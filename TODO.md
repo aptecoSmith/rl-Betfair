@@ -65,7 +65,7 @@ No item is done until all three steps are complete.
   - Observation space: full state vector (see PLAN.md State Representation)
   - Action space: per-runner (action_type, stake), masked for budget
   - Step: advance one tick, apply actions, compute reward
-  - Episode: one full day across all races; budget carries across races - double check this with user.  Some doubt over whether we want a budget per race to ensure the model can attempt to engage in that race, versus the model taking into account that its money needs to last the day.  A sensible solution is needed.
+  - Episode: one full day across all races; budget carries across races - double check this with user.  Some doubt over whether we want a budget per race to ensure the model can attempt to engage in that race, versus the model taking into account that its money needs to last the day.  A sensible solution is needed.  Perhaps its worth keeping two scoreboards - models scored per race and per day?
   - Reward: per-race P&L + early pick bonus + efficiency penalty (all
     coefficients from config.yaml)
 - **Test:** pytest with synthetic episodes — verify observation shape, action

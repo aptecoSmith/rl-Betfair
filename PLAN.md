@@ -210,6 +210,7 @@ The observation vector for each tick is a concatenation of:
 vector directly — these are categorical and high-cardinality. Options:
 - Embed them (learned embedding layer) — preferred for v2
 - Omit for v1 (market signals only)
+ - talk to the user about this - he feels that we may well want to track horses or jockeys across time.  For example, we might learn that a horse is always backed late in a market - this would be useful to know.
 
 ---
 
