@@ -33,23 +33,39 @@ No item is done until all three steps are complete.
 - **Test:** pytest confirms config loads correctly, all required keys present;
   ProgressTracker tests: correct rolling average, correct ETA on tick(), correct
   formatting, handles zero-completed edge case
+- **Integration test:** config loads from real config.yaml, ProgressTracker
+  ticks and produces sane ETAs
 
 ### Session 0.2 — Data extractor
-- `data/extractor.py` — connect to MySQL (localhost:3307), query
-  `ResolvedMarketSnaps` joined with ColdData tables (runner metadata, weather,
-  results, market catalogue), export one Parquet file per day to `data/processed/`
+- `data/extractor.py` — connect to MySQL (localhost:3306), query
+  `ResolvedMarketSnaps` with ColdData tables (results, weather, runner
+  metadata), export one Parquet file per day to `data/processed/`.
+  Market-level fields (venue, marketTime, inPlay, etc.) extracted from
+  SnapJson in Python — no timestamp join with `updates` table.
+  All ticks included (pre-race and in-play); bet placement restriction
+  is enforced by the environment, not the extractor.
 - Uses `ProgressTracker` — emits per-day and total-days ETA to stdout/log
   (WebSocket integration comes in Session 3.2)
 - **Test:** pytest with a mock MySQL connection — verify SQL queries, correct
   join logic, output schema matches expected Parquet columns
+- **Integration test:** extract a real day from MySQL → verify Parquet files
+  produced, correct columns, rows include pre-race and in-play ticks, runners
+  have selection_id
 
 ### Session 0.3 — Episode builder
 - `data/episode_builder.py` — load a day's Parquet, construct
-  `Day → [Race → [Tick]]` hierarchy as typed dataclasses
+  `Day → [Race → [Tick]]` hierarchy as typed dataclasses.
+  `parse_snap_json` handles the real nested SnapJson layout
+  (`MarketRunners` → `RunnerId`/`Definition`/`Prices`) and the flat test layout.
+  Both pre-race and in-play ticks are included.
 - `data/feature_engineer.py` — derive price velocity, implied probability,
   overround, cross-runner relative features (rank by price, price gaps) - have a conversation with the user here about features.
 - **Test:** pytest with synthetic Parquet data — verify Day/Race/Tick structure,
   feature values, edge cases (single runner, missing prices, removed runners)
+- **Integration test:** load real extracted day → verify races have ticks with
+  parsed runners, order books have valid PriceSize values, runner metadata
+  present, winners identified, ticks ordered by sequence. Feature engineering
+  produces results for all races/ticks with expected keys.
 
 ### Session 0.4 — Order book & bet manager
 - `env/order_book.py` — realistic bet matching: back bets consume
@@ -59,6 +75,10 @@ No item is done until all three steps are complete.
   remaining budget, lay liability
 - **Test:** pytest with known order book snapshots — verify full fills, partial
   fills, no-fill cases, liability calculation, budget enforcement
+- **Integration test:** match back/lay bets against real order books from
+  extracted data. Place bets and settle a real race — verify P&L is sane.
+  Simulate betting £1 across every race in a full day — verify all bets
+  settled, no open liability, budget non-negative.
 
 ### Session 0.5 — Gymnasium environment
 - `env/betfair_env.py` — Gymnasium `Env` subclass:
@@ -66,21 +86,29 @@ No item is done until all three steps are complete.
   - Action space: per-runner (action_type, stake), masked for budget
   - Step: advance one tick, apply actions, compute reward
   - Episode: one full day across all races; budget carries across races - double check this with user.  Some doubt over whether we want a budget per race to ensure the model can attempt to engage in that race, versus the model taking into account that its money needs to last the day.  A sensible solution is needed.
+  - Agent observes all ticks (pre-race + in-play) but can only place bets on
+    pre-race ticks (in_play == False)
   - Reward: per-race P&L + early pick bonus + efficiency penalty (all
     coefficients from config.yaml)
 - **Test:** pytest with synthetic episodes — verify observation shape, action
   masking, reward calculation for known scenarios, episode termination,
   budget carry-across-races
+- **Integration test:** run a full episode on real extracted data — verify
+  observations produced for every tick, bets only placed pre-race, races
+  settled correctly, budget tracks across races, final P&L matches sum of
+  race P&Ls
 
 ---
 
 ## Phase 1 — First Agent (requires 2+ days of data)
 
 ### Session 1.1 — Data extraction from real DB
-- Run `data/extractor.py` against live MySQL (localhost:3307)
+- Run `data/extractor.py` against live MySQL (localhost:3306)
 - Verify Parquet output for first real day(s) — check row counts, spot-check
   prices against known race data
 - **Test:** pytest validates Parquet schema and non-null key fields on real output
+- **Integration test:** extract all available dates, verify each produces valid
+  Parquet, spot-check order book depth and runner counts against DB
 
 ### Session 1.2 — Policy network (architecture v1: PPO + LSTM)
 - `agents/policy_network.py` — implement the v1 architecture (documented in
@@ -94,6 +122,9 @@ No item is done until all three steps are complete.
   registry (see PLAN.md) so future architectures can be swapped via config
 - **Test:** pytest — forward pass with correct input shapes, output shapes,
   hidden state carries correctly, gradient flows through all components
+- **Integration test:** build observation vectors from real extracted data,
+  feed through policy network forward pass, verify output shapes match
+  real runner counts
 
 ### Session 1.3 — PPO trainer (single agent)
 - `agents/ppo_trainer.py` — PPO training loop for one agent:
@@ -104,6 +135,8 @@ No item is done until all three steps are complete.
 - Progress dict published to a `asyncio.Queue` for the WebSocket to consume
 - **Test:** pytest — trainer runs for N steps on synthetic env without error,
   loss decreases over a trivial known environment, progress events emitted
+- **Integration test:** train one agent for a small number of episodes on real
+  data, verify loss computed, bets placed and settled, P&L recorded
 
 ### Session 1.4 — Model registry
 - `registry/model_store.py` — SQLite schema and CRUD:
@@ -113,6 +146,8 @@ No item is done until all three steps are complete.
   (win_rate, sharpe, mean_daily_pnl, efficiency), rank all active models
 - **Test:** pytest — create models, save/load weights, record evaluation runs,
   verify composite score formula, verify ranking order
+- **Integration test:** train agent on real data → save to registry → load
+  back → verify weights match, metadata correct, scoreboard ranks it
 
 ### Session 1.5 — End-to-end single agent run
 - Train one agent on first real training days
@@ -120,8 +155,9 @@ No item is done until all three steps are complete.
 - Inspect scoreboard output, bet log, per-day P&L
 - Verify nothing obviously broken (reward signal sensible, bets being matched,
   P&L not exploding)
-- **Test:** pytest integration test — full train→evaluate→registry pipeline
-  completes without error on real data
+- **Integration test:** full train → evaluate → registry pipeline on real data
+  — verify per-day metrics recorded, bet log populated, composite score
+  computed, scoreboard non-empty
 
 ---
 
@@ -135,6 +171,8 @@ No item is done until all three steps are complete.
   observation_window_ticks (see PLAN.md)
 - **Test:** pytest — population initialises with correct size, all hyperparams
   within valid ranges, no two agents identical
+- **Integration test:** initialise population from real config → verify all
+  agents have valid hyperparams, can each produce a forward pass on real data
 
 ### Session 2.2 — Genetic selection
 - Implement tournament selection: top 50% by composite score survive
@@ -143,6 +181,8 @@ No item is done until all three steps are complete.
   mean_pnl, AND sharpe all fall below thresholds (never discard for bad days alone)
 - **Test:** pytest with mock scored population — verify survivors, elites
   preserved, discard logic applied correctly
+- **Integration test:** train a small population on real data → score →
+  select → verify correct number survive, elites preserved, discards applied
 
 ### Session 2.3 — Genetic operators & logging
 - Implement hyperparameter crossover: for each hyperparameter, randomly
@@ -162,6 +202,9 @@ No item is done until all three steps are complete.
      (256→512 after mutation +256). Survived as elite."`
 - **Test:** pytest — crossover produces valid child params, mutation stays in
   bounds, all genetic events logged with correct parent/child IDs
+- **Integration test:** breed children from real trained parents → verify
+  genetic log file written, genetic_events table populated, child hyperparams
+  within valid ranges
 
 ### Session 2.4 — Training orchestrator
 - `training/run_training.py` — full generational loop:
@@ -179,13 +222,17 @@ No item is done until all three steps are complete.
 - Phase transitions emit `phase_start` / `phase_complete` events with summary
 - **Test:** pytest — orchestrator runs 2 generations on synthetic env, registry
   updated correctly, genetic log written, all progress events emitted in order
+- **Integration test:** run 2 generations on real data (small population) →
+  verify registry updated, progress events emitted in correct phase order,
+  genetic log populated, scoreboard re-ranked
 
 ### Session 2.5 — First multi-generation run
 - Run population training on all available real data (N generations, N from config)
 - Inspect genetic logs — verify trait inheritance is recorded and legible
 - Inspect scoreboard — verify population diversity, no premature convergence
-- **Test:** pytest integration — N generations completes, all models in registry,
-  genetic_events populated, scoreboard non-trivial
+- **Integration test:** N generations on real data — all models in registry,
+  genetic_events populated, scoreboard non-trivial, bet logs present for
+  every evaluation day
 
 ---
 
@@ -201,6 +248,9 @@ No item is done until all three steps are complete.
   - `GET /models/{id}/genetics` — genetic event log for this model's creation
 - **Test:** pytest with TestClient — all endpoints return correct schemas,
   lineage traversal correct, error cases handled
+- **Integration test:** start API against real registry DB → verify scoreboard
+  endpoint returns trained models, model detail includes real hyperparams and
+  per-day metrics, lineage traversal returns correct parent chain
 
 ### Session 3.2 — Training & replay API
 - `api/routers/training.py`:
@@ -217,6 +267,9 @@ No item is done until all three steps are complete.
     agent actions for one race (order book at each tick, bet events overlaid)
 - **Test:** pytest with TestClient — replay endpoint returns correct tick
   sequence, bet events at correct timestamps, WebSocket emits messages
+- **Integration test:** replay endpoint against real evaluation data — verify
+  tick sequence matches Parquet, bet events at correct timestamps, race P&L
+  matches registry records
 
 ### Session 3.3 — Angular scaffold & scoreboard
 - `ng new frontend` inside repo (Angular 18+, standalone components)
@@ -229,6 +282,8 @@ No item is done until all three steps are complete.
   - Click row → Model Detail
 - **Test:** Angular unit tests on scoreboard component; e2e (Playwright or
   Cypress) against mock API
+- **Integration test:** e2e against real API — scoreboard loads with trained
+  models, click-through to model detail works
 
 ### Session 3.4 — Training monitor page
 - Training Monitor page:
@@ -245,6 +300,9 @@ No item is done until all three steps are complete.
   - Scoreboard page shows status chip: Idle / Running (ETA Xh Ym) / Error
 - **Test:** Angular unit tests; mock WebSocket feed; verify ETA bars update
   correctly on each event type
+- **Integration test:** trigger a real training run → verify WebSocket events
+  arrive in correct phase order, ETA bars update, population grid reflects
+  agent states
 
 ### Session 3.5 — Model detail & lineage page
 - Model Detail page:
@@ -256,6 +314,8 @@ No item is done until all three steps are complete.
   - Full genetic event log for this model (human-readable lines from Session 2.3)
   - Lineage tree (visual ancestor graph, at least 3 generations deep)
 - **Test:** Angular unit tests on detail + lineage components
+- **Integration test:** view a real model's detail page → verify hyperparams
+  match registry, P&L chart renders, lineage tree shows correct parents
 
 ### Session 3.6 — Race replay page
 - Race Replay page:
@@ -270,6 +330,9 @@ No item is done until all three steps are complete.
   - Winner highlighted in green at race close
   - Summary bar: total bets, P&L, early picks
 - **Test:** Angular unit tests; verify cursor/action sync logic
+- **Integration test:** replay a real evaluated race → verify LTP chart data
+  matches Parquet ticks, bet events overlay at correct timestamps, winner
+  highlighted correctly
 
 ### Session 3.7 — Bet explorer page
 - Bet Explorer page:
@@ -278,6 +341,8 @@ No item is done until all three steps are complete.
   - Sortable columns: time to off, price, stake, P&L
   - Summary stats: total bets, bet precision, P&L per bet, total P&L
 - **Test:** Angular unit tests on filter/sort logic
+- **Integration test:** load real evaluation bets → verify filter/sort works,
+  summary stats match registry aggregates, P&L per bet is sane
 
 ---
 
@@ -292,11 +357,17 @@ No item is done until all three steps are complete.
 - Trigger options: manual (button in UI), automatic when threshold crossed,
   or scheduled (e.g. weekly) — configurable
 - Verify scoreboard re-ranks correctly — old models evaluated against new test days
+- **Integration test:** add new data days → trigger retraining → verify old
+  models re-evaluated on new test days, scoreboard re-ranked, no regressions
+  in existing metrics
 
 ### Session 4.2 — Reward coefficient tuning
 - Run ablation: vary early_pick_bonus and efficiency_penalty coefficients
   across population, compare scoreboard outcomes
 - Update config.yaml defaults based on findings
+- **Integration test:** train populations with different reward configs → verify
+  scoreboard reflects coefficient differences, bet counts change with
+  efficiency_penalty
 
 ### Session 4.3 — Architecture v2: Transformer policy
 - Implement `"ppo_transformer_v1"` architecture (multi-head self-attention
@@ -304,11 +375,17 @@ No item is done until all three steps are complete.
 - Register in architecture registry (see PLAN.md)
 - Train a sub-population using this architecture; compare on scoreboard
 - Document findings in PLAN.md Architecture section
+- **Integration test:** train transformer agent on real data → verify forward
+  pass, training loop, evaluation all work end-to-end; scoreboard includes
+  both LSTM and transformer models side by side
 
 ### Session 4.4 — Runner identity embeddings
 - Add learned embedding layers for jockey_name, trainer_name, horse_name
   (high-cardinality categoricals) to the per-runner encoder
 - Benchmark vs non-embedding baseline on scoreboard
+- **Integration test:** train with embeddings on real data → verify embedding
+  layers receive gradients, no OOM on real vocabulary sizes, scoreboard
+  comparison valid
 
 ### Session 4.5 — Raw observation input mode
 - Add an observation mode that feeds the raw order book data (3-level
@@ -330,11 +407,16 @@ No item is done until all three steps are complete.
 - **Test:** pytest — verify observation shapes for all three modes; verify
   raw mode produces identical results in backtest vs live (same data in,
   same features out)
+- **Integration test:** train agents in all three modes on real data → verify
+  observation dimensions correct, training completes, population can mix modes
 
 ### Session 4.6 — Performance profiling
 - Profile full training run: identify CPU vs GPU bottlenecks
 - Optimise data loading (prefetching, pinned memory, worker count)
 - Optimise episode construction (vectorised numpy vs Python loops)
+- **Integration test:** benchmark before/after — verify training throughput
+  improved, no correctness regressions (same model on same data produces
+  same P&L)
 
 ---
 
@@ -344,16 +426,24 @@ No item is done until all three steps are complete.
 - `live/live_env.py` — Gymnasium env that reads from StreamRecorder1's
   MySQL HotData in real time instead of Parquet replay
 - Mirrors `betfair_env.py` observation/action interface exactly
+- **Integration test:** connect to live MySQL → verify observations produced
+  in real time, same shape as backtest env, agent can produce actions
 
 ### Session 5.2 — Paper trading
 - Run best-ranked model(s) in paper trading mode on live days
 - Log paper bets to registry under a `paper` evaluation type
 - Compare paper P&L vs backtest P&L on same days as sanity check
+- **Integration test:** paper trade a full day → verify bets logged in registry
+  as `paper` type, P&L recorded, compare against backtest of same day to
+  check for divergence
 
 ### Session 5.3 — Live trading integration
 - Connect to Betfair betting API (OrderManager from StreamRecorder1 codebase)
 - Kill switch: halt all trading if daily drawdown exceeds threshold (config)
 - Real money only after sustained paper trading validation
+- **Integration test:** place a minimal real bet (£0.01) on a test market →
+  verify order placed via API, confirmation received, kill switch triggers
+  correctly on simulated drawdown
 
 ---
 
