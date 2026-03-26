@@ -109,8 +109,7 @@ RUNNERS_COLUMNS: list[str] = [
 SQL_AVAILABLE_DATES = text("""
     SELECT DISTINCT DATE(MarketStartTime) AS race_date
     FROM updates
-    WHERE InPlay = false
-      AND MarketStartTime IS NOT NULL
+    WHERE MarketStartTime IS NOT NULL
     ORDER BY race_date
 """)
 
@@ -348,6 +347,11 @@ class DataExtractor:
     def _query_ticks(self, target_date: date, conn: sa.Connection) -> pd.DataFrame:
         """Execute the ticks query and return a typed DataFrame.
 
+        All ticks are included (pre-race **and** in-play).  The agent observes
+        the full race — in-play price movement is valuable signal for learning
+        about future races.  Bet placement is restricted to pre-race ticks by
+        the environment, not the extractor.
+
         Market-level fields (venue, market_start_time, number_of_active_runners,
         traded_volume, in_play) are extracted from SnapJson in Python via
         :func:`_enrich_from_snap_json` because the ``updates`` and
@@ -360,10 +364,6 @@ class DataExtractor:
             return pd.DataFrame(columns=TICKS_COLUMNS)
         df = pd.DataFrame(rows, columns=list(result.keys()))
         df = _enrich_from_snap_json(df)
-        # Filter to pre-race ticks only (inPlay=false inside the SnapJson)
-        df = df[~df["in_play"]].reset_index(drop=True)
-        if df.empty:
-            return pd.DataFrame(columns=TICKS_COLUMNS)
         return _cast_ticks(df)
 
     def _query_runners(
