@@ -1,0 +1,89 @@
+# rl-betfair configuration
+# Credentials (DB_USER, DB_PASSWORD) are read from .env - never put them here.
+
+database:
+  host: localhost
+  port: 3307
+  cold_data_db: coldData
+  hot_data_db: hotDataRefactored
+
+population:
+  size: 20
+  n_elite: 3
+  selection_top_pct: 0.5        # top 50% survive each generation
+
+reward:
+  # Multiplier applied to P&L when agent correctly backed the winner ≥ 5 min before off
+  early_pick_bonus_min: 1.2
+  early_pick_bonus_max: 1.5
+  early_pick_min_seconds: 300   # 5 minutes before scheduled off
+
+  # Small cost per bet to discourage low-conviction churn
+  efficiency_penalty: 0.01
+
+  # Composite scoreboard weights — must sum to 1.0
+  coefficients:
+    win_rate: 0.35
+    sharpe: 0.30
+    mean_daily_pnl: 0.15
+    efficiency: 0.20
+
+paths:
+  processed_data: data/processed
+  model_weights: registry/weights
+  logs: logs
+  registry_db: registry/models.db
+
+training:
+  architecture: ppo_lstm_v1
+  starting_budget: 100.0        # £ per episode day
+  max_runners: 14               # observation vector padded to this many runners
+  retraining:
+    min_days: 30                # trigger threshold for automatic retraining
+
+discard_policy:
+  min_win_rate: 0.35            # below this AND ...
+  min_mean_pnl: 0.0             # below this AND ...
+  min_sharpe: -0.5              # below this → candidate for discard
+
+# Hyperparameter search ranges - signed off in Session 0.1.
+# Used to seed the first population (Session 2.1).
+hyperparameters:
+  search_ranges:
+    learning_rate:
+      type: float_log           # sampled on log scale
+      min: 1.0e-5
+      max: 5.0e-4               # tightened from 1e-3; higher LRs destabilise PPO+LSTM
+    ppo_clip_epsilon:
+      type: float
+      min: 0.1
+      max: 0.3
+    entropy_coefficient:
+      type: float
+      min: 0.001
+      max: 0.05
+    lstm_hidden_size:
+      type: int_choice
+      # Range includes 2048 - RTX 3090 (24 GB) can support it.
+      # Larger sizes matter here: a 30-min race at 5-sec ticks = 360 steps,
+      # and the LSTM carries context across races for the full day episode.
+      choices: [64, 128, 256, 512, 1024, 2048]
+    mlp_hidden_size:
+      type: int_choice
+      choices: [64, 128, 256]
+    mlp_layers:
+      type: int
+      min: 1
+      max: 3                    # 4 layers rarely helps a small per-runner encoder
+    observation_window_ticks:
+      type: int
+      min: 3
+      max: 360                  # full 30-min pre-race window at 5-sec ticks (30*60/5)
+    reward_early_pick_bonus:
+      type: float
+      min: 1.0
+      max: 1.5                  # capped at 1.5x; 2.0 risks overriding genuine P&L signal
+    reward_efficiency_penalty:
+      type: float
+      min: 0.001
+      max: 0.05
