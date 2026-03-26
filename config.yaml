@@ -3,7 +3,7 @@
 
 database:
   host: localhost
-  port: 3307
+  port: 3306
   cold_data_db: coldData
   hot_data_db: hotDataRefactored
 

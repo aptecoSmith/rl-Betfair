@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires local MySQL on localhost:3306 (deselected by default, run with: pytest -m integration)",
+]
+addopts = "-m 'not integration'"

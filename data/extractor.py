@@ -17,9 +17,10 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -99,33 +100,36 @@ RUNNERS_COLUMNS: list[str] = [
 # ── SQL queries ───────────────────────────────────────────────────────────────
 
 #: Distinct race dates available in the hot-data DB.
+#:
+#: Uses ``ResolvedMarketSnaps`` as the driving table — the ``updates`` table
+#: records timestamps independently and an exact-timestamp join produces zero
+#: rows.  The ``marketTime`` is embedded inside ``SnapJson`` but is also
+#: available via the ``updates`` table; we use ``updates`` here only for the
+#: date-discovery query (no timestamp join required).
 SQL_AVAILABLE_DATES = text("""
     SELECT DISTINCT DATE(MarketStartTime) AS race_date
     FROM updates
-    WHERE InPlay = false
-      AND MarketStartTime IS NOT NULL
+    WHERE MarketStartTime IS NOT NULL
     ORDER BY race_date
 """)
 
-#: All pre-race ticks for one day, joined with results and weather.
+#: All pre-race ticks for one day.
 #:
-#: Key decisions:
-#: - InPlay = false  → pre-race ticks only (as per DATABASE_SCHEMA.md)
-#: - marketResults subquery uses MIN(CAST(... AS SIGNED)) to collapse dead-heat
-#:   rows and safely widen int → signed bigint (Betfair selection IDs are long)
-#: - WeatherObservations filtered to ObservationType = 'PRE_RACE'
-#: - Both coldData tables are referenced with the database qualifier because
-#:   the engine connects to hotDataRefactored
+#: ``ResolvedMarketSnaps`` is the sole tick source — it contains the full
+#: ``SnapJson`` with market-level fields (venue, inPlay, numberOfActiveRunners,
+#: TradedVolume, marketTime).  Market-level fields are extracted from the JSON
+#: in Python (``_enrich_from_snap_json``) rather than joining ``updates`` on
+#: timestamps that never match exactly.
+#:
+#: Results and weather are joined by MarketId from coldData tables.
+#:
+#: We filter by MarketId IN (markets that start on target_date) using a
+#: subquery against ``updates`` which has ``MarketStartTime`` as a column.
 SQL_TICKS = text("""
     SELECT
         rms.MarketId               AS market_id,
         rms.Timestamp              AS timestamp,
         rms.SequenceNumber         AS sequence_number,
-        u.Venue                    AS venue,
-        u.MarketStartTime          AS market_start_time,
-        u.NumberOfActiveRunners    AS number_of_active_runners,
-        u.TradedVolume             AS traded_volume,
-        u.InPlay                   AS in_play,
         rms.SnapJson               AS snap_json,
         CAST(mr.WinnerSelectionId AS SIGNED) AS winner_selection_id,
         wo.Temperature             AS temperature,
@@ -134,21 +138,21 @@ SQL_TICKS = text("""
         wo.WindDirection           AS wind_direction,
         wo.Humidity                AS humidity,
         wo.WeatherCode             AS weather_code
-    FROM updates u
-    JOIN ResolvedMarketSnaps rms
-        ON rms.MarketId = u.MarketId
-       AND rms.Timestamp = u.time
+    FROM ResolvedMarketSnaps rms
     LEFT JOIN (
         SELECT MarketId,
                MIN(CAST(WinnerSelectionId AS SIGNED)) AS WinnerSelectionId
         FROM coldData.marketResults
         GROUP BY MarketId
-    ) mr ON mr.MarketId = u.MarketId
+    ) mr ON mr.MarketId = rms.MarketId
     LEFT JOIN coldData.WeatherObservations wo
-        ON wo.MarketId = u.MarketId
+        ON wo.MarketId = rms.MarketId
        AND wo.ObservationType = 'PRE_RACE'
-    WHERE u.InPlay = false
-      AND DATE(u.MarketStartTime) = :target_date
+    WHERE rms.MarketId IN (
+        SELECT DISTINCT MarketId
+        FROM updates
+        WHERE DATE(MarketStartTime) = :target_date
+    )
     ORDER BY rms.MarketId, rms.SequenceNumber
 """)
 
@@ -341,12 +345,25 @@ class DataExtractor:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _query_ticks(self, target_date: date, conn: sa.Connection) -> pd.DataFrame:
-        """Execute the ticks query and return a typed DataFrame."""
+        """Execute the ticks query and return a typed DataFrame.
+
+        All ticks are included (pre-race **and** in-play).  The agent observes
+        the full race — in-play price movement is valuable signal for learning
+        about future races.  Bet placement is restricted to pre-race ticks by
+        the environment, not the extractor.
+
+        Market-level fields (venue, market_start_time, number_of_active_runners,
+        traded_volume, in_play) are extracted from SnapJson in Python via
+        :func:`_enrich_from_snap_json` because the ``updates`` and
+        ``ResolvedMarketSnaps`` tables record timestamps independently and an
+        exact join produces zero rows.
+        """
         result = conn.execute(SQL_TICKS, {"target_date": target_date.isoformat()})
         rows = result.fetchall()
         if not rows:
             return pd.DataFrame(columns=TICKS_COLUMNS)
         df = pd.DataFrame(rows, columns=list(result.keys()))
+        df = _enrich_from_snap_json(df)
         return _cast_ticks(df)
 
     def _query_runners(
@@ -376,6 +393,55 @@ class DataExtractor:
         runners_path = self._output_dir / f"{date_str}_runners.parquet"
         ticks_df.to_parquet(ticks_path, index=False)
         runners_df.to_parquet(runners_path, index=False)
+
+
+# ── SnapJson enrichment ───────────────────────────────────────────────────────
+
+
+def _enrich_from_snap_json(df: pd.DataFrame) -> pd.DataFrame:
+    """Extract market-level fields from ``snap_json`` into columns.
+
+    The SQL query no longer joins ``updates`` for these fields because the
+    timestamps don't match.  Instead we parse them from the JSON that
+    ``ResolvedMarketSnaps`` already stores.
+
+    Added columns: ``venue``, ``market_start_time``,
+    ``number_of_active_runners``, ``traded_volume``, ``in_play``.
+    """
+    venues: list[str] = []
+    start_times: list[datetime | None] = []
+    n_active: list[int | None] = []
+    volumes: list[float] = []
+    in_play: list[bool] = []
+
+    for raw in df["snap_json"]:
+        snap = json.loads(raw) if isinstance(raw, str) else raw
+        md = snap.get("MarketDefinition") or {}
+
+        venues.append(md.get("venue", ""))
+
+        mt = md.get("marketTime")
+        if mt:
+            # ISO 8601 — may or may not have trailing Z / offset.
+            # Strip timezone to keep naive UTC (matches MySQL timestamps).
+            try:
+                dt = datetime.fromisoformat(mt.replace("Z", "+00:00"))
+                start_times.append(dt.replace(tzinfo=None))
+            except (ValueError, TypeError):
+                start_times.append(None)
+        else:
+            start_times.append(None)
+
+        n_active.append(md.get("numberOfActiveRunners"))
+        volumes.append(float(snap.get("TradedVolume", 0.0)))
+        in_play.append(bool(md.get("inPlay", False)))
+
+    df["venue"] = venues
+    df["market_start_time"] = start_times
+    df["number_of_active_runners"] = n_active
+    df["traded_volume"] = volumes
+    df["in_play"] = in_play
+    return df
 
 
 # ── Dtype helpers (module-level so tests can call them directly) ──────────────
