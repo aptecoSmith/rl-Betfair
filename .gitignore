@@ -1,7 +1,6 @@
 # Virtual environment
 .venv/
 venv/
-env/
 
 # Processed data (large, regenerated from DB) — keep the directory marker
 data/processed/*.parquet
