@@ -36,8 +36,8 @@ def test_database_keys(config):
         assert key in db, f"Missing database config key: '{key}'"
 
 
-def test_database_port_is_3307(config):
-    assert config["database"]["port"] == 3307
+def test_database_port_is_3306(config):
+    assert config["database"]["port"] == 3306
 
 
 def test_population_keys(config):

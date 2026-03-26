@@ -167,59 +167,95 @@ def _parse_price_sizes(raw: list[dict] | None) -> list[PriceSize]:
 def parse_snap_json(json_str: str) -> list[RunnerSnap]:
     """Parse a ``snap_json`` string into a list of :class:`RunnerSnap`.
 
-    The JSON is expected to have a top-level ``Runners`` array.  Each runner
-    object contains PascalCase keys matching the C# EF Core model names from
-    StreamRecorder1 (see DATABASE_SCHEMA.md).
+    Supports two JSON layouts:
 
-    Expected structure::
+    **Nested layout** (real ``ResolvedMarketSnaps.SnapJson`` from
+    StreamRecorder1) — top-level key ``MarketRunners``, each runner has
+    ``RunnerId.SelectionId``, ``Definition.Status``, ``Prices.*``::
 
         {
-          "Runners": [
+          "MarketRunners": [
             {
-              "SelectionId": 12345678,
-              "Status": "ACTIVE",
-              "LastTradedPrice": 4.5,
-              "TotalMatched": 1234.56,
-              "StartingPriceNear": 4.2,
-              "StartingPriceFar": 5.0,
-              "AdjustmentFactor": 100.0,
-              "Bsp": null,
-              "SortPriority": 1,
-              "RemovalDate": null,
-              "AvailableToBack": [
-                {"Price": 4.5, "Size": 100.0}, ...
-              ],
-              "AvailableToLay": [
-                {"Price": 4.6, "Size": 150.0}, ...
-              ]
+              "RunnerId": {"SelectionId": 12345678},
+              "Definition": {"Status": "ACTIVE", "SortPriority": 1, ...},
+              "Prices": {
+                "LastTradedPrice": 4.5,
+                "TradedVolume": 1234.56,
+                "StartingPriceNear": 4.2,
+                "StartingPriceFar": 5.0,
+                "AvailableToBack": [{"Price": 4.5, "Size": 100.0}],
+                "AvailableToLay": [{"Price": 4.6, "Size": 150.0}]
+              }
             }
           ]
         }
+
+    **Flat layout** (used by unit tests and older snapshots) — top-level key
+    ``Runners``, fields directly on each runner object.
     """
     data = json.loads(json_str)
-    runners_raw = data.get("Runners") or data.get("runners") or []
+
+    # Detect layout: nested (MarketRunners) vs flat (Runners)
+    runners_raw = (
+        data.get("MarketRunners")
+        or data.get("Runners")
+        or data.get("runners")
+        or []
+    )
+
     result: list[RunnerSnap] = []
     for r in runners_raw:
-        # Support both PascalCase and camelCase keys
-        selection_id = r.get("SelectionId") or r.get("selectionId") or r.get("id") or 0
+        # ── Nested layout: RunnerId / Definition / Prices sub-dicts ──
+        runner_id_obj = r.get("RunnerId") or {}
+        defn = r.get("Definition") or {}
+        prices = r.get("Prices") or {}
+
+        # SelectionId: nested → flat fallback
+        selection_id = (
+            runner_id_obj.get("SelectionId")
+            or r.get("SelectionId")
+            or r.get("selectionId")
+            or r.get("id")
+            or 0
+        )
+
+        # Status: nested → flat fallback
+        status = (
+            defn.get("Status")
+            or r.get("Status")
+            or r.get("status")
+            or "ACTIVE"
+        )
+
+        # Numeric fields: nested (Prices) → flat fallback
+        ltp = prices.get("LastTradedPrice") or r.get("LastTradedPrice") or r.get("ltp") or 0.0
+        tv = prices.get("TradedVolume") or r.get("TotalMatched") or r.get("totalMatched") or r.get("tv") or 0.0
+        spn = prices.get("StartingPriceNear") or r.get("StartingPriceNear") or r.get("spn") or 0.0
+        spf = prices.get("StartingPriceFar") or r.get("StartingPriceFar") or r.get("spf") or 0.0
+
+        adj = defn.get("AdjustmentFactor") or r.get("AdjustmentFactor") or r.get("adjustmentFactor")
+        bsp = defn.get("Bsp") or r.get("Bsp") or r.get("bsp")
+        sp = defn.get("SortPriority") or r.get("SortPriority") or r.get("sortPriority")
+        rd = defn.get("RemovalDate") or r.get("RemovalDate") or r.get("removalDate")
+
+        # Price ladders: nested (Prices) → flat fallback
+        atb_raw = prices.get("AvailableToBack") or r.get("AvailableToBack") or r.get("atb")
+        atl_raw = prices.get("AvailableToLay") or r.get("AvailableToLay") or r.get("atl")
+
         result.append(
             RunnerSnap(
                 selection_id=int(selection_id),
-                status=str(r.get("Status") or r.get("status") or "ACTIVE"),
-                last_traded_price=float(r.get("LastTradedPrice") or r.get("ltp") or 0.0),
-                total_matched=float(r.get("TotalMatched") or r.get("totalMatched") or r.get("tv") or 0.0),
-                starting_price_near=float(r.get("StartingPriceNear") or r.get("spn") or 0.0),
-                starting_price_far=float(r.get("StartingPriceFar") or r.get("spf") or 0.0),
-                adjustment_factor=_opt_float(r.get("AdjustmentFactor") or r.get("adjustmentFactor")),
-                bsp=_opt_float(r.get("Bsp") or r.get("bsp")),
-                sort_priority=_opt_int(r.get("SortPriority") or r.get("sortPriority")),
-                removal_date=r.get("RemovalDate") or r.get("removalDate"),
-                available_to_back=_parse_price_sizes(
-                    r.get("AvailableToBack") or r.get("atb")
-                ),
-                available_to_lay=_parse_price_sizes(
-                    r.get("AvailableToLay") or r.get("atl")
-                ),
+                status=str(status),
+                last_traded_price=float(ltp),
+                total_matched=float(tv),
+                starting_price_near=float(spn),
+                starting_price_far=float(spf),
+                adjustment_factor=_opt_float(adj),
+                bsp=_opt_float(bsp),
+                sort_priority=_opt_int(sp),
+                removal_date=rd,
+                available_to_back=_parse_price_sizes(atb_raw),
+                available_to_lay=_parse_price_sizes(atl_raw),
             )
         )
     return result

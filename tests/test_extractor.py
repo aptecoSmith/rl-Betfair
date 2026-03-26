@@ -102,9 +102,10 @@ def _make_extractor(config, ticks_df=None, runners_df=None) -> DataExtractor:
 # ── SQL content tests ─────────────────────────────────────────────────────────
 
 class TestSqlContent:
-    def test_ticks_query_filters_inplay_false(self):
+    def test_ticks_query_uses_resolved_market_snaps_as_driver(self):
+        """InPlay filtering is now done in Python after parsing SnapJson."""
         sql = str(SQL_TICKS)
-        assert "InPlay = false" in sql
+        assert "FROM ResolvedMarketSnaps rms" in sql
 
     def test_ticks_query_joins_resolved_market_snaps(self):
         sql = str(SQL_TICKS)
