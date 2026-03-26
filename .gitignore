@@ -3,8 +3,8 @@
 venv/
 env/
 
-# Processed data (large, regenerated from DB)
-data/processed/
+# Processed data (large, regenerated from DB) — keep the directory marker
+data/processed/*.parquet
 
 # Model weights (large binary files)
 registry/weights/
