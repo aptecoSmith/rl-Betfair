@@ -433,16 +433,13 @@ def _build_day(
     ticks_df: pd.DataFrame,
     runners_df: pd.DataFrame,
 ) -> Day:
-    """Core builder: DataFrame → Day.  Factored out for testability."""
-    # Guard: no in-play ticks allowed
-    if not ticks_df.empty and "in_play" in ticks_df.columns:
-        in_play_mask = ticks_df["in_play"].astype(bool)
-        if in_play_mask.any():
-            n_bad = int(in_play_mask.sum())
-            raise ValueError(
-                f"{n_bad} in-play tick(s) found in data for {date_str}. "
-                "Only pre-race ticks are allowed."
-            )
+    """Core builder: DataFrame → Day.  Factored out for testability.
+
+    Both pre-race and in-play ticks are included.  The agent observes the
+    full race — in-play price movement is valuable signal.  Bet placement
+    is restricted to pre-race ticks (``in_play == False``) by the
+    environment, not the data layer.
+    """
 
     # Group by market_id → races
     races: list[Race] = []

@@ -432,11 +432,13 @@ class TestBuildDay:
         seq_nums = [t.sequence_number for t in day.races[0].ticks]
         assert seq_nums == sorted(seq_nums)
 
-    def test_in_play_raises(self):
+    def test_in_play_ticks_accepted(self):
+        """In-play ticks are allowed — the agent observes the full race."""
         ticks = _make_ticks_df(n_ticks=3, in_play=True)
         runners = _make_runners_df()
-        with pytest.raises(ValueError, match="in-play"):
-            _build_day("2026-03-26", ticks, runners)
+        day = _build_day("2026-03-26", ticks, runners)
+        assert len(day.races) == 1
+        assert all(t.in_play for t in day.races[0].ticks)
 
     def test_empty_ticks(self):
         ticks = pd.DataFrame(columns=["market_id", "in_play"])
@@ -514,10 +516,12 @@ class TestLoadDay:
         day = load_day("2026-03-26", data_dir=tmp_path)
         assert len(day.races) == 3
 
-    def test_in_play_ticks_rejected(self, tmp_path):
+    def test_in_play_ticks_accepted(self, tmp_path):
+        """In-play ticks load successfully — no filtering at data layer."""
         _write_parquet_pair(tmp_path, in_play=True)
-        with pytest.raises(ValueError, match="in-play"):
-            load_day("2026-03-26", data_dir=tmp_path)
+        day = load_day("2026-03-26", data_dir=tmp_path)
+        assert len(day.races) == 1
+        assert all(t.in_play for t in day.races[0].ticks)
 
     def test_snap_json_parsed(self, tmp_path):
         _write_parquet_pair(tmp_path, n_runners=4)
@@ -660,11 +664,15 @@ class TestEdgeCases:
         runners = parse_snap_json(snap)
         assert runners[0].selection_id == 3000000000
 
-    def test_mixed_in_play_raises(self):
-        """Even a single in-play tick in the mix should raise."""
+    def test_mixed_pre_race_and_in_play(self):
+        """A mix of pre-race and in-play ticks builds successfully."""
         ticks = _make_ticks_df(n_ticks=3, in_play=False)
         extra = _make_ticks_df(n_ticks=1, in_play=True)
         extra["sequence_number"] = pd.array([999], dtype=pd.Int64Dtype())
         mixed = pd.concat([ticks, extra])
-        with pytest.raises(ValueError, match="1 in-play"):
-            _build_day("2026-03-26", mixed, pd.DataFrame())
+        day = _build_day("2026-03-26", mixed, pd.DataFrame())
+        assert len(day.races) == 1
+        assert len(day.races[0].ticks) == 4
+        # First 3 pre-race, last 1 in-play
+        assert not day.races[0].ticks[0].in_play
+        assert day.races[0].ticks[3].in_play
