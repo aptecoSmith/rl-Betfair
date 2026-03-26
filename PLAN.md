@@ -25,6 +25,9 @@ inherit traits from their parents. Eventually, the best models trade live.
   On each training run, all non-discarded models are evaluated. A model created
   months ago may still rank highly.
 - **Local GPU only.** RTX 3090 (24 GB VRAM). No cloud services.
+- **Always show ETAs.** Every long-running operation exposes two-level progress:
+  item ETA (current thing) and process ETA (everything). Visible in the UI at
+  all times so the user can check in and know when to come back.
 
 ---
 
@@ -464,6 +467,147 @@ rl-betfair/
     │   └── model-detail/        ← lineage, hyperparams, bet history
     └── ...
 ```
+
+---
+
+## ETA Tracking (Cross-Cutting)
+
+Every long-running operation publishes two-level progress in real time:
+- **Item ETA** — time remaining for the current atomic unit of work
+- **Process ETA** — time remaining for the entire operation
+
+### Operations that emit progress
+
+| Operation | Item unit | Process unit |
+|---|---|---|
+| Data extraction | 1 day extracted | All days to extract |
+| Episode building | 1 day built | All days to build |
+| Agent training (one agent) | 1 episode | All episodes for this agent |
+| Population training (full generation) | 1 agent trained | All agents in the generation |
+| Evaluation (one agent) | 1 test day | All test days for this agent |
+| Full scoreboard re-evaluation | 1 model evaluated | All models to re-evaluate |
+| Genetic selection + breeding | 1 child bred | All children to create |
+
+### ETA calculation — `ProgressTracker` utility
+
+```python
+# training/progress_tracker.py
+class ProgressTracker:
+    def __init__(self, total: int, label: str, rolling_window: int = 10):
+        self.total = total
+        self.label = label
+        self.completed = 0
+        self._times: deque = deque(maxlen=rolling_window)
+        self._last_tick = time.monotonic()
+
+    def tick(self):
+        """Call once per completed item."""
+        now = time.monotonic()
+        self._times.append(now - self._last_tick)
+        self._last_tick = now
+        self.completed += 1
+
+    @property
+    def item_eta_seconds(self) -> float | None:
+        """ETA for the NEXT item based on rolling average."""
+        return mean(self._times) if self._times else None
+
+    @property
+    def process_eta_seconds(self) -> float | None:
+        """ETA for all remaining items."""
+        if not self._times:
+            return None
+        remaining = self.total - self.completed
+        return mean(self._times) * remaining
+
+    def to_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "completed": self.completed,
+            "total": self.total,
+            "pct": round(self.completed / self.total * 100, 1),
+            "item_eta_s": self.item_eta_seconds,
+            "process_eta_s": self.process_eta_seconds,
+            "item_eta_human": _fmt(self.item_eta_seconds),
+            "process_eta_human": _fmt(self.process_eta_seconds),
+        }
+```
+
+Uses a **rolling window of the last N completions** (default 10) rather than
+elapsed/fraction. This handles warmup correctly — the first few items being
+slow don't distort the whole estimate.
+
+### WebSocket message schema
+
+All progress events are published to the WebSocket at `/ws/training`.
+The frontend consumes this stream for all ETA display.
+
+```json
+{
+  "event": "progress",
+  "timestamp": "2026-05-12T14:23:01Z",
+  "run_id": "abc123",
+  "phase": "training",
+  "process": {
+    "label": "Generation 4 — training 20 agents",
+    "completed": 7,
+    "total": 20,
+    "pct": 35.0,
+    "item_eta_human": "6 min",
+    "process_eta_human": "1 h 18 min"
+  },
+  "item": {
+    "label": "Training agent model_x1y2z3 (ppo_lstm_v1)",
+    "completed": 312,
+    "total": 1000,
+    "pct": 31.2,
+    "item_eta_human": "4 min 12 sec",
+    "process_eta_human": "6 min 05 sec"
+  },
+  "detail": "Episode 312 | reward=+1.24 | P&L=+£3.40 | loss=0.0042"
+}
+```
+
+Other event types on the same WebSocket:
+- `phase_start` — a new phase begins (extraction, training, evaluation, genetics)
+- `phase_complete` — phase done, with summary stats
+- `agent_complete` — one agent finished training, with final metrics
+- `run_complete` — entire training run done, scoreboard updated
+
+### UI display
+
+The Training Monitor page shows two persistent ETA bars at the top:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ PROCESS  Generation 4 · 7 of 20 agents trained          │
+│ ████████░░░░░░░░░░░░░░░░░ 35%    Process ETA: 1h 18m   │
+├─────────────────────────────────────────────────────────┤
+│ ITEM     Training model_x1y2z3 (ppo_lstm_v1)            │
+│ ████████████░░░░░░░░░░░░░ 31%    Item ETA:    4m 12s   │
+└─────────────────────────────────────────────────────────┘
+```
+
+These bars are always visible regardless of which sub-page of the Training
+Monitor is active. If no run is in progress, they show the last completed
+run's summary and elapsed time.
+
+The scoreboard page also shows a small status chip:
+- 🟢 Idle — last run completed 2h ago
+- 🟡 Running — Generation 4 in progress · ETA 1h 18m
+- 🔴 Error — last run failed (click for details)
+
+### Phases and their labels
+
+| Phase constant | Label shown in UI |
+|---|---|
+| `extracting` | Extracting market data from MySQL |
+| `building` | Building training episodes |
+| `training` | Training agents (Generation N) |
+| `evaluating` | Evaluating models on test days |
+| `selecting` | Genetic selection |
+| `breeding` | Breeding next generation |
+| `scoring` | Updating scoreboard |
 
 ---
 

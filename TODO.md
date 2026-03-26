@@ -13,21 +13,33 @@ No item is done until all three steps are complete.
 
 ## Phase 0 — Foundation (no live data yet)
 
-### Session 0.1 — Repo scaffold & config
+### Session 0.1 — Repo scaffold, config & ProgressTracker
 - Create Python virtual environment (`python -m venv .venv`)
 - Write `requirements.txt` (torch, gymnasium, stable-baselines3, pymysql,
   sqlalchemy, pandas, pyarrow, fastapi, uvicorn, pydantic, pytest, python-dotenv)
 - Write `config.yaml` (DB connection, population size, reward coefficients,
   paths, architecture name)
+- **⚠️ Have a conversation with the user before finalising config.yaml** —
+  specifically around hyperparameter search ranges (learning rate, LSTM size,
+  entropy coefficient, etc.). The ranges in PLAN.md are a starting point but
+  the user should sign off before they become the defaults that seed the first
+  population.
 - Write `.gitignore` (venv, processed data, model weights, `*.env`, `__pycache__`)
 - Write `.env.example` (DB password placeholder)
 - Write `conftest.py` (shared pytest fixtures)
-- **Test:** pytest confirms config loads correctly, all required keys present
+- `training/progress_tracker.py` — `ProgressTracker` class (see PLAN.md ETA
+  section): rolling-window ETA for item and process, `to_dict()` for WebSocket,
+  `_fmt()` helper for human-readable durations ("4m 12s", "1h 18m", etc.)
+- **Test:** pytest confirms config loads correctly, all required keys present;
+  ProgressTracker tests: correct rolling average, correct ETA on tick(), correct
+  formatting, handles zero-completed edge case
 
 ### Session 0.2 — Data extractor
 - `data/extractor.py` — connect to MySQL (localhost:3307), query
   `ResolvedMarketSnaps` joined with ColdData tables (runner metadata, weather,
   results, market catalogue), export one Parquet file per day to `data/processed/`
+- Uses `ProgressTracker` — emits per-day and total-days ETA to stdout/log
+  (WebSocket integration comes in Session 3.2)
 - **Test:** pytest with a mock MySQL connection — verify SQL queries, correct
   join logic, output schema matches expected Parquet columns
 
@@ -35,7 +47,7 @@ No item is done until all three steps are complete.
 - `data/episode_builder.py` — load a day's Parquet, construct
   `Day → [Race → [Tick]]` hierarchy as typed dataclasses
 - `data/feature_engineer.py` — derive price velocity, implied probability,
-  overround, cross-runner relative features (rank by price, price gaps)
+  overround, cross-runner relative features (rank by price, price gaps) - have a conversation with the user here about features.
 - **Test:** pytest with synthetic Parquet data — verify Day/Race/Tick structure,
   feature values, edge cases (single runner, missing prices, removed runners)
 
@@ -53,7 +65,7 @@ No item is done until all three steps are complete.
   - Observation space: full state vector (see PLAN.md State Representation)
   - Action space: per-runner (action_type, stake), masked for budget
   - Step: advance one tick, apply actions, compute reward
-  - Episode: one full day across all races; budget carries across races
+  - Episode: one full day across all races; budget carries across races - double check this with user.  Some doubt over whether we want a budget per race to ensure the model can attempt to engage in that race, versus the model taking into account that its money needs to last the day.  A sensible solution is needed.
   - Reward: per-race P&L + early pick bonus + efficiency penalty (all
     coefficients from config.yaml)
 - **Test:** pytest with synthetic episodes — verify observation shape, action
@@ -87,9 +99,11 @@ No item is done until all three steps are complete.
 - `agents/ppo_trainer.py` — PPO training loop for one agent:
   rollout collection, advantage estimation (GAE), policy + value loss,
   gradient clipping, entropy bonus
+- Uses `ProgressTracker` for episode-level and total-episodes ETA
 - Logs per-episode: reward, P&L, bet count, loss terms → `logs/` directory
+- Progress dict published to a `asyncio.Queue` for the WebSocket to consume
 - **Test:** pytest — trainer runs for N steps on synthetic env without error,
-  loss decreases over a trivial known environment
+  loss decreases over a trivial known environment, progress events emitted
 
 ### Session 1.4 — Model registry
 - `registry/model_store.py` — SQLite schema and CRUD:
@@ -155,9 +169,16 @@ No item is done until all three steps are complete.
   on validation days → score → select → breed → repeat
 - `training/evaluator.py` — run a model on each test day independently,
   return per-day metrics dict and full bet log for registry
-- Progress events emitted to a queue (consumed by API WebSocket in Phase 3)
+- **Two-level ProgressTracker at every stage:**
+  - Outer tracker: agents completed / total agents in generation
+  - Inner tracker (training): episodes completed / total episodes
+  - Inner tracker (evaluation): test days completed / total test days
+  - Separate trackers for genetics phase (children bred / total to breed)
+- All progress events written to a shared `asyncio.Queue` consumed by the API
+  WebSocket — single canonical progress stream for the whole run
+- Phase transitions emit `phase_start` / `phase_complete` events with summary
 - **Test:** pytest — orchestrator runs 2 generations on synthetic env, registry
-  updated correctly, genetic log written
+  updated correctly, genetic log written, all progress events emitted in order
 
 ### Session 2.5 — First multi-generation run
 - Run population training on all available real data (N generations, N from config)
@@ -183,9 +204,13 @@ No item is done until all three steps are complete.
 
 ### Session 3.2 — Training & replay API
 - `api/routers/training.py`:
-  - `GET /training/status` — current generation, agents trained, time elapsed
-  - `WebSocket /ws/training` — live progress stream (agent name, episode reward,
-    loss, P&L) consumed by Angular training monitor
+  - `GET /training/status` — current run snapshot: phase, process ETA, item ETA,
+    last completed agent score, generation number
+  - `WebSocket /ws/training` — consumes the shared `asyncio.Queue` from the
+    orchestrator; broadcasts `progress`, `phase_start`, `phase_complete`,
+    `agent_complete`, `run_complete` events (full schema in PLAN.md ETA section)
+  - Clients that connect mid-run receive the latest state immediately on connect
+    (no waiting for the next event)
 - `api/routers/replay.py`:
   - `GET /replay/{model_id}/{date}` — all races for that model+day
   - `GET /replay/{model_id}/{date}/{race_id}` — full tick-by-tick state +
@@ -207,11 +232,19 @@ No item is done until all three steps are complete.
 
 ### Session 3.4 — Training monitor page
 - Training Monitor page:
-  - Current generation progress (which agent training, episode N of M)
+  - **Two persistent ETA bars always at the top** (see PLAN.md ETA section):
+    - Process bar: "Generation 4 · 7 of 20 agents trained · ETA 1h 18m"
+    - Item bar: "Training model_x1y2z3 · episode 312/1000 · ETA 4m 12s"
+  - Both bars update in real time via WebSocket
+  - Phase label updates as the run moves through extraction → training →
+    evaluation → genetics → scoring
   - Live reward / loss chart (line chart, WebSocket feed)
   - Population grid: N agents, colour = current status (training / evaluated /
     selected / discarded)
-- **Test:** Angular unit tests; mock WebSocket feed
+  - If no run in progress: shows last run summary + time since completed
+  - Scoreboard page shows status chip: Idle / Running (ETA Xh Ym) / Error
+- **Test:** Angular unit tests; mock WebSocket feed; verify ETA bars update
+  correctly on each event type
 
 ### Session 3.5 — Model detail & lineage page
 - Model Detail page:
@@ -251,8 +284,13 @@ No item is done until all three steps are complete.
 ## Phase 4 — Scale & Refine
 
 ### Session 4.1 — Dataset growth retraining
-- Retrain all active models on full accumulated dataset (triggered manually
-  when dataset passes 30-day milestone)
+- Retrain all active models on full accumulated dataset
+- Trigger threshold is configurable in `config.yaml` (`retraining.min_days`,
+  default 30) — change it without touching code
+- UI should expose this setting on a config/settings page so it can be adjusted
+  without editing files
+- Trigger options: manual (button in UI), automatic when threshold crossed,
+  or scheduled (e.g. weekly) — configurable
 - Verify scoreboard re-ranks correctly — old models evaluated against new test days
 
 ### Session 4.2 — Reward coefficient tuning
@@ -309,5 +347,12 @@ These are documented here so they are not forgotten. Assign to a session when re
   market, plans ahead
 - Multi-agent self-play — agents trade against each other in simulation to
   develop more robust strategies
-- Hierarchical RL — high-level policy selects which race to focus on;
-  low-level policy handles tick-by-tick betting
+- **Hierarchical RL** ⭐ — high-level policy selects which race to focus on
+  (or how much budget to allocate); low-level policy handles tick-by-tick
+  betting within the chosen race. A natural fit for this problem — a race day
+  genuinely is two-level. Kept in Phase 4 rather than v1 because: (a) credit
+  assignment across two levels is hard when neither policy is trained yet, and
+  (b) our LSTM day-episode already lets the agent implicitly skip races by
+  doing nothing. Validate the low-level policy first, then add the explicit
+  hierarchy. When the time comes, implement as `hierarchical_ppo_v1` in the
+  architecture registry — no other code changes needed.
