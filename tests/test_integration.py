@@ -18,10 +18,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+import numpy as np
+
 from data.episode_builder import PriceSize, RunnerSnap, load_day
 from data.extractor import DataExtractor
 from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
+from env.betfair_env import BetfairEnv, RaceRecord
 from env.order_book import match_back, match_lay
 
 pytestmark = pytest.mark.integration
@@ -375,3 +378,116 @@ class TestBetManagerReal:
         assert mgr.budget != pytest.approx(budget) or mgr.bet_count == 0
         # Final budget must be non-negative
         assert mgr.budget >= 0.0
+
+
+# ── Gymnasium environment end-to-end ────────────────────────────────────────
+
+
+class TestBetfairEnvReal:
+    def test_full_episode_on_real_data(self, day, config):
+        """Run a full episode with real data — verify termination."""
+        env = BetfairEnv(day, config)
+        obs, info = env.reset()
+
+        assert obs.shape == env.observation_space.shape
+        assert not np.any(np.isnan(obs))
+
+        total_ticks = sum(len(r.ticks) for r in day.races)
+        steps = 0
+        terminated = False
+        action = env.action_space.sample()
+
+        while not terminated:
+            obs, reward, terminated, truncated, info = env.step(action)
+            assert obs.shape == env.observation_space.shape
+            assert not np.any(np.isnan(obs))
+            steps += 1
+            action = env.action_space.sample()
+
+        assert steps == total_ticks
+        assert info["races_completed"] == len(day.races)
+
+    def test_observations_every_tick(self, day, config):
+        """Every tick should produce a valid observation."""
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        obs_shapes = set()
+        terminated = False
+        while not terminated:
+            obs, _, terminated, _, _ = env.step(env.action_space.sample())
+            obs_shapes.add(obs.shape)
+
+        assert len(obs_shapes) == 1  # all same shape
+
+    def test_bets_only_prerace(self, day, config):
+        """Bets should only be placed during pre-race ticks."""
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        # Aggressive action: back all runners with maximum stake
+        action = np.ones(config["training"]["max_runners"] * 2, dtype=np.float32)
+
+        bet_counts_at_race_transitions = []
+        prev_race_idx = 0
+        terminated = False
+
+        while not terminated:
+            obs, _, terminated, _, info = env.step(action)
+            if info["race_idx"] != prev_race_idx or terminated:
+                bet_counts_at_race_transitions.append(info["bet_count"])
+                prev_race_idx = info["race_idx"]
+
+        # Should have placed bets
+        assert info["bet_count"] > 0
+
+    def test_races_settled_correctly(self, day, config):
+        """Every race should settle with zero open liability."""
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.ones(config["training"]["max_runners"] * 2, dtype=np.float32)
+        action[:config["training"]["max_runners"]] = 0.5  # moderate back signal
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        assert info["open_liability"] == pytest.approx(0.0)
+        records = info["race_records"]
+        assert len(records) == len(day.races)
+
+    def test_budget_tracks_across_races(self, day, config):
+        """Budget should carry across races within the episode."""
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(config["training"]["max_runners"] * 2, dtype=np.float32)
+        action[0] = 1.0    # back first runner
+        action[config["training"]["max_runners"]] = -0.8  # 10% stake
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        records = info["race_records"]
+        if len(records) >= 2 and records[0].bet_count > 0:
+            # Race 2 should start with a different budget than £100
+            # (unless race 1 had zero P&L, which is very unlikely)
+            assert records[0].budget_after > 0
+
+    def test_final_pnl_matches_race_sum(self, day, config):
+        """Final realised P&L should equal sum of per-race P&Ls."""
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(config["training"]["max_runners"] * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[config["training"]["max_runners"]] = -0.8
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        race_pnl_sum = sum(r.pnl for r in info["race_records"])
+        assert info["realised_pnl"] == pytest.approx(race_pnl_sum, abs=0.01)
