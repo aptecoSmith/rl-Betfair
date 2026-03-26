@@ -310,7 +310,28 @@ No item is done until all three steps are complete.
   (high-cardinality categoricals) to the per-runner encoder
 - Benchmark vs non-embedding baseline on scoreboard
 
-### Session 4.5 — Performance profiling
+### Session 4.5 — Raw observation input mode
+- Add an observation mode that feeds the raw order book data (3-level
+  back/lay prices+sizes per runner, LTP, volume, timestamps) directly into
+  the network alongside or instead of the hand-crafted features from
+  `feature_engineer.py`
+- The goal is to let the agent discover features and correlations that the
+  human engineer didn't think of — this is the whole point of deep RL
+- Implement as a config toggle (`observation_mode: "engineered" | "raw" | "both"`)
+  so the population can evolve which mode works best
+- `"raw"` mode: per-runner input is the flat price/size grid + LTP + volume +
+  timestamps + raw metadata numerics; no derived features
+- `"both"` mode: concatenation of raw and engineered — lets the agent use
+  engineered features as a shortcut while still having access to raw data
+  for discovering novel patterns
+- `"engineered"` mode: current behaviour (derived features only)
+- Register as a hyperparameter in the genetic system so the population can
+  explore which mode (or combination) produces the best agents
+- **Test:** pytest — verify observation shapes for all three modes; verify
+  raw mode produces identical results in backtest vs live (same data in,
+  same features out)
+
+### Session 4.6 — Performance profiling
 - Profile full training run: identify CPU vs GPU bottlenecks
 - Optimise data loading (prefetching, pinned memory, worker count)
 - Optimise episode construction (vectorised numpy vs Python loops)
