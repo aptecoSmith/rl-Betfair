@@ -69,11 +69,13 @@ class Evaluator:
         model_store: ModelStore | None = None,
         progress_queue: asyncio.Queue | None = None,
         device: str = "cpu",
+        feature_cache: dict[str, list] | None = None,
     ) -> None:
         self.config = config
         self.model_store = model_store
         self.progress_queue = progress_queue
         self.device = device
+        self.feature_cache = feature_cache
 
     def evaluate(
         self,
@@ -165,7 +167,7 @@ class Evaluator:
         run_id: str,
     ) -> tuple[EvaluationDayRecord, list[EvaluationBetRecord]]:
         """Run one episode (one day) in eval mode and collect metrics."""
-        env = BetfairEnv(day, self.config)
+        env = BetfairEnv(day, self.config, feature_cache=self.feature_cache)
         obs, info = env.reset()
 
         hidden_state = policy.init_hidden(batch_size=1)

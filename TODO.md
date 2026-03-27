@@ -410,10 +410,39 @@ No item is done until all three steps are complete.
 - **Integration test:** train agents in all three modes on real data → verify
   observation dimensions correct, training completes, population can mix modes
 
-### Session 4.6 — Performance profiling
-- Profile full training run: identify CPU vs GPU bottlenecks
-- Optimise data loading (prefetching, pinned memory, worker count)
-- Optimise episode construction (vectorised numpy vs Python loops)
+### Session 4.6 — Performance profiling & optimisation
+
+Profiling data from Session 2.6 (1 agent, 1 day = 53 races, 4,182 ticks):
+
+| Operation | Time | % of train+eval | Notes |
+|---|---|---|---|
+| Data loading (Parquet + JSON) | 3.35s | — | One-time per run |
+| Feature engineering (×2) | 2.04s | 12% | Same day re-computed for train AND eval |
+| Rollout collection (env.step) | 8.83s | 55% | CPU-bound Python loop |
+| PPO update (gradient descent) | 1.78s | 11% | On GPU, 264 mini-batches |
+| Evaluation (inference loop) | 5.77s | 36% | CPU-bound Python loop |
+| **GPU utilisation** | **55 MB / 24,576 MB** | **0.2%** | RTX 3090 massively underused |
+
+At full scale (20 agents × 30 days × 5 gens): feature engineering alone = 20 min
+of redundant re-computation; rollout+eval = ~2.4 h/gen, all sequential.
+
+**Items (ordered by impact):**
+
+1. ✅ **Cache `engineer_day()` results** — done early as a quick win (see below)
+2. **Vectorise env.step() loop** — rollout is pure Python iterating tick-by-tick.
+   Observation arrays are already pre-computed numpy. Batch forward passes across
+   ticks where the agent does nothing, or move step logic to vectorised numpy ops.
+3. **Parallel agent training** — agents trained sequentially; 55 MB GPU per agent
+   on 24 GB card = room for 4–8 agents in parallel. Use `torch.multiprocessing`
+   or overlap CPU rollout with GPU PPO updates via async workers.
+4. **Batch rollout across days** — instead of one env per day sequentially, batch
+   multiple days into a vectorised env (like SB3 `SubprocVecEnv`) so the GPU gets
+   larger batches per forward pass.
+5. **Optimise `_build_day()` JSON parsing** — 3.35s to load 1 day (100s at 30 days).
+   `parse_snap_json()` per row is likely the bottleneck. Consider `orjson` or
+   pre-parsing to a more efficient format.
+6. **Pinned memory for GPU transfers** — use `pin_memory=True` on DataLoader or
+   manual `tensor.pin_memory()` for obs/action batches to speed CPU→GPU copies.
 - **Integration test:** benchmark before/after — verify training throughput
   improved, no correctness regressions (same model on same data produces
   same P&L)

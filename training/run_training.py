@@ -140,9 +140,15 @@ class TrainingOrchestrator:
                 "require_gpu=false."
             )
 
+        # Shared feature cache: engineer_day() is expensive and deterministic
+        # for a given Day — cache results so they're computed once per day,
+        # not once per agent per day per phase.
+        self.feature_cache: dict[str, list] = {}
+
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(
             config, model_store, progress_queue=progress_queue, device=self.device,
+            feature_cache=self.feature_cache,
         )
         self.scoreboard = Scoreboard(model_store, config) if model_store else None
 
@@ -280,6 +286,7 @@ class TrainingOrchestrator:
                 hyperparams=agent.hyperparameters,
                 progress_queue=self.progress_queue,
                 device=self.device,
+                feature_cache=self.feature_cache,
             )
             with perf_log(
                 logger,

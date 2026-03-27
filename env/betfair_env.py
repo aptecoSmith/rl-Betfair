@@ -172,7 +172,12 @@ class BetfairEnv(gymnasium.Env):
 
     metadata: dict = {"render_modes": []}
 
-    def __init__(self, day: Day, config: dict) -> None:
+    def __init__(
+        self,
+        day: Day,
+        config: dict,
+        feature_cache: dict[str, list] | None = None,
+    ) -> None:
         super().__init__()
         self.day = day
         self.config = config
@@ -189,7 +194,7 @@ class BetfairEnv(gymnasium.Env):
         self._commission = reward_cfg.get("commission", 0.05)
 
         # Pre-compute features and runner mappings
-        self._precompute()
+        self._precompute(feature_cache)
 
         # Observation / action spaces
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * self.max_runners) + AGENT_STATE_DIM
@@ -210,15 +215,32 @@ class BetfairEnv(gymnasium.Env):
 
     # ── Pre-computation ───────────────────────────────────────────────────
 
-    def _precompute(self) -> None:
-        """Pre-compute all tick features and runner-slot mappings."""
+    def _precompute(
+        self, feature_cache: dict[str, list] | None = None,
+    ) -> None:
+        """Pre-compute all tick features and runner-slot mappings.
+
+        If *feature_cache* is provided and contains ``day.date``, the cached
+        features are reused instead of calling ``engineer_day()`` again.
+        New results are stored back into the cache for future reuse.
+        """
         n_races = len(self.day.races)
         n_ticks = sum(len(r.ticks) for r in self.day.races)
-        with perf_log(
-            logger,
-            f"Feature engineering ({n_races} races, {n_ticks} ticks)",
-        ):
-            day_features = engineer_day(self.day)
+
+        if feature_cache is not None and self.day.date in feature_cache:
+            day_features = feature_cache[self.day.date]
+            logger.info(
+                "Feature cache hit for %s (%d races, %d ticks)",
+                self.day.date, n_races, n_ticks,
+            )
+        else:
+            with perf_log(
+                logger,
+                f"Feature engineering ({n_races} races, {n_ticks} ticks)",
+            ):
+                day_features = engineer_day(self.day)
+            if feature_cache is not None:
+                feature_cache[self.day.date] = day_features
 
         self._static_obs: list[list[np.ndarray]] = []
         self._runner_maps: list[dict[int, int]] = []   # sid → slot

@@ -129,11 +129,13 @@ class PPOTrainer:
         hyperparams: dict | None = None,
         progress_queue: asyncio.Queue | None = None,
         device: str = "cpu",
+        feature_cache: dict[str, list] | None = None,
     ) -> None:
         self.policy = policy.to(device)
         self.config = config
         self.device = device
         self.progress_queue = progress_queue
+        self.feature_cache = feature_cache
 
         hp = hyperparams or {}
         self.lr = hp.get("learning_rate", 3e-4)
@@ -229,7 +231,7 @@ class PPOTrainer:
     def _collect_rollout(self, day: Day) -> tuple[Rollout, EpisodeStats]:
         """Run one episode (one day) and collect transitions."""
         rollout_start = time.perf_counter()
-        env = BetfairEnv(day, self.config)
+        env = BetfairEnv(day, self.config, feature_cache=self.feature_cache)
         obs, info = env.reset()
 
         rollout = Rollout()
