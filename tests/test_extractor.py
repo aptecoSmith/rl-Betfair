@@ -51,6 +51,7 @@ def _make_ticks_df(n: int = 3, winner_id: int | None = 12345678901) -> pd.DataFr
         "sequence_number": [100 + i for i in range(n)],
         "venue": ["Newmarket"] * n,
         "market_start_time": pd.to_datetime(["2026-03-01 11:30:00"] * n),
+        "market_type": ["WIN"] * n,
         "number_of_active_runners": [8] * n,
         "traded_volume": [5000.0] * n,
         "in_play": [0] * n,           # MySQL TINYINT — cast to bool
@@ -88,7 +89,7 @@ def _make_runners_df(market_ids: list[str] | None = None) -> pd.DataFrame:
 
 
 def _make_extractor(config, ticks_df=None, runners_df=None) -> DataExtractor:
-    """Return a DataExtractor with _query_ticks/_query_runners mocked."""
+    """Return a DataExtractor with _query_ticks/_query_runners/_query_market_names mocked."""
     mock_engine = MagicMock()
     extractor = DataExtractor(config, engine=mock_engine)
 
@@ -96,6 +97,18 @@ def _make_extractor(config, ticks_df=None, runners_df=None) -> DataExtractor:
         extractor._query_ticks = MagicMock(return_value=_cast_ticks(ticks_df.copy()))
     if runners_df is not None:
         extractor._query_runners = MagicMock(return_value=runners_df.copy())
+
+    # Default market names mock — returns names for all market IDs in the ticks
+    if ticks_df is not None and not ticks_df.empty:
+        market_ids = list(ticks_df["market_id"].unique())
+        names_df = pd.DataFrame({
+            "market_id": market_ids,
+            "market_name": [f"Race {i+1}" for i in range(len(market_ids))],
+        })
+    else:
+        names_df = pd.DataFrame(columns=["market_id", "market_name"])
+    extractor._query_market_names = MagicMock(return_value=names_df)
+
     return extractor
 
 
@@ -161,7 +174,8 @@ class TestColumnSchemas:
     def test_ticks_columns_complete(self):
         required = {
             "market_id", "timestamp", "sequence_number", "venue",
-            "market_start_time", "number_of_active_runners", "traded_volume",
+            "market_start_time", "market_type", "market_name",
+            "number_of_active_runners", "traded_volume",
             "in_play", "snap_json", "winner_selection_id",
             "temperature", "precipitation", "wind_speed", "wind_direction",
             "humidity", "weather_code",

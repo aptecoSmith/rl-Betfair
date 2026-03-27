@@ -43,6 +43,8 @@ TICKS_COLUMNS: list[str] = [
     "sequence_number",
     "venue",
     "market_start_time",
+    "market_type",
+    "market_name",
     "number_of_active_runners",
     "traded_volume",
     "in_play",
@@ -161,6 +163,13 @@ SQL_TICKS = text("""
 #: All RunnerMetaData fields are returned as-is (all string? in the DB).
 #: Numeric parsing (OFFICIAL_RATING, STALL_DRAW, FORECASTPRICE_*, etc.)
 #: is intentionally deferred to feature_engineer.py.
+#: Market names for a set of market IDs (from coldData.marketOnDates).
+SQL_MARKET_NAMES = """
+    SELECT MarketId AS market_id, MarketName AS market_name
+    FROM coldData.marketOnDates
+    WHERE MarketId IN :market_ids
+"""
+
 SQL_RUNNERS = """
     SELECT
         rd.MarketCatalogueMarketId AS market_id,
@@ -282,6 +291,14 @@ class DataExtractor:
                 return False
             market_ids = list(ticks_df["market_id"].unique())
             runners_df = self._query_runners(market_ids, conn)
+            names_df = self._query_market_names(market_ids, conn)
+
+        # Merge market_name into ticks (left join — some markets may not have names)
+        if not names_df.empty:
+            ticks_df = ticks_df.merge(names_df, on="market_id", how="left")
+            ticks_df["market_name"] = ticks_df["market_name"].fillna("")
+        else:
+            ticks_df["market_name"] = ""
 
         self._save_day(target_date, ticks_df, runners_df)
         logger.info(
@@ -366,6 +383,21 @@ class DataExtractor:
         df = _enrich_from_snap_json(df)
         return _cast_ticks(df)
 
+    def _query_market_names(
+        self, market_ids: list[str], conn: sa.Connection,
+    ) -> pd.DataFrame:
+        """Fetch market names from coldData.marketOnDates."""
+        if not market_ids:
+            return pd.DataFrame(columns=["market_id", "market_name"])
+        stmt = text(SQL_MARKET_NAMES).bindparams(
+            bindparam("market_ids", expanding=True)
+        )
+        result = conn.execute(stmt, {"market_ids": market_ids})
+        rows = result.fetchall()
+        if not rows:
+            return pd.DataFrame(columns=["market_id", "market_name"])
+        return pd.DataFrame(rows, columns=list(result.keys()))
+
     def _query_runners(
         self, market_ids: list[str], conn: sa.Connection
     ) -> pd.DataFrame:
@@ -405,11 +437,12 @@ def _enrich_from_snap_json(df: pd.DataFrame) -> pd.DataFrame:
     timestamps don't match.  Instead we parse them from the JSON that
     ``ResolvedMarketSnaps`` already stores.
 
-    Added columns: ``venue``, ``market_start_time``,
+    Added columns: ``venue``, ``market_start_time``, ``market_type``,
     ``number_of_active_runners``, ``traded_volume``, ``in_play``.
     """
     venues: list[str] = []
     start_times: list[datetime | None] = []
+    market_types: list[str] = []
     n_active: list[int | None] = []
     volumes: list[float] = []
     in_play: list[bool] = []
@@ -419,6 +452,7 @@ def _enrich_from_snap_json(df: pd.DataFrame) -> pd.DataFrame:
         md = snap.get("MarketDefinition") or {}
 
         venues.append(md.get("venue", ""))
+        market_types.append(md.get("marketType", ""))
 
         mt = md.get("marketTime")
         if mt:
@@ -438,6 +472,7 @@ def _enrich_from_snap_json(df: pd.DataFrame) -> pd.DataFrame:
 
     df["venue"] = venues
     df["market_start_time"] = start_times
+    df["market_type"] = market_types
     df["number_of_active_runners"] = n_active
     df["traded_volume"] = volumes
     df["in_play"] = in_play

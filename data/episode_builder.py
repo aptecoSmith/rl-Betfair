@@ -134,6 +134,11 @@ class Race:
     winner_selection_id: int | None
     ticks: list[Tick]
     runner_metadata: dict[int, RunnerMeta]  # keyed by selection_id
+    # Fields added in Session 1.3 — default values for backward compatibility
+    # until the extractor is updated to populate them (Session 2+).
+    market_name: str = ""
+    market_type: str = ""  # "WIN", "EACH_WAY", etc.
+    n_runners: int = 0     # total runners including removed
 
 
 @dataclass(slots=True)
@@ -450,8 +455,9 @@ def _build_day(
             group = group.sort_values("sequence_number", ascending=True)
             ticks = [_row_to_tick(row) for _, row in group.iterrows()]
 
-            # Derive race-level fields from the first tick
+            # Derive race-level fields from the first tick / row
             first = ticks[0]
+            first_row = group.iloc[0]
             runner_meta = _build_runner_metadata(runners_df, market_id)
 
             races.append(
@@ -462,6 +468,9 @@ def _build_day(
                     winner_selection_id=first.winner_selection_id,
                     ticks=ticks,
                     runner_metadata=runner_meta,
+                    market_name=str(first_row.get("market_name") or ""),
+                    market_type=str(first_row.get("market_type") or ""),
+                    n_runners=len(runner_meta),
                 )
             )
 
