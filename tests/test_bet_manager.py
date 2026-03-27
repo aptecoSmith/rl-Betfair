@@ -282,7 +282,7 @@ class TestSettlement:
         mgr.place_back(runner, stake=10.0, market_id="m1")
         # Budget: 100 − 10 = 90
 
-        pnl = mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
 
         # Profit: 10 × (3 − 1) = 20
         assert pnl == pytest.approx(20.0)
@@ -296,7 +296,7 @@ class TestSettlement:
 
         mgr.place_back(runner, stake=10.0, market_id="m1")
 
-        pnl = mgr.settle_race(winner_selection_id=9999, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=9999, market_id="m1")
 
         assert pnl == pytest.approx(-10.0)
         assert mgr.budget == pytest.approx(90.0)  # Stake was already deducted
@@ -311,7 +311,7 @@ class TestSettlement:
         # Liability = 10 × (4 − 1) = 30
         assert mgr.open_liability == pytest.approx(30.0)
 
-        pnl = mgr.settle_race(winner_selection_id=2001, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=2001, market_id="m1")
 
         # Runner won → layer loses liability
         assert pnl == pytest.approx(-30.0)
@@ -325,7 +325,7 @@ class TestSettlement:
 
         mgr.place_lay(runner, stake=10.0, market_id="m1")
 
-        pnl = mgr.settle_race(winner_selection_id=9999, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=9999, market_id="m1")
 
         # Runner lost → layer keeps the backer's stake
         assert pnl == pytest.approx(10.0)
@@ -342,7 +342,7 @@ class TestSettlement:
         mgr.place_back(loser, stake=10.0, market_id="m1")
         # Budget: 100 − 10 − 10 = 80
 
-        pnl = mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
 
         # Winner: +20, Loser: −10 → net +10
         assert pnl == pytest.approx(10.0)
@@ -356,7 +356,7 @@ class TestSettlement:
         mgr.place_back(r1, stake=10.0, market_id="m1")
         mgr.place_back(r2, stake=10.0, market_id="m2")
 
-        pnl = mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
 
         # Only m1 settled
         assert mgr.bets[0].outcome is BetOutcome.WON
@@ -371,7 +371,7 @@ class TestSettlement:
         mgr.place_back(r1, stake=10.0, market_id="m1")
         mgr.place_back(r2, stake=10.0, market_id="m1")
 
-        pnl = mgr.settle_race(winner_selection_id=1001)
+        pnl = mgr.settle_race(winning_selection_ids=1001)
 
         assert mgr.bets[0].outcome is BetOutcome.WON
         assert mgr.bets[1].outcome is BetOutcome.LOST
@@ -381,10 +381,10 @@ class TestSettlement:
         runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
 
         mgr.place_back(runner, stake=10.0, market_id="m1")
-        pnl1 = mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        pnl1 = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
         budget_after = mgr.budget
 
-        pnl2 = mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        pnl2 = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
 
         assert pnl2 == 0.0
         assert mgr.budget == budget_after
@@ -401,7 +401,7 @@ class TestSettlement:
         assert mgr.open_liability == pytest.approx(30.0)
         assert mgr.available_budget == pytest.approx(60.0)
 
-        pnl = mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
 
         # Back on 1001 wins: +20
         # Lay on 1002 — runner lost → layer keeps £10
@@ -421,7 +421,7 @@ class TestBudgetAcrossRaces:
 
         # Race 1: back £10, wins
         mgr.place_back(runner1, stake=10.0, market_id="race1")
-        mgr.settle_race(winner_selection_id=1001, market_id="race1")
+        mgr.settle_race(winning_selection_ids=1001, market_id="race1")
         assert mgr.budget == pytest.approx(120.0)
 
         # Race 2: can now bet with the profit
@@ -437,7 +437,7 @@ class TestBudgetAcrossRaces:
 
         # Race 1: back £50, loses
         mgr.place_back(runner1, stake=50.0, market_id="race1")
-        mgr.settle_race(winner_selection_id=9999, market_id="race1")
+        mgr.settle_race(winning_selection_ids=9999, market_id="race1")
         assert mgr.budget == pytest.approx(50.0)
 
         # Race 2: budget is now only 50
@@ -461,7 +461,7 @@ class TestHelpers:
         unsettled = mgr.unsettled_bets()
         assert len(unsettled) == 2
 
-        mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        mgr.settle_race(winning_selection_ids=1001, market_id="m1")
 
         unsettled = mgr.unsettled_bets()
         assert len(unsettled) == 1
@@ -499,7 +499,7 @@ class TestHelpers:
 
         assert mgr.winning_bets == 0
 
-        mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        mgr.settle_race(winning_selection_ids=1001, market_id="m1")
 
         assert mgr.winning_bets == 1
 
@@ -536,7 +536,7 @@ class TestEdgeCases:
 
         # Runner wins:
         # Back wins: +20. Lay loses: -30. Net: -10
-        pnl = mgr.settle_race(winner_selection_id=1001, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
         assert pnl == pytest.approx(-10.0)
 
     def test_back_and_lay_same_runner_loser(self):
@@ -553,7 +553,7 @@ class TestEdgeCases:
 
         # Runner loses:
         # Back loses: -10. Lay wins: +10. Net: 0
-        pnl = mgr.settle_race(winner_selection_id=9999, market_id="m1")
+        pnl = mgr.settle_race(winning_selection_ids=9999, market_id="m1")
         assert pnl == pytest.approx(0.0)
 
     def test_very_large_lay_capped(self):
@@ -581,7 +581,7 @@ class TestEdgeCases:
         mgr.place_back(r1_loser, stake=5.0, market_id="race1")
         # Budget: 100 − 20 − 5 = 75
 
-        pnl1 = mgr.settle_race(winner_selection_id=101, market_id="race1")
+        pnl1 = mgr.settle_race(winning_selection_ids=101, market_id="race1")
         # Winner: 20×1.5=30 profit. Loser: −5. Net: +25
         assert pnl1 == pytest.approx(25.0)
         assert mgr.budget == pytest.approx(125.0)
@@ -593,7 +593,7 @@ class TestEdgeCases:
         mgr.place_back(r2_loser1, stake=30.0, market_id="race2")
         mgr.place_lay(r2_lay, stake=10.0, market_id="race2")
 
-        pnl2 = mgr.settle_race(winner_selection_id=999, market_id="race2")
+        pnl2 = mgr.settle_race(winning_selection_ids=999, market_id="race2")
         # Back 201 loses: −30. Lay 202 wins (runner lost): +10. Net: −20
         assert pnl2 == pytest.approx(-20.0)
         assert mgr.budget == pytest.approx(105.0)
@@ -602,3 +602,124 @@ class TestEdgeCases:
         assert mgr.realised_pnl == pytest.approx(5.0)
         assert mgr.bet_count == 4
         assert mgr.winning_bets == 2  # r1_winner back + r2_lay
+
+
+# ── EACH_WAY / PLACED settlement ────────────────────────────────────────────
+
+
+class TestEachWaySettlement:
+    """Tests for EACH_WAY markets where PLACED runners also pay out."""
+
+    def test_placed_runner_back_wins(self):
+        """A back bet on a PLACED runner should pay out at full price."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        # Runner placed (not the winner) — should still pay out
+        pnl = mgr.settle_race({2001, 1001}, market_id="m1")
+        assert pnl == pytest.approx(20.0)  # 10 × (3.0 - 1) = 20
+        assert mgr.bets[0].outcome is BetOutcome.WON
+
+    def test_placed_runner_lay_loses(self):
+        """A lay bet on a PLACED runner should lose (runner placed)."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        mgr.place_lay(runner, stake=10.0, market_id="m1")
+        # Runner placed — layer loses
+        pnl = mgr.settle_race({2001, 1001}, market_id="m1")
+        liability = 10.0 * (4.0 - 1.0)  # = 30
+        assert pnl == pytest.approx(-liability)
+        assert mgr.bets[0].outcome is BetOutcome.LOST
+
+    def test_non_placed_runner_loses(self):
+        """Back bet on non-placed runner still loses in EACH_WAY."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=3001, lay_levels=[(5.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        # Winners are {1001, 2001} — 3001 is a loser
+        pnl = mgr.settle_race({1001, 2001}, market_id="m1")
+        assert pnl == pytest.approx(-10.0)
+        assert mgr.bets[0].outcome is BetOutcome.LOST
+
+    def test_multiple_placed_runners_all_pay(self):
+        """Multiple bets on different placed runners should all win."""
+        mgr = BetManager(starting_budget=100.0)
+        r1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        r2 = _runner(selection_id=1002, lay_levels=[(5.0, 50.0)])
+        mgr.place_back(r1, stake=10.0, market_id="m1")
+        mgr.place_back(r2, stake=10.0, market_id="m1")
+        # Both placed
+        pnl = mgr.settle_race({1001, 1002, 1003}, market_id="m1")
+        # r1: 10×2=20, r2: 10×4=40
+        assert pnl == pytest.approx(60.0)
+        assert mgr.winning_bets == 2
+
+    def test_single_int_still_works(self):
+        """Passing a single int (backward compat) should still work."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        pnl = mgr.settle_race(1001, market_id="m1")
+        assert pnl == pytest.approx(20.0)
+
+
+# ── Commission tests ────────────────────────────────────────────────────────
+
+
+class TestCommission:
+    """Tests for Betfair commission on winning bets."""
+
+    def test_back_winner_with_commission(self):
+        """Commission should be deducted from profit on a winning back bet."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        # Budget: 90
+        pnl = mgr.settle_race(1001, market_id="m1", commission=0.05)
+        # Gross profit: 10 × 2 = 20. Commission: 20 × 0.05 = 1. Net: 19
+        assert pnl == pytest.approx(19.0)
+        assert mgr.budget == pytest.approx(90.0 + 10.0 + 19.0)  # 119
+
+    def test_back_loser_no_commission(self):
+        """No commission on losing bets."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        pnl = mgr.settle_race(9999, market_id="m1", commission=0.05)
+        assert pnl == pytest.approx(-10.0)
+
+    def test_lay_winner_no_commission_on_loss(self):
+        """Lay bet losing (runner won) — no commission, just lose liability."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        mgr.place_lay(runner, stake=10.0, market_id="m1")
+        pnl = mgr.settle_race(1001, market_id="m1", commission=0.05)
+        # Layer loses liability: 10 × 3 = 30 (no commission on losses)
+        assert pnl == pytest.approx(-30.0)
+
+    def test_lay_loser_with_commission(self):
+        """Lay bet winning (runner lost) — commission on the profit."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        mgr.place_lay(runner, stake=10.0, market_id="m1")
+        pnl = mgr.settle_race(9999, market_id="m1", commission=0.05)
+        # Gross profit: 10 (backer's stake). Commission: 10 × 0.05 = 0.5. Net: 9.5
+        assert pnl == pytest.approx(9.5)
+
+    def test_zero_commission(self):
+        """With zero commission, results match the old behaviour."""
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        pnl = mgr.settle_race(1001, market_id="m1", commission=0.0)
+        assert pnl == pytest.approx(20.0)
+
+    def test_commission_with_placed_runners(self):
+        """Commission applies to placed runner payouts too."""
+        mgr = BetManager(starting_budget=100.0)
+        r1 = _runner(selection_id=1001, lay_levels=[(5.0, 50.0)])
+        mgr.place_back(r1, stake=10.0, market_id="m1")
+        # Runner 1001 placed
+        pnl = mgr.settle_race({1001, 2001}, market_id="m1", commission=0.10)
+        # Gross profit: 10 × 4 = 40. Commission: 40 × 0.10 = 4. Net: 36
+        assert pnl == pytest.approx(36.0)

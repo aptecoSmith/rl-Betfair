@@ -188,16 +188,34 @@ class BetManager:
 
     # ── Settlement ───────────────────────────────────────────────────────
 
-    def settle_race(self, winner_selection_id: int, market_id: str = "") -> float:
+    def settle_race(
+        self,
+        winning_selection_ids: int | set[int],
+        market_id: str = "",
+        commission: float = 0.0,
+    ) -> float:
         """Settle all unsettled bets for a race and return the race P&L.
 
         Args:
-            winner_selection_id: The selection ID of the winning runner.
+            winning_selection_ids: Selection ID(s) that won/placed.
+                For WIN markets pass the single winner.  For EACH_WAY
+                (place) markets pass a set containing WINNER + PLACED IDs.
+                Betfair EACH_WAY odds already include the place fraction
+                so PLACED runners pay at the quoted price.
+                Accepts a single int for backward compatibility.
             market_id: If provided, only settle bets for this market.
+            commission: Betfair commission rate applied to net profit
+                (e.g. 0.05 for 5%).  Only deducted from winning bets.
 
         Returns:
-            Net P&L for the settled bets.
+            Net P&L for the settled bets (after commission).
         """
+        # Normalise to a set
+        if isinstance(winning_selection_ids, int):
+            winners = {winning_selection_ids}
+        else:
+            winners = winning_selection_ids
+
         race_pnl = 0.0
 
         for bet in self.bets:
@@ -206,14 +224,15 @@ class BetManager:
             if market_id and bet.market_id != market_id:
                 continue
 
-            won_selection = bet.selection_id == winner_selection_id
+            won_selection = bet.selection_id in winners
 
             if bet.side is BetSide.BACK:
                 if won_selection:
-                    # Winner: profit = stake × (price − 1), get stake back.
-                    profit = bet.matched_stake * (bet.average_price - 1.0)
-                    self.budget += bet.matched_stake + profit
-                    bet.pnl = profit
+                    # Winner/placed: profit = stake × (price − 1), get stake back.
+                    gross_profit = bet.matched_stake * (bet.average_price - 1.0)
+                    net_profit = gross_profit * (1.0 - commission)
+                    self.budget += bet.matched_stake + net_profit
+                    bet.pnl = net_profit
                     bet.outcome = BetOutcome.WON
                 else:
                     # Loser: stake already deducted, nothing returned.
@@ -223,16 +242,18 @@ class BetManager:
             elif bet.side is BetSide.LAY:
                 liability = bet.matched_stake * (bet.average_price - 1.0)
                 if won_selection:
-                    # Runner won → layer loses liability.
+                    # Runner won/placed → layer loses liability.
                     self.budget -= liability
                     self._open_liability -= liability
                     bet.pnl = -liability
                     bet.outcome = BetOutcome.LOST
                 else:
                     # Runner lost → layer keeps the backer's stake.
-                    self.budget += bet.matched_stake
+                    gross_profit = bet.matched_stake
+                    net_profit = gross_profit * (1.0 - commission)
+                    self.budget += net_profit
                     self._open_liability -= liability
-                    bet.pnl = bet.matched_stake
+                    bet.pnl = net_profit
                     bet.outcome = BetOutcome.WON
 
             race_pnl += bet.pnl

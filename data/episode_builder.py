@@ -139,6 +139,10 @@ class Race:
     market_name: str = ""
     market_type: str = ""  # "WIN", "EACH_WAY", etc.
     n_runners: int = 0     # total runners including removed
+    # Set of selection IDs that won the market.  For WIN markets this is
+    # just {winner_selection_id}.  For EACH_WAY (place) markets this
+    # includes WINNER + PLACED runners — all of them pay out on a back bet.
+    winning_selection_ids: set[int] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -460,6 +464,16 @@ def _build_day(
             first_row = group.iloc[0]
             runner_meta = _build_runner_metadata(runners_df, market_id)
 
+            # Build winning_selection_ids from the last tick's runner statuses.
+            # For WIN markets: only WINNER.  For EACH_WAY: WINNER + PLACED.
+            # Betfair EACH_WAY markets are place markets — the quoted odds
+            # already reflect the place fraction, so PLACED pays at full price.
+            winning_ids: set[int] = set()
+            last_tick = ticks[-1]
+            for runner in last_tick.runners:
+                if runner.status in ("WINNER", "PLACED"):
+                    winning_ids.add(runner.selection_id)
+
             races.append(
                 Race(
                     market_id=market_id,
@@ -471,6 +485,7 @@ def _build_day(
                     market_name=str(first_row.get("market_name") or ""),
                     market_type=str(first_row.get("market_type") or ""),
                     n_runners=len(runner_meta),
+                    winning_selection_ids=winning_ids,
                 )
             )
 

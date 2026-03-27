@@ -181,6 +181,7 @@ class BetfairEnv(gymnasium.Env):
         self._early_pick_max = reward_cfg["early_pick_bonus_max"]
         self._early_pick_seconds = reward_cfg["early_pick_min_seconds"]
         self._efficiency_penalty = reward_cfg["efficiency_penalty"]
+        self._commission = reward_cfg.get("commission", 0.05)
 
         # Pre-compute features and runner mappings
         self._precompute()
@@ -411,8 +412,17 @@ class BetfairEnv(gymnasium.Env):
         assert bm is not None
         budget_before = bm.budget + bm.open_liability  # total economic value
 
-        winner = race.winner_selection_id if race.winner_selection_id else -1
-        race_pnl = bm.settle_race(winner, market_id=race.market_id)
+        # Use winning_selection_ids (WINNER + PLACED for EACH_WAY markets).
+        # Fall back to {winner_selection_id} for backward compatibility with
+        # Race objects that don't have the field populated.
+        winning_ids = race.winning_selection_ids
+        if not winning_ids and race.winner_selection_id:
+            winning_ids = {race.winner_selection_id}
+        elif not winning_ids:
+            winning_ids = {-1}
+        race_pnl = bm.settle_race(
+            winning_ids, market_id=race.market_id, commission=self._commission,
+        )
 
         race_bets = bm.race_bets(race.market_id)
         race_bet_count = len(race_bets)
@@ -451,7 +461,10 @@ class BetfairEnv(gymnasium.Env):
 
         Returns (bonus_value, count_of_early_picks).
         """
-        if not race.winner_selection_id:
+        winning_ids = race.winning_selection_ids
+        if not winning_ids and race.winner_selection_id:
+            winning_ids = {race.winner_selection_id}
+        if not winning_ids:
             return 0.0, 0
 
         bm = self.bet_manager
@@ -462,7 +475,7 @@ class BetfairEnv(gymnasium.Env):
         for bet_idx, bet in enumerate(bm.bets):
             if bet.market_id != race.market_id:
                 continue
-            if bet.selection_id != race.winner_selection_id:
+            if bet.selection_id not in winning_ids:
                 continue
             if bet.side is not BetSide.BACK:
                 continue
