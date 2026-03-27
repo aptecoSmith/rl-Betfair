@@ -275,6 +275,20 @@ class TestListAgents:
 
 
 class TestDeleteDay:
+    def test_delete_requires_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+            processed = Path(config["paths"]["processed_data"])
+            _create_parquet(processed / "2026-03-26.parquet")
+
+            client = _make_app(store, config)
+            resp = client.delete("/admin/days/2026-03-26")
+            assert resp.status_code == 400
+            assert "confirm" in resp.json()["detail"].lower()
+            # File should still exist
+            assert (processed / "2026-03-26.parquet").exists()
+
     def test_delete_existing_day(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = _test_config(tmp)
@@ -294,7 +308,7 @@ class TestDeleteDay:
             ))
 
             client = _make_app(store, config)
-            resp = client.delete("/admin/days/2026-03-26")
+            resp = client.delete("/admin/days/2026-03-26?confirm=true")
             assert resp.status_code == 200
             assert resp.json()["deleted"] is True
 
@@ -312,7 +326,7 @@ class TestDeleteDay:
             store = _create_store(tmp)
             client = _make_app(store, config)
 
-            resp = client.delete("/admin/days/2026-01-01")
+            resp = client.delete("/admin/days/2026-01-01?confirm=true")
             assert resp.status_code == 404
 
     def test_delete_invalid_date_format(self):
@@ -321,7 +335,7 @@ class TestDeleteDay:
             store = _create_store(tmp)
             client = _make_app(store, config)
 
-            resp = client.delete("/admin/days/not-a-date")
+            resp = client.delete("/admin/days/not-a-date?confirm=true")
             assert resp.status_code == 400
 
 
@@ -329,6 +343,19 @@ class TestDeleteDay:
 
 
 class TestDeleteAgent:
+    def test_delete_requires_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+            mid = store.create_model(0, "ppo_lstm_v1", "Test", {})
+
+            client = _make_app(store, config)
+            resp = client.delete(f"/admin/agents/{mid}")
+            assert resp.status_code == 400
+            assert "confirm" in resp.json()["detail"].lower()
+            # Model should still exist
+            assert store.get_model(mid) is not None
+
     def test_delete_model_with_all_artefacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = _test_config(tmp)
@@ -336,7 +363,7 @@ class TestDeleteAgent:
             mid, run_id = _seed_model_with_eval(store)
 
             client = _make_app(store, config)
-            resp = client.delete(f"/admin/agents/{mid}")
+            resp = client.delete(f"/admin/agents/{mid}?confirm=true")
             assert resp.status_code == 200
             assert resp.json()["deleted"] is True
 
@@ -365,7 +392,7 @@ class TestDeleteAgent:
             store = _create_store(tmp)
             client = _make_app(store, config)
 
-            resp = client.delete("/admin/agents/nonexistent-id")
+            resp = client.delete("/admin/agents/nonexistent-id?confirm=true")
             assert resp.status_code == 404
 
     def test_delete_does_not_cascade_parent_refs(self):
@@ -381,7 +408,7 @@ class TestDeleteAgent:
             )
 
             client = _make_app(store, config)
-            resp = client.delete(f"/admin/agents/{child_id}")
+            resp = client.delete(f"/admin/agents/{child_id}?confirm=true")
             assert resp.status_code == 200
 
             # Parent still exists
@@ -632,7 +659,7 @@ class TestAdminIntegration:
             ))
 
             client = _make_app(store, config)
-            resp = client.delete("/admin/days/2026-03-26")
+            resp = client.delete("/admin/days/2026-03-26?confirm=true")
             assert resp.status_code == 200
 
             # Files gone
@@ -652,7 +679,7 @@ class TestAdminIntegration:
             mid, run_id = _seed_model_with_eval(store)
 
             client = _make_app(store, config)
-            resp = client.delete(f"/admin/agents/{mid}")
+            resp = client.delete(f"/admin/agents/{mid}?confirm=true")
             assert resp.status_code == 200
 
             # Everything gone
@@ -697,7 +724,7 @@ class TestAdminIntegration:
             resp = client.get("/admin/days")
             assert len(resp.json()["days"]) == 2
 
-            client.delete("/admin/days/2026-03-25")
+            client.delete("/admin/days/2026-03-25?confirm=true")
 
             resp = client.get("/admin/days")
             days = resp.json()["days"]

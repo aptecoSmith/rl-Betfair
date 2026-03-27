@@ -133,8 +133,16 @@ async def list_agents(request: Request):
 
 
 @router.delete("/days/{date_str}", response_model=AdminDeleteResponse)
-async def delete_day(date_str: str, request: Request):
-    """Delete a day's extracted Parquet files and evaluation records referencing that date."""
+async def delete_day(date_str: str, request: Request, confirm: bool = False):
+    """Delete a day's extracted Parquet files and evaluation records referencing that date.
+
+    Requires ``confirm=true`` query parameter to prevent accidental deletion.
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation required: pass ?confirm=true",
+        )
     # Validate date format
     try:
         date.fromisoformat(date_str)
@@ -181,8 +189,16 @@ def _delete_evaluation_days_for_date(store, date_str: str) -> int:
 
 
 @router.delete("/agents/{model_id}", response_model=AdminDeleteResponse)
-async def delete_agent(model_id: str, request: Request):
-    """Delete a model: weights, registry record, evaluation data, genetic events."""
+async def delete_agent(model_id: str, request: Request, confirm: bool = False):
+    """Delete a model: weights, registry record, evaluation data, genetic events.
+
+    Requires ``confirm=true`` query parameter to prevent accidental deletion.
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation required: pass ?confirm=true",
+        )
     store = request.app.state.store
 
     model = store.get_model(model_id)

@@ -36,11 +36,11 @@ export class ApiService {
   }
 
   deleteDay(date: string): Observable<AdminDeleteResponse> {
-    return this.http.delete<AdminDeleteResponse>(`${this.baseUrl}/admin/days/${date}`);
+    return this.http.delete<AdminDeleteResponse>(`${this.baseUrl}/admin/days/${date}?confirm=true`);
   }
 
   deleteAgent(modelId: string): Observable<AdminDeleteResponse> {
-    return this.http.delete<AdminDeleteResponse>(`${this.baseUrl}/admin/agents/${modelId}`);
+    return this.http.delete<AdminDeleteResponse>(`${this.baseUrl}/admin/agents/${modelId}?confirm=true`);
   }
 
   importDay(date: string): Observable<ImportDayResponse> {
