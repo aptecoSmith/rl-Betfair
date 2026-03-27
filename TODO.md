@@ -447,6 +447,27 @@ No item is done until all three steps are complete.
 
 ---
 
+## Infrastructure & Performance (backlog — no session assigned yet)
+
+- **Database architecture review** — SQLite `evaluation_bets` table hit a
+  performance wall at 31K rows/agent/day (Session 2.5). With 20 agents × 30
+  test days × ~30K bets = 18M rows per generation. Batch `executemany` helps
+  but at scale this may need a different approach:
+  - Option A: Keep SQLite for metadata (models, eval_runs, eval_days, genetic_events)
+    but write bet logs to Parquet files keyed by (run_id, date) — fast columnar writes,
+    native to the data pipeline
+  - Option B: PostgreSQL for everything — better concurrency, bulk insert perf, but
+    adds a server dependency
+  - Option C: SQLite with WAL mode + batch-only writes (current approach, may suffice
+    with the `executemany` fix)
+  - Decision deferred until real-scale runs reveal whether Option C holds up
+
+- **GPU utilisation** — install CUDA-enabled PyTorch (`pip install torch
+  --index-url https://download.pytorch.org/whl/cu124`), set `training.require_gpu: true`
+  in config.yaml, verify training moves to RTX 3090
+
+---
+
 ## Future Architecture Experiments (backlog — no session assigned yet)
 
 These are documented here so they are not forgotten. Assign to a session when ready.

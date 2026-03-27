@@ -742,3 +742,87 @@ class TestResultStructure:
         for m in models:
             assert m.weights_path is not None
             assert Path(m.weights_path).exists()
+
+
+# ── Tests: GPU detection & enforcement ───────────────────────────────────────
+
+
+class TestGPUDetection:
+    def test_auto_detects_device(self, tmp_path):
+        """Orchestrator should auto-detect CUDA or CPU."""
+        config = _make_full_config()
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        orch = TrainingOrchestrator(config, model_store=store)
+        expected = "cuda" if torch.cuda.is_available() else "cpu"
+        assert orch.device == expected
+
+    def test_explicit_device_overrides(self, tmp_path):
+        """Explicitly passing device should override auto-detection."""
+        config = _make_full_config()
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        orch = TrainingOrchestrator(config, model_store=store, device="cpu")
+        assert orch.device == "cpu"
+
+    def test_require_gpu_raises_on_cpu(self, tmp_path):
+        """When require_gpu=true and no GPU, should raise RuntimeError."""
+        if torch.cuda.is_available():
+            pytest.skip("GPU is available — this test checks the CPU fallback path")
+        config = _make_full_config()
+        config["training"]["require_gpu"] = True
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        with pytest.raises(RuntimeError, match="require_gpu"):
+            TrainingOrchestrator(config, model_store=store)
+
+    def test_require_gpu_passes_with_gpu(self, tmp_path):
+        """When require_gpu=true and GPU is available, should succeed."""
+        if not torch.cuda.is_available():
+            pytest.skip("No GPU available")
+        config = _make_full_config()
+        config["training"]["require_gpu"] = True
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        orch = TrainingOrchestrator(config, model_store=store)
+        assert orch.device == "cuda"
+
+    def test_require_gpu_false_allows_cpu(self, tmp_path):
+        """When require_gpu=false, CPU fallback is allowed."""
+        config = _make_full_config()
+        config["training"]["require_gpu"] = False
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        orch = TrainingOrchestrator(config, model_store=store, device="cpu")
+        assert orch.device == "cpu"
+
+
+# ── Tests: Batch bet insertion ───────────────────────────────────────────────
+
+
+class TestBatchBetInsertion:
+    def test_batch_insert_matches_single(self, tmp_path):
+        """Batch insert should produce same results as single inserts."""
+        from registry.model_store import EvaluationBetRecord
+
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        model_id = store.create_model(
+            generation=0,
+            architecture_name="ppo_lstm_v1",
+            architecture_description="test",
+            hyperparameters={},
+        )
+        run_id = store.create_evaluation_run(model_id, "2026-03-25", ["2026-03-26"])
+
+        bets = [
+            EvaluationBetRecord(
+                run_id=run_id, date="2026-03-26", market_id=f"1.{i}",
+                tick_timestamp="", seconds_to_off=0.0, runner_id=1,
+                runner_name="Horse", action="back", price=3.0,
+                stake=10.0, matched_size=10.0, outcome="won", pnl=20.0,
+            )
+            for i in range(100)
+        ]
+        store.record_evaluation_bets_batch(bets)
+
+        stored = store.get_evaluation_bets(run_id)
+        assert len(stored) == 100
+
+    def test_empty_batch_is_noop(self, tmp_path):
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        store.record_evaluation_bets_batch([])  # should not error

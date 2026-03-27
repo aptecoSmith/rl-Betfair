@@ -130,8 +130,8 @@ class Evaluator:
             # Persist to registry
             if self.model_store is not None and run_id is not None:
                 self.model_store.record_evaluation_day(day_record)
-                for bet_rec in bet_records:
-                    self.model_store.record_evaluation_bet(bet_rec)
+                if bet_records:
+                    self.model_store.record_evaluation_bets_batch(bet_records)
 
             tracker.tick()
             self._publish_progress(tracker, day_record)

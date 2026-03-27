@@ -372,6 +372,38 @@ class ModelStore:
         finally:
             conn.close()
 
+    def record_evaluation_bets_batch(self, records: list[EvaluationBetRecord]) -> None:
+        """Insert multiple evaluation bet records in a single transaction.
+
+        Much faster than calling record_evaluation_bet() in a loop — a single
+        transaction with executemany instead of N separate commits.
+        """
+        if not records:
+            return
+        conn = self._get_conn()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO evaluation_bets
+                    (run_id, date, market_id, tick_timestamp, seconds_to_off,
+                     runner_id, runner_name, action, price, stake,
+                     matched_size, outcome, pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r.run_id, r.date, r.market_id, r.tick_timestamp,
+                        r.seconds_to_off, r.runner_id, r.runner_name,
+                        r.action, r.price, r.stake, r.matched_size,
+                        r.outcome, r.pnl,
+                    )
+                    for r in records
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def get_evaluation_days(self, run_id: str) -> list[EvaluationDayRecord]:
         """Get all per-day metrics for an evaluation run."""
         conn = self._get_conn()

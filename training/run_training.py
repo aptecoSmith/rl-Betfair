@@ -39,6 +39,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+import torch
+
 from agents.population_manager import (
     AgentRecord,
     BreedingRecord,
@@ -103,12 +105,39 @@ class TrainingOrchestrator:
         config: dict,
         model_store: ModelStore | None = None,
         progress_queue: asyncio.Queue | None = None,
-        device: str = "cpu",
+        device: str | None = None,
     ) -> None:
         self.config = config
         self.model_store = model_store
         self.progress_queue = progress_queue
-        self.device = device
+
+        # GPU auto-detection
+        if device is not None:
+            self.device = device
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+            logger.info(
+                "GPU detected: %s (VRAM: %.1f GB). Using CUDA.",
+                torch.cuda.get_device_name(0),
+                torch.cuda.get_device_properties(0).total_mem / 1e9,
+            )
+        else:
+            self.device = "cpu"
+            logger.warning(
+                "WARNING: No CUDA GPU detected — falling back to CPU. "
+                "Training will be significantly slower. "
+                "Ensure CUDA-enabled PyTorch is installed: "
+                "pip install torch --index-url https://download.pytorch.org/whl/cu124"
+            )
+
+        # Config-level GPU requirement check
+        require_gpu = config.get("training", {}).get("require_gpu", False)
+        if require_gpu and self.device == "cpu":
+            raise RuntimeError(
+                "config.yaml has training.require_gpu=true but no CUDA GPU "
+                "was detected. Install CUDA-enabled PyTorch or set "
+                "require_gpu=false."
+            )
 
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(

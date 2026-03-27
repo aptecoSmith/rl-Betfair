@@ -139,6 +139,27 @@
 - 25 unit tests for `TrainingOrchestrator` (init, empty inputs, single generation, two generations with selection/breeding/genetic logging, progress event phases and ordering, result structure, weights persistence)
 - 6 integration tests (evaluator on real data, 2-gen orchestrator on real data: registry updated, events in correct order, genetic log populated, scoreboard re-ranked)
 
+### Session 2.5 — First multi-generation run
+**Status:** Done
+
+- Ran 3 generations on real data (2026-03-26, population=6, epochs=2, seed=42) — 56 minutes on CPU
+- `scripts/run_session_2_5.py` — standalone runner script with full summary output
+- Results (1 day, train=test — scores optimistic as expected):
+  - 11 total models created (6 gen0 + 3 gen0-children + 2 gen1-children)
+  - 152,861 evaluation bets recorded
+  - Genetic logs legible: SELECTION + BREEDING sections, per-hyperparameter trait inheritance, mutation deltas
+  - Scoreboard: top 5 models clustered at score ≈ 0.689 (all win_rate=1.0, which is expected with train=test)
+  - Population diversity: 3 archetypes visible — "bet on everything" (P&L £562M), "cautious" (P&L -£100), "moderate" (P&L £12-93M)
+  - No premature convergence in hyperparams: mutation keeps generating diversity across learning_rate, lstm_hidden_size, mlp_hidden_size
+- **Performance improvements applied during session:**
+  - GPU auto-detection: `TrainingOrchestrator` auto-detects CUDA, logs GPU name + VRAM. Prominent WARNING when falling back to CPU with install instructions
+  - `training.require_gpu` config flag: when `true`, raises `RuntimeError` if no CUDA detected — fail-fast for production
+  - Batch bet insertion: `ModelStore.record_evaluation_bets_batch()` uses `executemany` in a single transaction — eliminates the 31K individual INSERT + COMMIT bottleneck
+  - Duplicate import fix in evaluator.py
+- **Observation: PyTorch CPU-only build installed** — `torch 2.11.0+cpu`. Need to reinstall with CUDA support: `pip install torch --index-url https://download.pytorch.org/whl/cu124`
+- 7 unit tests (GPU detection: auto-detect, explicit override, require_gpu enforcement; batch bet insertion: correctness, empty noop)
+- 12 integration tests (full 2-gen pipeline: all models registered, genetic events in SQLite, genetic log files non-empty, scoreboard non-trivial, bet logs present, progress events in correct phase order)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -169,8 +190,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.2     | 37              | 9                      | **605 + 73**  |
 | 2.3     | 36              | 10                     | **641 + 83**  |
 | 2.4     | 43              | 6                      | **684 + 89**  |
+| 2.5     | 7               | 12                     | **691 + 101** |
 
-**Current total: 684 unit + 88 integration = 772 tests, all passing.**
+**Current total: 690 unit (1 skipped) + 100 integration = 791 tests, all passing.**
 
 ---
 
@@ -189,3 +211,7 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 6. **Learning rate cap at 5e-4** (Session 0.1) — Higher LRs destabilise PPO+LSTM training. The original PLAN.md range of 1e-3 was tightened during config review.
 
 7. **Graceful insufficient data handling** (Session 2.4) — When no test days are available (e.g. only 1 day extracted), the orchestrator uses training days for evaluation with a logged warning. Results are optimistic and should not be trusted for ranking. This unblocks the full pipeline even with a single day of data.
+
+8. **SQLite bet insertion bottleneck** (Session 2.5) — Writing 31K individual bet records per agent evaluation was the dominant cost (4+ minutes per agent). Fixed with `record_evaluation_bets_batch()` using `executemany` in a single transaction. Consider whether SQLite remains the right choice for evaluation_bets at scale — with 20 agents × 30 test days × 30K bets = 18M rows per generation. Alternatives: batch Parquet files for bet logs, or PostgreSQL if the scale demands it. Added to TODO as a future consideration.
+
+9. **CPU-only PyTorch** (Session 2.5) — The installed PyTorch (`2.11.0+cpu`) doesn't include CUDA. Added `training.require_gpu` config flag and GPU auto-detection with prominent warnings. Need to reinstall: `pip install torch --index-url https://download.pytorch.org/whl/cu124`

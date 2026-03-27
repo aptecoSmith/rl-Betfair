@@ -39,6 +39,7 @@ training:
   architecture: ppo_lstm_v1
   starting_budget: 100.0        # £ per episode day
   max_runners: 14               # observation vector padded to this many runners
+  require_gpu: false            # set true once CUDA-enabled PyTorch is installed (pip install torch --index-url https://download.pytorch.org/whl/cu124)
   retraining:
     min_days: 30                # trigger threshold for automatic retraining
 
