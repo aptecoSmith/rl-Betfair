@@ -317,6 +317,28 @@
 - **Angular:** 42 unit tests (vitest): component creation, page title, loading states, empty states, days table rendering/columns/data, delete day dialog show/cancel/confirm, backup days rendering/import buttons/Import All, single day import, import range, agents table rendering/columns/short ID/status badges/discarded class, delete agent dialog, reset dialog show/cancel/confirm text validation/API call, formatBytes helper, shortId helper, success/error messages, section headers
 - All 802 Python tests pass, all 137 Angular tests pass
 
+### Session 3.5 — Model detail & lineage page
+**Status:** Done
+
+#### Frontend — Model Detail page (`src/app/model-detail/`)
+- **Header:** model short ID (full in tooltip), generation badge (colour-coded), status badge (green active / red discarded), architecture name + description, composite score display
+- **Genetic Origin panel:** "Bred from [parent_a] × [parent_b] — inherited N traits from A, M traits from B, K mutations applied". Seed models show "Seed model (no parents — generation 0)". Parent IDs are clickable links to navigate to their detail pages
+- **Hyperparameter table:** all params sorted alphabetically, with diff highlighting (orange dot + row highlight) for values that differ from parent_a. Uses `parentHyperparams` computed from lineage data
+- **Per-day P&L bar chart:** SVG bar chart with green (profitable) / red (loss) bars, sorted by date. Zero line, legend with max absolute value. Responsive via viewBox
+- **Genetic event log:** scrollable list of all genetic events for this model's creation. Displays `human_summary` when available, falls back to structured display (event type badge, hyperparameter, inherited_from, mutation delta)
+- **Lineage tree:** SVG ancestor graph, at least 3 generations deep. Nodes grouped by generation (newest at top), centred per row. Edges connect children to parents. Current model highlighted with thicker border. Nodes are clickable to navigate to that model. Node colour matches generation palette. Shows short ID + composite score (or "Gen N" if no score)
+- **Metrics summary:** grid cards for test days, profitable days, total P&L (colour-coded), total bets
+- **Back navigation:** "← Scoreboard" button in header
+
+#### TypeScript models & API service
+- `models/model-detail.model.ts` — `ModelDetailResponse`, `DayMetric`, `LineageNode`, `LineageResponse`, `GeneticEvent`, `GeneticsResponse`
+- `ApiService` methods: `getModelDetail(id)`, `getModelLineage(id)`, `getModelGenetics(id)`
+
+#### Tests
+- **Angular:** 51 unit tests (vitest): component creation, route param reading, short ID, API calls on init, loading/error states, generation badge/colour/cycling, architecture display, composite score, status badge/discarded, hyperparams table rendering/sorting/values/diff highlighting/diff markers/no-parent-no-markers, genetic origin bred/seed/card/parent-links, P&L chart section/bar data/SVG bars/zero line/no-data/date sorting, genetic events rendering/human summary/empty section, lineage tree section/no-data/tree nodes/SVG nodes/current highlight/edges/3-gen-deep, metrics summary/no-history/totalPnl/totalBets, format helpers (scientific/normal/string), navigation (back/model click), back button, chart legend
+- **Angular integration:** 6 tests (vitest, skip when API not running): load real model, hyperparams match registry, P&L chart renders, lineage tree loads, correct parents, architecture + generation display
+- All 804 Python tests pass, all 188 Angular tests pass (12 skipped — integration)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -353,9 +375,10 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 3.3     | 23 (Angular)    | 6 (Angular)            | **743 + 113** (Python) + **23 + 6** (Angular) |
 | 3.4     | 11 (Python) + 76 (Angular) | 1 (Python) | **754 + 114** (Python) + **95 + 6** (Angular) |
 | 3.8     | 27 (Python) + 42 (Angular) | 4 (Python) | **781 + 118** (Python) + **137 + 6** (Angular) |
+| 3.5     | 51 (Angular)    | 6 (Angular)            | **781 + 118** (Python) + **188 + 12** (Angular) |
 
-**Python total: 802 passed, 2 skipped, 102 deselected.**
-**Angular total: 137 passed, 6 skipped (integration — API not running).**
+**Python total: 804 passed, 2 skipped, 102 deselected.**
+**Angular total: 188 passed, 12 skipped (integration — API not running).**
 
 ---
 

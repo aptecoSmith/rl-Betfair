@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { ScoreboardResponse } from '../models/scoreboard.model';
+import { ModelDetailResponse, LineageResponse, GeneticsResponse } from '../models/model-detail.model';
 import {
   ExtractedDaysResponse,
   BackupDaysResponse,
@@ -19,6 +20,20 @@ export class ApiService {
 
   getScoreboard(): Observable<ScoreboardResponse> {
     return this.http.get<ScoreboardResponse>(`${this.baseUrl}/models`);
+  }
+
+  // ── Model detail endpoints ────────────────────────────────────────
+
+  getModelDetail(modelId: string): Observable<ModelDetailResponse> {
+    return this.http.get<ModelDetailResponse>(`${this.baseUrl}/models/${modelId}`);
+  }
+
+  getModelLineage(modelId: string): Observable<LineageResponse> {
+    return this.http.get<LineageResponse>(`${this.baseUrl}/models/${modelId}/lineage`);
+  }
+
+  getModelGenetics(modelId: string): Observable<GeneticsResponse> {
+    return this.http.get<GeneticsResponse>(`${this.baseUrl}/models/${modelId}/genetics`);
   }
 
   // ── Admin endpoints ──────────────────────────────────────────────

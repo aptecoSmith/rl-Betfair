@@ -1,0 +1,211 @@
+<div class="model-detail-container">
+  <!-- Header -->
+  <div class="detail-header">
+    <button class="back-btn" (click)="goBack()">← Scoreboard</button>
+    <div class="header-title">
+      <h1>
+        <span class="model-id" [title]="modelId">{{ shortId() }}</span>
+        @if (model(); as m) {
+          <span class="gen-badge" [style.background]="genColour()">Gen {{ m.generation }}</span>
+          <span class="status-badge" [class.discarded]="m.status === 'discarded'">{{ m.status }}</span>
+        }
+      </h1>
+      @if (model(); as m) {
+        <span class="architecture">{{ m.architecture_name }}</span>
+        @if (m.architecture_description) {
+          <span class="arch-desc">{{ m.architecture_description }}</span>
+        }
+      }
+    </div>
+    @if (model(); as m) {
+      <div class="score-display">
+        <span class="score-label">Composite Score</span>
+        <span class="score-value">{{ m.composite_score !== null ? (m.composite_score | number:'1.3-3') : '—' }}</span>
+      </div>
+    }
+  </div>
+
+  <!-- Loading / Error -->
+  @if (loading()) {
+    <div class="loading" data-testid="loading">Loading model data…</div>
+  }
+  @if (error(); as err) {
+    <div class="error" data-testid="error">{{ err }}</div>
+  }
+
+  @if (model(); as m) {
+    <!-- Genetic Origin Panel -->
+    @if (geneticOrigin(); as origin) {
+      <section class="card genetic-origin" data-testid="genetic-origin">
+        <h2>Genetic Origin</h2>
+        @if (origin.type === 'seed') {
+          <p class="origin-text">{{ origin.text }}</p>
+        } @else {
+          <p class="origin-text">
+            Bred from
+            <a class="parent-link" (click)="navigateToModel(origin.parentA!)">{{ origin.shortA }}</a>
+            @if (origin.parentB && origin.shortB) {
+              × <a class="parent-link" (click)="navigateToModel(origin.parentB!)">{{ origin.shortB }}</a>
+            }
+            — inherited {{ origin.fromA }} traits from A, {{ origin.fromB }} traits from B, {{ origin.mutations }} mutations applied
+          </p>
+        }
+      </section>
+    }
+
+    <!-- Hyperparameters Table -->
+    <section class="card" data-testid="hyperparams">
+      <h2>Hyperparameters</h2>
+      <table class="param-table">
+        <thead>
+          <tr>
+            <th>Parameter</th>
+            <th>Value</th>
+            <th>Changed</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (entry of hyperparamEntries(); track entry[0]) {
+            <tr [class.changed]="differsFromParent(entry[0], entry[1])">
+              <td class="param-name">{{ entry[0] }}</td>
+              <td class="param-value">{{ formatParamValue(entry[1]) }}</td>
+              <td class="param-diff">
+                @if (differsFromParent(entry[0], entry[1])) {
+                  <span class="diff-marker" data-testid="diff-marker">●</span>
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Per-Day P&L Bar Chart -->
+    <section class="card" data-testid="pnl-chart">
+      <h2>Per-Day P&amp;L</h2>
+      @if (pnlChartData(); as chart) {
+        <div class="chart-container">
+          <svg [attr.viewBox]="'0 0 ' + chart.chartWidth + ' ' + chart.chartHeight"
+               class="pnl-svg"
+               preserveAspectRatio="xMinYMid meet">
+            <!-- Zero line -->
+            <line [attr.x1]="0" [attr.y1]="chart.midY"
+                  [attr.x2]="chart.chartWidth" [attr.y2]="chart.midY"
+                  class="zero-line" />
+            <!-- Bars -->
+            @for (bar of chart.bars; track bar.date) {
+              <rect [attr.x]="bar.x" [attr.y]="bar.y"
+                    [attr.width]="bar.width" [attr.height]="bar.height"
+                    [attr.fill]="bar.colour"
+                    class="pnl-bar">
+                <title>{{ bar.date }}: £{{ bar.pnl | number:'1.2-2' }}</title>
+              </rect>
+            }
+          </svg>
+          <div class="chart-legend">
+            <span class="legend-item profit">● Profitable</span>
+            <span class="legend-item loss">● Loss</span>
+            <span class="legend-label">Max: £{{ chart.maxAbs | number:'1.2-2' }}</span>
+          </div>
+        </div>
+      } @else {
+        <p class="no-data">No evaluation data available</p>
+      }
+    </section>
+
+    <!-- Genetic Event Log -->
+    @if (geneticEvents().length > 0) {
+      <section class="card" data-testid="genetic-events">
+        <h2>Genetic Event Log</h2>
+        <div class="event-log">
+          @for (event of geneticEvents(); track event.event_id) {
+            <div class="event-entry" [attr.data-event-type]="event.event_type">
+              @if (event.human_summary) {
+                <p class="event-summary">{{ event.human_summary }}</p>
+              } @else {
+                <p class="event-summary">
+                  <span class="event-type-badge">{{ event.event_type }}</span>
+                  @if (event.hyperparameter) {
+                    {{ event.hyperparameter }}:
+                    {{ event.final_value }}
+                    @if (event.inherited_from) {
+                      (from {{ event.inherited_from }})
+                    }
+                    @if (event.mutation_delta !== null) {
+                      <span class="mutation-delta">Δ{{ event.mutation_delta | number:'1.4-4' }}</span>
+                    }
+                  }
+                </p>
+              }
+            </div>
+          }
+        </div>
+      </section>
+    }
+
+    <!-- Lineage Tree -->
+    <section class="card" data-testid="lineage-tree">
+      <h2>Lineage Tree</h2>
+      @if (treeData(); as tree) {
+        <div class="tree-container">
+          <svg [attr.viewBox]="'0 0 ' + tree.width + ' ' + tree.height"
+               class="lineage-svg"
+               preserveAspectRatio="xMidYMin meet">
+            <!-- Edges -->
+            @for (edge of tree.edges; track $index) {
+              <line [attr.x1]="edge.x1" [attr.y1]="edge.y1"
+                    [attr.x2]="edge.x2" [attr.y2]="edge.y2"
+                    class="tree-edge" />
+            }
+            <!-- Nodes -->
+            @for (node of tree.nodes; track node.id) {
+              <g class="tree-node" [class.current]="node.id === modelId"
+                 (click)="navigateToModel(node.id)"
+                 [attr.data-testid]="'tree-node-' + node.shortId">
+                <rect [attr.x]="node.x - 60" [attr.y]="node.y"
+                      width="120" height="52" rx="6"
+                      [attr.fill]="node.id === modelId ? '#2a2a5a' : '#1e1e38'"
+                      [attr.stroke]="node.colour" stroke-width="2" />
+                <text [attr.x]="node.x" [attr.y]="node.y + 20"
+                      text-anchor="middle" class="node-id">{{ node.shortId }}</text>
+                <text [attr.x]="node.x" [attr.y]="node.y + 38"
+                      text-anchor="middle" class="node-score">
+                  {{ node.score !== null ? 'Score: ' + (node.score | number:'1.3-3') : 'Gen ' + node.generation }}
+                </text>
+              </g>
+            }
+          </svg>
+        </div>
+      } @else {
+        <p class="no-data">No lineage data available</p>
+      }
+    </section>
+
+    <!-- Metrics Summary -->
+    @if (m.metrics_history.length > 0) {
+      <section class="card" data-testid="metrics-summary">
+        <h2>Evaluation Metrics</h2>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <span class="metric-label">Test Days</span>
+            <span class="metric-value">{{ m.metrics_history.length }}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Profitable Days</span>
+            <span class="metric-value">{{ m.metrics_history.filter(d => d.profitable).length }}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Total P&amp;L</span>
+            <span class="metric-value" [class.profit]="totalPnl() >= 0" [class.loss]="totalPnl() < 0">
+              {{ totalPnl() | currency:'GBP':'symbol':'1.2-2' }}
+            </span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Total Bets</span>
+            <span class="metric-value">{{ totalBets() }}</span>
+          </div>
+        </div>
+      </section>
+    }
+  }
+</div>
