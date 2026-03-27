@@ -238,6 +238,10 @@ No item is done until all three steps are complete.
 
 ## Phase 3 — API & UI
 
+**Execution order:** 3.1 → 3.2 → 3.3 → 3.4 → **3.8** → 3.5 → 3.6 → 3.7 → **3.9**
+(Admin tools (3.8) is done early because it's immediately useful for data
+management. Playwright e2e tests (3.9) come last so all pages exist to test.)
+
 ### Session 3.1 — FastAPI backend core
 - `api/main.py` — FastAPI app with CORS, lifespan (opens registry DB)
 - `api/schemas.py` — Pydantic models for all request/response types
@@ -285,8 +289,22 @@ No item is done until all three steps are complete.
 - **Integration test:** e2e against real API — scoreboard loads with trained
   models, click-through to model detail works
 
-### Session 3.4 — Training monitor page
-- Training Monitor page:
+### Session 3.4 — Training monitor, app header & live system metrics
+- **App shell header** (persistent across all pages):
+  - Status chip showing current run state: Idle / Running (ETA Xh Ym) / Error
+  - When a run is active: compact progress summary (phase, generation, % complete)
+  - Click chip → navigates to Training Monitor page for full detail
+  - **Live system metrics panel** in the header:
+    - GPU utilisation % and VRAM usage (via pynvml / nvidia-smi)
+    - CPU utilisation %
+    - RAM usage (used / total)
+    - SSD I/O throughput or disk usage
+    - Updated every 2–3 seconds via polling or WebSocket
+  - `api/routers/system.py`:
+    - `GET /system/metrics` — returns current GPU, CPU, RAM, disk stats
+    - Uses `psutil` for CPU/RAM/disk, `pynvml` (or subprocess `nvidia-smi`) for GPU
+  - Add `psutil` and `pynvml` to `requirements.txt`
+- **Training Monitor page:**
   - **Two persistent ETA bars always at the top** (see PLAN.md ETA section):
     - Process bar: "Generation 4 · 7 of 20 agents trained · ETA 1h 18m"
     - Item bar: "Training model_x1y2z3 · episode 312/1000 · ETA 4m 12s"
@@ -297,12 +315,14 @@ No item is done until all three steps are complete.
   - Population grid: N agents, colour = current status (training / evaluated /
     selected / discarded)
   - If no run in progress: shows last run summary + time since completed
-  - Scoreboard page shows status chip: Idle / Running (ETA Xh Ym) / Error
-- **Test:** Angular unit tests; mock WebSocket feed; verify ETA bars update
-  correctly on each event type
-- **Integration test:** trigger a real training run → verify WebSocket events
-  arrive in correct phase order, ETA bars update, population grid reflects
-  agent states
+- **Test:** pytest for `/system/metrics` endpoint (mock psutil/pynvml);
+  Angular unit tests for header component and training monitor; mock WebSocket
+  feed; verify ETA bars update correctly on each event type; verify system
+  metrics panel renders and updates
+- **Integration test:** verify `/system/metrics` returns real GPU/CPU/RAM data;
+  trigger a real training run → verify WebSocket events arrive in correct phase
+  order, ETA bars update, population grid reflects agent states, header status
+  chip updates
 
 ### Session 3.5 — Model detail & lineage page
 - Model Detail page:
@@ -343,6 +363,82 @@ No item is done until all three steps are complete.
 - **Test:** Angular unit tests on filter/sort logic
 - **Integration test:** load real evaluation bets → verify filter/sort works,
   summary stats match registry aggregates, P&L per bet is sane
+
+### Session 3.8 — Admin tools page
+- **Backend** — `api/routers/admin.py`:
+  - `DELETE /admin/days/{date}` — remove a day's extracted data (Parquet files)
+    and all evaluation records referencing that date. Useful for patchy early
+    data or anomalous days. Requires confirmation token to prevent accidental
+    deletion.
+  - `DELETE /admin/agents/{model_id}` — delete a model: remove weights file,
+    registry record, evaluation runs/days, bet log Parquets, genetic events
+    where this model is the child. Does NOT cascade-delete parent/child
+    references in other models (they become orphan pointers, which is fine).
+  - `POST /admin/import-day` — import a single day from the backup folder.
+    Body: `{ "date": "YYYY-MM-DD" }`. Runs `extractor.py` for that date,
+    producing Parquet in `data/processed/`.
+  - `POST /admin/import-range` — import multiple days from backup folder.
+    Body: `{ "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" }`.
+    Runs extraction for each date in range. Returns immediately with a job ID;
+    progress available via `/training/status` or WebSocket (reuse existing
+    progress infrastructure). Skips dates that already have Parquet files
+    unless `force: true`.
+  - `POST /admin/reset` — "start afresh": delete all models from registry,
+    clear scoreboard, delete all genetic events, delete all evaluation data
+    (runs, days, bet log Parquets), delete weight files. Does NOT delete
+    extracted Parquet data (preserves raw market data). Requires confirmation
+    body `{ "confirm": "DELETE_EVERYTHING" }` to prevent accidents.
+  - `GET /admin/days` — list all extracted days with metadata (date, tick
+    count, race count, file size) for the UI to show what's available.
+  - `GET /admin/backup-days` — list dates available in the backup folder that
+    can be imported (dates not yet in `data/processed/`).
+- **Frontend** — Admin Tools page (`src/app/admin/`):
+  - **Manage Days** section: table of extracted days (from `GET /admin/days`)
+    with delete button per row. Confirmation dialog before deletion.
+  - **Import Days** section: list of available backup dates (from
+    `GET /admin/backup-days`). Single-day import button per row, plus
+    "Import All" / date-range picker for bulk import. Progress bar for
+    multi-day imports.
+  - **Manage Agents** section: list of all models (active + discarded) with
+    delete button per row. Confirmation dialog.
+  - **Reset** section: prominent "Start Afresh" button with two-step
+    confirmation (click → type confirmation phrase → confirm). Clear warning
+    about what will be deleted.
+- **Test:** pytest for all admin endpoints (mock file system, mock ModelStore);
+  verify confirmation tokens required; verify cascading deletes correct;
+  Angular unit tests for admin page components, confirmation dialogs
+- **Integration test:** create test data → delete day → verify Parquet and
+  evaluation records removed; delete agent → verify all artefacts cleaned up;
+  reset → verify empty registry; import day → verify Parquet produced
+
+### Session 3.9 — Playwright end-to-end tests
+- Install Playwright (`npm init playwright` inside `frontend/`)
+- **User flows to test:**
+  - **Scoreboard flow:** app loads → scoreboard renders with models → columns
+    all present → sorted by composite score → click a row → navigates to
+    model detail page → model ID displayed correctly → back to scoreboard
+  - **Training monitor flow:** navigate to training monitor → if idle, shows
+    last run summary; if running, ETA bars visible and updating → system
+    metrics panel shows GPU/CPU/RAM values
+  - **Admin tools flow:** navigate to admin page → days table loads → click
+    delete on a day → confirmation dialog appears → cancel → day still present
+    → confirm → day removed from table. Import a day → progress shown →
+    day appears in table. Reset with wrong confirmation → rejected. Reset
+    with correct confirmation → registry emptied.
+  - **Model detail flow:** from scoreboard click model → detail page shows
+    hyperparams, architecture, P&L chart, lineage tree. Navigate back works.
+  - **Race replay flow:** navigate to replay → select model → select date →
+    select race → chart renders with runners → action log shows bets →
+    click bet in log → chart cursor jumps to that tick
+  - **Responsive layout:** verify scoreboard table is usable at tablet and
+    desktop widths (no horizontal overflow)
+- **Test configuration:**
+  - Tests run against `ng serve` (dev server) + real FastAPI backend
+  - CI-friendly: skip if backend not available (same pattern as integration
+    tests)
+  - Separate npm script: `npm run e2e`
+- **Test:** Playwright tests covering all flows above
+- **Integration test:** full e2e suite against real API with trained models
 
 ---
 

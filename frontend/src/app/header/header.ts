@@ -1,11 +1,12 @@
 import { Component, inject, computed } from '@angular/core';
-import { Router } from '@angular/router';
+import { Router, RouterLink, RouterLinkActive } from '@angular/router';
 import { TrainingService } from '../services/training.service';
 import { SystemMetricsService } from '../services/system-metrics.service';
 
 @Component({
   selector: 'app-header',
   standalone: true,
+  imports: [RouterLink, RouterLinkActive],
   templateUrl: './header.html',
   styleUrl: './header.scss',
 })

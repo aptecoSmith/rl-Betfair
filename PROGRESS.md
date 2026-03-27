@@ -283,6 +283,40 @@
 
 **Dependencies installed:** psutil 7.2.2, pynvml 13.0.1 (nvidia-ml-py 13.595.45)
 
+### Session 3.8 — Admin tools page
+**Status:** Done
+
+#### Backend — admin router (`api/routers/admin.py`)
+- `GET /admin/days` — list extracted days with metadata (date, tick_count, race_count, file_size_bytes). Reads Parquet files from `data/processed/`
+- `GET /admin/backup-days` — list dates in backup folder not yet extracted. Returns dates from `data/backup/` absent in `data/processed/`
+- `GET /admin/agents` — list all models (active + discarded) with ID, generation, architecture, status, score, created_at
+- `DELETE /admin/days/{date}` — remove a day's Parquet files (ticks + runners) and all `evaluation_days` records for that date
+- `DELETE /admin/agents/{model_id}` — full cascade delete: weights file, all evaluation runs/days, bet log Parquets, genetic events (child only), model record. Does NOT cascade parent/child references in other models
+- `POST /admin/import-day` — import single day from MySQL via `DataExtractor.extract_date()`. Returns success/failure with detail message
+- `POST /admin/import-range` — import date range. Returns immediately with job_id; runs extraction in background asyncio task. Emits progress events to WebSocket via existing `progress_queue`. Skips existing dates unless `force: true`
+- `POST /admin/reset` — delete all models, evaluation data, genetic events, weight files, bet log dirs. Requires `{"confirm": "DELETE_EVERYTHING"}`. Preserves extracted Parquet data
+- 12 Pydantic schemas added to `api/schemas.py`: `ExtractedDay`, `ExtractedDaysResponse`, `BackupDay`, `BackupDaysResponse`, `AdminAgentEntry`, `AdminAgentsResponse`, `ImportDayRequest/Response`, `ImportRangeRequest/Response`, `ResetRequest/Response`, `AdminDeleteResponse`
+- `backup_data` path added to `config.yaml` under `paths`
+- Router wired into `api/main.py`
+
+#### Frontend — admin page (`src/app/admin/`)
+- **Manage Days** section: table of extracted days (date, tick count, race count, file size) with delete button per row. Confirmation dialog before deletion
+- **Import Days** section: list of backup dates with single-day import button, "Import All" button with count, date-range picker for bulk import. Progress bar for multi-day imports
+- **Manage Agents** section: table of all models (active + discarded) with model ID (short, full in tooltip), generation, architecture, status badge (colour-coded), composite score, created date, delete button. Confirmation dialog. Discarded rows shown at reduced opacity
+- **Reset** section: "Start Afresh" button with two-step confirmation — dialog lists exactly what will be deleted, user must type `DELETE_EVERYTHING` to enable the confirm button
+- Success/error message banners with auto-dismiss after 5 seconds
+- Dark theme consistent with existing UI (scoreboard, training monitor)
+- `AdminService` methods added to `ApiService`: `getExtractedDays`, `getBackupDays`, `getAdminAgents`, `deleteDay`, `deleteAgent`, `importDay`, `importRange`, `resetSystem`
+- TypeScript models in `models/admin.model.ts`
+- Route: `/admin` (lazy-loaded)
+- Header updated with nav links: Scoreboard, Training, Admin (using `RouterLink` + `RouterLinkActive`)
+
+#### Tests
+- **Python:** 31 unit tests: list days (empty, metadata, sorted), list backup days (empty, new-only, dir-not-exists), list agents (empty, all-statuses), delete day (existing, nonexistent, invalid format, cascade eval days), delete agent (full artefacts, nonexistent, no parent cascade), import day (success, no data, invalid date, extractor error), import range (queue dates, skip existing, force reimport, all existing, invalid dates, start>end), reset (wrong confirmation, clears everything, empty registry)
+- **Python integration:** 4 tests: create→delete day with eval day preservation, create→delete agent with full cleanup, create→reset with Parquet preservation, list days after delete
+- **Angular:** 42 unit tests (vitest): component creation, page title, loading states, empty states, days table rendering/columns/data, delete day dialog show/cancel/confirm, backup days rendering/import buttons/Import All, single day import, import range, agents table rendering/columns/short ID/status badges/discarded class, delete agent dialog, reset dialog show/cancel/confirm text validation/API call, formatBytes helper, shortId helper, success/error messages, section headers
+- All 802 Python tests pass, all 137 Angular tests pass
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -318,9 +352,10 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 3.1+3.2 | 36              | 11                     | **743 + 113** |
 | 3.3     | 23 (Angular)    | 6 (Angular)            | **743 + 113** (Python) + **23 + 6** (Angular) |
 | 3.4     | 11 (Python) + 76 (Angular) | 1 (Python) | **754 + 114** (Python) + **95 + 6** (Angular) |
+| 3.8     | 27 (Python) + 42 (Angular) | 4 (Python) | **781 + 118** (Python) + **137 + 6** (Angular) |
 
-**Python total: 771 passed, 2 skipped, 102 deselected.**
-**Angular total: 95 passed, 6 skipped (integration — API not running).**
+**Python total: 802 passed, 2 skipped, 102 deselected.**
+**Angular total: 137 passed, 6 skipped (integration — API not running).**
 
 ---
 

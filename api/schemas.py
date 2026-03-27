@@ -211,3 +211,74 @@ class ReplayRaceResponse(BaseModel):
     ticks: list[ReplayTick]
     all_bets: list[BetEvent]
     race_pnl: float
+
+
+# ── Admin ──────────────────────────────────────────────────────────
+
+
+class ExtractedDay(BaseModel):
+    date: str
+    tick_count: int
+    race_count: int
+    file_size_bytes: int
+
+
+class ExtractedDaysResponse(BaseModel):
+    days: list[ExtractedDay]
+
+
+class BackupDay(BaseModel):
+    date: str
+
+
+class BackupDaysResponse(BaseModel):
+    days: list[BackupDay]
+
+
+class AdminAgentEntry(BaseModel):
+    model_id: str
+    generation: int
+    architecture_name: str
+    status: str
+    composite_score: float | None
+    created_at: str
+
+
+class AdminAgentsResponse(BaseModel):
+    agents: list[AdminAgentEntry]
+
+
+class ImportDayRequest(BaseModel):
+    date: str
+
+
+class ImportRangeRequest(BaseModel):
+    start_date: str
+    end_date: str
+    force: bool = False
+
+
+class ResetRequest(BaseModel):
+    confirm: str
+
+
+class AdminDeleteResponse(BaseModel):
+    deleted: bool
+    detail: str
+
+
+class ImportDayResponse(BaseModel):
+    success: bool
+    date: str
+    detail: str
+
+
+class ImportRangeResponse(BaseModel):
+    job_id: str
+    dates_queued: int
+    detail: str
+
+
+class ResetResponse(BaseModel):
+    reset: bool
+    detail: str

@@ -1,0 +1,233 @@
+<div class="admin-page">
+  <h1>Admin Tools</h1>
+
+  <!-- Success / Error messages -->
+  @if (successMessage()) {
+    <div class="message success">{{ successMessage() }}</div>
+  }
+  @if (error()) {
+    <div class="message error">{{ error() }}</div>
+  }
+
+  <!-- ── Manage Days ───────────────────────────────────────────── -->
+  <section class="admin-section">
+    <h2>Manage Days</h2>
+    <p class="section-desc">Extracted race days in data/processed/</p>
+
+    @if (loadingDays()) {
+      <p class="loading">Loading extracted days...</p>
+    } @else if (extractedDays().length === 0) {
+      <p class="empty">No extracted days found.</p>
+    } @else {
+      <table class="admin-table days-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Ticks</th>
+            <th>Races</th>
+            <th>File Size</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (day of extractedDays(); track day.date) {
+            <tr>
+              <td>{{ day.date }}</td>
+              <td>{{ day.tick_count | number }}</td>
+              <td>{{ day.race_count }}</td>
+              <td>{{ formatBytes(day.file_size_bytes) }}</td>
+              <td>
+                <button class="btn btn-danger btn-sm" (click)="promptDeleteDay(day.date)">Delete</button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+
+    <!-- Delete day confirmation dialog -->
+    @if (confirmDeleteDay()) {
+      <div class="dialog-overlay">
+        <div class="dialog">
+          <h3>Confirm Delete</h3>
+          <p>Delete all data for <strong>{{ confirmDeleteDay() }}</strong>? This removes Parquet files and evaluation records for this date.</p>
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" (click)="cancelDeleteDay()">Cancel</button>
+            <button class="btn btn-danger" (click)="confirmAndDeleteDay()">Delete</button>
+          </div>
+        </div>
+      </div>
+    }
+  </section>
+
+  <!-- ── Import Days ───────────────────────────────────────────── -->
+  <section class="admin-section">
+    <h2>Import Days</h2>
+    <p class="section-desc">Import race data from MySQL database</p>
+
+    @if (loadingBackup()) {
+      <p class="loading">Loading backup days...</p>
+    } @else if (backupDays().length === 0) {
+      <p class="empty">No new dates available for import.</p>
+    } @else {
+      <div class="import-controls">
+        <button class="btn btn-primary" (click)="importAllBackupDays()" [disabled]="importingRange()">
+          Import All ({{ backupDays().length }} days)
+        </button>
+      </div>
+
+      <table class="admin-table backup-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (day of backupDays(); track day.date) {
+            <tr>
+              <td>{{ day.date }}</td>
+              <td>
+                <button
+                  class="btn btn-primary btn-sm"
+                  (click)="importSingleDay(day.date)"
+                  [disabled]="importingDay() === day.date">
+                  {{ importingDay() === day.date ? 'Importing...' : 'Import' }}
+                </button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+
+    <div class="range-import">
+      <h3>Import Date Range</h3>
+      <div class="range-inputs">
+        <label>
+          Start:
+          <input type="date" [ngModel]="importRangeStart()" (ngModelChange)="importRangeStart.set($event)" />
+        </label>
+        <label>
+          End:
+          <input type="date" [ngModel]="importRangeEnd()" (ngModelChange)="importRangeEnd.set($event)" />
+        </label>
+        <button
+          class="btn btn-primary"
+          (click)="importRange()"
+          [disabled]="!importRangeStart() || !importRangeEnd() || importingRange()">
+          {{ importingRange() ? 'Importing...' : 'Import Range' }}
+        </button>
+      </div>
+    </div>
+
+    @if (importProgress()) {
+      <div class="progress-bar-container">
+        <div class="progress-bar" [style.width.%]="(importProgress()!.completed / importProgress()!.total) * 100"></div>
+        <span class="progress-label">{{ importProgress()!.completed }} / {{ importProgress()!.total }}</span>
+      </div>
+    }
+  </section>
+
+  <!-- ── Manage Agents ─────────────────────────────────────────── -->
+  <section class="admin-section">
+    <h2>Manage Agents</h2>
+    <p class="section-desc">All models (active and discarded)</p>
+
+    @if (loadingAgents()) {
+      <p class="loading">Loading agents...</p>
+    } @else if (agents().length === 0) {
+      <p class="empty">No agents in registry.</p>
+    } @else {
+      <table class="admin-table agents-table">
+        <thead>
+          <tr>
+            <th>Model ID</th>
+            <th>Gen</th>
+            <th>Architecture</th>
+            <th>Status</th>
+            <th>Score</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (agent of agents(); track agent.model_id) {
+            <tr [class.discarded]="agent.status === 'discarded'">
+              <td class="model-id" [title]="agent.model_id">{{ shortId(agent.model_id) }}</td>
+              <td>{{ agent.generation }}</td>
+              <td>{{ agent.architecture_name }}</td>
+              <td>
+                <span class="status-badge" [class.status-active]="agent.status === 'active'" [class.status-discarded]="agent.status === 'discarded'">
+                  {{ agent.status }}
+                </span>
+              </td>
+              <td>{{ agent.composite_score != null ? (agent.composite_score | number:'1.3-3') : '—' }}</td>
+              <td>{{ agent.created_at | slice:0:10 }}</td>
+              <td>
+                <button class="btn btn-danger btn-sm" (click)="promptDeleteAgent(agent.model_id)">Delete</button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+
+    <!-- Delete agent confirmation dialog -->
+    @if (confirmDeleteAgent()) {
+      <div class="dialog-overlay">
+        <div class="dialog">
+          <h3>Confirm Delete</h3>
+          <p>Delete model <strong>{{ shortId(confirmDeleteAgent()!) }}</strong>? This removes weights, evaluation data, bet logs, and genetic events for this model.</p>
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" (click)="cancelDeleteAgent()">Cancel</button>
+            <button class="btn btn-danger" (click)="confirmAndDeleteAgent()">Delete</button>
+          </div>
+        </div>
+      </div>
+    }
+  </section>
+
+  <!-- ── Reset ─────────────────────────────────────────────────── -->
+  <section class="admin-section reset-section">
+    <h2>Start Afresh</h2>
+    <p class="section-desc warning-text">
+      Delete all models, scoreboard data, genetic events, evaluation records, and weight files.
+      Extracted Parquet data (race days) will be preserved.
+    </p>
+    <button class="btn btn-danger" (click)="promptReset()">Start Afresh</button>
+
+    @if (showResetDialog()) {
+      <div class="dialog-overlay">
+        <div class="dialog reset-dialog">
+          <h3>Are you sure?</h3>
+          <p>This will permanently delete:</p>
+          <ul>
+            <li>All model weights</li>
+            <li>All evaluation runs, day metrics, and bet logs</li>
+            <li>All genetic events</li>
+            <li>All scoreboard data</li>
+          </ul>
+          <p>Extracted market data (Parquet files) will <strong>not</strong> be deleted.</p>
+          <p>Type <code>DELETE_EVERYTHING</code> to confirm:</p>
+          <input
+            type="text"
+            class="reset-input"
+            [ngModel]="resetConfirmText()"
+            (ngModelChange)="resetConfirmText.set($event)"
+            placeholder="DELETE_EVERYTHING"
+          />
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" (click)="cancelReset()">Cancel</button>
+            <button
+              class="btn btn-danger"
+              (click)="confirmAndReset()"
+              [disabled]="resetConfirmText() !== 'DELETE_EVERYTHING'">
+              Confirm Reset
+            </button>
+          </div>
+        </div>
+      </div>
+    }
+  </section>
+</div>

@@ -34,6 +34,7 @@ reward:
 
 paths:
   processed_data: data/processed
+  backup_data: data/backup
   model_weights: registry/weights
   logs: logs
   registry_db: registry/models.db
