@@ -112,6 +112,33 @@
 - `mutation_rate` added to config.yaml under `population`.
 - 36 unit tests + 10 integration tests (full select → breed → log pipeline, SQLite events, log files, child lineage, weight round-trip)
 
+### Session 2.4 — Training orchestrator
+**Status:** Done
+
+- `training/evaluator.py` — `Evaluator` class runs a trained policy on each test day independently:
+  - Fresh budget per day, no LSTM carry-over between days (each day is a clean episode)
+  - Deterministic actions (uses action mean, no sampling) for reproducible evaluation
+  - Records per-day metrics (day_pnl, bet_count, winning_bets, bet_precision, pnl_per_bet, early_picks, profitable)
+  - Records full bet log (market_id, runner_id, action, price, stake, matched_size, outcome, pnl)
+  - Persists evaluation run + day records + bet records to ModelStore
+  - Emits progress events to asyncio.Queue per test day
+- `training/run_training.py` — `TrainingOrchestrator` full generational loop:
+  - Initialise population (generation 0) with randomised hyperparams
+  - Per generation: train all agents → evaluate all on test days → score via scoreboard → apply discard policy → select survivors → breed next generation → log genetic events
+  - Two-level ProgressTracker at every stage:
+    - Outer: agents completed / total agents in generation
+    - Inner (training): delegated to PPOTrainer's own ProgressTracker per episode
+    - Inner (evaluation): delegated to Evaluator's own ProgressTracker per test day
+  - All progress events flow to shared asyncio.Queue for WebSocket consumption
+  - Phase transitions emit `phase_start` / `phase_complete` events with summary dicts
+  - Phases: training → evaluating → scoring → selecting → breeding (per gen), run_complete (final)
+  - Handles insufficient data gracefully: if no test days available, uses training days for evaluation with a warning logged
+  - Weights saved to ModelStore after each agent's training completes
+  - `GenerationResult` and `TrainingRunResult` dataclasses capture full results
+- 18 unit tests for `Evaluator` (init, empty inputs, synthetic day evaluation, persistence, progress events, metric correctness, deterministic actions)
+- 25 unit tests for `TrainingOrchestrator` (init, empty inputs, single generation, two generations with selection/breeding/genetic logging, progress event phases and ordering, result structure, weights persistence)
+- 6 integration tests (evaluator on real data, 2-gen orchestrator on real data: registry updated, events in correct order, genetic log populated, scoreboard re-ranked)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -141,8 +168,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.1     | 44              | 7                      | **568 + 64**  |
 | 2.2     | 37              | 9                      | **605 + 73**  |
 | 2.3     | 36              | 10                     | **641 + 83**  |
+| 2.4     | 43              | 6                      | **684 + 89**  |
 
-**Current total: 641 unit + 82 integration = 723 tests, all passing.**
+**Current total: 684 unit + 88 integration = 772 tests, all passing.**
 
 ---
 
@@ -159,3 +187,5 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 5. **Race dataclass enrichment** (Session 1.3+1.4) — Added `market_name`, `market_type`, `n_runners` to Race. These were missing from the original design but are useful for evaluation reporting and filtering.
 
 6. **Learning rate cap at 5e-4** (Session 0.1) — Higher LRs destabilise PPO+LSTM training. The original PLAN.md range of 1e-3 was tightened during config review.
+
+7. **Graceful insufficient data handling** (Session 2.4) — When no test days are available (e.g. only 1 day extracted), the orchestrator uses training days for evaluation with a logged warning. Results are optimistic and should not be trusted for ranking. This unblocks the full pipeline even with a single day of data.

@@ -1,0 +1,445 @@
+"""
+training/run_training.py -- Full generational training orchestrator.
+
+Runs the complete training pipeline:
+
+1. Initialise population (generation 0) or load survivors from previous gen
+2. For each generation:
+   a. Train all agents on training days
+   b. Evaluate all agents on test days
+   c. Score and rank via scoreboard
+   d. Apply discard policy
+   e. Select survivors (tournament + elitism)
+   f. Breed next generation (crossover + mutation)
+   g. Log genetic events
+3. Repeat for N generations
+
+Two-level ProgressTracker at every stage:
+- Outer tracker: agents/generation
+- Inner tracker: episodes (training) or test days (evaluation)
+
+All progress events flow to a shared asyncio.Queue for WebSocket.
+
+Usage::
+
+    orchestrator = TrainingOrchestrator(config, model_store)
+    result = orchestrator.run(
+        train_days=train_days,
+        test_days=test_days,
+        n_generations=5,
+        n_epochs=3,
+    )
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+import uuid
+from dataclasses import dataclass, field
+
+from agents.population_manager import (
+    AgentRecord,
+    BreedingRecord,
+    PopulationManager,
+    SelectionResult,
+)
+from agents.ppo_trainer import PPOTrainer, TrainingStats
+from data.episode_builder import Day
+from registry.model_store import ModelStore
+from registry.scoreboard import ModelScore, Scoreboard
+from training.evaluator import Evaluator
+from training.progress_tracker import ProgressTracker
+
+logger = logging.getLogger(__name__)
+
+
+# -- Result dataclass ----------------------------------------------------------
+
+
+@dataclass
+class GenerationResult:
+    """Results from one generation."""
+
+    generation: int
+    training_stats: dict[str, TrainingStats]  # model_id → stats
+    scores: list[ModelScore]
+    selection: SelectionResult | None
+    discarded: list[str]
+    children: list[AgentRecord]
+    breeding_records: list[BreedingRecord]
+
+
+@dataclass
+class TrainingRunResult:
+    """Results from a full multi-generation run."""
+
+    run_id: str
+    generations: list[GenerationResult] = field(default_factory=list)
+    final_rankings: list[ModelScore] = field(default_factory=list)
+
+
+# -- Orchestrator --------------------------------------------------------------
+
+
+class TrainingOrchestrator:
+    """Full generational training loop.
+
+    Parameters
+    ----------
+    config : dict
+        Project config (from config.yaml).
+    model_store : ModelStore | None
+        Registry for persistence.  Pass None for test-only runs.
+    progress_queue : asyncio.Queue | None
+        Shared queue for all progress/phase events (WebSocket consumption).
+    device : str
+        PyTorch device.
+    """
+
+    def __init__(
+        self,
+        config: dict,
+        model_store: ModelStore | None = None,
+        progress_queue: asyncio.Queue | None = None,
+        device: str = "cpu",
+    ) -> None:
+        self.config = config
+        self.model_store = model_store
+        self.progress_queue = progress_queue
+        self.device = device
+
+        self.pop_manager = PopulationManager(config, model_store)
+        self.evaluator = Evaluator(
+            config, model_store, progress_queue=progress_queue, device=device,
+        )
+        self.scoreboard = Scoreboard(model_store, config) if model_store else None
+
+    def run(
+        self,
+        train_days: list[Day],
+        test_days: list[Day],
+        n_generations: int = 1,
+        n_epochs: int = 1,
+        seed: int | None = None,
+    ) -> TrainingRunResult:
+        """Execute the full generational training loop.
+
+        Parameters
+        ----------
+        train_days :
+            Days used for training (earliest chronologically).
+        test_days :
+            Days used for evaluation (latest chronologically).
+            If empty, evaluation is skipped with a warning.
+        n_generations :
+            Number of generations to run.
+        n_epochs :
+            Number of training passes over the training days per agent.
+        seed :
+            Optional RNG seed for population initialisation.
+
+        Returns
+        -------
+        TrainingRunResult with full results from all generations.
+        """
+        run_id = str(uuid.uuid4())
+        result = TrainingRunResult(run_id=run_id)
+
+        if not train_days:
+            logger.warning("No training days provided — aborting run.")
+            return result
+
+        if not test_days:
+            logger.warning(
+                "No test days available. Using training days for evaluation "
+                "(results will be optimistic — do not trust for ranking)."
+            )
+            test_days = train_days
+
+        train_cutoff = train_days[-1].date
+
+        # -- Generation 0: initialise population --
+        self._emit_phase_start("training", {
+            "run_id": run_id,
+            "n_generations": n_generations,
+            "train_days": len(train_days),
+            "test_days": len(test_days),
+        })
+
+        agents = self.pop_manager.initialise_population(generation=0, seed=seed)
+
+        for gen in range(n_generations):
+            logger.info("=== Generation %d ===", gen)
+            gen_result = self._run_generation(
+                generation=gen,
+                agents=agents,
+                train_days=train_days,
+                test_days=test_days,
+                train_cutoff=train_cutoff,
+                n_epochs=n_epochs,
+                is_last=(gen == n_generations - 1),
+            )
+            result.generations.append(gen_result)
+
+            # Prepare next generation's agents
+            if gen < n_generations - 1:
+                # Survivors carry over, children are new
+                survivor_agents = []
+                if gen_result.selection is not None:
+                    for mid in gen_result.selection.survivors:
+                        try:
+                            agent = self.pop_manager.load_agent(mid)
+                            survivor_agents.append(agent)
+                        except Exception:
+                            logger.warning(
+                                "Could not load survivor %s, skipping", mid,
+                            )
+                agents = survivor_agents + gen_result.children
+            else:
+                # Final generation — compute final rankings
+                if self.scoreboard is not None:
+                    result.final_rankings = self.scoreboard.update_scores()
+                else:
+                    result.final_rankings = gen_result.scores
+
+        self._emit_phase_complete("run_complete", {
+            "run_id": run_id,
+            "generations_completed": n_generations,
+            "final_rankings": len(result.final_rankings),
+        })
+
+        return result
+
+    def _run_generation(
+        self,
+        generation: int,
+        agents: list[AgentRecord],
+        train_days: list[Day],
+        test_days: list[Day],
+        train_cutoff: str,
+        n_epochs: int,
+        is_last: bool,
+    ) -> GenerationResult:
+        """Run one full generation: train → evaluate → score → select → breed."""
+
+        # ── Phase: Training ──────────────────────────────────────────────
+        self._emit_phase_start("training", {
+            "generation": generation,
+            "agent_count": len(agents),
+        })
+
+        outer_tracker = ProgressTracker(
+            total=len(agents),
+            label=f"Generation {generation} — training {len(agents)} agents",
+        )
+        outer_tracker.reset_timer()
+
+        training_stats: dict[str, TrainingStats] = {}
+
+        for agent in agents:
+            self._publish_progress(
+                "training", outer_tracker,
+                detail=f"Training agent {agent.model_id[:12]} ({agent.architecture_name})",
+            )
+
+            trainer = PPOTrainer(
+                policy=agent.policy,
+                config=self.config,
+                hyperparams=agent.hyperparameters,
+                progress_queue=self.progress_queue,
+                device=self.device,
+            )
+            stats = trainer.train(train_days, n_epochs=n_epochs)
+            training_stats[agent.model_id] = stats
+
+            # Save updated weights after training
+            if self.model_store is not None:
+                self.model_store.save_weights(
+                    agent.model_id, agent.policy.state_dict(),
+                )
+
+            outer_tracker.tick()
+            self._publish_progress(
+                "training", outer_tracker,
+                detail=(
+                    f"Agent {agent.model_id[:12]} done | "
+                    f"mean_reward={stats.mean_reward:+.3f} | "
+                    f"mean_pnl={stats.mean_pnl:+.2f}"
+                ),
+            )
+
+        self._emit_phase_complete("training", {
+            "generation": generation,
+            "agents_trained": len(agents),
+        })
+
+        # ── Phase: Evaluation ────────────────────────────────────────────
+        self._emit_phase_start("evaluating", {
+            "generation": generation,
+            "agent_count": len(agents),
+            "test_days": len(test_days),
+        })
+
+        eval_tracker = ProgressTracker(
+            total=len(agents),
+            label=f"Generation {generation} — evaluating {len(agents)} agents",
+        )
+        eval_tracker.reset_timer()
+
+        for agent in agents:
+            self._publish_progress(
+                "evaluating", eval_tracker,
+                detail=f"Evaluating agent {agent.model_id[:12]}",
+            )
+
+            self.evaluator.evaluate(
+                model_id=agent.model_id,
+                policy=agent.policy,
+                test_days=test_days,
+                train_cutoff_date=train_cutoff,
+            )
+
+            eval_tracker.tick()
+
+        self._emit_phase_complete("evaluating", {
+            "generation": generation,
+            "agents_evaluated": len(agents),
+        })
+
+        # ── Phase: Scoring ───────────────────────────────────────────────
+        self._emit_phase_start("scoring", {"generation": generation})
+
+        scores: list[ModelScore] = []
+        if self.scoreboard is not None:
+            scores = self.scoreboard.update_scores()
+        else:
+            # Fallback for tests without a model store: build minimal scores
+            for agent in agents:
+                scores.append(ModelScore(
+                    model_id=agent.model_id,
+                    win_rate=0.0,
+                    mean_daily_pnl=0.0,
+                    sharpe=0.0,
+                    bet_precision=0.0,
+                    pnl_per_bet=0.0,
+                    efficiency=0.0,
+                    composite_score=0.0,
+                    test_days=len(test_days),
+                    profitable_days=0,
+                ))
+
+        self._emit_phase_complete("scoring", {
+            "generation": generation,
+            "models_scored": len(scores),
+            "top_score": scores[0].composite_score if scores else 0.0,
+        })
+
+        # ── Phase: Selection & breeding ──────────────────────────────────
+        selection: SelectionResult | None = None
+        discarded: list[str] = []
+        children: list[AgentRecord] = []
+        breeding_records: list[BreedingRecord] = []
+
+        if not is_last and scores:
+            self._emit_phase_start("selecting", {"generation": generation})
+
+            # Discard policy
+            discarded = self.pop_manager.apply_discard_policy(scores)
+
+            # Filter out discarded from selection
+            active_scores = [s for s in scores if s.model_id not in discarded]
+            if active_scores:
+                selection = self.pop_manager.select(active_scores)
+
+                self._emit_phase_complete("selecting", {
+                    "generation": generation,
+                    "survivors": len(selection.survivors),
+                    "eliminated": len(selection.eliminated),
+                    "discarded": len(discarded),
+                })
+
+                # Breeding
+                self._emit_phase_start("breeding", {
+                    "generation": generation,
+                    "survivors": len(selection.survivors),
+                })
+
+                mutation_rate = self.config["population"].get("mutation_rate", 0.3)
+                children, breeding_records = self.pop_manager.breed(
+                    selection_result=selection,
+                    generation=generation + 1,
+                    mutation_rate=mutation_rate,
+                )
+
+                self._emit_phase_complete("breeding", {
+                    "generation": generation,
+                    "children_bred": len(children),
+                })
+
+                # Log genetic events
+                self.pop_manager.log_generation(
+                    generation=generation,
+                    selection_result=selection,
+                    breeding_records=breeding_records,
+                    discarded=discarded,
+                )
+
+        return GenerationResult(
+            generation=generation,
+            training_stats=training_stats,
+            scores=scores,
+            selection=selection,
+            discarded=discarded,
+            children=children,
+            breeding_records=breeding_records,
+        )
+
+    # -- Progress event helpers ------------------------------------------------
+
+    def _emit_phase_start(self, phase: str, summary: dict) -> None:
+        """Emit a phase_start event."""
+        event = {
+            "event": "phase_start",
+            "phase": phase,
+            "timestamp": time.time(),
+            "summary": summary,
+        }
+        logger.info("Phase start: %s %s", phase, summary)
+        self._put_event(event)
+
+    def _emit_phase_complete(self, phase: str, summary: dict) -> None:
+        """Emit a phase_complete event."""
+        event = {
+            "event": "phase_complete",
+            "phase": phase,
+            "timestamp": time.time(),
+            "summary": summary,
+        }
+        logger.info("Phase complete: %s %s", phase, summary)
+        self._put_event(event)
+
+    def _publish_progress(
+        self,
+        phase: str,
+        tracker: ProgressTracker,
+        detail: str = "",
+    ) -> None:
+        """Publish a progress event with the outer tracker state."""
+        event = {
+            "event": "progress",
+            "phase": phase,
+            "process": tracker.to_dict(),
+            "detail": detail,
+            "timestamp": time.time(),
+        }
+        self._put_event(event)
+
+    def _put_event(self, event: dict) -> None:
+        """Put an event on the progress queue (non-blocking)."""
+        if self.progress_queue is not None:
+            try:
+                self.progress_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
