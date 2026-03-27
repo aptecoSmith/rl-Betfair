@@ -447,24 +447,44 @@ No item is done until all three steps are complete.
 
 ---
 
-## Infrastructure & Performance (backlog — no session assigned yet)
+## ⚠️ CRITICAL — Infrastructure fixes (Session 2.6)
 
-- **Database architecture review** — SQLite `evaluation_bets` table hit a
-  performance wall at 31K rows/agent/day (Session 2.5). With 20 agents × 30
-  test days × ~30K bets = 18M rows per generation. Batch `executemany` helps
-  but at scale this may need a different approach:
-  - Option A: Keep SQLite for metadata (models, eval_runs, eval_days, genetic_events)
-    but write bet logs to Parquet files keyed by (run_id, date) — fast columnar writes,
-    native to the data pipeline
-  - Option B: PostgreSQL for everything — better concurrency, bulk insert perf, but
-    adds a server dependency
-  - Option C: SQLite with WAL mode + batch-only writes (current approach, may suffice
-    with the `executemany` fix)
-  - Decision deferred until real-scale runs reveal whether Option C holds up
+These block meaningful training runs and must be done before further model work.
 
-- **GPU utilisation** — install CUDA-enabled PyTorch (`pip install torch
-  --index-url https://download.pytorch.org/whl/cu124`), set `training.require_gpu: true`
-  in config.yaml, verify training moves to RTX 3090
+### Session 2.6a — Install CUDA-enabled PyTorch
+- Current: `torch 2.11.0+cpu` — RTX 3090 (24 GB VRAM) is sitting idle
+- Uninstall CPU-only torch: `pip uninstall torch torchvision torchaudio`
+- Install CUDA build: `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124`
+- Update `requirements.txt` with the CUDA index URL
+- Set `training.require_gpu: true` in `config.yaml`
+- Verify: `torch.cuda.is_available()` returns `True`, `torch.cuda.get_device_name(0)` returns the 3090
+- Run a quick training sanity check (1 agent, 1 epoch) and confirm GPU utilisation via `nvidia-smi`
+- **Test:** existing `test_require_gpu_passes_with_gpu` should now pass instead of skip
+
+### Session 2.6b — Migrate evaluation_bets from SQLite to Parquet
+- **Problem:** 31K individual bet records per agent per day written to SQLite.
+  At full scale (20 agents × 30 test days × 30K bets = 18M rows/generation)
+  this is an unacceptable bottleneck and the DB file will balloon.
+- **Solution:** Keep SQLite for metadata (models, evaluation_runs,
+  evaluation_days, genetic_events — small tables, low write volume). Move
+  evaluation_bets to Parquet files:
+  - Write path: one Parquet file per evaluation day per model:
+    `registry/bet_logs/{run_id}/{date}.parquet`
+  - Schema: same columns as the current `evaluation_bets` SQLite table
+  - Read path: `ModelStore.get_evaluation_bets(run_id)` reads from Parquet
+    instead of SQLite — returns the same `EvaluationBetRecord` list
+  - `Evaluator` writes a DataFrame directly to Parquet (one `pd.to_parquet`
+    call, no row-by-row inserts)
+  - Remove `evaluation_bets` table from SQLite schema (keep for migration
+    period if needed, but new writes go to Parquet only)
+  - Remove `record_evaluation_bet()` and `record_evaluation_bets_batch()`
+    from ModelStore — replaced by Parquet writes in the Evaluator
+  - Replay API (Session 3.2) will read from Parquet — fast columnar reads
+- **Test:** verify Parquet bet logs written, readable, schema matches,
+  `get_evaluation_bets` returns correct data from Parquet files
+- **Integration test:** run evaluation on real data → verify Parquet files
+  created with correct row counts, old SQLite path still works for any
+  pre-existing data
 
 ---
 

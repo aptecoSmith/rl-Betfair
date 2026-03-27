@@ -50,7 +50,7 @@
 
 - Extracted 2026-03-26: 4,182 ticks, 53 markets (WIN + EACH_WAY), 497 runners
 - 27 schema/quality tests + 10 integration tests spot-checking against DB
-- MySQL on localhost:3306 (Docker, hotDataRefactored + coldData)
+- MySQL on localhost:3306 (local install, hotDataRefactored + coldData)
 
 ### Session 1.2 — Policy network (architecture v1: PPO + LSTM)
 **Status:** Done
