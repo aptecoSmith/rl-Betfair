@@ -616,6 +616,113 @@ These block meaningful training runs and must be done before further model work.
 
 ---
 
+## ⚠️ Data Pipeline Upgrades (Sessions 2.7–2.8)
+
+BetfairPoller (new polling service) captures higher-frequency price data (5s
+vs 180s), race lifecycle events, and enriched runner metadata. These sessions
+integrate the new data into the training pipeline.
+
+### Session 2.7a — PolledMarketSnapshots + RaceStatusEvents
+- `data/extractor.py`:
+  - Add `extract_polled_date()` — queries `PolledMarketSnapshots` instead of
+    `ResolvedMarketSnaps`. Parses `RunnersJson` (different field layout to
+    `SnapJson`) into the same normalised Parquet schema so downstream code is
+    unaffected
+  - Auto-detect: if `PolledMarketSnapshots` has data for a date, use it;
+    otherwise fall back to `ResolvedMarketSnaps`
+  - Join `RaceStatusEvents` by market_id — for each tick, find the most recent
+    race status at that tick's timestamp. Add `race_status` column to ticks
+    Parquet (string: `parading`, `going_down`, `going_behind`,
+    `under_orders`, `at_the_post`, `off`, or `null` if no status yet)
+- `data/episode_builder.py`:
+  - Add `race_status: str | None` field to `Tick` dataclass
+- `data/feature_engineer.py`:
+  - Add race status one-hot features (6 dims) to market features
+  - Add `time_since_status_change` feature (seconds since last race status
+    event, normalised)
+- `env/betfair_env.py`:
+  - Increase `MARKET_DIM` by 7 (6 one-hot + 1 time_since_change)
+  - Handle missing `race_status` gracefully (all zeros for old data without it)
+- **Test:** pytest — extractor produces correct schema from both sources, race
+  status joined correctly, feature dims updated, env obs_dim correct,
+  backward-compatible with old Parquet files that lack `race_status`
+- **Integration test:** extract today's data from polled source → verify tick
+  count higher than old source, race statuses populated, feature engineer
+  produces correct output, env runs a full episode
+
+### Session 2.7b — RaceCardRunners (PastRacesJson)
+- `data/extractor.py`:
+  - Query `RaceCardRunners` — join with runners Parquet by market_id +
+    selection_id
+  - Add new columns to runners Parquet: `timeform_comment`, `recent_form`,
+    `past_races_json` (raw JSON string — parsed downstream)
+  - Where fields overlap with coldData (age, weight, jockey, trainer), prefer
+    `RaceCardRunners` as it's fresher — fall back to coldData if missing
+- `data/episode_builder.py`:
+  - Add `PastRace` dataclass: `date`, `course`, `distance`, `going`, `bsp`,
+    `ip_max`, `ip_min`, `race_type`, `jockey`, `position`
+  - Extend `RunnerMeta` with `past_races: list[PastRace]`,
+    `timeform_comment: str | None`
+- `data/feature_engineer.py`:
+  - Parse `PastRacesJson` into `PastRace` list, derive:
+    - `course_runs`, `course_wins`, `course_win_rate` (at today's course)
+    - `distance_runs`, `distance_wins` (at similar distance ±1f)
+    - `going_preference_score` (win rate on today's going type)
+    - `avg_bsp`, `best_bsp`, `bsp_trend` (improving or declining market
+      confidence)
+    - `avg_finishing_position`, `best_position`
+    - `runs_count`, `improving_form` (boolean: last 3 positions trending down)
+    - `days_between_runs_avg` (typical rest pattern)
+  - ~12–15 new features per runner
+- `env/betfair_env.py`:
+  - Increase `RUNNER_DIM` to accommodate new features
+  - Backward-compatible: if past_races is empty, features default to 0
+- **Test:** pytest — PastRace parsing, derived features correct for known
+  history, runner dim updated, backward compatibility
+- **Integration test:** extract today's data with RaceCardRunners → verify
+  past races populated, feature engineer derives course/distance/going form,
+  env handles new obs dimensions
+
+### Session 2.8 — Time-aware LSTM and time delta features
+- **Problem:** The LSTM treats every tick as an equal time step. With
+  180s-conflated data mixed with 5s-polled data, a 3-tick velocity window
+  covers wildly different wall-clock periods. The model cannot distinguish
+  "prices were stable for 3 minutes" from "prices were stable for 15 seconds".
+- `data/feature_engineer.py`:
+  - Add `seconds_since_last_tick` per tick (0 for first tick in each race)
+  - Add `seconds_spanned_last_N_ticks` for N=3,5,10 — the wall-clock time
+    covered by the velocity window, so the model knows what time period each
+    velocity actually represents
+  - 4 new features (1 market-level + 3 velocity context)
+- `env/betfair_env.py`:
+  - Add 4 dims to observation: `seconds_since_last_tick` (normalised),
+    `seconds_spanned_3`, `seconds_spanned_5`, `seconds_spanned_10`
+    (all normalised)
+  - Update `MARKET_DIM` or add a new `TIME_DIM` section
+- `agents/policy_network.py`:
+  - Implement `TimeLSTMCell` — custom LSTM cell where the forget gate
+    incorporates `time_delta`:
+    `f_t = sigmoid(W_f @ [h, x] + W_dt * delta_t + b_f)`
+    Larger delta → more forgetting of short-term state
+  - Implement `PPOTimeLSTMPolicy` wrapping the custom cell, same interface
+    as `PPOLSTMPolicy`
+  - Register as `ppo_time_lstm_v1` in architecture registry
+- `agents/architecture_registry.py`:
+  - Add `ppo_time_lstm_v1` entry
+- `config.yaml`:
+  - Add `ppo_time_lstm_v1` to architecture choices so the genetic system can
+    evolve it alongside the standard LSTM
+- **Test:** pytest — TimeLSTMCell forward pass, forget gate responds to time
+  delta (larger delta → more forgetting), gradient flows, architecture
+  registry lookup, time features computed correctly for uniform and
+  non-uniform tick spacing, backward-compatible with old data
+  (seconds_since_last_tick defaults to 0)
+- **Integration test:** train 1 agent with `ppo_time_lstm_v1` on real data →
+  verify forward pass, training completes, time features populated, compare
+  hidden state decay between 5s and 180s gaps
+
+---
+
 ## Future Architecture Experiments (backlog — no session assigned yet)
 
 These are documented here so they are not forgotten. Assign to a session when ready.
