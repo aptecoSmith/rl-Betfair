@@ -35,9 +35,14 @@ import gymnasium
 import numpy as np
 from gymnasium import spaces
 
+import logging
+
 from data.episode_builder import Day, Race, Tick
 from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
+from training.perf_log import perf_log
+
+logger = logging.getLogger(__name__)
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
@@ -207,7 +212,13 @@ class BetfairEnv(gymnasium.Env):
 
     def _precompute(self) -> None:
         """Pre-compute all tick features and runner-slot mappings."""
-        day_features = engineer_day(self.day)
+        n_races = len(self.day.races)
+        n_ticks = sum(len(r.ticks) for r in self.day.races)
+        with perf_log(
+            logger,
+            f"Feature engineering ({n_races} races, {n_ticks} ticks)",
+        ):
+            day_features = engineer_day(self.day)
 
         self._static_obs: list[list[np.ndarray]] = []
         self._runner_maps: list[dict[int, int]] = []   # sid → slot

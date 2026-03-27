@@ -22,6 +22,8 @@ import asyncio
 import logging
 import time
 
+from training.perf_log import perf_log
+
 import numpy as np
 import torch
 
@@ -123,9 +125,17 @@ class Evaluator:
 
         day_records: list[EvaluationDayRecord] = []
 
+        eval_start = time.perf_counter()
+
         for day in test_days:
+            day_start = time.perf_counter()
             day_record, bet_records = self._evaluate_day(
                 policy, day, run_id or "",
+            )
+            day_elapsed = time.perf_counter() - day_start
+            logger.info(
+                "Eval day %s: %.2fs | pnl=%+.2f bets=%d",
+                day.date, day_elapsed, day_record.day_pnl, day_record.bet_count,
             )
             day_records.append(day_record)
 
@@ -139,6 +149,12 @@ class Evaluator:
 
             tracker.tick()
             self._publish_progress(tracker, day_record)
+
+        eval_elapsed = time.perf_counter() - eval_start
+        logger.info(
+            "Evaluation of %s complete: %d days in %.2fs",
+            model_id[:12], len(test_days), eval_elapsed,
+        )
 
         return run_id, day_records
 

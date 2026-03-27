@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -421,6 +422,7 @@ def load_day(
         If any tick has ``in_play=True`` (should never happen if the
         extractor filtered correctly, but we guard against it).
     """
+    t0 = time.perf_counter()
     data_dir = Path(data_dir)
     ticks_path = data_dir / f"{date_str}.parquet"
     runners_path = data_dir / f"{date_str}_runners.parquet"
@@ -434,7 +436,13 @@ def load_day(
         else pd.DataFrame()
     )
 
-    return _build_day(date_str, ticks_df, runners_df)
+    day = _build_day(date_str, ticks_df, runners_df)
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "Loaded %s: %d ticks, %d races in %.2fs",
+        date_str, len(ticks_df), len(day.races), elapsed,
+    )
+    return day
 
 
 def _build_day(

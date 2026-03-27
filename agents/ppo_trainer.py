@@ -38,6 +38,7 @@ from torch.distributions import Normal
 from agents.architecture_registry import create_policy
 from agents.policy_network import BasePolicy, PolicyOutput
 from data.episode_builder import Day
+from training.perf_log import perf_log
 from env.betfair_env import BetfairEnv
 from training.progress_tracker import ProgressTracker
 
@@ -227,6 +228,7 @@ class PPOTrainer:
 
     def _collect_rollout(self, day: Day) -> tuple[Rollout, EpisodeStats]:
         """Run one episode (one day) and collect transitions."""
+        rollout_start = time.perf_counter()
         env = BetfairEnv(day, self.config)
         obs, info = env.reset()
 
@@ -275,6 +277,13 @@ class PPOTrainer:
             n_steps += 1
             obs = next_obs
             info = next_info
+
+        rollout_elapsed = time.perf_counter() - rollout_start
+        logger.info(
+            "Rollout %s: %d steps in %.2fs (%.0f steps/s)",
+            day.date, n_steps, rollout_elapsed,
+            n_steps / rollout_elapsed if rollout_elapsed > 0 else 0,
+        )
 
         ep_stats = EpisodeStats(
             day_date=day.date,
@@ -333,6 +342,7 @@ class PPOTrainer:
 
         Returns a dict with final loss components.
         """
+        ppo_start = time.perf_counter()
         transitions = rollout.transitions
         n = len(transitions)
 
@@ -419,6 +429,14 @@ class PPOTrainer:
                 policy_losses.append(float(policy_loss.item()))
                 value_losses.append(float(value_loss.item()))
                 entropies.append(float(entropy.item()))
+
+        ppo_elapsed = time.perf_counter() - ppo_start
+        n_updates = len(policy_losses)
+        logger.info(
+            "PPO update: %d transitions, %d mini-batch updates in %.2fs"
+            " | device=%s",
+            n, n_updates, ppo_elapsed, self.device,
+        )
 
         return {
             "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,

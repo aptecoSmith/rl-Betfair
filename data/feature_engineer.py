@@ -20,8 +20,12 @@ Design principles:
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 from data.episode_builder import (
     Day,
@@ -664,4 +668,14 @@ def engineer_day(day: Day) -> list[list[dict[str, object]]]:
 
     Returns a nested list: ``day[race_idx][tick_idx] → feature_dict``.
     """
-    return [engineer_race(race) for race in day.races]
+    results = []
+    for race in day.races:
+        t0 = time.perf_counter()
+        feats = engineer_race(race)
+        elapsed = time.perf_counter() - t0
+        logger.debug(
+            "  Race %s: %d ticks engineered in %.3fs",
+            race.market_id, len(race.ticks), elapsed,
+        )
+        results.append(feats)
+    return results

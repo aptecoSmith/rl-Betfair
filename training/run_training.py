@@ -52,6 +52,7 @@ from data.episode_builder import Day
 from registry.model_store import ModelStore
 from registry.scoreboard import ModelScore, Scoreboard
 from training.evaluator import Evaluator
+from training.perf_log import gpu_memory_summary, perf_log
 from training.progress_tracker import ProgressTracker
 
 logger = logging.getLogger(__name__)
@@ -280,7 +281,12 @@ class TrainingOrchestrator:
                 progress_queue=self.progress_queue,
                 device=self.device,
             )
-            stats = trainer.train(train_days, n_epochs=n_epochs)
+            with perf_log(
+                logger,
+                f"Train agent {agent.model_id[:12]}",
+                log_gpu=(self.device == "cuda"),
+            ):
+                stats = trainer.train(train_days, n_epochs=n_epochs)
             training_stats[agent.model_id] = stats
 
             # Save updated weights after training
@@ -323,12 +329,17 @@ class TrainingOrchestrator:
                 detail=f"Evaluating agent {agent.model_id[:12]}",
             )
 
-            self.evaluator.evaluate(
-                model_id=agent.model_id,
-                policy=agent.policy,
-                test_days=test_days,
-                train_cutoff_date=train_cutoff,
-            )
+            with perf_log(
+                logger,
+                f"Eval agent {agent.model_id[:12]}",
+                log_gpu=(self.device == "cuda"),
+            ):
+                self.evaluator.evaluate(
+                    model_id=agent.model_id,
+                    policy=agent.policy,
+                    test_days=test_days,
+                    train_cutoff_date=train_cutoff,
+                )
 
             eval_tracker.tick()
 
@@ -414,6 +425,12 @@ class TrainingOrchestrator:
                     breeding_records=breeding_records,
                     discarded=discarded,
                 )
+
+        # GPU memory summary at end of generation
+        mem = gpu_memory_summary()
+        if mem:
+            logger.info("Generation %d complete | %s", generation, mem)
+            torch.cuda.reset_peak_memory_stats()
 
         return GenerationResult(
             generation=generation,
