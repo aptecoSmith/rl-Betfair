@@ -1,0 +1,190 @@
+"""Pydantic models for all API request/response types."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+
+# ── Scoreboard & Model Records ──────────────────────────────────────
+
+
+class DayMetric(BaseModel):
+    date: str
+    day_pnl: float
+    bet_count: int
+    winning_bets: int
+    bet_precision: float
+    pnl_per_bet: float
+    early_picks: int
+    profitable: bool
+
+
+class ScoreboardEntry(BaseModel):
+    model_id: str
+    generation: int
+    architecture_name: str
+    status: str
+    composite_score: float | None
+    win_rate: float
+    sharpe: float
+    mean_daily_pnl: float
+    efficiency: float
+    test_days: int
+    profitable_days: int
+
+
+class ScoreboardResponse(BaseModel):
+    models: list[ScoreboardEntry]
+
+
+class ModelDetail(BaseModel):
+    model_id: str
+    generation: int
+    parent_a_id: str | None
+    parent_b_id: str | None
+    architecture_name: str
+    architecture_description: str
+    hyperparameters: dict
+    status: str
+    created_at: str
+    last_evaluated_at: str | None
+    composite_score: float | None
+    metrics_history: list[DayMetric]
+
+
+# ── Lineage ─────────────────────────────────────────────────────────
+
+
+class LineageNode(BaseModel):
+    model_id: str
+    generation: int
+    parent_a_id: str | None
+    parent_b_id: str | None
+    architecture_name: str
+    hyperparameters: dict
+    composite_score: float | None
+
+
+class LineageResponse(BaseModel):
+    nodes: list[LineageNode]
+
+
+# ── Genetic Events ──────────────────────────────────────────────────
+
+
+class GeneticEvent(BaseModel):
+    event_id: str
+    generation: int
+    event_type: str
+    child_model_id: str | None = None
+    parent_a_id: str | None = None
+    parent_b_id: str | None = None
+    hyperparameter: str | None = None
+    parent_a_value: str | None = None
+    parent_b_value: str | None = None
+    inherited_from: str | None = None
+    mutation_delta: float | None = None
+    final_value: str | None = None
+    selection_reason: str | None = None
+    human_summary: str | None = None
+
+
+class GeneticsResponse(BaseModel):
+    events: list[GeneticEvent]
+
+
+# ── Training Status ─────────────────────────────────────────────────
+
+
+class ProgressSnapshot(BaseModel):
+    label: str
+    completed: int
+    total: int
+    pct: float
+    item_eta_human: str
+    process_eta_human: str
+
+
+class TrainingStatus(BaseModel):
+    running: bool
+    phase: str | None = None
+    generation: int | None = None
+    process: ProgressSnapshot | None = None
+    item: ProgressSnapshot | None = None
+    detail: str | None = None
+    last_agent_score: float | None = None
+
+
+# ── WebSocket Events ────────────────────────────────────────────────
+
+
+class WSEvent(BaseModel):
+    event: str
+    timestamp: float
+    phase: str | None = None
+    process: dict | None = None
+    item: dict | None = None
+    detail: str | None = None
+    summary: dict | None = None
+
+
+# ── Replay ──────────────────────────────────────────────────────────
+
+
+class BetEvent(BaseModel):
+    tick_timestamp: str
+    seconds_to_off: float
+    runner_id: int
+    runner_name: str
+    action: str
+    price: float
+    stake: float
+    matched_size: float
+    outcome: str
+    pnl: float
+
+
+class RaceSummary(BaseModel):
+    race_id: str
+    market_name: str
+    venue: str
+    market_start_time: str
+    n_runners: int
+    bet_count: int
+    race_pnl: float
+
+
+class ReplayDayResponse(BaseModel):
+    model_id: str
+    date: str
+    races: list[RaceSummary]
+
+
+class TickRunner(BaseModel):
+    selection_id: int
+    status: str
+    last_traded_price: float
+    total_matched: float
+    available_to_back: list[dict]
+    available_to_lay: list[dict]
+
+
+class ReplayTick(BaseModel):
+    timestamp: str
+    sequence_number: int
+    in_play: bool
+    traded_volume: float
+    runners: list[TickRunner]
+    bets: list[BetEvent]
+
+
+class ReplayRaceResponse(BaseModel):
+    model_id: str
+    date: str
+    race_id: str
+    venue: str
+    market_start_time: str
+    winner_selection_id: int | None
+    ticks: list[ReplayTick]
+    all_bets: list[BetEvent]
+    race_pnl: float

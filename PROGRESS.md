@@ -187,6 +187,35 @@
 **Bug fixes (pre-existing):**
 - `test_integration_population_manager.py::test_forward_pass_on_real_observation` — arguments to `load_day()` were swapped, and `BetfairEnv` was called with `days=` (plural) instead of `day=` (singular)
 
+### Session 3.1 + 3.2 — FastAPI backend (core + training/replay API)
+**Status:** Done
+
+#### 3.1 — FastAPI backend core
+- `api/main.py` — FastAPI app with CORS (allow `localhost:4200`), lifespan opens registry DB via ModelStore, wires Scoreboard and asyncio.Queue for progress events
+- `api/schemas.py` — 16 Pydantic models: ScoreboardEntry, ScoreboardResponse, ModelDetail, DayMetric, LineageNode/Response, GeneticEvent/Response, TrainingStatus, ProgressSnapshot, WSEvent, BetEvent, RaceSummary, ReplayDayResponse, TickRunner, ReplayTick, ReplayRaceResponse
+- `api/routers/models.py`:
+  - `GET /models` — scoreboard: all active models ranked by composite score, with win_rate, sharpe, efficiency, generation, architecture
+  - `GET /models/{id}` — model detail: hyperparams, architecture, per-day metrics history from latest evaluation run
+  - `GET /models/{id}/lineage` — BFS ancestry traversal: walks parent_a/parent_b chain to roots, no duplicates
+  - `GET /models/{id}/genetics` — genetic event log for this model's creation (crossover, mutation events)
+- 15 unit tests (scoreboard empty/ranked/sorted, detail found/not-found/metrics/no-eval, lineage root/traversal/dedup/hyperparams, genetics empty/events)
+- 11 integration tests against real extracted data (scoreboard ranking, model detail with real hyperparams, lineage chain, genetics, replay with real Parquet ticks)
+
+#### 3.2 — Training & replay API
+- `api/routers/training.py`:
+  - `GET /training/status` — current run snapshot: running flag, phase, generation, two-level progress (process + item ETAs), detail string
+  - `WebSocket /ws/training` — consumes shared asyncio.Queue, broadcasts progress/phase_start/phase_complete/agent_complete/run_complete events, 30s keepalive ping, mid-run clients receive latest state on connect
+- `api/routers/replay.py`:
+  - `GET /replay/{model_id}/{date}` — all races for model+day: race_id, venue, market_start_time, n_runners, bet_count, race_pnl
+  - `GET /replay/{model_id}/{date}/{race_id}` — full tick-by-tick: snap_json parsed to per-runner order books (back/lay 3 levels), bet events overlaid at correct timestamps, winner_selection_id, race_pnl
+  - Reads bet logs from Parquet (`registry/bet_logs/{run_id}/{date}.parquet`)
+  - Reads tick data from extracted Parquet (`data/processed/{date}.parquet`)
+- 6 WebSocket unit tests (idle ping, latest-on-connect, queue broadcast, run_complete/phase_start state transitions, latest_event tracking)
+- 11 replay unit tests (model/run/tick not-found, day returns races with metadata, race tick sequence/runners parsed/bets overlaid/metadata/no-bets)
+- Integration tests verify tick count matches raw Parquet, bet timestamps correct, race P&L matches registry
+
+**Dependencies installed:** fastapi 0.135.2, uvicorn 0.42.0, httpx 0.28.1, pydantic 2.12.5, starlette 1.0.0
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -219,8 +248,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.4     | 43              | 6                      | **684 + 89**  |
 | 2.5     | 7               | 12                     | **691 + 101** |
 | 2.6     | 16              | 1                      | **707 + 102** |
+| 3.1+3.2 | 36              | 11                     | **743 + 113** |
 
-**Current total: 706 unit (1 skipped) + 82 integration (19 skipped) = 788 passing.**
+**Current total: 742 unit (1 skipped) + 95 integration (19 skipped) = 856 passing (760 passed, 2 skipped, 101 deselected).**
 
 ---
 
