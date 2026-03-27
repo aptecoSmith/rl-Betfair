@@ -216,6 +216,26 @@
 
 **Dependencies installed:** fastapi 0.135.2, uvicorn 0.42.0, httpx 0.28.1, pydantic 2.12.5, starlette 1.0.0
 
+### Session 3.3 — Angular scaffold & scoreboard
+**Status:** Done
+
+- `ng new frontend` — Angular 21 app with standalone components, vitest, SCSS
+- Proxy config (`proxy.conf.json`) routes `/api` → `http://localhost:8000` (FastAPI backend)
+- **Scoreboard page** (`src/app/scoreboard/`):
+  - Model rankings table: rank, model ID (short, full in tooltip), generation, architecture, win_rate, sharpe, mean_daily_pnl, efficiency, composite_score
+  - Sorted by composite_score descending; null scores ranked last
+  - Generation colour-coding: 10-colour palette, applied as left border on rows and badge background
+  - Click row → navigates to `/models/:id` (Model Detail route — stub page, built in Session 3.5)
+  - Loading state, error state, empty state handled
+  - Formatted values: win_rate as %, mean_daily_pnl as £, sharpe/efficiency as decimals
+- **Model Detail stub** (`src/app/model-detail/`) — placeholder component for Session 3.5
+- **Routes:** `/` → redirect to `/scoreboard`, `/scoreboard` (lazy-loaded), `/models/:id` (lazy-loaded)
+- **ApiService** (`src/app/services/api.service.ts`) — `GET /api/models` → `ScoreboardResponse`
+- **TypeScript model** (`src/app/models/scoreboard.model.ts`) — mirrors `api/schemas.py` `ScoreboardEntry`
+- 21 unit tests (vitest): component creation, loading/error/empty states, table columns, row rendering, short ID display, sorting, ranking, null score handling, generation colours with cycling, border-left colour, badge rendering, navigation on click, formatted values, data refresh
+- 6 integration tests (vitest, skip when API not running): load real models, render table, columns present, sort order, valid data, click navigation
+- 2 app-level tests: component creation, router-outlet presence
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -249,8 +269,10 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.5     | 7               | 12                     | **691 + 101** |
 | 2.6     | 16              | 1                      | **707 + 102** |
 | 3.1+3.2 | 36              | 11                     | **743 + 113** |
+| 3.3     | 23 (Angular)    | 6 (Angular)            | **743 + 113** (Python) + **23 + 6** (Angular) |
 
-**Current total: 742 unit (1 skipped) + 95 integration (19 skipped) = 856 passing (760 passed, 2 skipped, 101 deselected).**
+**Python total: 760 passed, 2 skipped, 101 deselected.**
+**Angular total: 23 passed, 6 skipped (integration — API not running).**
 
 ---
 
