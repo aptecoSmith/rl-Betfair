@@ -54,7 +54,11 @@
     <div class="idle-state">
       @if (lastRunSummary()) {
         <div class="last-run">
-          <h3>Last Run Complete</h3>
+          <h3>Last Run Complete
+            @if (timeSinceCompleted()) {
+              <span class="time-since">· {{ timeSinceCompleted() }}</span>
+            }
+          </h3>
           <pre class="run-summary">{{ lastRunSummary() | json }}</pre>
         </div>
       } @else {

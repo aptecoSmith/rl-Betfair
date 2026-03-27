@@ -278,8 +278,8 @@
 
 #### Tests
 - **Python:** 11 unit tests (6 endpoint tests: response schema, field types, values, GPU null; 5 GPU helper tests: available, import error, nvml error, temp error, bytes name) + 1 integration test (real hardware)
-- **Angular:** 22 header tests (creation, title, idle/running states, status chip DOM, progress summary, phase labels ×7, GPU/CPU/RAM/disk labels, null metrics, metrics panel count, navigation) + 27 training monitor tests (creation, title, idle message, ETA bars, process/item data, phase labels ×7, detail line, chart empties, reward/loss paths, empty path <2 points, agent grid, agent classes ×5, no grid when empty, chart cards, chart titles) + 3 app tests (creation, router-outlet, header presence)
-- All 73 Angular tests pass, 6 integration skipped (API not running)
+- **Angular:** 22 header tests (creation, title, idle/running states, status chip DOM, progress summary, phase labels ×7, GPU/CPU/RAM/disk labels, null metrics, metrics panel count, navigation) + 32 training monitor tests (creation, title, idle message, ETA bars, process/item data, phase labels ×7, detail line, chart empties, reward/loss paths, empty path <2 points, agent grid, agent classes ×5, no grid when empty, chart cards, chart titles, timeSinceCompleted ×5) + 19 WebSocket message flow tests (idle start, progress→running, run_complete→idle, lastRunCompletedAt from timestamp/Date.now, latestEvent tracking, ping ignored, reward/loss extraction, accumulation, non-progress ignored, clearHistory, phase_start+progress ETA bars, partial event preserves fields, negative reward, malformed JSON, full lifecycle) + 3 app tests (creation, router-outlet, header presence)
+- All 95 Angular tests pass, 6 integration skipped (API not running)
 
 **Dependencies installed:** psutil 7.2.2, pynvml 13.0.1 (nvidia-ml-py 13.595.45)
 
@@ -317,10 +317,10 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.6     | 16              | 1                      | **707 + 102** |
 | 3.1+3.2 | 36              | 11                     | **743 + 113** |
 | 3.3     | 23 (Angular)    | 6 (Angular)            | **743 + 113** (Python) + **23 + 6** (Angular) |
-| 3.4     | 11 (Python) + 52 (Angular) | 1 (Python) | **754 + 114** (Python) + **75 + 6** (Angular) |
+| 3.4     | 11 (Python) + 76 (Angular) | 1 (Python) | **754 + 114** (Python) + **95 + 6** (Angular) |
 
 **Python total: 771 passed, 2 skipped, 102 deselected.**
-**Angular total: 73 passed, 6 skipped (integration — API not running).**
+**Angular total: 95 passed, 6 skipped (integration — API not running).**
 
 ---
 

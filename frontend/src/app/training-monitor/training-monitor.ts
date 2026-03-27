@@ -29,6 +29,7 @@ export interface AgentGridItem {
 })
 export class TrainingMonitor implements OnDestroy {
   private readonly training = inject(TrainingService);
+  private tickTimer: ReturnType<typeof setInterval> | null = null;
 
   readonly status = this.training.status;
   readonly isRunning = this.training.isRunning;
@@ -38,11 +39,22 @@ export class TrainingMonitor implements OnDestroy {
   /** Population grid agents. */
   readonly agents = signal<AgentGridItem[]>([]);
 
+  /** Ticks every 10s to drive the "time since" display. */
+  readonly now = signal(Date.now());
+
   /** Last completed run summary (shown when idle). */
   readonly lastRunSummary = computed(() => {
     const event = this.training.latestEvent();
     if (!event || event.event !== 'run_complete') return null;
     return event.summary ?? null;
+  });
+
+  /** Human-readable time since last run completed. */
+  readonly timeSinceCompleted = computed(() => {
+    const completedAt = this.training.lastRunCompletedAt();
+    if (!completedAt) return null;
+    const elapsed = this.now() - completedAt;
+    return this.formatElapsed(elapsed);
   });
 
   readonly processBar = computed(() => this.status().process);
@@ -78,8 +90,25 @@ export class TrainingMonitor implements OnDestroy {
     this.updateAgentGrid(event);
   });
 
+  constructor() {
+    this.tickTimer = setInterval(() => this.now.set(Date.now()), 10_000);
+  }
+
   ngOnDestroy(): void {
     this.agentEffect.destroy();
+    if (this.tickTimer) clearInterval(this.tickTimer);
+  }
+
+  private formatElapsed(ms: number): string {
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    const remainMins = minutes % 60;
+    if (hours < 24) return remainMins > 0 ? `${hours}h ${remainMins}m ago` : `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   }
 
   private updateAgentGrid(event: WSEvent): void {

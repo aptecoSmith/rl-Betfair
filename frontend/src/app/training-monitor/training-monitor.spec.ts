@@ -53,11 +53,14 @@ describe('TrainingMonitor', () => {
   let rewardSignal: ReturnType<typeof signal<{ step: number; reward: number }[]>>;
   let lossSignal: ReturnType<typeof signal<{ step: number; loss: number }[]>>;
 
-  function setup(status?: TrainingStatus) {
+  let completedAtSignal: ReturnType<typeof signal<number | null>>;
+
+  function setup(status?: TrainingStatus, completedAt?: number | null) {
     statusSignal = signal(status ?? idleStatus());
     eventSignal = signal(null);
     rewardSignal = signal([]);
     lossSignal = signal([]);
+    completedAtSignal = signal(completedAt !== undefined ? completedAt : null);
 
     const mockTraining = {
       status: statusSignal,
@@ -65,6 +68,7 @@ describe('TrainingMonitor', () => {
       latestEvent: eventSignal,
       rewardHistory: rewardSignal,
       lossHistory: lossSignal,
+      lastRunCompletedAt: completedAtSignal,
       phase: signal((status ?? idleStatus()).phase),
       connect: vi.fn(),
       clearHistory: vi.fn(),
@@ -251,5 +255,30 @@ describe('TrainingMonitor', () => {
     const titles = fixture.nativeElement.querySelectorAll('.chart-title');
     expect(titles[0]?.textContent).toContain('Reward');
     expect(titles[1]?.textContent).toContain('Loss');
+  });
+
+  it('timeSinceCompleted returns null when no completedAt', () => {
+    setup(idleStatus(), null);
+    expect(component.timeSinceCompleted()).toBeNull();
+  });
+
+  it('timeSinceCompleted returns "just now" for recent completion', () => {
+    setup(idleStatus(), Date.now() - 10_000); // 10 seconds ago
+    expect(component.timeSinceCompleted()).toBe('just now');
+  });
+
+  it('timeSinceCompleted returns minutes for recent completion', () => {
+    setup(idleStatus(), Date.now() - 5 * 60 * 1000); // 5 min ago
+    expect(component.timeSinceCompleted()).toBe('5m ago');
+  });
+
+  it('timeSinceCompleted returns hours and minutes', () => {
+    setup(idleStatus(), Date.now() - (2 * 60 * 60 * 1000 + 15 * 60 * 1000)); // 2h 15m ago
+    expect(component.timeSinceCompleted()).toBe('2h 15m ago');
+  });
+
+  it('timeSinceCompleted returns days for old completions', () => {
+    setup(idleStatus(), Date.now() - 3 * 24 * 60 * 60 * 1000); // 3 days ago
+    expect(component.timeSinceCompleted()).toBe('3d ago');
   });
 });

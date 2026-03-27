@@ -24,6 +24,9 @@ export class TrainingService implements OnDestroy {
   /** Latest WebSocket event (for training monitor live charts). */
   readonly latestEvent = signal<WSEvent | null>(null);
 
+  /** Timestamp (epoch ms) when the last run completed. */
+  readonly lastRunCompletedAt = signal<number | null>(null);
+
   /** Reward data points collected from progress events. */
   readonly rewardHistory = signal<{ step: number; reward: number }[]>([]);
   readonly lossHistory = signal<{ step: number; loss: number }[]>([]);
@@ -91,6 +94,9 @@ export class TrainingService implements OnDestroy {
 
   private updateStatusFromEvent(event: WSEvent): void {
     if (event.event === 'run_complete') {
+      this.lastRunCompletedAt.set(
+        event.timestamp ? event.timestamp * 1000 : Date.now()
+      );
       this.status.set({
         running: false,
         phase: null,
