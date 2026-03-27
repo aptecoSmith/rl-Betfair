@@ -5,12 +5,22 @@ Each agent receives randomised hyperparameters drawn from the search ranges
 defined in ``config.yaml``.  The population manager creates policy networks
 via the architecture registry and registers each agent in the model store.
 
+Also implements genetic selection:
+
+- **Tournament selection**: top 50% by composite score survive.
+- **Elitism**: top N_elite agents always survive unchanged.
+- **Discard policy**: mark models as ``discarded`` in registry only if
+  win_rate, mean_pnl, AND sharpe all fall below thresholds.
+
 Usage::
 
     from agents.population_manager import PopulationManager
 
     pm = PopulationManager(config, model_store)
     agents = pm.initialise_population(generation=0)
+
+    # After evaluation + scoring:
+    result = pm.select(scored_population)
 """
 
 from __future__ import annotations
@@ -21,6 +31,7 @@ from dataclasses import dataclass, field
 
 from agents.architecture_registry import REGISTRY, create_policy
 from agents.policy_network import BasePolicy
+from registry.scoreboard import ModelScore
 
 
 # -- Hyperparameter sampling --------------------------------------------------
@@ -271,3 +282,101 @@ class PopulationManager:
             architecture_name=arch_name,
             policy=policy,
         )
+
+    # -- Genetic selection ---------------------------------------------------------
+
+    def select(
+        self,
+        scores: list[ModelScore],
+    ) -> SelectionResult:
+        """Tournament selection with elitism.
+
+        Selects survivors from a scored population:
+
+        1. Scores are sorted by composite_score descending.
+        2. The top ``n_elite`` are marked as **elites** (always survive).
+        3. The top ``selection_top_pct`` fraction (including elites) survive.
+        4. The rest are eliminated (but NOT discarded from the registry —
+           discard is a separate policy applied via :meth:`apply_discard_policy`).
+
+        Parameters
+        ----------
+        scores:
+            Scored models, typically from :meth:`Scoreboard.rank_all`.
+
+        Returns
+        -------
+        :class:`SelectionResult` with elites, survivors, and eliminated lists.
+        """
+        pop_cfg = self.config["population"]
+        n_elite: int = pop_cfg.get("n_elite", 3)
+        top_pct: float = pop_cfg.get("selection_top_pct", 0.5)
+
+        # Sort by composite score descending
+        ranked = sorted(scores, key=lambda s: s.composite_score, reverse=True)
+
+        # Number of survivors: at least n_elite, at most all
+        n_survive = max(n_elite, round(len(ranked) * top_pct))
+        n_survive = min(n_survive, len(ranked))
+
+        elites = ranked[:n_elite]
+        survivors = ranked[:n_survive]
+        eliminated = ranked[n_survive:]
+
+        return SelectionResult(
+            elites=[s.model_id for s in elites],
+            survivors=[s.model_id for s in survivors],
+            eliminated=[s.model_id for s in eliminated],
+            ranked_scores=ranked,
+        )
+
+    def apply_discard_policy(
+        self,
+        scores: list[ModelScore],
+    ) -> list[str]:
+        """Mark models as discarded in the registry if they meet ALL discard criteria.
+
+        A model is discarded only if ALL of:
+        - win_rate < min_win_rate
+        - mean_daily_pnl < min_mean_pnl
+        - sharpe < min_sharpe
+
+        Parameters
+        ----------
+        scores:
+            Scored models to check.
+
+        Returns
+        -------
+        List of model IDs that were discarded.
+        """
+        dp = self.config.get("discard_policy", {})
+        min_wr = dp.get("min_win_rate", 0.35)
+        min_pnl = dp.get("min_mean_pnl", 0.0)
+        min_sharpe = dp.get("min_sharpe", -0.5)
+
+        discarded: list[str] = []
+        for s in scores:
+            if (
+                s.win_rate < min_wr
+                and s.mean_daily_pnl < min_pnl
+                and s.sharpe < min_sharpe
+            ):
+                discarded.append(s.model_id)
+                if self.model_store is not None:
+                    self.model_store.update_model_status(s.model_id, "discarded")
+
+        return discarded
+
+
+# -- Selection result ----------------------------------------------------------
+
+
+@dataclass
+class SelectionResult:
+    """Result of tournament selection on a scored population."""
+
+    elites: list[str]       # model IDs that are elite (top N)
+    survivors: list[str]    # model IDs that survived (top 50%, includes elites)
+    eliminated: list[str]   # model IDs eliminated this generation
+    ranked_scores: list[ModelScore]  # full ranked list for reference

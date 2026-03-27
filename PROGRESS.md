@@ -84,6 +84,21 @@
 - 44 unit tests + 7 integration tests (real config, real data forward pass, model store round-trip)
 - Session 1.5 skipped (blocked on 2+ days of data); Session 2.1 does not depend on it
 
+### Session 2.2 — Genetic selection
+**Status:** Done
+
+- `select()` method on `PopulationManager` — tournament selection with elitism
+  - Sorts by composite_score descending
+  - Top `n_elite` (config, default 3) always survive as elites
+  - Top `selection_top_pct` (config, default 50%) survive overall (includes elites)
+  - Returns `SelectionResult` with elites, survivors, eliminated, and ranked_scores
+- `apply_discard_policy()` — marks models as "discarded" in registry only if ALL of:
+  - win_rate < min_win_rate (default 0.35)
+  - mean_daily_pnl < min_mean_pnl (default 0.0)
+  - sharpe < min_sharpe (default -0.5)
+  - Never discards for bad days alone; all three must fail simultaneously
+- 37 unit tests + 9 integration tests (scored population → select → discard → verify store status)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -111,8 +126,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 1.3+1.4 | 82              | 8                      | 512           |
 | *Misc*  | 12              | —                      | **524 + 57**  |
 | 2.1     | 44              | 7                      | **568 + 64**  |
+| 2.2     | 37              | 9                      | **605 + 73**  |
 
-**Current total: 568 unit + 64 integration = 632 tests, all passing.**
+**Current total: 605 unit + 73 integration = 678 tests, all passing.**
 
 ---
 
