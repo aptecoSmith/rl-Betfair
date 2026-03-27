@@ -41,7 +41,7 @@ from env.betfair_env import (
 
 # ── Observation layout constants ────────────────────────────────────────────
 
-MARKET_TOTAL_DIM = MARKET_DIM + VELOCITY_DIM + AGENT_STATE_DIM  # 25 + 6 + 5 = 36
+MARKET_TOTAL_DIM = MARKET_DIM + VELOCITY_DIM + AGENT_STATE_DIM  # 31 + 7 + 5 = 43
 
 
 # ── Base class ──────────────────────────────────────────────────────────────

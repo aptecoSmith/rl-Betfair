@@ -114,6 +114,10 @@ class Tick:
     traded_volume: float
     in_play: bool
     winner_selection_id: int | None
+    # Race status from RaceStatusEvents (Session 2.7a).
+    # One of: "parading", "going down", "going behind", "under orders",
+    #         "at the post", "off", or None (not available / legacy data)
+    race_status: str | None
     # Weather (may be None if fetch failed)
     temperature: float | None
     precipitation: float | None
@@ -361,6 +365,15 @@ def _row_to_tick(row: pd.Series) -> Tick:
     else:
         winner_sid = int(winner_sid)
 
+    # Race status (Session 2.7a) — may be absent in old Parquet files
+    race_status_raw = row.get("race_status")
+    if race_status_raw is None or (isinstance(race_status_raw, float) and pd.isna(race_status_raw)):
+        race_status = None
+    elif pd.isna(race_status_raw):
+        race_status = None
+    else:
+        race_status = str(race_status_raw)
+
     return Tick(
         market_id=str(row["market_id"]),
         timestamp=pd.Timestamp(row["timestamp"]).to_pydatetime(),
@@ -371,6 +384,7 @@ def _row_to_tick(row: pd.Series) -> Tick:
         traded_volume=float(row.get("traded_volume", 0.0)),
         in_play=bool(row.get("in_play", False)),
         winner_selection_id=winner_sid,
+        race_status=race_status,
         temperature=_opt_float(row.get("temperature")),
         precipitation=_opt_float(row.get("precipitation")),
         wind_speed=_opt_float(row.get("wind_speed")),

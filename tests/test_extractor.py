@@ -88,10 +88,17 @@ def _make_runners_df(market_ids: list[str] | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _make_extractor(config, ticks_df=None, runners_df=None) -> DataExtractor:
-    """Return a DataExtractor with _query_ticks/_query_runners/_query_market_names mocked."""
+def _make_extractor(config, ticks_df=None, runners_df=None, polled=False) -> DataExtractor:
+    """Return a DataExtractor with _query_ticks/_query_runners/_query_market_names mocked.
+
+    When *polled* is False (default), ``_has_polled_date`` is mocked to return
+    False so the legacy ``ResolvedMarketSnaps`` path is used.
+    """
     mock_engine = MagicMock()
     extractor = DataExtractor(config, engine=mock_engine)
+
+    # Default: polled source not available → legacy path
+    extractor._has_polled_date = MagicMock(return_value=polled)
 
     if ticks_df is not None:
         extractor._query_ticks = MagicMock(return_value=_cast_ticks(ticks_df.copy()))
@@ -177,6 +184,7 @@ class TestColumnSchemas:
             "market_start_time", "market_type", "market_name",
             "number_of_active_runners", "traded_volume",
             "in_play", "snap_json", "winner_selection_id",
+            "race_status",
             "temperature", "precipitation", "wind_speed", "wind_direction",
             "humidity", "weather_code",
         }

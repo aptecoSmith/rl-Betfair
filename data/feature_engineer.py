@@ -38,6 +38,12 @@ from data.episode_builder import (
 
 NaN = float("nan")
 
+#: Known race status values from ``RaceStatusEvents``.
+RACE_STATUSES: list[str] = [
+    "parading", "going down", "going behind",
+    "under orders", "at the post", "off",
+]
+
 
 # ── Numeric parsing helpers ──────────────────────────────────────────────────
 
@@ -373,6 +379,12 @@ def market_tick_features(tick: Tick) -> dict[str, float]:
     feats["humidity"] = tick.humidity if tick.humidity is not None else NaN
     feats["weather_code"] = float(tick.weather_code) if tick.weather_code is not None else NaN
 
+    # Race status features (Session 2.7a)
+    # One-hot encoding for the 6 known statuses
+    status = tick.race_status.lower() if tick.race_status else ""
+    for s in RACE_STATUSES:
+        feats[f"race_status_{s.replace(' ', '_')}"] = 1.0 if status == s else 0.0
+
     return feats
 
 
@@ -492,9 +504,20 @@ class TickHistory:
     _vol_history: dict[int, list[float]] = field(default_factory=dict)
     _market_vol_history: list[float] = field(default_factory=list)
     _overround_history: list[float] = field(default_factory=list)
+    # Race status tracking (Session 2.7a)
+    _last_race_status: str | None = field(default=None)
+    _last_status_change_tick: int = field(default=0)
+    _tick_counter: int = field(default=0)
 
     def update(self, tick: Tick, market_feats: dict[str, float]) -> None:
         """Record the latest tick's data into the history."""
+        # Track race status changes (Session 2.7a)
+        self._tick_counter += 1
+        current_status = tick.race_status
+        if current_status != self._last_race_status:
+            self._last_race_status = current_status
+            self._last_status_change_tick = self._tick_counter
+
         for runner in tick.runners:
             sid = runner.selection_id
             if sid not in self._ltp_history:
@@ -580,6 +603,11 @@ class TickHistory:
             else:
                 feats[f"overround_delta{suffix}"] = NaN
 
+        # Time since last status change (Session 2.7a)
+        # Normalised by assuming ~5s ticks: ticks_elapsed * 5 / 1800 (30 min)
+        ticks_since = self._tick_counter - self._last_status_change_tick
+        feats["time_since_status_change"] = min(ticks_since * 5.0 / 1800.0, 1.0)
+
         return feats
 
     def reset(self) -> None:
@@ -588,6 +616,9 @@ class TickHistory:
         self._vol_history.clear()
         self._market_vol_history.clear()
         self._overround_history.clear()
+        self._last_race_status = None
+        self._last_status_change_tick = 0
+        self._tick_counter = 0
 
 
 # ── High-level feature assembly ──────────────────────────────────────────────

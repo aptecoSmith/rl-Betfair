@@ -403,7 +403,7 @@ class TestEdgeCases:
         pm = PopulationManager(small_config, model_store=None)
         expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         assert pm.obs_dim == expected
-        assert pm.obs_dim == 1338
+        assert pm.obs_dim == 1345
 
     def test_action_dim_matches_env(self, small_config: dict):
         pm = PopulationManager(small_config, model_store=None)

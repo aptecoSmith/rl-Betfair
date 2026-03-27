@@ -57,6 +57,10 @@ def runners_df(request) -> pd.DataFrame:
 class TestTicksSchema:
     def test_has_all_expected_columns(self, ticks_df):
         for col in TICKS_COLUMNS:
+            if col == "race_status":
+                # race_status added in Session 2.7a — old Parquet files
+                # won't have it.  Backward-compatible: allowed missing.
+                continue
             assert col in ticks_df.columns, f"Missing column: {col}"
 
     def test_has_rows(self, ticks_df):

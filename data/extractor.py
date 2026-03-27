@@ -7,6 +7,22 @@ weather, runner metadata). Outputs two Parquet files per day:
   data/processed/YYYY-MM-DD.parquet          one row per pre-race tick
   data/processed/YYYY-MM-DD_runners.parquet  one row per runner per market
 
+Two tick sources are supported:
+
+1. **ResolvedMarketSnaps** (legacy) — ~180s conflation, full SnapJson.
+2. **PolledMarketSnapshots** (new, Session 2.7a) — ~5s polling, RunnersJson.
+   RunnersJson has a different layout (``selectionId``, ``state.*``,
+   ``exchange.*``) and is normalised into the same Parquet schema as the
+   legacy path so downstream code is unaffected.
+
+``extract_date()`` auto-detects: if ``PolledMarketSnapshots`` has data for
+the target date it is preferred; otherwise falls back to
+``ResolvedMarketSnaps``.
+
+``RaceStatusEvents`` (WebSocket push) are joined to polled ticks — for each
+tick the most recent race status at that tick's timestamp is added as a
+``race_status`` column.
+
 The ticks file contains the raw SnapJson for the full order book.  The
 runners file contains all RunnerMetaData string fields exactly as stored —
 numeric parsing happens in feature_engineer.py (Session 0.3), not here.
@@ -50,6 +66,7 @@ TICKS_COLUMNS: list[str] = [
     "in_play",
     "snap_json",
     "winner_selection_id",
+    "race_status",
     "temperature",
     "precipitation",
     "wind_speed",
@@ -170,6 +187,67 @@ SQL_MARKET_NAMES = """
     WHERE MarketId IN :market_ids
 """
 
+# ── Polled source SQL (Session 2.7a) ─────────────────────────────────────────
+
+#: Check whether ``PolledMarketSnapshots`` has any rows for a given date.
+SQL_POLLED_HAS_DATE = text("""
+    SELECT 1
+    FROM PolledMarketSnapshots
+    WHERE DATE(Timestamp) = :target_date
+    LIMIT 1
+""")
+
+#: All polled ticks for one day.
+#: Joined with results and weather just like the legacy path.
+SQL_POLLED_TICKS = text("""
+    SELECT
+        pms.MarketId               AS market_id,
+        pms.Timestamp              AS timestamp,
+        pms.Id                     AS sequence_number,
+        pms.RunnersJson            AS runners_json,
+        pms.MarketStatus           AS market_status,
+        pms.InPlay                 AS in_play,
+        pms.TotalMatched           AS traded_volume,
+        pms.NumberOfActiveRunners  AS number_of_active_runners,
+        CAST(mr.WinnerSelectionId AS SIGNED) AS winner_selection_id,
+        wo.Temperature             AS temperature,
+        wo.Precipitation           AS precipitation,
+        wo.WindSpeed               AS wind_speed,
+        wo.WindDirection           AS wind_direction,
+        wo.Humidity                AS humidity,
+        wo.WeatherCode             AS weather_code
+    FROM PolledMarketSnapshots pms
+    LEFT JOIN (
+        SELECT MarketId,
+               MIN(CAST(WinnerSelectionId AS SIGNED)) AS WinnerSelectionId
+        FROM coldData.marketResults
+        GROUP BY MarketId
+    ) mr ON mr.MarketId = pms.MarketId
+    LEFT JOIN coldData.WeatherObservations wo
+        ON wo.MarketId = pms.MarketId
+       AND wo.ObservationType = 'PRE_RACE'
+    WHERE DATE(pms.Timestamp) = :target_date
+    ORDER BY pms.MarketId, pms.Timestamp
+""")
+
+#: Dates that have polled data.
+SQL_POLLED_AVAILABLE_DATES = text("""
+    SELECT DISTINCT DATE(Timestamp) AS race_date
+    FROM PolledMarketSnapshots
+    ORDER BY race_date
+""")
+
+#: Race status events for a given date, ordered for as-of join.
+SQL_RACE_STATUS_EVENTS = text("""
+    SELECT
+        MarketId   AS market_id,
+        Timestamp  AS timestamp,
+        Status     AS status
+    FROM RaceStatusEvents
+    WHERE DATE(Timestamp) = :target_date
+    ORDER BY MarketId, Timestamp
+""")
+
 SQL_RUNNERS = """
     SELECT
         rd.MarketCatalogueMarketId AS market_id,
@@ -265,13 +343,27 @@ class DataExtractor:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get_available_dates(self) -> list[date]:
-        """Return all dates that have pre-race tick data in the DB."""
+        """Return all dates that have tick data in the DB.
+
+        Merges dates from both ``ResolvedMarketSnaps`` (via ``updates``)
+        and ``PolledMarketSnapshots`` so either source is discovered.
+        """
         with self._engine.connect() as conn:
-            result = conn.execute(SQL_AVAILABLE_DATES)
-            return [row.race_date for row in result]
+            legacy_dates = {row.race_date for row in conn.execute(SQL_AVAILABLE_DATES)}
+            polled_dates = self._polled_available_dates(conn)
+            return sorted(legacy_dates | polled_dates)
+
+    def has_polled_data(self, target_date: date) -> bool:
+        """Check whether ``PolledMarketSnapshots`` has rows for *target_date*."""
+        with self._engine.connect() as conn:
+            return self._has_polled_date(target_date, conn)
 
     def extract_date(self, target_date: date) -> bool:
         """Extract one day to Parquet.
+
+        Auto-detects the best source:
+        - If ``PolledMarketSnapshots`` has data → use polled source (higher freq)
+        - Otherwise → fall back to ``ResolvedMarketSnaps`` (legacy)
 
         Writes two files:
         - ``YYYY-MM-DD.parquet``          — tick-level data
@@ -285,10 +377,18 @@ class DataExtractor:
         """
         self._output_dir.mkdir(parents=True, exist_ok=True)
         with self._engine.connect() as conn:
-            ticks_df = self._query_ticks(target_date, conn)
+            use_polled = self._has_polled_date(target_date, conn)
+            if use_polled:
+                logger.info("Using PolledMarketSnapshots for %s", target_date)
+                ticks_df = self._query_polled_ticks(target_date, conn)
+            else:
+                logger.info("Using ResolvedMarketSnaps for %s", target_date)
+                ticks_df = self._query_ticks(target_date, conn)
+
             if ticks_df.empty:
-                logger.warning("No pre-race ticks found for %s — skipping", target_date)
+                logger.warning("No ticks found for %s — skipping", target_date)
                 return False
+
             market_ids = list(ticks_df["market_id"].unique())
             runners_df = self._query_runners(market_ids, conn)
             names_df = self._query_market_names(market_ids, conn)
@@ -300,10 +400,16 @@ class DataExtractor:
         else:
             ticks_df["market_name"] = ""
 
+        # Ensure race_status column exists (legacy path doesn't have it)
+        if "race_status" not in ticks_df.columns:
+            ticks_df["race_status"] = None
+
+        source = "polled" if use_polled else "legacy"
         self._save_day(target_date, ticks_df, runners_df)
         logger.info(
-            "Extracted %s — %d ticks across %d markets, %d runners",
+            "Extracted %s (%s) — %d ticks across %d markets, %d runners",
             target_date,
+            source,
             len(ticks_df),
             len(market_ids),
             len(runners_df),
@@ -413,6 +519,62 @@ class DataExtractor:
             return pd.DataFrame(columns=RUNNERS_COLUMNS)
         return pd.DataFrame(rows, columns=list(result.keys()))
 
+    # ── Polled source helpers (Session 2.7a) ────────────────────────────────
+
+    def _has_polled_date(self, target_date: date, conn: sa.Connection) -> bool:
+        """Return ``True`` if ``PolledMarketSnapshots`` has rows for the date."""
+        try:
+            result = conn.execute(SQL_POLLED_HAS_DATE, {"target_date": target_date.isoformat()})
+            return result.fetchone() is not None
+        except Exception:
+            # Table may not exist in older DB setups
+            return False
+
+    def _polled_available_dates(self, conn: sa.Connection) -> set[date]:
+        """Return all dates with polled data."""
+        try:
+            result = conn.execute(SQL_POLLED_AVAILABLE_DATES)
+            return {row.race_date for row in result}
+        except Exception:
+            return set()
+
+    def _query_polled_ticks(
+        self, target_date: date, conn: sa.Connection,
+    ) -> pd.DataFrame:
+        """Query ``PolledMarketSnapshots`` and normalise into the standard schema.
+
+        The RunnersJson layout differs from SnapJson:
+        ``[{selectionId, handicap, state: {adjustmentFactor, sortPriority,
+        lastPriceTraded, totalMatched, status}, exchange: {availableToBack,
+        availableToLay}}]``.
+
+        This method converts RunnersJson into the SnapJson format expected by
+        ``parse_snap_json`` so all downstream code works unchanged.  It also
+        joins ``RaceStatusEvents`` to add a ``race_status`` column.
+        """
+        result = conn.execute(SQL_POLLED_TICKS, {"target_date": target_date.isoformat()})
+        rows = result.fetchall()
+        if not rows:
+            return pd.DataFrame(columns=TICKS_COLUMNS)
+
+        df = pd.DataFrame(rows, columns=list(result.keys()))
+
+        # Convert RunnersJson → SnapJson (normalised format)
+        df["snap_json"] = df["runners_json"].apply(_polled_runners_to_snap_json)
+        df.drop(columns=["runners_json"], inplace=True)
+
+        # Extract venue and market_start_time from updates / marketOnDates.
+        # PolledMarketSnapshots doesn't store venue or marketTime — we pull
+        # them from the same coldData sources as the legacy path, but only
+        # where available.  For now, set defaults; _enrich_polled will
+        # attempt to fill them.
+        df = _enrich_polled_ticks(df, conn)
+
+        # Join RaceStatusEvents — as-of merge by market_id + timestamp
+        df = _join_race_status(df, target_date, conn)
+
+        return _cast_ticks(df)
+
     def _save_day(
         self,
         target_date: date,
@@ -506,6 +668,163 @@ def _cast_ticks(df: pd.DataFrame) -> pd.DataFrame:
         df["in_play"] = df["in_play"].astype(bool)
 
     return df
+
+
+# ── Polled → SnapJson normalisation (Session 2.7a) ───────────────────────────
+
+
+def _polled_runners_to_snap_json(runners_json_str: str | None) -> str:
+    """Convert a ``PolledMarketSnapshots.RunnersJson`` string to SnapJson format.
+
+    Input (per runner)::
+
+        {
+          "selectionId": 12345,
+          "handicap": 0.0,
+          "state": {
+            "adjustmentFactor": 10.0,
+            "sortPriority": 1,
+            "lastPriceTraded": 3.5,
+            "totalMatched": 50000.0,
+            "status": "ACTIVE"
+          },
+          "exchange": {
+            "availableToBack": [{"price": 3.4, "size": 100.0}],
+            "availableToLay":  [{"price": 3.55, "size": 50.0}]
+          }
+        }
+
+    Output: SnapJson ``{"MarketRunners": [...]}`` format matching the nested
+    layout that ``parse_snap_json`` already handles.
+    """
+    if not runners_json_str:
+        return json.dumps({"MarketRunners": []})
+
+    try:
+        polled = json.loads(runners_json_str)
+    except (json.JSONDecodeError, TypeError):
+        return json.dumps({"MarketRunners": []})
+
+    if not isinstance(polled, list):
+        return json.dumps({"MarketRunners": []})
+
+    market_runners: list[dict] = []
+    for r in polled:
+        state = r.get("state") or {}
+        exchange = r.get("exchange") or {}
+
+        runner = {
+            "RunnerId": {"SelectionId": r.get("selectionId", 0)},
+            "Definition": {
+                "Status": state.get("status", "ACTIVE"),
+                "AdjustmentFactor": state.get("adjustmentFactor"),
+                "SortPriority": state.get("sortPriority"),
+            },
+            "Prices": {
+                "LastTradedPrice": state.get("lastPriceTraded", 0.0),
+                "TradedVolume": state.get("totalMatched", 0.0),
+                "StartingPriceNear": 0.0,
+                "StartingPriceFar": 0.0,
+                "AvailableToBack": exchange.get("availableToBack", []),
+                "AvailableToLay": exchange.get("availableToLay", []),
+            },
+        }
+        market_runners.append(runner)
+
+    return json.dumps({"MarketRunners": market_runners})
+
+
+def _enrich_polled_ticks(df: pd.DataFrame, conn: sa.Connection) -> pd.DataFrame:
+    """Add venue, market_start_time and market_type to polled ticks.
+
+    ``PolledMarketSnapshots`` doesn't carry venue, scheduled start time, or
+    market type — we pull these from the ``updates`` table (one lookup per
+    market).  Also drops the ``market_status`` column (not in TICKS_COLUMNS).
+    """
+    if df.empty:
+        return df
+
+    market_ids = list(df["market_id"].unique())
+
+    # Fetch venue + market start time + market type from updates
+    try:
+        stmt = text("""
+            SELECT DISTINCT MarketId AS market_id,
+                   Venue AS venue,
+                   MarketStartTime AS market_start_time,
+                   MarketType AS market_type
+            FROM updates
+            WHERE MarketId IN :market_ids
+        """).bindparams(bindparam("market_ids", expanding=True))
+        result = conn.execute(stmt, {"market_ids": market_ids})
+        rows = result.fetchall()
+        if rows:
+            updates_df = pd.DataFrame(rows, columns=list(result.keys()))
+            updates_df = updates_df.drop_duplicates(subset=["market_id"], keep="first")
+            df = df.merge(
+                updates_df[["market_id", "venue", "market_start_time", "market_type"]],
+                on="market_id", how="left",
+            )
+            df["venue"] = df["venue"].fillna("")
+            df["market_type"] = df["market_type"].fillna("")
+        else:
+            df["venue"] = ""
+            df["market_start_time"] = None
+            df["market_type"] = ""
+    except Exception:
+        df["venue"] = ""
+        if "market_start_time" not in df.columns:
+            df["market_start_time"] = None
+        df["market_type"] = ""
+
+    # Drop market_status (polled-only column, not in TICKS_COLUMNS)
+    if "market_status" in df.columns:
+        df.drop(columns=["market_status"], inplace=True)
+
+    return df
+
+
+def _join_race_status(
+    df: pd.DataFrame, target_date: date, conn: sa.Connection,
+) -> pd.DataFrame:
+    """Join ``RaceStatusEvents`` to ticks as an as-of (point-in-time) merge.
+
+    For each tick, find the most recent race status event at or before that
+    tick's timestamp (per market).  Adds a ``race_status`` column.
+    """
+    if df.empty:
+        df["race_status"] = None
+        return df
+
+    try:
+        result = conn.execute(SQL_RACE_STATUS_EVENTS, {"target_date": target_date.isoformat()})
+        rows = result.fetchall()
+    except Exception:
+        df["race_status"] = None
+        return df
+
+    if not rows:
+        df["race_status"] = None
+        return df
+
+    events_df = pd.DataFrame(rows, columns=list(result.keys()))
+    events_df["timestamp"] = pd.to_datetime(events_df["timestamp"])
+    events_df = events_df.sort_values(["market_id", "timestamp"])
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # As-of merge: for each tick find the latest event at or before that timestamp
+    merged = pd.merge_asof(
+        df.sort_values(["market_id", "timestamp"]),
+        events_df[["market_id", "timestamp", "status"]].rename(columns={"status": "race_status"}),
+        on="timestamp",
+        by="market_id",
+        direction="backward",
+    )
+
+    # Restore original ordering
+    merged = merged.sort_values(["market_id", "sequence_number"])
+    return merged
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────

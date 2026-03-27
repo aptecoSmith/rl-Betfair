@@ -60,11 +60,17 @@ MARKET_KEYS: list[str] = [
     "avg_spread",
     "temperature", "precipitation", "wind_speed",
     "wind_direction", "humidity", "weather_code",
+    # Race status one-hot (Session 2.7a) — 6 dims
+    "race_status_parading", "race_status_going_down",
+    "race_status_going_behind", "race_status_under_orders",
+    "race_status_at_the_post", "race_status_off",
 ]
 
 MARKET_VELOCITY_KEYS: list[str] = [
     "market_vol_delta_3", "market_vol_delta_5", "market_vol_delta_10",
     "overround_delta_3", "overround_delta_5", "overround_delta_10",
+    # Race status timing (Session 2.7a) — 1 dim
+    "time_since_status_change",
 ]
 
 RUNNER_KEYS: list[str] = [
@@ -112,8 +118,8 @@ RUNNER_KEYS: list[str] = [
 AGENT_STATE_DIM = 5  # in_play, budget_frac, liability_frac, bets_norm, races_norm
 
 # Derived constants
-MARKET_DIM = len(MARKET_KEYS)            # 25
-VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 6
+MARKET_DIM = len(MARKET_KEYS)            # 31 (25 + 6 race status one-hot)
+VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 7 (6 + 1 time_since_status_change)
 RUNNER_DIM = len(RUNNER_KEYS)             # 93
 
 # Action thresholds
@@ -148,7 +154,7 @@ class BetfairEnv(gymnasium.Env):
     Observation space
     -----------------
     Flat ``float32`` vector:
-    ``[market (25) | velocity (6) | runners×93 (max_runners×93) | agent_state (5)]``
+    ``[market (31) | velocity (7) | runners×93 (max_runners×93) | agent_state (5)]``
 
     NaN values from the feature engineer are replaced with 0.
 

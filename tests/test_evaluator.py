@@ -102,6 +102,7 @@ def _make_tick(
         traded_volume=10000.0,
         in_play=in_play,
         winner_selection_id=winner,
+        race_status=None,
         temperature=15.0,
         precipitation=0.0,
         wind_speed=5.0,

@@ -85,10 +85,10 @@ class TestArchitectureRegistry:
 
 class TestObsDimConstants:
     def test_market_dim(self):
-        assert MARKET_DIM == 25
+        assert MARKET_DIM == 31  # 25 base + 6 race status one-hot
 
     def test_velocity_dim(self):
-        assert VELOCITY_DIM == 6
+        assert VELOCITY_DIM == 7  # 6 base + 1 time_since_status_change
 
     def test_runner_dim(self):
         assert RUNNER_DIM == 93
@@ -97,12 +97,12 @@ class TestObsDimConstants:
         assert AGENT_STATE_DIM == 5
 
     def test_market_total_dim(self):
-        assert MARKET_TOTAL_DIM == 36
+        assert MARKET_TOTAL_DIM == 43  # 31 + 7 + 5
 
     def test_obs_dim_matches_env(self):
         expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM
-        assert expected == 1338
-        assert OBS_DIM == 1338
+        assert expected == 1345
+        assert OBS_DIM == 1345
 
 
 # ── PPOLSTMPolicy architecture ──────────────────────────────────────────────

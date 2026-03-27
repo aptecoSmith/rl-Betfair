@@ -339,6 +339,46 @@
 - **Angular integration:** 6 tests (vitest, skip when API not running): load real model, hyperparams match registry, P&L chart renders, lineage tree loads, correct parents, architecture + generation display
 - All 804 Python tests pass, all 188 Angular tests pass (12 skipped — integration)
 
+### Session 2.7a — PolledMarketSnapshots + RaceStatusEvents
+**Status:** Done
+
+#### Extractor — dual source with auto-detect
+- `data/extractor.py` — auto-detects tick source per date: if `PolledMarketSnapshots` has data, use it (higher frequency ~5s); otherwise fall back to `ResolvedMarketSnaps` (legacy ~180s conflation)
+- New SQL queries: `SQL_POLLED_HAS_DATE`, `SQL_POLLED_TICKS`, `SQL_POLLED_AVAILABLE_DATES`, `SQL_RACE_STATUS_EVENTS`
+- `_polled_runners_to_snap_json()` — converts the polled `RunnersJson` format (`selectionId`, `state.*`, `exchange.*`) into the nested `SnapJson` format (`MarketRunners → RunnerId/Definition/Prices`) so `parse_snap_json` and all downstream code works unchanged
+- `_enrich_polled_ticks()` — pulls venue, market_start_time, market_type from the `updates` table (polled snapshots don't carry these)
+- `_join_race_status()` — as-of merge of `RaceStatusEvents` by market_id + timestamp: for each tick, finds the most recent race status event at or before that tick's timestamp
+- `get_available_dates()` now merges dates from both sources
+- `has_polled_data(date)` public method for checking availability
+- `race_status` column added to `TICKS_COLUMNS`
+
+#### Episode builder
+- `race_status: str | None` field added to `Tick` dataclass (after `winner_selection_id`)
+- `_row_to_tick()` reads `race_status` from Parquet, handles missing column (backward-compatible with old files)
+
+#### Feature engineer
+- `RACE_STATUSES` constant: 6 known statuses (`parading`, `going down`, `going behind`, `under orders`, `at the post`, `off`)
+- `market_tick_features()` now produces 6 one-hot features (`race_status_parading`, `race_status_going_down`, etc.) — all zeros when `race_status` is None (old data)
+- `TickHistory` tracks race status changes: `_last_race_status`, `_last_status_change_tick`, `_tick_counter`
+- `market_velocity_features()` now includes `time_since_status_change` — normalised (ticks_since_change * 5s / 1800s), clamped to [0, 1]
+- `reset()` clears race status tracking state
+
+#### Environment
+- `MARKET_KEYS` extended with 6 race status one-hot keys → `MARKET_DIM` = 31 (was 25)
+- `MARKET_VELOCITY_KEYS` extended with `time_since_status_change` → `VELOCITY_DIM` = 7 (was 6)
+- Total `obs_dim` = 31 + 7 + (93 × 14) + 5 = **1345** (was 1338, delta +7)
+- `MARKET_TOTAL_DIM` in `policy_network.py` updated to 43 (was 36)
+- Fully backward-compatible: old Parquet files with no `race_status` column produce all-zero race status features
+
+#### Notes
+- `PolledMarketSnapshots` and `RaceStatusEvents` tables exist in MySQL but are empty (BetfairPoller hasn't recorded data yet). All code is tested with mocks + the legacy path continues to work
+- Existing models (trained on obs_dim=1338) are incompatible with the new obs_dim=1345. Retraining required after this change
+
+#### Tests
+- **47 unit tests** (test_session_2_7a.py): polled→snap conversion (16 tests incl. null/empty/invalid/missing state, parse_snap_json round-trip), race status join (4 tests: basic, no events, empty ticks, multiple markets), extractor auto-detect (4 tests: no table, no rows, rows exist, legacy adds race_status), episode builder (4 tests: race_status field, None default, all values, backward compat with old Parquet), feature engineer race status (8 tests: one-hot all zeros/parading/under orders/off/case insensitive/all 6 statuses, RACE_STATUSES constant), time_since_status_change (5 tests: initial zero, increases, resets on change, clamps at 1.0, reset clears), env dimensions (6 tests: market_dim, velocity_dim, keys contain statuses, obs_dim, backward compat env episode)
+- **7 integration tests** (test_integration_session_2_7a.py): auto-detect on real DB, available_dates includes legacy, extract_date legacy fallback, load_day backward compat, feature engineer handles None, time_since_status_change present, env runs full episode with old data
+- All 858 Python tests pass (was 804), 2 skipped, 102 deselected
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -376,9 +416,10 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 3.4     | 11 (Python) + 76 (Angular) | 1 (Python) | **754 + 114** (Python) + **95 + 6** (Angular) |
 | 3.8     | 27 (Python) + 42 (Angular) | 4 (Python) | **781 + 118** (Python) + **137 + 6** (Angular) |
 | 3.5     | 51 (Angular)    | 6 (Angular)            | **781 + 118** (Python) + **188 + 12** (Angular) |
+| 2.7a    | 47              | 7                      | **828 + 125** (Python) + **188 + 12** (Angular) |
 
-**Python total: 804 passed, 2 skipped, 102 deselected.**
-**Angular total: 188 passed, 12 skipped (integration — API not running).**
+**Python total: 858 passed, 2 skipped, 102 deselected.**
+**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 2.7a.)**
 
 ---
 
@@ -403,3 +444,7 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 9. **CUDA cu126 not cu124** (Session 2.6a) — Python 3.14 had no cu124 wheels. Used cu126 instead. RTX 3090 confirmed working with 55 MB VRAM for single-agent training.
 
 10. **Device propagation fix** (Session 2.6a) — `TrainingOrchestrator` was passing the raw `device` constructor parameter (None) to the `Evaluator` instead of the resolved `self.device` ("cuda"). This caused CPU/CUDA tensor mismatch errors that only appeared when actually running on GPU.
+
+11. **Polled → SnapJson normalisation** (Session 2.7a) — `PolledMarketSnapshots.RunnersJson` uses a different layout (`selectionId`, `state.*`, `exchange.*`) than `ResolvedMarketSnaps.SnapJson` (`MarketRunners → RunnerId/Definition/Prices`). Rather than adding a second parser, the polled format is normalised into SnapJson format at extraction time, keeping all downstream code unchanged.
+
+12. **obs_dim breaking change** (Session 2.7a) — Adding 7 race status features changes obs_dim from 1338 to 1345. Existing trained models are incompatible and must be retrained. This is acceptable because the model registry is empty (no production models yet).
