@@ -432,9 +432,12 @@ of redundant re-computation; rollout+eval = ~2.4 h/gen, all sequential.
 2. **Vectorise env.step() loop** — rollout is pure Python iterating tick-by-tick.
    Observation arrays are already pre-computed numpy. Batch forward passes across
    ticks where the agent does nothing, or move step logic to vectorised numpy ops.
-3. **Parallel agent training** — agents trained sequentially; 55 MB GPU per agent
-   on 24 GB card = room for 4–8 agents in parallel. Use `torch.multiprocessing`
-   or overlap CPU rollout with GPU PPO updates via async workers.
+3. **Parallel agent training** — agents trained sequentially. VRAM is not the
+   constraint (55 MB/agent, could fit hundreds). The bottleneck is CPU: rollout
+   collection is 55% of training time and is pure Python/CPU. Practical parallelism
+   is limited by CPU core count (~8–16 agents). Best approach: pipeline CPU
+   rollout collection with GPU PPO updates — while agent A's rollout runs on CPU,
+   agent B's PPO update runs on GPU. Use `torch.multiprocessing` or a worker pool.
 4. **Batch rollout across days** — instead of one env per day sequentially, batch
    multiple days into a vectorised env (like SB3 `SubprocVecEnv`) so the GPU gets
    larger batches per forward pass.
