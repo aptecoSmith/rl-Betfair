@@ -11,6 +11,7 @@ population:
   size: 20
   n_elite: 3
   selection_top_pct: 0.5        # top 50% survive each generation
+  mutation_rate: 0.3            # probability of mutating each hyperparameter in bred children
 
 reward:
   # Multiplier applied to P&L when agent correctly backed the winner ≥ 5 min before off

@@ -26,11 +26,16 @@ Usage::
 from __future__ import annotations
 
 import math
+import os
 import random
+import uuid
 from dataclasses import dataclass, field
+from datetime import date as date_cls
+from pathlib import Path
 
 from agents.architecture_registry import REGISTRY, create_policy
 from agents.policy_network import BasePolicy
+from registry.model_store import GeneticEventRecord
 from registry.scoreboard import ModelScore
 
 
@@ -368,8 +373,453 @@ class PopulationManager:
 
         return discarded
 
+    # -- Genetic operators ---------------------------------------------------------
 
-# -- Selection result ----------------------------------------------------------
+    def crossover(
+        self,
+        parent_a_hp: dict,
+        parent_b_hp: dict,
+        rng: random.Random | None = None,
+    ) -> tuple[dict, dict[str, str]]:
+        """Uniform crossover: for each hyperparameter, randomly inherit from A or B.
+
+        Parameters
+        ----------
+        parent_a_hp, parent_b_hp:
+            Hyperparameter dicts of the two parents.
+        rng:
+            Optional seeded Random instance.
+
+        Returns
+        -------
+        (child_hp, inheritance_map)
+            child_hp: the child's hyperparameters.
+            inheritance_map: {param_name: "A" | "B"} showing which parent was chosen.
+        """
+        rng = rng or random.Random()
+        child: dict = {}
+        inheritance: dict[str, str] = {}
+
+        for spec in self.hp_specs:
+            name = spec.name
+            if rng.random() < 0.5:
+                child[name] = parent_a_hp[name]
+                inheritance[name] = "A"
+            else:
+                child[name] = parent_b_hp[name]
+                inheritance[name] = "B"
+
+        # Architecture inherits like any other trait
+        if rng.random() < 0.5:
+            child["architecture_name"] = parent_a_hp.get(
+                "architecture_name", self.default_architecture
+            )
+            inheritance["architecture_name"] = "A"
+        else:
+            child["architecture_name"] = parent_b_hp.get(
+                "architecture_name", self.default_architecture
+            )
+            inheritance["architecture_name"] = "B"
+
+        return child, inheritance
+
+    def mutate(
+        self,
+        hp: dict,
+        mutation_rate: float = 0.3,
+        rng: random.Random | None = None,
+    ) -> tuple[dict, dict[str, float | None]]:
+        """Apply mutation to hyperparameters.
+
+        For each parameter, with probability ``mutation_rate``:
+        - float / float_log: Gaussian noise (sigma = 10% of range).
+        - int: random shift of ±1 (or ±1 step for int_choice).
+        - int_choice: jump to an adjacent choice.
+
+        The result is always clamped to the valid range.
+
+        Parameters
+        ----------
+        hp:
+            Hyperparameters to mutate (modified in-place AND returned).
+        mutation_rate:
+            Probability of mutating each parameter.
+        rng:
+            Optional seeded Random instance.
+
+        Returns
+        -------
+        (mutated_hp, deltas)
+            mutated_hp: the (possibly mutated) hyperparameters.
+            deltas: {param_name: delta} for mutated params, None for unmutated.
+        """
+        rng = rng or random.Random()
+        deltas: dict[str, float | None] = {}
+
+        for spec in self.hp_specs:
+            name = spec.name
+            if rng.random() >= mutation_rate:
+                deltas[name] = None
+                continue
+
+            old_val = hp[name]
+
+            if spec.type == "float":
+                sigma = (spec.max - spec.min) * 0.1
+                delta = rng.gauss(0, sigma)
+                new_val = max(spec.min, min(spec.max, old_val + delta))
+                deltas[name] = new_val - old_val
+                hp[name] = new_val
+
+            elif spec.type == "float_log":
+                log_old = math.log(old_val)
+                log_range = math.log(spec.max) - math.log(spec.min)
+                sigma = log_range * 0.1
+                log_new = log_old + rng.gauss(0, sigma)
+                log_new = max(math.log(spec.min), min(math.log(spec.max), log_new))
+                new_val = max(spec.min, min(spec.max, math.exp(log_new)))
+                deltas[name] = new_val - old_val
+                hp[name] = new_val
+
+            elif spec.type == "int":
+                delta = rng.choice([-1, 1])
+                new_val = max(int(spec.min), min(int(spec.max), old_val + delta))
+                deltas[name] = float(new_val - old_val)
+                hp[name] = new_val
+
+            elif spec.type == "int_choice":
+                idx = spec.choices.index(old_val)
+                direction = rng.choice([-1, 1])
+                new_idx = max(0, min(len(spec.choices) - 1, idx + direction))
+                new_val = spec.choices[new_idx]
+                deltas[name] = float(new_val - old_val)
+                hp[name] = new_val
+
+        return hp, deltas
+
+    def breed(
+        self,
+        selection_result: SelectionResult,
+        generation: int,
+        mutation_rate: float = 0.3,
+        seed: int | None = None,
+    ) -> tuple[list[AgentRecord], list[BreedingRecord]]:
+        """Breed children to fill the population back to full size.
+
+        Survivors are kept unchanged. Children are bred from pairs of survivors
+        via crossover + mutation to fill remaining slots.
+
+        Parameters
+        ----------
+        selection_result:
+            Result from :meth:`select`.
+        generation:
+            Generation number for the new children.
+        mutation_rate:
+            Probability of mutating each hyperparameter in a child.
+        seed:
+            Optional RNG seed.
+
+        Returns
+        -------
+        (children, breeding_records)
+            children: list of new AgentRecords for bred children.
+            breeding_records: detailed record of each breeding event.
+        """
+        rng = random.Random(seed)
+        survivors = selection_result.survivors
+        n_children = self.population_size - len(survivors)
+
+        # Need survivor hyperparams — look them up from ranked_scores or store
+        survivor_hp: dict[str, dict] = {}
+        for s in selection_result.ranked_scores:
+            if s.model_id in survivors:
+                if self.model_store is not None:
+                    record = self.model_store.get_model(s.model_id)
+                    survivor_hp[s.model_id] = record.hyperparameters
+                # else: caller must provide them (unit test scenario handled below)
+
+        children: list[AgentRecord] = []
+        breeding_records: list[BreedingRecord] = []
+
+        for _ in range(n_children):
+            # Pick two parents from survivors
+            parent_a_id, parent_b_id = rng.sample(survivors, 2)
+
+            # Get parent hyperparams
+            hp_a = survivor_hp.get(parent_a_id)
+            hp_b = survivor_hp.get(parent_b_id)
+            if hp_a is None or hp_b is None:
+                raise RuntimeError(
+                    "Cannot breed: parent hyperparameters not available. "
+                    "Ensure model_store is set."
+                )
+
+            # Crossover
+            child_hp, inheritance = self.crossover(hp_a, hp_b, rng)
+
+            # Mutation
+            child_hp, deltas = self.mutate(child_hp, mutation_rate, rng)
+
+            arch_name = child_hp.get("architecture_name", self.default_architecture)
+
+            # Create policy
+            policy = create_policy(
+                name=arch_name,
+                obs_dim=self.obs_dim,
+                action_dim=self.action_dim,
+                max_runners=self.max_runners,
+                hyperparams=child_hp,
+            )
+
+            # Register in store
+            arch_cls = REGISTRY[arch_name]
+            model_id = ""
+            if self.model_store is not None:
+                model_id = self.model_store.create_model(
+                    generation=generation,
+                    architecture_name=arch_name,
+                    architecture_description=arch_cls.description,
+                    hyperparameters=child_hp,
+                    parent_a_id=parent_a_id,
+                    parent_b_id=parent_b_id,
+                )
+                self.model_store.save_weights(model_id, policy.state_dict())
+            else:
+                model_id = str(uuid.uuid4())
+
+            children.append(
+                AgentRecord(
+                    model_id=model_id,
+                    generation=generation,
+                    hyperparameters=child_hp,
+                    architecture_name=arch_name,
+                    policy=policy,
+                )
+            )
+
+            breeding_records.append(
+                BreedingRecord(
+                    child_model_id=model_id,
+                    parent_a_id=parent_a_id,
+                    parent_b_id=parent_b_id,
+                    parent_a_hp=hp_a,
+                    parent_b_hp=hp_b,
+                    child_hp=child_hp,
+                    inheritance=inheritance,
+                    deltas=deltas,
+                )
+            )
+
+        return children, breeding_records
+
+    # -- Genetic event logging -----------------------------------------------------
+
+    def log_generation(
+        self,
+        generation: int,
+        selection_result: SelectionResult,
+        breeding_records: list[BreedingRecord],
+        discarded: list[str],
+    ) -> None:
+        """Log all genetic events for a generation to SQLite and a human-readable log file.
+
+        Parameters
+        ----------
+        generation:
+            The generation number.
+        selection_result:
+            Result from :meth:`select`.
+        breeding_records:
+            Records from :meth:`breed`.
+        discarded:
+            Model IDs that were discarded.
+        """
+        logs_dir = Path(self.config.get("paths", {}).get("logs", "logs")) / "genetics"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        today = date_cls.today().isoformat()
+        log_path = logs_dir / f"gen_{generation}_{today}.log"
+
+        lines: list[str] = []
+        lines.append(f"=== Generation {generation} — {today} ===\n")
+
+        # -- Selection events --
+        lines.append("SELECTION")
+        score_map = {s.model_id: s for s in selection_result.ranked_scores}
+
+        elite_parts = []
+        for mid in selection_result.elites:
+            s = score_map.get(mid)
+            sc = f"{s.composite_score:.4f}" if s else "?"
+            elite_parts.append(f"  {mid[:12]} [score={sc}]")
+            self._record_event(generation, "selection", parent_a_id=mid,
+                               selection_reason="elite",
+                               summary=f"Survived as elite [score={sc}]")
+        if elite_parts:
+            lines.append("  Survived (elite):")
+            lines.extend(f"    {p.strip()}" for p in elite_parts)
+
+        non_elite_survivors = [
+            mid for mid in selection_result.survivors
+            if mid not in selection_result.elites
+        ]
+        surv_parts = []
+        for mid in non_elite_survivors:
+            s = score_map.get(mid)
+            sc = f"{s.composite_score:.4f}" if s else "?"
+            surv_parts.append(f"  {mid[:12]} [score={sc}]")
+            self._record_event(generation, "selection", parent_a_id=mid,
+                               selection_reason="top_50pct",
+                               summary=f"Survived top 50% [score={sc}]")
+        if surv_parts:
+            lines.append("  Survived (top 50%):")
+            lines.extend(f"    {p.strip()}" for p in surv_parts)
+
+        for mid in discarded:
+            s = score_map.get(mid)
+            sc = f"{s.composite_score:.4f}" if s else "?"
+            wr = f"{s.win_rate:.2f}" if s else "?"
+            lines.append(f"  Discarded: {mid[:12]} [score={sc}, win_rate={wr}]")
+            self._record_event(generation, "discard", parent_a_id=mid,
+                               selection_reason="discarded",
+                               summary=f"Discarded [score={sc}, win_rate={wr}]")
+
+        lines.append("")
+
+        # -- Breeding events --
+        if breeding_records:
+            lines.append("BREEDING")
+            for br in breeding_records:
+                parent_a_score = score_map.get(br.parent_a_id)
+                parent_b_score = score_map.get(br.parent_b_id)
+                pa_sc = f"{parent_a_score.composite_score:.4f}" if parent_a_score else "?"
+                pb_sc = f"{parent_b_score.composite_score:.4f}" if parent_b_score else "?"
+
+                lines.append(f"  Child: {br.child_model_id[:12]}")
+                lines.append(f"    Parent A: {br.parent_a_id[:12]} (score={pa_sc})")
+                lines.append(f"    Parent B: {br.parent_b_id[:12]} (score={pb_sc})")
+                lines.append("    Trait inheritance:")
+
+                mutated_count = 0
+                mutated_names = []
+                for spec in self.hp_specs:
+                    name = spec.name
+                    inherited = br.inheritance.get(name, "?")
+                    final = br.child_hp.get(name)
+                    parent_val = br.parent_a_hp.get(name) if inherited == "A" else br.parent_b_hp.get(name)
+                    delta = br.deltas.get(name)
+
+                    if delta is not None and delta != 0:
+                        mutated_count += 1
+                        mutated_names.append(name)
+                        lines.append(
+                            f"      {name:30s} {_fmt_val(parent_val)} (from {inherited})"
+                            f" → {_fmt_val(final)}  (mutated {delta:+.6g})"
+                        )
+                    else:
+                        lines.append(
+                            f"      {name:30s} {_fmt_val(final)} (from {inherited})"
+                            f"  ← no mutation"
+                        )
+
+                    # Record crossover event
+                    self._record_event(
+                        generation, "crossover",
+                        child_model_id=br.child_model_id,
+                        parent_a_id=br.parent_a_id,
+                        parent_b_id=br.parent_b_id,
+                        hyperparameter=name,
+                        parent_a_value=str(br.parent_a_hp.get(name)),
+                        parent_b_value=str(br.parent_b_hp.get(name)),
+                        inherited_from=inherited,
+                        mutation_delta=delta,
+                        final_value=str(final),
+                        selection_reason=f"bred_from: [{br.parent_a_id[:12]}, {br.parent_b_id[:12]}]",
+                        summary=(
+                            f"Child {br.child_model_id[:12]} "
+                            f"{name}={_fmt_val(final)} from {inherited}"
+                            + (f" (mutated {delta:+.6g})" if delta and delta != 0 else "")
+                        ),
+                    )
+
+                # Architecture inheritance
+                arch_inh = br.inheritance.get("architecture_name", "?")
+                lines.append(
+                    f"      {'architecture_name':30s} {br.child_hp.get('architecture_name')}"
+                    f" (from {arch_inh})"
+                )
+
+                summary = f"    Summary: {mutated_count} traits mutated."
+                if mutated_names:
+                    summary += f" Mutated: {', '.join(mutated_names)}."
+                lines.append(summary)
+                lines.append("")
+
+        # Write log file
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _record_event(
+        self,
+        generation: int,
+        event_type: str,
+        child_model_id: str | None = None,
+        parent_a_id: str | None = None,
+        parent_b_id: str | None = None,
+        hyperparameter: str | None = None,
+        parent_a_value: str | None = None,
+        parent_b_value: str | None = None,
+        inherited_from: str | None = None,
+        mutation_delta: float | None = None,
+        final_value: str | None = None,
+        selection_reason: str | None = None,
+        summary: str | None = None,
+    ) -> None:
+        """Record a single genetic event to the model store (if available)."""
+        if self.model_store is None:
+            return
+        self.model_store.record_genetic_event(
+            GeneticEventRecord(
+                event_id=str(uuid.uuid4()),
+                generation=generation,
+                event_type=event_type,
+                child_model_id=child_model_id,
+                parent_a_id=parent_a_id,
+                parent_b_id=parent_b_id,
+                hyperparameter=hyperparameter,
+                parent_a_value=parent_a_value,
+                parent_b_value=parent_b_value,
+                inherited_from=inherited_from,
+                mutation_delta=mutation_delta,
+                final_value=final_value,
+                selection_reason=selection_reason,
+                human_summary=summary,
+            )
+        )
+
+
+# -- Data classes --------------------------------------------------------------
+
+
+def _fmt_val(v) -> str:
+    """Format a hyperparameter value for log display."""
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    return str(v)
+
+
+@dataclass
+class BreedingRecord:
+    """Detailed record of one breeding event (crossover + mutation)."""
+
+    child_model_id: str
+    parent_a_id: str
+    parent_b_id: str
+    parent_a_hp: dict
+    parent_b_hp: dict
+    child_hp: dict
+    inheritance: dict[str, str]         # {param: "A" | "B"}
+    deltas: dict[str, float | None]     # {param: delta or None}
 
 
 @dataclass

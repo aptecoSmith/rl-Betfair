@@ -99,6 +99,19 @@
   - Never discards for bad days alone; all three must fail simultaneously
 - 37 unit tests + 9 integration tests (scored population → select → discard → verify store status)
 
+### Session 2.3 — Genetic operators & logging
+**Status:** Done
+
+- `crossover()` — uniform crossover: for each hyperparameter, randomly inherit from parent A or B. Returns child hyperparams + inheritance map.
+- `mutate()` — Gaussian noise on float/float_log params (sigma = 10% of range), ±1 step on int/int_choice params. All results clamped to valid ranges. Configurable mutation_rate (default 0.3).
+- `breed()` — fills population back to full size by breeding children from survivors. Picks two parents at random from survivors, applies crossover + mutation, creates policy, registers in model store with parent IDs.
+- `log_generation()` — writes human-readable log to `logs/genetics/gen_N_YYYY-MM-DD.log` and records all events to `genetic_events` SQLite table.
+- `genetic_events` table added to model_store.py: event_id, generation, event_type, child/parent IDs, per-hyperparameter inheritance/mutation details, selection_reason, human_summary.
+- `GeneticEventRecord` dataclass + `record_genetic_event()` / `get_genetic_events()` CRUD on ModelStore.
+- `BreedingRecord` dataclass captures full breeding details per child.
+- `mutation_rate` added to config.yaml under `population`.
+- 36 unit tests + 10 integration tests (full select → breed → log pipeline, SQLite events, log files, child lineage, weight round-trip)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -127,8 +140,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | *Misc*  | 12              | —                      | **524 + 57**  |
 | 2.1     | 44              | 7                      | **568 + 64**  |
 | 2.2     | 37              | 9                      | **605 + 73**  |
+| 2.3     | 36              | 10                     | **641 + 83**  |
 
-**Current total: 605 unit + 73 integration = 678 tests, all passing.**
+**Current total: 641 unit + 82 integration = 723 tests, all passing.**
 
 ---
 

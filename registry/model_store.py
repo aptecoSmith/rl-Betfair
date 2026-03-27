@@ -98,6 +98,26 @@ class EvaluationBetRecord:
     pnl: float
 
 
+@dataclass
+class GeneticEventRecord:
+    """A genetic event (selection, crossover, mutation, discard)."""
+
+    event_id: str
+    generation: int
+    event_type: str  # "selection" | "crossover" | "mutation" | "discard"
+    child_model_id: str | None = None
+    parent_a_id: str | None = None
+    parent_b_id: str | None = None
+    hyperparameter: str | None = None
+    parent_a_value: str | None = None
+    parent_b_value: str | None = None
+    inherited_from: str | None = None  # "A" | "B"
+    mutation_delta: float | None = None
+    final_value: str | None = None
+    selection_reason: str | None = None
+    human_summary: str | None = None
+
+
 # -- ModelStore ----------------------------------------------------------------
 
 
@@ -428,6 +448,87 @@ class ModelStore:
         finally:
             conn.close()
 
+    # -- Genetic events -------------------------------------------------------
+
+    def record_genetic_event(self, record: GeneticEventRecord) -> None:
+        """Insert one genetic event record."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO genetic_events
+                    (event_id, generation, event_type, child_model_id,
+                     parent_a_id, parent_b_id, hyperparameter,
+                     parent_a_value, parent_b_value, inherited_from,
+                     mutation_delta, final_value, selection_reason,
+                     human_summary)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.event_id,
+                    record.generation,
+                    record.event_type,
+                    record.child_model_id,
+                    record.parent_a_id,
+                    record.parent_b_id,
+                    record.hyperparameter,
+                    record.parent_a_value,
+                    record.parent_b_value,
+                    record.inherited_from,
+                    record.mutation_delta,
+                    record.final_value,
+                    record.selection_reason,
+                    record.human_summary,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_genetic_events(
+        self,
+        generation: int | None = None,
+        child_model_id: str | None = None,
+    ) -> list[GeneticEventRecord]:
+        """Query genetic events, optionally filtered by generation or child model."""
+        conn = self._get_conn()
+        try:
+            conditions: list[str] = []
+            params: list = []
+            if generation is not None:
+                conditions.append("generation = ?")
+                params.append(generation)
+            if child_model_id is not None:
+                conditions.append("child_model_id = ?")
+                params.append(child_model_id)
+
+            where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+            rows = conn.execute(
+                f"SELECT * FROM genetic_events{where} ORDER BY rowid",
+                params,
+            ).fetchall()
+            return [
+                GeneticEventRecord(
+                    event_id=r["event_id"],
+                    generation=r["generation"],
+                    event_type=r["event_type"],
+                    child_model_id=r["child_model_id"],
+                    parent_a_id=r["parent_a_id"],
+                    parent_b_id=r["parent_b_id"],
+                    hyperparameter=r["hyperparameter"],
+                    parent_a_value=r["parent_a_value"],
+                    parent_b_value=r["parent_b_value"],
+                    inherited_from=r["inherited_from"],
+                    mutation_delta=r["mutation_delta"],
+                    final_value=r["final_value"],
+                    selection_reason=r["selection_reason"],
+                    human_summary=r["human_summary"],
+                )
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
     # -- Helpers --------------------------------------------------------------
 
     @staticmethod
@@ -508,4 +609,24 @@ CREATE TABLE IF NOT EXISTS evaluation_bets (
 
 CREATE INDEX IF NOT EXISTS idx_eval_bets_run ON evaluation_bets(run_id);
 CREATE INDEX IF NOT EXISTS idx_eval_bets_market ON evaluation_bets(run_id, date, market_id);
+
+CREATE TABLE IF NOT EXISTS genetic_events (
+    event_id            TEXT PRIMARY KEY,
+    generation          INTEGER NOT NULL,
+    event_type          TEXT NOT NULL,
+    child_model_id      TEXT,
+    parent_a_id         TEXT,
+    parent_b_id         TEXT,
+    hyperparameter      TEXT,
+    parent_a_value      TEXT,
+    parent_b_value      TEXT,
+    inherited_from      TEXT,
+    mutation_delta       REAL,
+    final_value         TEXT,
+    selection_reason     TEXT,
+    human_summary       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_genetic_generation ON genetic_events(generation);
+CREATE INDEX IF NOT EXISTS idx_genetic_child ON genetic_events(child_model_id);
 """
