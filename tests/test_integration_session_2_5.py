@@ -155,13 +155,29 @@ class TestScoreboardNonTrivial:
 
 
 class TestBetLogsPresent:
-    def test_all_evaluated_models_have_bet_logs(self, run_result):
+    def test_all_evaluated_models_have_evaluation_days(self, run_result):
         _, store, _, _ = run_result
         for m in store.list_models():
             run = store.get_latest_evaluation_run(m.model_id)
             assert run is not None, f"Model {m.model_id[:12]} has no evaluation"
             days = store.get_evaluation_days(run.run_id)
             assert len(days) > 0, f"Model {m.model_id[:12]} has no evaluation days"
+
+    def test_bet_logs_in_parquet(self, run_result):
+        _, store, _, _ = run_result
+        for m in store.list_models():
+            run = store.get_latest_evaluation_run(m.model_id)
+            if run is None:
+                continue
+            # Check Parquet files exist for runs with bets
+            run_dir = store.bet_logs_dir / run.run_id
+            days = store.get_evaluation_days(run.run_id)
+            for day in days:
+                if day.bet_count > 0:
+                    parquet_file = run_dir / f"{day.date}.parquet"
+                    assert parquet_file.exists(), (
+                        f"Model {m.model_id[:12]} missing Parquet for {day.date}"
+                    )
 
 
 class TestProgressEventsCorrectOrder:

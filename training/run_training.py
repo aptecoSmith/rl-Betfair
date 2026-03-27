@@ -119,7 +119,7 @@ class TrainingOrchestrator:
             logger.info(
                 "GPU detected: %s (VRAM: %.1f GB). Using CUDA.",
                 torch.cuda.get_device_name(0),
-                torch.cuda.get_device_properties(0).total_mem / 1e9,
+                torch.cuda.get_device_properties(0).total_memory / 1e9,
             )
         else:
             self.device = "cpu"
@@ -127,7 +127,7 @@ class TrainingOrchestrator:
                 "WARNING: No CUDA GPU detected — falling back to CPU. "
                 "Training will be significantly slower. "
                 "Ensure CUDA-enabled PyTorch is installed: "
-                "pip install torch --index-url https://download.pytorch.org/whl/cu124"
+                "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126"
             )
 
         # Config-level GPU requirement check
@@ -141,7 +141,7 @@ class TrainingOrchestrator:
 
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(
-            config, model_store, progress_queue=progress_queue, device=device,
+            config, model_store, progress_queue=progress_queue, device=self.device,
         )
         self.scoreboard = Scoreboard(model_store, config) if model_store else None
 

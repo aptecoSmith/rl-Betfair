@@ -29,6 +29,8 @@ from agents.policy_network import BasePolicy, PolicyOutput
 from data.episode_builder import Day
 from env.bet_manager import BetOutcome, BetSide
 from env.betfair_env import BetfairEnv
+import pandas as pd
+
 from registry.model_store import (
     EvaluationBetRecord,
     EvaluationDayRecord,
@@ -131,7 +133,9 @@ class Evaluator:
             if self.model_store is not None and run_id is not None:
                 self.model_store.record_evaluation_day(day_record)
                 if bet_records:
-                    self.model_store.record_evaluation_bets_batch(bet_records)
+                    self.model_store.write_bet_logs_parquet(
+                        run_id, day.date, bet_records,
+                    )
 
             tracker.tick()
             self._publish_progress(tracker, day_record)

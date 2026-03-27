@@ -1,15 +1,16 @@
 """
 registry/model_store.py -- SQLite-backed model registry.
 
-Stores model metadata, evaluation runs, per-day metrics, and individual bets
-in a local SQLite database.  Supports save/load of PyTorch model weights.
+Stores model metadata, evaluation runs, per-day metrics, and genetic events
+in a local SQLite database.  Evaluation bet logs are stored as Parquet files
+under ``registry/bet_logs/{run_id}/{date}.parquet``.
 
 Tables
 ------
 - ``models``           -- one row per trained model
 - ``evaluation_runs``  -- one row per evaluation run
 - ``evaluation_days``  -- one row per test-day per run
-- ``evaluation_bets``  -- one row per bet placed during evaluation
+- ``genetic_events``   -- one row per genetic event
 
 Usage::
 
@@ -29,6 +30,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pandas as pd
 import torch
 
 
@@ -136,11 +138,18 @@ class ModelStore:
         self,
         db_path: str | Path = "registry/models.db",
         weights_dir: str | Path = "registry/weights",
+        bet_logs_dir: str | Path | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.weights_dir = Path(weights_dir)
+        # Default bet_logs_dir sits next to the db file
+        if bet_logs_dir is None:
+            self.bet_logs_dir = self.db_path.parent / "bet_logs"
+        else:
+            self.bet_logs_dir = Path(bet_logs_dir)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.weights_dir.mkdir(parents=True, exist_ok=True)
+        self.bet_logs_dir.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -340,69 +349,40 @@ class ModelStore:
         finally:
             conn.close()
 
-    def record_evaluation_bet(self, record: EvaluationBetRecord) -> None:
-        """Insert one evaluation bet record."""
-        conn = self._get_conn()
-        try:
-            conn.execute(
-                """
-                INSERT INTO evaluation_bets
-                    (run_id, date, market_id, tick_timestamp, seconds_to_off,
-                     runner_id, runner_name, action, price, stake,
-                     matched_size, outcome, pnl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.run_id,
-                    record.date,
-                    record.market_id,
-                    record.tick_timestamp,
-                    record.seconds_to_off,
-                    record.runner_id,
-                    record.runner_name,
-                    record.action,
-                    record.price,
-                    record.stake,
-                    record.matched_size,
-                    record.outcome,
-                    record.pnl,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    def write_bet_logs_parquet(
+        self, run_id: str, date: str, records: list[EvaluationBetRecord],
+    ) -> Path | None:
+        """Write evaluation bet records as a Parquet file.
 
-    def record_evaluation_bets_batch(self, records: list[EvaluationBetRecord]) -> None:
-        """Insert multiple evaluation bet records in a single transaction.
+        Path: ``bet_logs_dir/{run_id}/{date}.parquet``
 
-        Much faster than calling record_evaluation_bet() in a loop — a single
-        transaction with executemany instead of N separate commits.
+        Returns the written path, or None if *records* is empty.
         """
         if not records:
-            return
-        conn = self._get_conn()
-        try:
-            conn.executemany(
-                """
-                INSERT INTO evaluation_bets
-                    (run_id, date, market_id, tick_timestamp, seconds_to_off,
-                     runner_id, runner_name, action, price, stake,
-                     matched_size, outcome, pnl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        r.run_id, r.date, r.market_id, r.tick_timestamp,
-                        r.seconds_to_off, r.runner_id, r.runner_name,
-                        r.action, r.price, r.stake, r.matched_size,
-                        r.outcome, r.pnl,
-                    )
-                    for r in records
-                ],
-            )
-            conn.commit()
-        finally:
-            conn.close()
+            return None
+        run_dir = self.bet_logs_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / f"{date}.parquet"
+        df = pd.DataFrame([
+            {
+                "run_id": r.run_id,
+                "date": r.date,
+                "market_id": r.market_id,
+                "tick_timestamp": r.tick_timestamp,
+                "seconds_to_off": r.seconds_to_off,
+                "runner_id": r.runner_id,
+                "runner_name": r.runner_name,
+                "action": r.action,
+                "price": r.price,
+                "stake": r.stake,
+                "matched_size": r.matched_size,
+                "outcome": r.outcome,
+                "pnl": r.pnl,
+            }
+            for r in records
+        ])
+        df.to_parquet(path, index=False)
+        return path
 
     def get_evaluation_days(self, run_id: str) -> list[EvaluationDayRecord]:
         """Get all per-day metrics for an evaluation run."""
@@ -430,33 +410,38 @@ class ModelStore:
             conn.close()
 
     def get_evaluation_bets(self, run_id: str) -> list[EvaluationBetRecord]:
-        """Get all bets from an evaluation run."""
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM evaluation_bets WHERE run_id = ? ORDER BY date, tick_timestamp",
-                (run_id,),
-            ).fetchall()
-            return [
-                EvaluationBetRecord(
-                    run_id=r["run_id"],
-                    date=r["date"],
-                    market_id=r["market_id"],
-                    tick_timestamp=r["tick_timestamp"],
-                    seconds_to_off=r["seconds_to_off"],
-                    runner_id=r["runner_id"],
-                    runner_name=r["runner_name"],
-                    action=r["action"],
-                    price=r["price"],
-                    stake=r["stake"],
-                    matched_size=r["matched_size"],
-                    outcome=r["outcome"],
-                    pnl=r["pnl"],
-                )
-                for r in rows
-            ]
-        finally:
-            conn.close()
+        """Get all bets from an evaluation run (reads from Parquet files).
+
+        Reads all ``{date}.parquet`` files under ``bet_logs_dir/{run_id}/``
+        and returns them as a flat list sorted by date and tick_timestamp.
+        """
+        run_dir = self.bet_logs_dir / run_id
+        if not run_dir.exists():
+            return []
+        parquet_files = sorted(run_dir.glob("*.parquet"))
+        if not parquet_files:
+            return []
+        dfs = [pd.read_parquet(p) for p in parquet_files]
+        df = pd.concat(dfs, ignore_index=True)
+        df = df.sort_values(["date", "tick_timestamp"]).reset_index(drop=True)
+        return [
+            EvaluationBetRecord(
+                run_id=str(row["run_id"]),
+                date=str(row["date"]),
+                market_id=str(row["market_id"]),
+                tick_timestamp=str(row["tick_timestamp"]),
+                seconds_to_off=float(row["seconds_to_off"]),
+                runner_id=int(row["runner_id"]),
+                runner_name=str(row["runner_name"]),
+                action=str(row["action"]),
+                price=float(row["price"]),
+                stake=float(row["stake"]),
+                matched_size=float(row["matched_size"]),
+                outcome=str(row["outcome"]),
+                pnl=float(row["pnl"]),
+            )
+            for _, row in df.iterrows()
+        ]
 
     def get_latest_evaluation_run(self, model_id: str) -> EvaluationRunRecord | None:
         """Get the most recent evaluation run for a model."""
@@ -621,26 +606,6 @@ CREATE TABLE IF NOT EXISTS evaluation_days (
 );
 
 CREATE INDEX IF NOT EXISTS idx_eval_days_run ON evaluation_days(run_id);
-
-CREATE TABLE IF NOT EXISTS evaluation_bets (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id          TEXT NOT NULL REFERENCES evaluation_runs(run_id),
-    date            TEXT NOT NULL,
-    market_id       TEXT NOT NULL,
-    tick_timestamp  TEXT NOT NULL,
-    seconds_to_off  REAL NOT NULL DEFAULT 0.0,
-    runner_id       INTEGER NOT NULL,
-    runner_name     TEXT NOT NULL DEFAULT '',
-    action          TEXT NOT NULL,
-    price           REAL NOT NULL,
-    stake           REAL NOT NULL,
-    matched_size    REAL NOT NULL DEFAULT 0.0,
-    outcome         TEXT NOT NULL DEFAULT 'unsettled',
-    pnl             REAL NOT NULL DEFAULT 0.0
-);
-
-CREATE INDEX IF NOT EXISTS idx_eval_bets_run ON evaluation_bets(run_id);
-CREATE INDEX IF NOT EXISTS idx_eval_bets_market ON evaluation_bets(run_id, date, market_id);
 
 CREATE TABLE IF NOT EXISTS genetic_events (
     event_id            TEXT PRIMARY KEY,

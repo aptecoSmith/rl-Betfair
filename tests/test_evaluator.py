@@ -351,7 +351,7 @@ class TestEvaluateWithStore:
         stored_days = store.get_evaluation_days(run_id)
         assert len(stored_days) == 2
 
-    def test_persists_bet_records(self, tmp_path):
+    def test_persists_bet_records_to_parquet(self, tmp_path):
         config = _make_config()
         store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
         policy = _make_policy(config)
@@ -371,6 +371,13 @@ class TestEvaluateWithStore:
         stored_bets = store.get_evaluation_bets(run_id)
         # Bet count should match records
         assert len(stored_bets) == records[0].bet_count
+
+        # Verify Parquet files exist
+        if records[0].bet_count > 0:
+            parquet_dir = store.bet_logs_dir / run_id
+            assert parquet_dir.exists()
+            parquet_files = list(parquet_dir.glob("*.parquet"))
+            assert len(parquet_files) == 1
 
 
 class TestEvaluateProgressEvents:

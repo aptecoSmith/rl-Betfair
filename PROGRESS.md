@@ -160,6 +160,33 @@
 - 7 unit tests (GPU detection: auto-detect, explicit override, require_gpu enforcement; batch bet insertion: correctness, empty noop)
 - 12 integration tests (full 2-gen pipeline: all models registered, genetic events in SQLite, genetic log files non-empty, scoreboard non-trivial, bet logs present, progress events in correct phase order)
 
+### Session 2.6 — CUDA PyTorch + Parquet bet logs
+**Status:** Done
+
+#### 2.6a — CUDA-enabled PyTorch
+- Uninstalled CPU-only `torch 2.11.0+cpu`, installed `torch 2.11.0+cu126` (cu124 had no Python 3.14 wheels)
+- RTX 3090 detected: 24 GB VRAM, `torch.cuda.is_available()` returns `True`
+- Updated `requirements.txt` with CUDA install instructions (`--index-url https://download.pytorch.org/whl/cu126`)
+- Set `training.require_gpu: true` in `config.yaml`
+- Fixed `total_mem` → `total_memory` (renamed in PyTorch 2.11)
+- Fixed device propagation bug: `TrainingOrchestrator` was passing raw `device` param (None) to `Evaluator` instead of resolved `self.device` — caused CPU/CUDA tensor mismatch during evaluation
+- GPU training sanity check passed: 1 agent, 1 epoch, 53 races, 55 MB VRAM used
+- `test_require_gpu_passes_with_gpu` now passes instead of skipping
+
+#### 2.6b — Evaluation bets migrated from SQLite to Parquet
+- **Problem resolved:** Session 2.5 identified SQLite as a bottleneck for 18M+ bet rows per generation
+- **New write path:** `ModelStore.write_bet_logs_parquet(run_id, date, records)` writes one Parquet file per evaluation day per model to `registry/bet_logs/{run_id}/{date}.parquet`
+- **New read path:** `ModelStore.get_evaluation_bets(run_id)` reads all Parquet files under `registry/bet_logs/{run_id}/`, returns same `EvaluationBetRecord` list
+- **Removed:** `record_evaluation_bet()`, `record_evaluation_bets_batch()`, and the `evaluation_bets` SQLite table
+- **Evaluator updated:** `Evaluator.evaluate()` now calls `write_bet_logs_parquet()` directly (one `pd.to_parquet` call per day)
+- SQLite retained for metadata only: `models`, `evaluation_runs`, `evaluation_days`, `genetic_events`
+- `bet_logs_dir` defaults to `registry/bet_logs/` (sibling to `models.db`)
+- 7 new Parquet tests: write/read round-trip, multiple bets, multiple days, empty records, schema validation, no-data returns empty, bet_logs_dir creation
+- Fixed pre-existing bug in `test_integration_population_manager.py`: swapped `load_day` arguments + wrong BetfairEnv constructor call
+
+**Bug fixes (pre-existing):**
+- `test_integration_population_manager.py::test_forward_pass_on_real_observation` — arguments to `load_day()` were swapped, and `BetfairEnv` was called with `days=` (plural) instead of `day=` (singular)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -191,8 +218,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.3     | 36              | 10                     | **641 + 83**  |
 | 2.4     | 43              | 6                      | **684 + 89**  |
 | 2.5     | 7               | 12                     | **691 + 101** |
+| 2.6     | 16              | 1                      | **707 + 102** |
 
-**Current total: 690 unit (1 skipped) + 100 integration = 791 tests, all passing.**
+**Current total: 706 unit (1 skipped) + 82 integration (19 skipped) = 788 passing.**
 
 ---
 
@@ -212,6 +240,8 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 
 7. **Graceful insufficient data handling** (Session 2.4) — When no test days are available (e.g. only 1 day extracted), the orchestrator uses training days for evaluation with a logged warning. Results are optimistic and should not be trusted for ranking. This unblocks the full pipeline even with a single day of data.
 
-8. **SQLite bet insertion bottleneck** (Session 2.5) — Writing 31K individual bet records per agent evaluation was the dominant cost (4+ minutes per agent). Fixed with `record_evaluation_bets_batch()` using `executemany` in a single transaction. Consider whether SQLite remains the right choice for evaluation_bets at scale — with 20 agents × 30 test days × 30K bets = 18M rows per generation. Alternatives: batch Parquet files for bet logs, or PostgreSQL if the scale demands it. Added to TODO as a future consideration.
+8. **Evaluation bets → Parquet** (Session 2.6b) — Session 2.5 identified SQLite as a bottleneck for 18M+ rows/generation. Migrated evaluation_bets from SQLite to Parquet files (`registry/bet_logs/{run_id}/{date}.parquet`). SQLite retained for metadata tables only. Single `pd.to_parquet` call per day replaces thousands of INSERTs.
 
-9. **CPU-only PyTorch** (Session 2.5) — The installed PyTorch (`2.11.0+cpu`) doesn't include CUDA. Added `training.require_gpu` config flag and GPU auto-detection with prominent warnings. Need to reinstall: `pip install torch --index-url https://download.pytorch.org/whl/cu124`
+9. **CUDA cu126 not cu124** (Session 2.6a) — Python 3.14 had no cu124 wheels. Used cu126 instead. RTX 3090 confirmed working with 55 MB VRAM for single-agent training.
+
+10. **Device propagation fix** (Session 2.6a) — `TrainingOrchestrator` was passing the raw `device` constructor parameter (None) to the `Evaluator` instead of the resolved `self.device` ("cuda"). This caused CPU/CUDA tensor mismatch errors that only appeared when actually running on GPU.

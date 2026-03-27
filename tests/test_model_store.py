@@ -264,13 +264,13 @@ class TestEvaluationDays:
         assert days[0].date == "2026-03-19"
 
 
-# ── Evaluation bets ───────────────────────────────────────────────────────────
+# ── Evaluation bets (Parquet) ─────────────────────────────────────────────────
 
 
-class TestEvaluationBets:
-    """Test individual bet records."""
+class TestEvaluationBetsParquet:
+    """Test bet records via Parquet read/write."""
 
-    def test_record_and_retrieve(self, store: ModelStore):
+    def test_write_and_read(self, store: ModelStore):
         mid = store.create_model(1, "arch", "d", {})
         rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
 
@@ -289,7 +289,9 @@ class TestEvaluationBets:
             outcome="won",
             pnl=30.0,
         )
-        store.record_evaluation_bet(bet)
+        path = store.write_bet_logs_parquet(rid, "2026-03-21", [bet])
+        assert path is not None
+        assert path.exists()
 
         bets = store.get_evaluation_bets(rid)
         assert len(bets) == 1
@@ -301,8 +303,8 @@ class TestEvaluationBets:
         mid = store.create_model(1, "arch", "d", {})
         rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
 
-        for i in range(5):
-            store.record_evaluation_bet(EvaluationBetRecord(
+        bets = [
+            EvaluationBetRecord(
                 run_id=rid, date="2026-03-21", market_id="1.200000001",
                 tick_timestamp=f"2026-03-21T14:0{i}:00",
                 seconds_to_off=300.0 - i * 5,
@@ -311,11 +313,71 @@ class TestEvaluationBets:
                 price=3.0 + i, stake=5.0, matched_size=5.0,
                 outcome="won" if i < 2 else "lost",
                 pnl=10.0 if i < 2 else -5.0,
-            ))
+            )
+            for i in range(5)
+        ]
+        store.write_bet_logs_parquet(rid, "2026-03-21", bets)
 
-        bets = store.get_evaluation_bets(rid)
-        assert len(bets) == 5
-        backs = [b for b in bets if b.action == "back"]
-        lays = [b for b in bets if b.action == "lay"]
+        stored = store.get_evaluation_bets(rid)
+        assert len(stored) == 5
+        backs = [b for b in stored if b.action == "back"]
+        lays = [b for b in stored if b.action == "lay"]
         assert len(backs) == 3
         assert len(lays) == 2
+
+    def test_multiple_days(self, store: ModelStore):
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21", "2026-03-22"])
+
+        for date in ["2026-03-21", "2026-03-22"]:
+            bets = [
+                EvaluationBetRecord(
+                    run_id=rid, date=date, market_id="1.200000001",
+                    tick_timestamp=f"{date}T14:00:00",
+                    seconds_to_off=300.0, runner_id=1, runner_name="Horse1",
+                    action="back", price=4.0, stake=5.0, matched_size=5.0,
+                    outcome="won", pnl=15.0,
+                )
+                for _ in range(3)
+            ]
+            store.write_bet_logs_parquet(rid, date, bets)
+
+        stored = store.get_evaluation_bets(rid)
+        assert len(stored) == 6
+        # Should be sorted by date
+        dates = [b.date for b in stored]
+        assert dates == sorted(dates)
+
+    def test_empty_records_returns_none(self, store: ModelStore):
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+        result = store.write_bet_logs_parquet(rid, "2026-03-21", [])
+        assert result is None
+
+    def test_no_parquet_returns_empty(self, store: ModelStore):
+        bets = store.get_evaluation_bets("nonexistent-run-id")
+        assert bets == []
+
+    def test_bet_logs_dir_created(self, store: ModelStore):
+        assert store.bet_logs_dir.exists()
+
+    def test_parquet_schema_correct(self, store: ModelStore):
+        import pandas as pd
+
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+
+        bet = EvaluationBetRecord(
+            run_id=rid, date="2026-03-21", market_id="1.200000001",
+            tick_timestamp="2026-03-21T14:00:00", seconds_to_off=300.0,
+            runner_id=12345, runner_name="Horse1", action="back",
+            price=4.0, stake=10.0, matched_size=10.0, outcome="won", pnl=30.0,
+        )
+        path = store.write_bet_logs_parquet(rid, "2026-03-21", [bet])
+        df = pd.read_parquet(path)
+        expected_cols = {
+            "run_id", "date", "market_id", "tick_timestamp",
+            "seconds_to_off", "runner_id", "runner_name", "action",
+            "price", "stake", "matched_size", "outcome", "pnl",
+        }
+        assert set(df.columns) == expected_cols

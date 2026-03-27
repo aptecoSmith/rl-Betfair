@@ -792,12 +792,12 @@ class TestGPUDetection:
         assert orch.device == "cpu"
 
 
-# ── Tests: Batch bet insertion ───────────────────────────────────────────────
+# ── Tests: Parquet bet logs ──────────────────────────────────────────────────
 
 
-class TestBatchBetInsertion:
-    def test_batch_insert_matches_single(self, tmp_path):
-        """Batch insert should produce same results as single inserts."""
+class TestParquetBetLogs:
+    def test_write_and_read_100_bets(self, tmp_path):
+        """Write 100 bets to Parquet and read them back."""
         from registry.model_store import EvaluationBetRecord
 
         store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
@@ -818,11 +818,12 @@ class TestBatchBetInsertion:
             )
             for i in range(100)
         ]
-        store.record_evaluation_bets_batch(bets)
+        store.write_bet_logs_parquet(run_id, "2026-03-26", bets)
 
         stored = store.get_evaluation_bets(run_id)
         assert len(stored) == 100
 
-    def test_empty_batch_is_noop(self, tmp_path):
+    def test_empty_write_is_noop(self, tmp_path):
         store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
-        store.record_evaluation_bets_batch([])  # should not error
+        result = store.write_bet_logs_parquet("run-1", "2026-03-26", [])
+        assert result is None

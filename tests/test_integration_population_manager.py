@@ -57,7 +57,7 @@ def real_date() -> str:
 
 @pytest.fixture(scope="module")
 def real_day(real_date: str):
-    day = load_day(str(PROCESSED_DIR), real_date)
+    day = load_day(real_date, data_dir=str(PROCESSED_DIR))
     return engineer_day(day)
 
 
@@ -83,17 +83,14 @@ class TestPopulationFromRealConfig:
             hp_tuples.append(tuple(sorted(hp_no_arch.items())))
         assert len(set(hp_tuples)) == len(hp_tuples)
 
-    def test_forward_pass_on_real_observation(self, real_config: dict, real_day):
+    def test_forward_pass_on_real_observation(self, real_config: dict, real_date: str):
         """Every agent can forward-pass on a real observation vector."""
         pm = PopulationManager(real_config, model_store=None)
         agents = pm.initialise_population(generation=0, seed=42)
 
         # Build a real observation from the env
-        env = BetfairEnv(
-            days=[real_day],
-            starting_budget=real_config["training"]["starting_budget"],
-            max_runners=real_config["training"]["max_runners"],
-        )
+        day_obj = load_day(real_date, data_dir=str(PROCESSED_DIR))
+        env = BetfairEnv(day_obj, real_config)
         obs, _ = env.reset()
         obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
 
