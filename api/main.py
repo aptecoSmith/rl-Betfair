@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from registry.model_store import ModelStore
 from registry.scoreboard import Scoreboard
 
-from api.routers import models, training, replay
+from api.routers import models, training, replay, system
 
 
 def _load_config(path: str = "config.yaml") -> dict:
@@ -63,6 +63,7 @@ def create_app() -> FastAPI:
     app.include_router(models.router)
     app.include_router(training.router)
     app.include_router(replay.router)
+    app.include_router(system.router)
 
     return app
 

@@ -1,0 +1,255 @@
+import { TestBed, ComponentFixture } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
+import { provideHttpClient } from '@angular/common/http';
+import { signal } from '@angular/core';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { TrainingMonitor, AgentGridItem } from './training-monitor';
+import { TrainingService } from '../services/training.service';
+import { TrainingStatus, WSEvent } from '../models/training.model';
+
+function idleStatus(): TrainingStatus {
+  return {
+    running: false,
+    phase: null,
+    generation: null,
+    process: null,
+    item: null,
+    detail: null,
+    last_agent_score: null,
+  };
+}
+
+function runningStatus(): TrainingStatus {
+  return {
+    running: true,
+    phase: 'training',
+    generation: 4,
+    process: {
+      label: 'Generation 4 — training 20 agents',
+      completed: 7,
+      total: 20,
+      pct: 35.0,
+      item_eta_human: '6 min',
+      process_eta_human: '1h 18m',
+    },
+    item: {
+      label: 'Training model_x1y2z3',
+      completed: 312,
+      total: 1000,
+      pct: 31.2,
+      item_eta_human: '4m 12s',
+      process_eta_human: '6m 05s',
+    },
+    detail: 'Episode 312 | reward=+1.24 | loss=0.0042',
+    last_agent_score: 0.82,
+  };
+}
+
+describe('TrainingMonitor', () => {
+  let fixture: ComponentFixture<TrainingMonitor>;
+  let component: TrainingMonitor;
+  let statusSignal: ReturnType<typeof signal<TrainingStatus>>;
+  let eventSignal: ReturnType<typeof signal<WSEvent | null>>;
+  let rewardSignal: ReturnType<typeof signal<{ step: number; reward: number }[]>>;
+  let lossSignal: ReturnType<typeof signal<{ step: number; loss: number }[]>>;
+
+  function setup(status?: TrainingStatus) {
+    statusSignal = signal(status ?? idleStatus());
+    eventSignal = signal(null);
+    rewardSignal = signal([]);
+    lossSignal = signal([]);
+
+    const mockTraining = {
+      status: statusSignal,
+      isRunning: signal((status ?? idleStatus()).running),
+      latestEvent: eventSignal,
+      rewardHistory: rewardSignal,
+      lossHistory: lossSignal,
+      phase: signal((status ?? idleStatus()).phase),
+      connect: vi.fn(),
+      clearHistory: vi.fn(),
+    };
+
+    TestBed.configureTestingModule({
+      imports: [TrainingMonitor],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: TrainingService, useValue: mockTraining },
+      ],
+    });
+
+    fixture = TestBed.createComponent(TrainingMonitor);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  }
+
+  it('should create', () => {
+    setup();
+    expect(component).toBeTruthy();
+  });
+
+  it('shows page title', () => {
+    setup();
+    const el = fixture.nativeElement.querySelector('.page-title');
+    expect(el?.textContent).toContain('Training Monitor');
+  });
+
+  it('shows idle message when not running', () => {
+    setup(idleStatus());
+    const el = fixture.nativeElement.querySelector('.no-run');
+    expect(el).toBeTruthy();
+    expect(el.textContent).toContain('No training run');
+  });
+
+  it('shows ETA bars when running', () => {
+    setup(runningStatus());
+    const bars = fixture.nativeElement.querySelectorAll('.eta-bar');
+    expect(bars.length).toBe(2);
+  });
+
+  it('shows process bar with correct data', () => {
+    setup(runningStatus());
+    expect(component.processBar()).toBeTruthy();
+    expect(component.processBar()!.label).toContain('Generation 4');
+    expect(component.processBar()!.pct).toBe(35.0);
+  });
+
+  it('shows item bar with correct data', () => {
+    setup(runningStatus());
+    expect(component.itemBar()).toBeTruthy();
+    expect(component.itemBar()!.label).toContain('model_x1y2z3');
+    expect(component.itemBar()!.pct).toBe(31.2);
+  });
+
+  it('shows phase label', () => {
+    setup(runningStatus());
+    expect(component.phaseLabel()).toBe('Training agents');
+  });
+
+  it('maps extracting phase', () => {
+    setup({ ...runningStatus(), phase: 'extracting' });
+    expect(component.phaseLabel()).toBe('Extracting market data from MySQL');
+  });
+
+  it('maps building phase', () => {
+    setup({ ...runningStatus(), phase: 'building' });
+    expect(component.phaseLabel()).toBe('Building training episodes');
+  });
+
+  it('maps evaluating phase', () => {
+    setup({ ...runningStatus(), phase: 'evaluating' });
+    expect(component.phaseLabel()).toBe('Evaluating models on test days');
+  });
+
+  it('maps selecting phase', () => {
+    setup({ ...runningStatus(), phase: 'selecting' });
+    expect(component.phaseLabel()).toBe('Genetic selection');
+  });
+
+  it('maps breeding phase', () => {
+    setup({ ...runningStatus(), phase: 'breeding' });
+    expect(component.phaseLabel()).toBe('Breeding next generation');
+  });
+
+  it('maps scoring phase', () => {
+    setup({ ...runningStatus(), phase: 'scoring' });
+    expect(component.phaseLabel()).toBe('Updating scoreboard');
+  });
+
+  it('shows detail line when running', () => {
+    setup(runningStatus());
+    const el = fixture.nativeElement.querySelector('.detail-line');
+    expect(el?.textContent).toContain('Episode 312');
+  });
+
+  it('shows empty chart message when no data', () => {
+    setup(runningStatus());
+    const empties = fixture.nativeElement.querySelectorAll('.chart-empty');
+    expect(empties.length).toBe(2);
+  });
+
+  it('builds reward path when data available', () => {
+    setup(runningStatus());
+    rewardSignal.set([
+      { step: 0, reward: 1.0 },
+      { step: 1, reward: 2.0 },
+      { step: 2, reward: 1.5 },
+    ]);
+    fixture.detectChanges();
+    expect(component.rewardPath()).toContain('M');
+    expect(component.rewardPath()).toContain('L');
+  });
+
+  it('builds loss path when data available', () => {
+    setup(runningStatus());
+    lossSignal.set([
+      { step: 0, loss: 0.5 },
+      { step: 1, loss: 0.3 },
+      { step: 2, loss: 0.2 },
+    ]);
+    fixture.detectChanges();
+    expect(component.lossPath()).toContain('M');
+  });
+
+  it('returns empty path for < 2 data points', () => {
+    setup(runningStatus());
+    rewardSignal.set([{ step: 0, reward: 1.0 }]);
+    fixture.detectChanges();
+    expect(component.rewardPath()).toBe('');
+  });
+
+  it('agent grid initially empty', () => {
+    setup(runningStatus());
+    expect(component.agents().length).toBe(0);
+  });
+
+  it('getAgentClass returns correct class', () => {
+    setup();
+    const agent: AgentGridItem = { id: 'a1', status: 'training' };
+    expect(component.getAgentClass(agent)).toBe('agent-cell agent-training');
+  });
+
+  it('getAgentClass for pending', () => {
+    setup();
+    const agent: AgentGridItem = { id: 'a1', status: 'pending' };
+    expect(component.getAgentClass(agent)).toBe('agent-cell agent-pending');
+  });
+
+  it('getAgentClass for evaluated', () => {
+    setup();
+    const agent: AgentGridItem = { id: 'a1', status: 'evaluated' };
+    expect(component.getAgentClass(agent)).toBe('agent-cell agent-evaluated');
+  });
+
+  it('getAgentClass for selected', () => {
+    setup();
+    const agent: AgentGridItem = { id: 'a1', status: 'selected' };
+    expect(component.getAgentClass(agent)).toBe('agent-cell agent-selected');
+  });
+
+  it('getAgentClass for discarded', () => {
+    setup();
+    const agent: AgentGridItem = { id: 'a1', status: 'discarded' };
+    expect(component.getAgentClass(agent)).toBe('agent-cell agent-discarded');
+  });
+
+  it('no population grid when no agents', () => {
+    setup(runningStatus());
+    const section = fixture.nativeElement.querySelector('.population-section');
+    expect(section).toBeNull();
+  });
+
+  it('renders chart cards', () => {
+    setup(runningStatus());
+    const cards = fixture.nativeElement.querySelectorAll('.chart-card');
+    expect(cards.length).toBe(2);
+  });
+
+  it('chart titles are Reward and Loss', () => {
+    setup(runningStatus());
+    const titles = fixture.nativeElement.querySelectorAll('.chart-title');
+    expect(titles[0]?.textContent).toContain('Reward');
+    expect(titles[1]?.textContent).toContain('Loss');
+  });
+});

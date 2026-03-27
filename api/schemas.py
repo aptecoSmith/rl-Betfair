@@ -128,6 +128,29 @@ class WSEvent(BaseModel):
     summary: dict | None = None
 
 
+# ── System Metrics ─────────────────────────────────────────────────
+
+
+class GpuMetrics(BaseModel):
+    name: str
+    utilisation_pct: int
+    memory_used_mb: int
+    memory_total_mb: int
+    temperature_c: int | None = None
+
+
+class SystemMetrics(BaseModel):
+    cpu_pct: float
+    ram_used_mb: int
+    ram_total_mb: int
+    ram_pct: float
+    disk_read_mb_s: float
+    disk_write_mb_s: float
+    disk_used_gb: float
+    disk_total_gb: float
+    gpu: GpuMetrics | None = None
+
+
 # ── Replay ──────────────────────────────────────────────────────────
 
 

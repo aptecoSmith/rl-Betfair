@@ -1,0 +1,43 @@
+<header class="app-header">
+  <div class="header-left">
+    <span class="app-title">rl-betfair</span>
+  </div>
+
+  <div class="header-center">
+    <button class="status-chip" [class]="statusClass()" (click)="goToTrainingMonitor()">
+      <span class="status-dot"></span>
+      <span class="status-text">{{ statusLabel() }}</span>
+    </button>
+
+    @if (progressSummary()) {
+      <span class="progress-summary">
+        @if (phaseLabel()) {
+          <span class="phase-label">{{ phaseLabel() }}</span>
+          <span class="sep">·</span>
+        }
+        {{ progressSummary() }}
+      </span>
+    }
+  </div>
+
+  <div class="header-right">
+    <div class="metrics-panel">
+      <div class="metric" title="GPU Utilisation & VRAM">
+        <span class="metric-icon">GPU</span>
+        <span class="metric-value">{{ gpuLabel() }}</span>
+      </div>
+      <div class="metric" title="CPU Utilisation">
+        <span class="metric-icon">CPU</span>
+        <span class="metric-value">{{ cpuLabel() }}</span>
+      </div>
+      <div class="metric" title="RAM Usage">
+        <span class="metric-icon">RAM</span>
+        <span class="metric-value">{{ ramLabel() }}</span>
+      </div>
+      <div class="metric" title="Disk Usage">
+        <span class="metric-icon">SSD</span>
+        <span class="metric-value">{{ diskLabel() }}</span>
+      </div>
+    </div>
+  </div>
+</header>

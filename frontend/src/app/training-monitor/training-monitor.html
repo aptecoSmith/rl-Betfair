@@ -1,0 +1,110 @@
+<div class="training-monitor">
+  <h1 class="page-title">Training Monitor</h1>
+
+  <!-- ── ETA Bars ─────────────────────────────────────────── -->
+  @if (isRunning()) {
+    <div class="eta-bars">
+      @if (processBar()) {
+        <div class="eta-bar">
+          <div class="eta-header">
+            <span class="eta-level">PROCESS</span>
+            <span class="eta-label">{{ processBar()!.label }}</span>
+            <span class="eta-stats">
+              {{ processBar()!.completed }}/{{ processBar()!.total }}
+              · ETA {{ processBar()!.process_eta_human || '—' }}
+            </span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill bar-process" [style.width.%]="processBar()!.pct"></div>
+          </div>
+          <span class="bar-pct">{{ processBar()!.pct }}%</span>
+        </div>
+      }
+
+      @if (itemBar()) {
+        <div class="eta-bar">
+          <div class="eta-header">
+            <span class="eta-level">ITEM</span>
+            <span class="eta-label">{{ itemBar()!.label }}</span>
+            <span class="eta-stats">
+              {{ itemBar()!.completed }}/{{ itemBar()!.total }}
+              · ETA {{ itemBar()!.item_eta_human || '—' }}
+            </span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill bar-item" [style.width.%]="itemBar()!.pct"></div>
+          </div>
+          <span class="bar-pct">{{ itemBar()!.pct }}%</span>
+        </div>
+      }
+
+      @if (phaseLabel()) {
+        <div class="phase-banner">
+          <span class="phase-dot"></span>
+          {{ phaseLabel() }}
+        </div>
+      }
+
+      @if (status().detail) {
+        <div class="detail-line">{{ status().detail }}</div>
+      }
+    </div>
+  } @else {
+    <!-- ── Idle State ─────────────────────────────────────── -->
+    <div class="idle-state">
+      @if (lastRunSummary()) {
+        <div class="last-run">
+          <h3>Last Run Complete</h3>
+          <pre class="run-summary">{{ lastRunSummary() | json }}</pre>
+        </div>
+      } @else {
+        <p class="no-run">No training run in progress. Start a run from the command line.</p>
+      }
+    </div>
+  }
+
+  <!-- ── Charts ───────────────────────────────────────────── -->
+  <div class="charts">
+    <div class="chart-card">
+      <h3 class="chart-title">Reward</h3>
+      @if (rewardHistory().length >= 2) {
+        <svg viewBox="0 0 600 150" class="chart-svg" preserveAspectRatio="none">
+          <line x1="0" y1="75" x2="600" y2="75" class="zero-line" />
+          <path [attr.d]="rewardPath()" class="chart-line reward-line" />
+        </svg>
+      } @else {
+        <div class="chart-empty">Waiting for data…</div>
+      }
+    </div>
+    <div class="chart-card">
+      <h3 class="chart-title">Loss</h3>
+      @if (lossHistory().length >= 2) {
+        <svg viewBox="0 0 600 150" class="chart-svg" preserveAspectRatio="none">
+          <path [attr.d]="lossPath()" class="chart-line loss-line" />
+        </svg>
+      } @else {
+        <div class="chart-empty">Waiting for data…</div>
+      }
+    </div>
+  </div>
+
+  <!-- ── Population Grid ──────────────────────────────────── -->
+  @if (agents().length > 0) {
+    <div class="population-section">
+      <h3 class="section-title">Population</h3>
+      <div class="agent-grid">
+        @for (agent of agents(); track agent.id) {
+          <div [class]="getAgentClass(agent)" [title]="agent.id + ' — ' + agent.status">
+          </div>
+        }
+      </div>
+      <div class="grid-legend">
+        <span class="legend-item"><span class="legend-dot agent-pending"></span> Pending</span>
+        <span class="legend-item"><span class="legend-dot agent-training"></span> Training</span>
+        <span class="legend-item"><span class="legend-dot agent-evaluated"></span> Evaluated</span>
+        <span class="legend-item"><span class="legend-dot agent-selected"></span> Selected</span>
+        <span class="legend-item"><span class="legend-dot agent-discarded"></span> Discarded</span>
+      </div>
+    </div>
+  }
+</div>

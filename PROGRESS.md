@@ -236,6 +236,53 @@
 - 6 integration tests (vitest, skip when API not running): load real models, render table, columns present, sort order, valid data, click navigation
 - 2 app-level tests: component creation, router-outlet presence
 
+### Session 3.4 — Training monitor, app header & live system metrics
+**Status:** Done
+
+#### Backend — system metrics endpoint
+- `api/routers/system.py` — `GET /system/metrics` returns CPU %, RAM (used/total MB, %), disk I/O and usage, GPU (utilisation %, VRAM used/total, temperature, name)
+- Uses `psutil` for CPU/RAM/disk, `pynvml` for GPU (graceful fallback: `gpu: null` when unavailable)
+- `GpuMetrics` and `SystemMetrics` Pydantic schemas added to `api/schemas.py`
+- Router wired in `api/main.py`
+- `psutil>=5.9.0` and `pynvml>=11.5.0` added to `requirements.txt`
+
+#### Frontend — app shell header (persistent across all pages)
+- `header/header.ts` — standalone component imported by `App`, visible on every page
+- **Status chip:** Idle (green) / Running with ETA (amber) — click navigates to `/training`
+- **Progress summary:** phase label + generation + completed/total (%) — shown when a run is active
+- **System metrics panel:** GPU (util % + VRAM), CPU %, RAM (GB), SSD (GB) — polled every 3 seconds via `SystemMetricsService`
+- Phase labels mapped: extracting, building, training, evaluating, selecting, breeding, scoring
+- `app.html` updated: `<app-header />` above `<router-outlet />`
+- `app.scss` added dark background for main content area
+
+#### Frontend — training monitor page
+- `training-monitor/training-monitor.ts` — standalone component at `/training` route
+- **Two persistent ETA bars:** process bar (purple gradient) and item bar (cyan gradient), real-time via WebSocket
+- **Phase banner:** animated dot + full phase description
+- **Detail line:** monospace display of current episode/reward/loss
+- **Reward/loss charts:** SVG line charts built from WebSocket progress events; reward chart includes zero-line
+- **Population grid:** coloured cells for each agent — pending (grey), training (amber, pulsing), evaluated (purple), selected (green), discarded (red)
+- **Idle state:** last run summary (JSON) or "No training run in progress" message
+- Grid legend for all 5 agent statuses
+
+#### Frontend — services
+- `services/training.service.ts` — WebSocket connection to `/ws/training` with auto-reconnect (3s), HTTP polling fallback for initial state, parses reward/loss from progress detail strings for chart data
+- `services/system-metrics.service.ts` — polls `GET /api/system/metrics` every 3 seconds
+- `models/training.model.ts` — TypeScript interfaces: `ProgressSnapshot`, `TrainingStatus`, `WSEvent`
+- `models/system.model.ts` — TypeScript interfaces: `GpuMetrics`, `SystemMetrics`
+
+#### Routes & app wiring
+- `/training` route added (lazy-loaded `TrainingMonitor`)
+- `App` component imports `Header` and `RouterOutlet`
+- `ApiService` unchanged (header/monitor use dedicated services)
+
+#### Tests
+- **Python:** 11 unit tests (6 endpoint tests: response schema, field types, values, GPU null; 5 GPU helper tests: available, import error, nvml error, temp error, bytes name) + 1 integration test (real hardware)
+- **Angular:** 22 header tests (creation, title, idle/running states, status chip DOM, progress summary, phase labels ×7, GPU/CPU/RAM/disk labels, null metrics, metrics panel count, navigation) + 27 training monitor tests (creation, title, idle message, ETA bars, process/item data, phase labels ×7, detail line, chart empties, reward/loss paths, empty path <2 points, agent grid, agent classes ×5, no grid when empty, chart cards, chart titles) + 3 app tests (creation, router-outlet, header presence)
+- All 73 Angular tests pass, 6 integration skipped (API not running)
+
+**Dependencies installed:** psutil 7.2.2, pynvml 13.0.1 (nvidia-ml-py 13.595.45)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -270,9 +317,10 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.6     | 16              | 1                      | **707 + 102** |
 | 3.1+3.2 | 36              | 11                     | **743 + 113** |
 | 3.3     | 23 (Angular)    | 6 (Angular)            | **743 + 113** (Python) + **23 + 6** (Angular) |
+| 3.4     | 11 (Python) + 52 (Angular) | 1 (Python) | **754 + 114** (Python) + **75 + 6** (Angular) |
 
-**Python total: 760 passed, 2 skipped, 101 deselected.**
-**Angular total: 23 passed, 6 skipped (integration — API not running).**
+**Python total: 771 passed, 2 skipped, 102 deselected.**
+**Angular total: 73 passed, 6 skipped (integration — API not running).**
 
 ---
 

@@ -1,0 +1,283 @@
+.training-monitor {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  color: #e0e0e0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+.page-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 0 0 1.25rem;
+  color: #ffffff;
+}
+
+/* ── ETA Bars ──────────────────────────────────────────────── */
+
+.eta-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.eta-bar {
+  background: #1e1e38;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.eta-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.375rem;
+  font-size: 0.75rem;
+}
+
+.eta-level {
+  font-weight: 700;
+  font-size: 0.625rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #808098;
+  min-width: 52px;
+}
+
+.eta-label {
+  color: #c0c0d8;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.eta-stats {
+  color: #a0a0b8;
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 6px;
+  background: #2a2a4a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.bar-process {
+  background: linear-gradient(90deg, #6c63ff, #a78bfa);
+}
+
+.bar-item {
+  background: linear-gradient(90deg, #38bdf8, #67e8f9);
+}
+
+.bar-pct {
+  display: block;
+  text-align: right;
+  font-size: 0.6875rem;
+  color: #808098;
+  margin-top: 0.25rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.phase-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #c0c0d8;
+}
+
+.phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f2c94c;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.detail-line {
+  font-size: 0.75rem;
+  color: #a0a0b8;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  padding: 0.5rem 0.75rem;
+  background: #12122a;
+  border-radius: 4px;
+}
+
+/* ── Idle State ────────────────────────────────────────────── */
+
+.idle-state {
+  text-align: center;
+  padding: 3rem 1rem;
+}
+
+.no-run {
+  color: #808098;
+  font-size: 0.875rem;
+}
+
+.last-run h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  color: #a0a0b8;
+}
+
+.run-summary {
+  text-align: left;
+  background: #12122a;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 1rem;
+  font-size: 0.75rem;
+  color: #c0c0d8;
+  overflow-x: auto;
+}
+
+/* ── Charts ────────────────────────────────────────────────── */
+
+.charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.chart-card {
+  background: #1e1e38;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.chart-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #808098;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 0.5rem;
+}
+
+.chart-svg {
+  width: 100%;
+  height: 150px;
+}
+
+.zero-line {
+  stroke: #2a2a4a;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.chart-line {
+  fill: none;
+  stroke-width: 1.5;
+}
+
+.reward-line {
+  stroke: #6fcf97;
+}
+
+.loss-line {
+  stroke: #eb5757;
+}
+
+.chart-empty {
+  height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #606080;
+  font-size: 0.8125rem;
+}
+
+/* ── Population Grid ───────────────────────────────────────── */
+
+.population-section {
+  margin-bottom: 1.5rem;
+}
+
+.section-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #c0c0d8;
+  margin: 0 0 0.75rem;
+}
+
+.agent-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-cell {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  transition: background 0.3s;
+}
+
+.agent-pending {
+  background: #2a2a4a;
+  border-color: #3a3a5a;
+}
+
+.agent-training {
+  background: #f2c94c;
+  border-color: #e0b83c;
+  animation: pulse 1.2s infinite;
+}
+
+.agent-evaluated {
+  background: #6c63ff;
+  border-color: #5a52e0;
+}
+
+.agent-selected {
+  background: #6fcf97;
+  border-color: #5ab880;
+}
+
+.agent-discarded {
+  background: #eb5757;
+  border-color: #d04040;
+  opacity: 0.6;
+}
+
+.grid-legend {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.5rem;
+  font-size: 0.6875rem;
+  color: #808098;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
