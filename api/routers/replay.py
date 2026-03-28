@@ -10,6 +10,8 @@ from fastapi import APIRouter, HTTPException, Request
 
 from api.schemas import (
     BetEvent,
+    BetExplorerResponse,
+    ExplorerBet,
     RaceSummary,
     ReplayDayResponse,
     ReplayRaceResponse,
@@ -69,6 +71,55 @@ def _load_tick_data(config: dict, date: str) -> pd.DataFrame | None:
     if not path.exists():
         return None
     return pd.read_parquet(path)
+
+
+@router.get("/{model_id}/bets", response_model=BetExplorerResponse)
+def get_model_bets(model_id: str, request: Request):
+    """All bets for a model across all evaluation days."""
+    store = _store(request)
+
+    rec = store.get_model(model_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    run = store.get_latest_evaluation_run(model_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="No evaluation run found")
+
+    bet_records = store.get_evaluation_bets(run.run_id)
+
+    bets = [
+        ExplorerBet(
+            date=b.date,
+            race_id=b.market_id,
+            tick_timestamp=b.tick_timestamp,
+            seconds_to_off=b.seconds_to_off,
+            runner_id=b.runner_id,
+            runner_name=b.runner_name,
+            action=b.action,
+            price=b.price,
+            stake=b.stake,
+            matched_size=b.matched_size,
+            outcome=b.outcome,
+            pnl=b.pnl,
+        )
+        for b in bet_records
+    ]
+
+    total_bets = len(bets)
+    total_pnl = round(sum(b.pnl for b in bets), 2)
+    winning = sum(1 for b in bets if b.pnl > 0)
+    bet_precision = round(winning / total_bets, 4) if total_bets > 0 else 0.0
+    pnl_per_bet = round(total_pnl / total_bets, 4) if total_bets > 0 else 0.0
+
+    return BetExplorerResponse(
+        model_id=model_id,
+        total_bets=total_bets,
+        total_pnl=total_pnl,
+        bet_precision=bet_precision,
+        pnl_per_bet=pnl_per_bet,
+        bets=bets,
+    )
 
 
 @router.get("/{model_id}/{date}", response_model=ReplayDayResponse)

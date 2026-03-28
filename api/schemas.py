@@ -213,6 +213,30 @@ class ReplayRaceResponse(BaseModel):
     race_pnl: float
 
 
+class ExplorerBet(BaseModel):
+    date: str
+    race_id: str
+    tick_timestamp: str
+    seconds_to_off: float
+    runner_id: int
+    runner_name: str
+    action: str
+    price: float
+    stake: float
+    matched_size: float
+    outcome: str
+    pnl: float
+
+
+class BetExplorerResponse(BaseModel):
+    model_id: str
+    total_bets: int
+    total_pnl: float
+    bet_precision: float
+    pnl_per_bet: float
+    bets: list[ExplorerBet]
+
+
 # ── Admin ──────────────────────────────────────────────────────────
 
 

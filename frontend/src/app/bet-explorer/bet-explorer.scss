@@ -1,0 +1,262 @@
+.explorer-page {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  color: #e0e0e0;
+
+  h1 {
+    font-size: 1.8rem;
+    margin-bottom: 1rem;
+    color: #fff;
+  }
+}
+
+// ── Selectors ──
+
+.selectors {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.selector {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+
+  label {
+    font-size: 0.75rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  select {
+    background: #1e1e2e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.9rem;
+    min-width: 200px;
+
+    option {
+      background: #1e1e2e;
+      color: #e0e0e0;
+    }
+  }
+}
+
+// ── Loading / Error ──
+
+.loading {
+  color: #888;
+  font-style: italic;
+  padding: 2rem;
+  text-align: center;
+}
+
+.error {
+  color: #e57373;
+  background: rgba(244, 67, 54, 0.15);
+  border: 1px solid #f44336;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 3rem;
+  color: #666;
+  font-style: italic;
+  font-size: 1.1rem;
+}
+
+// ── Summary Bar ──
+
+.summary-bar {
+  display: flex;
+  gap: 2rem;
+  padding: 1rem 1.25rem;
+  background: #1e1e2e;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .stat-label {
+    font-size: 0.7rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .stat-value {
+    font-size: 1.1rem;
+    font-weight: 600;
+
+    &.positive { color: #81c784; }
+    &.negative { color: #e57373; }
+  }
+}
+
+// ── Filters ──
+
+.filters {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+
+  label {
+    font-size: 0.7rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  select, input {
+    background: #1e1e2e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.85rem;
+    min-width: 120px;
+
+    &::placeholder {
+      color: #555;
+    }
+
+    option {
+      background: #1e1e2e;
+      color: #e0e0e0;
+    }
+  }
+}
+
+.btn {
+  padding: 0.35rem 0.7rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  transition: opacity 0.2s;
+
+  &:hover:not(:disabled) { opacity: 0.85; }
+
+  &-secondary { background: #444; color: #ddd; }
+  &-sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
+}
+
+// ── Table ──
+
+.table-wrapper {
+  overflow-x: auto;
+}
+
+.bets-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+
+  th {
+    text-align: left;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 2px solid #333;
+    color: #aaa;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+
+    &.sortable {
+      cursor: pointer;
+      user-select: none;
+
+      &:hover { color: #ddd; }
+    }
+  }
+
+  td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #2a2a3a;
+    white-space: nowrap;
+  }
+
+  tbody tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+}
+
+.bet-row {
+  &.won { border-left: 3px solid #81c784; }
+  &.lost { border-left: 3px solid #e57373; }
+}
+
+.mono {
+  font-family: monospace;
+  font-size: 0.8rem;
+}
+
+.runner-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.action-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+
+  &.back { background: rgba(33, 150, 243, 0.2); color: #64b5f6; }
+  &.lay { background: rgba(244, 67, 54, 0.2); color: #ef9a9a; }
+}
+
+.outcome-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+
+  &.won { color: #81c784; }
+  &.lost { color: #e57373; }
+}
+
+.pnl-cell {
+  font-weight: 600;
+
+  &.positive { color: #81c784; }
+  &.negative { color: #e57373; }
+}
+
+.empty-row {
+  text-align: center;
+  padding: 2rem !important;
+  color: #666;
+  font-style: italic;
+}
+
+.results-count {
+  font-size: 0.8rem;
+  color: #666;
+  margin-top: 0.5rem;
+  text-align: right;
+}

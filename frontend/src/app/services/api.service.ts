@@ -3,6 +3,8 @@ import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { ScoreboardResponse } from '../models/scoreboard.model';
 import { ModelDetailResponse, LineageResponse, GeneticsResponse } from '../models/model-detail.model';
+import { ReplayDayResponse, ReplayRaceResponse } from '../models/replay.model';
+import { BetExplorerResponse } from '../models/bet-explorer.model';
 import {
   ExtractedDaysResponse,
   BackupDaysResponse,
@@ -34,6 +36,20 @@ export class ApiService {
 
   getModelGenetics(modelId: string): Observable<GeneticsResponse> {
     return this.http.get<GeneticsResponse>(`${this.baseUrl}/models/${modelId}/genetics`);
+  }
+
+  // ── Replay endpoints ─────────────────────────────────────────────
+
+  getReplayDay(modelId: string, date: string): Observable<ReplayDayResponse> {
+    return this.http.get<ReplayDayResponse>(`${this.baseUrl}/replay/${modelId}/${date}`);
+  }
+
+  getReplayRace(modelId: string, date: string, raceId: string): Observable<ReplayRaceResponse> {
+    return this.http.get<ReplayRaceResponse>(`${this.baseUrl}/replay/${modelId}/${date}/${raceId}`);
+  }
+
+  getModelBets(modelId: string): Observable<BetExplorerResponse> {
+    return this.http.get<BetExplorerResponse>(`${this.baseUrl}/replay/${modelId}/bets`);
   }
 
   // ── Admin endpoints ──────────────────────────────────────────────

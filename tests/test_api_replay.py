@@ -355,3 +355,96 @@ class TestReplayRace:
             assert len(data["ticks"]) == 3
             assert data["all_bets"] == []
             assert data["race_pnl"] == 0.0
+
+
+# ── Bet Explorer Tests ──────────────────────────────────────────────
+
+
+class TestBetExplorer:
+    def test_model_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+            resp = client.get("/replay/nonexistent/bets")
+            assert resp.status_code == 404
+
+    def test_no_evaluation_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            mid = store.create_model(0, "ppo_lstm_v1", "Test", {"lr": 0.001})
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+            resp = client.get(f"/replay/{mid}/bets")
+            assert resp.status_code == 404
+
+    def test_returns_all_bets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            date = "2026-03-26"
+            market_id = "1.111"
+            _create_tick_parquet(tmp, date, {market_id: 5})
+            model_id, _ = _seed_model_with_bets(store, date, market_id)
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+
+            resp = client.get(f"/replay/{model_id}/bets")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["model_id"] == model_id
+            assert data["total_bets"] == 2
+            assert len(data["bets"]) == 2
+
+    def test_summary_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            date = "2026-03-26"
+            market_id = "1.111"
+            _create_tick_parquet(tmp, date, {market_id: 5})
+            model_id, _ = _seed_model_with_bets(store, date, market_id)
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+
+            resp = client.get(f"/replay/{model_id}/bets")
+            data = resp.json()
+            assert data["total_pnl"] == 5.0  # 25 + (-20)
+            assert data["bet_precision"] == 0.5  # 1 winning / 2 total
+            assert data["pnl_per_bet"] == 2.5  # 5 / 2
+
+    def test_bet_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            date = "2026-03-26"
+            market_id = "1.111"
+            _create_tick_parquet(tmp, date, {market_id: 5})
+            model_id, _ = _seed_model_with_bets(store, date, market_id)
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+
+            resp = client.get(f"/replay/{model_id}/bets")
+            bet = resp.json()["bets"][0]
+            assert "date" in bet
+            assert "race_id" in bet
+            assert "runner_name" in bet
+            assert "action" in bet
+            assert "price" in bet
+            assert "stake" in bet
+            assert "pnl" in bet
+            assert "outcome" in bet
+            assert "seconds_to_off" in bet
+
+    def test_empty_bets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            mid = store.create_model(0, "ppo_lstm_v1", "Test", {"lr": 0.001})
+            run_id = store.create_evaluation_run(mid, "2026-03-25", ["2026-03-26"])
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+
+            resp = client.get(f"/replay/{mid}/bets")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["total_bets"] == 0
+            assert data["bets"] == []
+            assert data["bet_precision"] == 0.0
+            assert data["pnl_per_bet"] == 0.0

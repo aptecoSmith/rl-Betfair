@@ -1,0 +1,180 @@
+<div class="explorer-page">
+  <h1>Bet Explorer</h1>
+
+  <!-- ── Model selector ── -->
+  <div class="selectors" data-testid="selectors">
+    <div class="selector">
+      <label>Model</label>
+      <select data-testid="model-select"
+              [value]="selectedModelId() ?? ''"
+              (change)="onModelChange($any($event.target).value)">
+        <option value="" disabled>Select model…</option>
+        @for (m of models(); track m.model_id) {
+          <option [value]="m.model_id">{{ shortId(m.model_id) }} (Gen {{ m.generation }})</option>
+        }
+      </select>
+    </div>
+  </div>
+
+  @if (loading()) {
+    <div class="loading" data-testid="loading">Loading bets…</div>
+  }
+
+  @if (error()) {
+    <div class="error" data-testid="error">{{ error() }}</div>
+  }
+
+  @if (betData(); as data) {
+    <!-- ── Summary stats ── -->
+    <div class="summary-bar" data-testid="summary-bar">
+      <div class="stat">
+        <span class="stat-label">Total Bets</span>
+        <span class="stat-value">{{ filteredStats().totalBets }}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Bet Precision</span>
+        <span class="stat-value">{{ filteredStats().betPrecision | percent:'1.1-1' }}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">P&L per Bet</span>
+        <span class="stat-value" [class.positive]="filteredStats().pnlPerBet > 0"
+              [class.negative]="filteredStats().pnlPerBet < 0">
+          {{ filteredStats().pnlPerBet | currency:'GBP':'symbol':'1.2-2' }}
+        </span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Total P&L</span>
+        <span class="stat-value" [class.positive]="filteredStats().totalPnl > 0"
+              [class.negative]="filteredStats().totalPnl < 0">
+          {{ filteredStats().totalPnl | currency:'GBP':'symbol':'1.2-2' }}
+        </span>
+      </div>
+    </div>
+
+    <!-- ── Filters ── -->
+    <div class="filters" data-testid="filters">
+      <div class="filter">
+        <label>Date</label>
+        <select data-testid="filter-date" [value]="filterDate()"
+                (change)="filterDate.set($any($event.target).value)">
+          <option value="">All dates</option>
+          @for (d of uniqueDates(); track d) {
+            <option [value]="d">{{ d }}</option>
+          }
+        </select>
+      </div>
+      <div class="filter">
+        <label>Race</label>
+        <select data-testid="filter-race" [value]="filterRace()"
+                (change)="filterRace.set($any($event.target).value)">
+          <option value="">All races</option>
+          @for (r of uniqueRaces(); track r) {
+            <option [value]="r">{{ shortId(r) }}</option>
+          }
+        </select>
+      </div>
+      <div class="filter">
+        <label>Runner</label>
+        <input type="text" data-testid="filter-runner"
+               placeholder="Search runner…"
+               [value]="filterRunner()"
+               (input)="filterRunner.set($any($event.target).value)" />
+      </div>
+      <div class="filter">
+        <label>Action</label>
+        <select data-testid="filter-action" [value]="filterAction()"
+                (change)="filterAction.set($any($event.target).value)">
+          <option value="">All</option>
+          <option value="back">Back</option>
+          <option value="lay">Lay</option>
+        </select>
+      </div>
+      <div class="filter">
+        <label>Outcome</label>
+        <select data-testid="filter-outcome" [value]="filterOutcome()"
+                (change)="filterOutcome.set($any($event.target).value)">
+          <option value="">All</option>
+          <option value="won">Won</option>
+          <option value="lost">Lost</option>
+        </select>
+      </div>
+      <button class="btn btn-secondary btn-sm" (click)="clearFilters()" data-testid="clear-filters">
+        Clear
+      </button>
+    </div>
+
+    <!-- ── Bets table ── -->
+    <div class="table-wrapper" data-testid="bets-table-wrapper">
+      <table class="bets-table" data-testid="bets-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Runner</th>
+            <th>Action</th>
+            <th class="sortable" (click)="toggleSort('seconds_to_off')" data-testid="sort-time-to-off">
+              Time to Off{{ sortIndicator('seconds_to_off') }}
+            </th>
+            <th class="sortable" (click)="toggleSort('price')" data-testid="sort-price">
+              Price{{ sortIndicator('price') }}
+            </th>
+            <th class="sortable" (click)="toggleSort('stake')" data-testid="sort-stake">
+              Stake{{ sortIndicator('stake') }}
+            </th>
+            <th>Matched</th>
+            <th>Outcome</th>
+            <th class="sortable" (click)="toggleSort('pnl')" data-testid="sort-pnl">
+              P&L{{ sortIndicator('pnl') }}
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (bet of sortedBets(); track $index) {
+            <tr class="bet-row" [class.won]="bet.outcome === 'won'" [class.lost]="bet.outcome === 'lost'"
+                data-testid="bet-row">
+              <td>{{ bet.date }}</td>
+              <td class="runner-name">{{ bet.runner_name }}</td>
+              <td>
+                <span class="action-badge" [class.back]="bet.action === 'back'" [class.lay]="bet.action === 'lay'">
+                  {{ bet.action | uppercase }}
+                </span>
+              </td>
+              <td class="mono">{{ formatSecondsToOff(bet.seconds_to_off) }}</td>
+              <td class="mono">{{ bet.price | number:'1.2-2' }}</td>
+              <td class="mono">£{{ bet.stake | number:'1.2-2' }}</td>
+              <td class="mono">£{{ bet.matched_size | number:'1.2-2' }}</td>
+              <td>
+                <span class="outcome-badge" [class.won]="bet.outcome === 'won'" [class.lost]="bet.outcome === 'lost'">
+                  {{ bet.outcome }}
+                </span>
+              </td>
+              <td class="mono pnl-cell" [class.positive]="bet.pnl > 0" [class.negative]="bet.pnl < 0">
+                {{ bet.pnl > 0 ? '+' : '' }}{{ bet.pnl | number:'1.2-2' }}
+              </td>
+            </tr>
+          }
+          @if (sortedBets().length === 0) {
+            <tr>
+              <td colspan="9" class="empty-row" data-testid="empty-row">
+                @if (allBets().length === 0) {
+                  No bets found for this model.
+                } @else {
+                  No bets match the current filters.
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+
+    <div class="results-count" data-testid="results-count">
+      Showing {{ sortedBets().length }} of {{ allBets().length }} bets
+    </div>
+  }
+
+  @if (!betData() && !loading() && !error()) {
+    <div class="empty-state" data-testid="empty-state">
+      Select a model to explore its evaluation bets.
+    </div>
+  }
+</div>

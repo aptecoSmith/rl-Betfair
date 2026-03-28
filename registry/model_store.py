@@ -79,6 +79,8 @@ class EvaluationDayRecord:
     pnl_per_bet: float
     early_picks: int
     profitable: bool
+    mean_opportunity_window_s: float = 0.0
+    median_opportunity_window_s: float = 0.0
 
 
 @dataclass
@@ -98,6 +100,7 @@ class EvaluationBetRecord:
     matched_size: float
     outcome: str  # "won" | "lost" | "void"
     pnl: float
+    opportunity_window_s: float = 0.0
 
 
 @dataclass
@@ -164,6 +167,14 @@ class ModelStore:
         conn = self._get_conn()
         try:
             conn.executescript(_SCHEMA_SQL)
+            # Migration: add opportunity window columns to existing databases
+            for col in ("mean_opportunity_window_s", "median_opportunity_window_s"):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE evaluation_days ADD COLUMN {col} REAL NOT NULL DEFAULT 0.0"
+                    )
+                except Exception:
+                    pass  # column already exists
             conn.commit()
         finally:
             conn.close()
@@ -330,8 +341,9 @@ class ModelStore:
                 """
                 INSERT INTO evaluation_days
                     (run_id, date, day_pnl, bet_count, winning_bets,
-                     bet_precision, pnl_per_bet, early_picks, profitable)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     bet_precision, pnl_per_bet, early_picks, profitable,
+                     mean_opportunity_window_s, median_opportunity_window_s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.run_id,
@@ -343,6 +355,8 @@ class ModelStore:
                     record.pnl_per_bet,
                     record.early_picks,
                     1 if record.profitable else 0,
+                    record.mean_opportunity_window_s,
+                    record.median_opportunity_window_s,
                 ),
             )
             conn.commit()
@@ -378,6 +392,7 @@ class ModelStore:
                 "matched_size": r.matched_size,
                 "outcome": r.outcome,
                 "pnl": r.pnl,
+                "opportunity_window_s": r.opportunity_window_s,
             }
             for r in records
         ])
@@ -392,6 +407,7 @@ class ModelStore:
                 "SELECT * FROM evaluation_days WHERE run_id = ? ORDER BY date",
                 (run_id,),
             ).fetchall()
+            col_names = set(rows[0].keys()) if rows else set()
             return [
                 EvaluationDayRecord(
                     run_id=r["run_id"],
@@ -403,6 +419,14 @@ class ModelStore:
                     pnl_per_bet=r["pnl_per_bet"],
                     early_picks=r["early_picks"],
                     profitable=bool(r["profitable"]),
+                    mean_opportunity_window_s=(
+                        r["mean_opportunity_window_s"]
+                        if "mean_opportunity_window_s" in col_names else 0.0
+                    ),
+                    median_opportunity_window_s=(
+                        r["median_opportunity_window_s"]
+                        if "median_opportunity_window_s" in col_names else 0.0
+                    ),
                 )
                 for r in rows
             ]
@@ -424,6 +448,7 @@ class ModelStore:
         dfs = [pd.read_parquet(p) for p in parquet_files]
         df = pd.concat(dfs, ignore_index=True)
         df = df.sort_values(["date", "tick_timestamp"]).reset_index(drop=True)
+        has_opp_window = "opportunity_window_s" in df.columns
         return [
             EvaluationBetRecord(
                 run_id=str(row["run_id"]),
@@ -439,6 +464,9 @@ class ModelStore:
                 matched_size=float(row["matched_size"]),
                 outcome=str(row["outcome"]),
                 pnl=float(row["pnl"]),
+                opportunity_window_s=(
+                    float(row["opportunity_window_s"]) if has_opp_window else 0.0
+                ),
             )
             for _, row in df.iterrows()
         ]
@@ -602,7 +630,9 @@ CREATE TABLE IF NOT EXISTS evaluation_days (
     bet_precision   REAL NOT NULL DEFAULT 0.0,
     pnl_per_bet     REAL NOT NULL DEFAULT 0.0,
     early_picks     INTEGER NOT NULL DEFAULT 0,
-    profitable      INTEGER NOT NULL DEFAULT 0
+    profitable      INTEGER NOT NULL DEFAULT 0,
+    mean_opportunity_window_s  REAL NOT NULL DEFAULT 0.0,
+    median_opportunity_window_s REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE INDEX IF NOT EXISTS idx_eval_days_run ON evaluation_days(run_id);

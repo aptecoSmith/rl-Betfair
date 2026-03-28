@@ -571,6 +571,49 @@ At full scale (20 agents x 30 days x 5 generations): estimated savings of ~45 mi
 - **8 integration tests** (test_integration_session_4_6.py): orjson real data (2 tests: all ticks parsed/prices valid), rollout on real data (3 tests: completes/PPO no NaNs/evaluation), benchmark results (3 tests: before exists/after exists/after faster)
 - All 952 Python tests pass (2 skipped, 129 deselected DB-dependent integration), no regressions
 
+### Session 3.6 + 3.7 — Race replay page & bet explorer page
+**Status:** Done
+
+#### Backend — bet explorer endpoint
+- `api/routers/replay.py` — new `GET /{model_id}/bets` endpoint returns all evaluation bets for a model with summary stats (total_bets, total_pnl, bet_precision, pnl_per_bet)
+- Route placed before `/{model_id}/{date}` to avoid path parameter collision
+- `api/schemas.py` — new `ExplorerBet` and `BetExplorerResponse` Pydantic models
+- Bugfix: `model_store.py` line 410 — `r.keys()` → `rows[0].keys()` (NameError when evaluation_days had rows)
+
+#### Frontend — Race Replay page (`src/app/race-replay/`)
+- **Selectors:** model → date → race (cascading dropdowns populated from API)
+- **LTP price chart:** SVG line chart per runner (colour-coded), x-axis = time to off (counts down to 0), cursor line tracks current tick position
+- **Playback controls:** play/pause button, speed control (1x/2x/5x/10x), tick slider, tick counter, time-to-off display
+- **Order book panel:** best 3 back/lay prices+sizes for selected runner, updates with cursor position. Back/lay sides colour-coded (blue/red)
+- **Action log panel:** chronological list of agent bets — time, runner, action type (BACK/LAY), price, stake, P&L. Click bet → cursor jumps to that tick
+- **Runner legend:** colour-coded buttons, click to select runner for order book. Winner marked with green "W" badge
+- **Summary bar:** total bets, race P&L (colour-coded), early picks count, venue, winner name
+- Winner highlighted throughout: thicker chart line, green badge in legend, green stat in summary
+- Route: `/replay` (lazy-loaded)
+
+#### Frontend — Bet Explorer page (`src/app/bet-explorer/`)
+- **Model selector:** dropdown populated from scoreboard API
+- **Summary stats bar:** total bets, bet precision (%), P&L per bet, total P&L — all update with filters
+- **Filter controls:** date (dropdown), race (dropdown), runner name (text search, case-insensitive), action (back/lay), outcome (won/lost). Clear button resets all
+- **Sortable table:** columns for date, runner, action, time to off, price, stake, matched size, outcome, P&L. Click column headers to sort (toggle asc/desc). Sort indicators (▲/▼)
+- **Visual styling:** action badges (blue back / red lay), outcome badges, P&L colour-coding, won/lost row left-border indicators
+- **Results count:** "Showing N of M bets" updates with filters
+- Route: `/bets` (lazy-loaded)
+
+#### Shared changes
+- **Header:** added "Replay" and "Bets" nav links between Training and Admin
+- **Routes:** `/replay` and `/bets` added to `app.routes.ts` (lazy-loaded)
+- **ApiService:** `getReplayDay()`, `getReplayRace()`, `getModelBets()` methods added
+- **TypeScript models:** `replay.model.ts` (BetEvent, RaceSummary, TickRunner, ReplayTick, ReplayDayResponse, ReplayRaceResponse), `bet-explorer.model.ts` (ExplorerBet, BetExplorerResponse)
+- Dark theme consistent with existing UI (#1e1e2e panels, #e0e0e0 text, #81c784 green, #e57373 red)
+
+#### Tests
+- **Python:** 6 new unit tests (test_api_replay.py): bet explorer model not found, no eval run, returns all bets, summary stats, bet fields, empty bets
+- **Angular Race Replay:** 48 unit tests: component creation, page title, model loading/error, empty state, loading/error display, selectors rendered/disabled, date population, race population, race data loading, summary bar/stats/early picks, LTP chart rendering/runner data/winner marking/SVG paths, runner legend/winner badge, order book panel/selected runner/empty message/tick changes, action log/items/empty/bet click, playback controls/play button/toggle/speed/tick counter/slider/seek, time to off compute/display, cursor position/line, auto-select runner, runner change, helpers (shortId/formatSecondsToOff/runnerColour), winner ID/display, error handling (race/day load), edge cases (no ticks/no winner/destroy), state reset on model change
+- **Angular Bet Explorer:** 45 unit tests: component creation, page title, model loading/error, empty state, loading/error display, model selector/load/error, summary bar/stats/empty stats, filters (date/action/outcome/runner/race/combined/clear/update stats), unique dates/races, sorting (default/toggle/price/pnl asc/indicator), table rendering/rows/columns, empty messages (no bets/filter empty), results count/filtered count, action badges (back/lay), outcome badges (won/lost), helpers (shortId/formatSecondsToOff), state reset
+- **Angular integration:** 5 race replay tests + 6 bet explorer tests (skip when API not running)
+- All 978 Python unit tests pass, all 285 Angular tests pass (24 skipped — integration)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -608,10 +651,10 @@ At full scale (20 agents x 30 days x 5 generations): estimated savings of ~45 mi
 | 2.8     | 44              | 7                      | **919 + 139** (Python) + **188 + 12** (Angular) |
 | 1.5     | 0               | 27                     | **919 + 166** (Python) + **188 + 12** (Angular) |
 | 4.6     | 21              | 8                      | **940 + 174** (Python) + **188 + 12** (Angular) |
+| 3.6+3.7 | 6 (Python) + 93 (Angular) | 11 (Angular) | **946 + 174** (Python) + **285 + 24** (Angular) |
 
-**Python total: 952 passed, 2 skipped, 129 deselected (non-integration). 29 tests added in Session 4.6 (21 unit + 8 integration).**
-**5 pre-existing integration test failures in 2.7b/2.8 (DB state — RaceCardRunners data availability, TimeLSTM W_dt init).**
-**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged.)**
+**Python total: 978 passed, 2 skipped, 175 deselected (non-integration). 6 tests added in Session 3.6+3.7 (bet explorer endpoint).**
+**Angular total: 285 passed, 24 skipped (integration — API not running). 104 tests added in Session 3.6+3.7 (48 replay + 45 bet explorer + 11 integration).**
 
 ---
 
