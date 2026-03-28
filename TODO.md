@@ -546,6 +546,41 @@ of redundant re-computation; rollout+eval = ~2.4 h/gen, all sequential.
   improved, no correctness regressions (same model on same data produces
   same P&L)
 
+### Session 4.11 — Race replay improvements
+- **Agent Actions panel** — show stake, price, liability, and running balance
+  per bet. Currently truncated/unreadable. Format: "LAY Horse @ 4.75 | stake
+  £32.13 | liability £119.99 | balance £67.87"
+- **Price chart** — the main chart area is blank for races with data. Debug
+  and fix the LTP price line rendering.
+- **Play button** — verify animation works (step through ticks, update order
+  book and chart cursor)
+
+### Session 4.10 — Budget-per-race and bet limits
+- **Budget reset per race** — each race starts with the starting budget (£100),
+  not the running total from previous races. Prevents compounding exploits
+  where early wins inflate the budget exponentially.
+- **Day P&L = sum of race P&Ls** — true accounting. Capital at risk for the day
+  is `starting_budget × races_played`. A model that bets on nothing correctly
+  shows £0 P&L, not £100 "profit" from unused budget.
+- **Max 20 bets per race** — configurable in `config.yaml`. Prevents the agent
+  from spamming bets on every tick on every runner. Still allows active trading
+  (20 bets across 10+ runners is plenty).
+- **Accumulated positions** — multiple bets on the same runner within a race
+  accumulate into a net position. The agent's observation should include its
+  current exposure per runner so it can decide whether to add to a position.
+  `BetManager` tracks net exposure per selection_id within a race.
+- **Agent state observation** — add per-runner position info to the observation
+  vector (current net back/lay exposure, number of bets on this runner).
+- **Scoreboard impact** — `pnl_per_bet` and `efficiency` metrics recalculated
+  under new accounting. `mean_daily_pnl` now reflects true capital efficiency.
+- **Breaking change** — all existing models incompatible after this change
+  (different env dynamics). Reset registry and retrain.
+- **Test:** pytest — budget resets between races, max bets enforced, position
+  accumulation correct, day P&L matches sum of race P&Ls, observation includes
+  exposure, efficiency scoring updated
+- **Integration test:** train agent on real data under new rules — verify no
+  budget explosion, bet counts per race <= 20, P&L is realistic
+
 ### Session 4.9 — Start/stop training from the UI
 - **Start Training button** on Training Monitor page — opens a form with
   generations (default 3) and epochs (default 3), POSTs to `/training/start`
