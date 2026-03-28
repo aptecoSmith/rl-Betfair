@@ -153,6 +153,8 @@ export class TrainingMonitor implements OnDestroy {
       next: () => {
         this.isStarting.set(false);
         this.training.clearHistory();
+        // Immediately reflect running state — don't wait for WebSocket
+        this.training.setRunning(true, 'Starting training run...');
       },
       error: (err) => {
         this.isStarting.set(false);

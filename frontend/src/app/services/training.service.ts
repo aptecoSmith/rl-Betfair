@@ -9,6 +9,7 @@ export class TrainingService implements OnDestroy {
 
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Latest training status from WebSocket or polling. */
   readonly status = signal<TrainingStatus>({
@@ -37,19 +38,39 @@ export class TrainingService implements OnDestroy {
   constructor() {
     this.connect();
     this.pollStatus();
+    // Poll every 5s as fallback in case WebSocket misses events
+    this.pollTimer = setInterval(() => this.pollStatus(), 5000);
   }
 
   ngOnDestroy(): void {
     this.disconnect();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.pollTimer) clearInterval(this.pollTimer);
   }
 
-  /** Poll /training/status once to get initial state. */
+  /** Poll /training/status to sync state. */
   private pollStatus(): void {
     this.http.get<TrainingStatus>(`${this.baseUrl}/training/status`).subscribe({
-      next: (s) => this.status.set(s),
+      next: (s) => {
+        // Only update running state from poll if WebSocket hasn't provided richer data
+        if (s.running !== this.status().running) {
+          this.status.update((prev) => ({ ...prev, running: s.running }));
+        }
+        if (s.phase && s.phase !== this.status().phase) {
+          this.status.update((prev) => ({ ...prev, ...s }));
+        }
+      },
       error: () => {},
     });
+  }
+
+  /** Manually set running state (called from UI after start/stop). */
+  setRunning(running: boolean, detail?: string): void {
+    this.status.update((prev) => ({
+      ...prev,
+      running,
+      detail: detail ?? prev.detail,
+    }));
   }
 
   /** Connect to WebSocket for live updates. */
@@ -93,7 +114,12 @@ export class TrainingService implements OnDestroy {
   }
 
   private updateStatusFromEvent(event: WSEvent): void {
-    if (event.event === 'run_complete') {
+    // Handle run end events (complete, stopped, error)
+    const isRunEnd =
+      event.event === 'run_complete' ||
+      (event.event === 'phase_complete' && ['run_complete', 'run_stopped', 'run_error'].includes(event.phase ?? ''));
+
+    if (isRunEnd) {
       this.lastRunCompletedAt.set(
         event.timestamp ? event.timestamp * 1000 : Date.now()
       );
@@ -103,7 +129,7 @@ export class TrainingService implements OnDestroy {
         generation: event.generation ?? this.status().generation,
         process: null,
         item: null,
-        detail: event.detail ?? null,
+        detail: event.phase === 'run_stopped' ? 'Training stopped by user' : (event.detail ?? null),
         last_agent_score: null,
       });
       return;
