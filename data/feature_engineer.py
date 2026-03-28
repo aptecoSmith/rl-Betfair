@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 from data.episode_builder import (
     Day,
+    PastRace,
     PriceSize,
     Race,
     RunnerMeta,
@@ -183,10 +184,172 @@ def runner_meta_features(meta: RunnerMeta) -> dict[str, float]:
         )
     feats["has_equipment"] = 1.0 if wearing != "" else 0.0
 
-    # Form features
-    feats.update(parse_form(meta.form))
+    # Form features — prefer recent_form from RaceCardRunners (Session 2.7b)
+    form_str = meta.recent_form if meta.recent_form else meta.form
+    feats.update(parse_form(form_str))
 
     return feats
+
+
+# ── Past race features (Session 2.7b) ────────────────────────────────────────
+
+#: All feature keys produced by :func:`past_race_features`.
+PAST_RACE_FEATURE_KEYS: list[str] = [
+    "pr_course_runs", "pr_course_wins", "pr_course_win_rate",
+    "pr_distance_runs", "pr_distance_wins",
+    "pr_going_runs", "pr_going_wins", "pr_going_win_rate",
+    "pr_avg_bsp", "pr_best_bsp", "pr_bsp_trend",
+    "pr_avg_position", "pr_best_position",
+    "pr_runs_count", "pr_completion_rate", "pr_improving_form",
+    "pr_days_between_runs_avg",
+]
+
+#: Distance tolerance for "similar distance" matching (±2 furlongs ≈ 440 yards).
+_DISTANCE_TOLERANCE_YARDS = 440
+
+
+def past_race_features(
+    meta: RunnerMeta,
+    venue: str,
+    today_distance_yards: int = 0,
+    today_going_abbr: str = "",
+) -> dict[str, float]:
+    """Derive features from a runner's past race history.
+
+    Parameters
+    ----------
+    meta:
+        Runner metadata (must have ``past_races`` populated from Session 2.7b).
+    venue:
+        Today's venue name for course-form matching (case-insensitive).
+    today_distance_yards:
+        Today's race distance in yards for distance matching.  If 0,
+        distance features count all races (no filtering).
+    today_going_abbr:
+        Today's going abbreviation for going-form matching.  If empty,
+        going features count all races (no filtering).
+
+    Returns
+    -------
+    dict[str, float]
+        17 features, all NaN when ``meta.past_races`` is empty.
+    """
+    races = meta.past_races
+    if not races:
+        return {k: NaN for k in PAST_RACE_FEATURE_KEYS}
+
+    venue_lower = venue.lower().strip() if venue else ""
+
+    # ── Course form ──────────────────────────────────────────────────────
+    course_races = [r for r in races if r.course.lower().strip() == venue_lower] if venue_lower else []
+    course_wins = sum(1 for r in course_races if r.position == 1)
+    pr_course_runs = float(len(course_races))
+    pr_course_wins = float(course_wins)
+    pr_course_win_rate = (course_wins / len(course_races)) if course_races else NaN
+
+    # ── Distance form ────────────────────────────────────────────────────
+    if today_distance_yards > 0:
+        dist_races = [
+            r for r in races
+            if abs(r.distance_yards - today_distance_yards) <= _DISTANCE_TOLERANCE_YARDS
+        ]
+    else:
+        dist_races = list(races)
+    pr_distance_runs = float(len(dist_races))
+    pr_distance_wins = float(sum(1 for r in dist_races if r.position == 1))
+
+    # ── Going form ───────────────────────────────────────────────────────
+    if today_going_abbr:
+        going_lower = today_going_abbr.lower().strip()
+        going_races = [r for r in races if r.going_abbr.lower().strip() == going_lower]
+    else:
+        going_races = []
+    going_wins = sum(1 for r in going_races if r.position == 1)
+    pr_going_runs = float(len(going_races))
+    pr_going_wins = float(going_wins)
+    pr_going_win_rate = (going_wins / len(going_races)) if going_races else NaN
+
+    # ── BSP features ─────────────────────────────────────────────────────
+    bsps = [r.bsp for r in races if not math.isnan(r.bsp) and r.bsp > 0]
+    if bsps:
+        pr_avg_bsp = log_norm(sum(bsps) / len(bsps))
+        pr_best_bsp = log_norm(min(bsps))
+        # BSP trend: linear slope over recent races (oldest first in JSON)
+        if len(bsps) >= 2:
+            n = len(bsps)
+            x_mean = (n - 1) / 2.0
+            y_mean = sum(bsps) / n
+            num = sum((i - x_mean) * (b - y_mean) for i, b in enumerate(bsps))
+            den = sum((i - x_mean) ** 2 for i in range(n))
+            pr_bsp_trend = (num / den) if den != 0 else 0.0
+        else:
+            pr_bsp_trend = 0.0
+    else:
+        pr_avg_bsp = NaN
+        pr_best_bsp = NaN
+        pr_bsp_trend = NaN
+
+    # ── Performance features ─────────────────────────────────────────────
+    positions = [r.position for r in races if r.position is not None]
+    if positions:
+        pr_avg_position = sum(positions) / len(positions)
+        pr_best_position = float(min(positions))
+    else:
+        pr_avg_position = NaN
+        pr_best_position = NaN
+
+    pr_runs_count = float(len(races))
+    completed = sum(1 for r in races if r.position is not None)
+    pr_completion_rate = (completed / len(races)) if races else NaN
+
+    # Improving form: last 3 completed positions trending downward (getting better)
+    recent_positions = [r.position for r in races if r.position is not None][:3]
+    if len(recent_positions) >= 3:
+        # All descending means improving (lower pos = better)
+        pr_improving_form = 1.0 if (
+            recent_positions[0] >= recent_positions[1] >= recent_positions[2]
+            and recent_positions[0] > recent_positions[2]
+        ) else 0.0
+    else:
+        pr_improving_form = NaN
+
+    # ── Days between runs ────────────────────────────────────────────────
+    dates = [r.date for r in races if r.date]
+    if len(dates) >= 2:
+        from datetime import datetime as dt
+        gaps: list[float] = []
+        for i in range(len(dates) - 1):
+            try:
+                d1 = dt.strptime(dates[i][:10], "%Y-%m-%d")
+                d2 = dt.strptime(dates[i + 1][:10], "%Y-%m-%d")
+                gap = abs((d1 - d2).days)
+                if gap > 0:
+                    gaps.append(float(gap))
+            except (ValueError, TypeError):
+                continue
+        pr_days_between_runs_avg = (sum(gaps) / len(gaps)) if gaps else NaN
+    else:
+        pr_days_between_runs_avg = NaN
+
+    return {
+        "pr_course_runs": pr_course_runs,
+        "pr_course_wins": pr_course_wins,
+        "pr_course_win_rate": pr_course_win_rate,
+        "pr_distance_runs": pr_distance_runs,
+        "pr_distance_wins": pr_distance_wins,
+        "pr_going_runs": pr_going_runs,
+        "pr_going_wins": pr_going_wins,
+        "pr_going_win_rate": pr_going_win_rate,
+        "pr_avg_bsp": pr_avg_bsp,
+        "pr_best_bsp": pr_best_bsp,
+        "pr_bsp_trend": pr_bsp_trend,
+        "pr_avg_position": pr_avg_position,
+        "pr_best_position": pr_best_position,
+        "pr_runs_count": pr_runs_count,
+        "pr_completion_rate": pr_completion_rate,
+        "pr_improving_form": pr_improving_form,
+        "pr_days_between_runs_avg": pr_days_between_runs_avg,
+    }
 
 
 # ── Per-runner tick features (from order book snapshot) ──────────────────────
@@ -656,6 +819,7 @@ def engineer_tick(
         meta = race.runner_metadata.get(sid)
         if meta:
             feats.update(runner_meta_features(meta))
+            feats.update(past_race_features(meta, race.venue))
 
         # Add cross-runner features
         if sid in cross:

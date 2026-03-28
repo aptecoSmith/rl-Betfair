@@ -128,7 +128,7 @@ class TestBackwardCompat:
 
         expected_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         assert obs.shape == (expected_dim,)
-        assert expected_dim == 1345
+        assert expected_dim == 1583  # was 1345 (Session 2.7b: +17 per runner × 14)
 
         # Step through a few ticks
         import numpy as np

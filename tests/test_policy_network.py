@@ -91,7 +91,7 @@ class TestObsDimConstants:
         assert VELOCITY_DIM == 7  # 6 base + 1 time_since_status_change
 
     def test_runner_dim(self):
-        assert RUNNER_DIM == 93
+        assert RUNNER_DIM == 110  # was 93, +17 past race features (Session 2.7b)
 
     def test_agent_state_dim(self):
         assert AGENT_STATE_DIM == 5
@@ -101,8 +101,8 @@ class TestObsDimConstants:
 
     def test_obs_dim_matches_env(self):
         expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM
-        assert expected == 1345
-        assert OBS_DIM == 1345
+        assert expected == 1583  # was 1345 (Session 2.7b: +17×14=238)
+        assert OBS_DIM == 1583
 
 
 # ── PPOLSTMPolicy architecture ──────────────────────────────────────────────

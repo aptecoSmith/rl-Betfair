@@ -387,6 +387,50 @@
 - **7 integration tests** (test_integration_session_2_7a.py): auto-detect on real DB, available_dates includes legacy, extract_date legacy fallback, load_day backward compat, feature engineer handles None, time_since_status_change present, env runs full episode with old data
 - All 883 Python tests pass (was 858), 3 skipped, 102 deselected
 
+### Session 2.7b — RaceCardRunners (PastRacesJson)
+**Status:** Done
+
+#### Extractor — RaceCardRunners merge
+- `data/extractor.py` — new `SQL_RACECARD_RUNNERS` query fetches `PastRacesJson`, `TimeformComment`, `RecentForm`, and overlapping metadata fields from `hotDataRefactored.RaceCardRunners`
+- `_merge_racecard_runners()` — left-joins RaceCardRunners onto coldData runners by (market_id, selection_id). Adds 3 new columns to runners Parquet: `timeform_comment`, `recent_form`, `past_races_json`
+- Field override: where RaceCardRunners has fresher non-null values for AGE, WEIGHT_VALUE, JOCKEY_NAME, TRAINER_NAME, DAYS_SINCE_LAST_RUN, SEX_TYPE, these override stale coldData values
+- `RUNNERS_COLUMNS` extended from 37 → 40 columns
+- Graceful fallback: if `RaceCardRunners` table doesn't exist, new columns default to None
+
+#### Episode builder — PastRace dataclass
+- New `PastRace` frozen dataclass: date, course, distance_yards, going, going_abbr, bsp, ip_max, ip_min, race_type, jockey, official_rating, position, field_size
+- `_parse_position()` — parses `"3/6"` → (3, 6), `"U/9"` → (None, 9), etc.
+- `_parse_past_races_json()` — JSON array → tuple of PastRace objects; handles null/empty/malformed gracefully
+- `RunnerMeta` extended with 3 new fields (with defaults for backward compat): `past_races: tuple[PastRace, ...]`, `timeform_comment: str`, `recent_form: str`
+- `_build_runner_meta()` — reads new columns from Parquet, handles missing columns for old files
+
+#### Feature engineer — 17 new features per runner
+- `past_race_features(meta, venue)` → 17 features:
+  - Course form: `pr_course_runs`, `pr_course_wins`, `pr_course_win_rate` (case-insensitive venue match)
+  - Distance form: `pr_distance_runs`, `pr_distance_wins` (±440 yards / ±2 furlongs tolerance)
+  - Going form: `pr_going_runs`, `pr_going_wins`, `pr_going_win_rate` (going abbreviation match)
+  - BSP: `pr_avg_bsp` (log-normed), `pr_best_bsp` (log-normed), `pr_bsp_trend` (linear slope, negative = improving)
+  - Performance: `pr_avg_position`, `pr_best_position`, `pr_runs_count`, `pr_completion_rate`
+  - Form trend: `pr_improving_form` (1.0 if last 3 positions descending)
+  - Rest pattern: `pr_days_between_runs_avg`
+- All features default to NaN when `past_races` is empty
+- `runner_meta_features()` now prefers `recent_form` (from RaceCardRunners) over `form` (coldData) when available
+- Called from `engineer_tick()` alongside existing `runner_meta_features()`
+
+#### Environment
+- `RUNNER_KEYS` extended with 17 past race feature keys → `RUNNER_DIM` = 110 (was 93)
+- Total `obs_dim` = 31 + 7 + (110 × 14) + 5 = **1583** (was 1345, delta +238)
+- Fully backward-compatible: old Parquet files without new columns produce all-zero past race features
+
+#### Notes
+- Existing models (trained on obs_dim=1345) are incompatible with the new obs_dim=1583. Retraining required
+- 688/740 RaceCardRunners have `PastRacesJson` populated; 740/740 have `TimeformComment`
+
+#### Tests
+- **47 unit tests** (test_session_2_7b.py): position parsing (9 tests), PastRacesJson parsing (8 tests: valid/dnf/missing fields/empty/null/malformed), past_race_features (17 tests: no history/all keys/course form/case insensitive/no match/distance/going/BSP/trend/position/completion/improving form true/false/insufficient/days between runs), recent_form preference (2 tests), extractor merge (2 tests: new columns present, count=40), episode builder backward compat (4 tests), env dimensions (5 tests: RUNNER_DIM=110/keys count/past race keys/obs_dim=1583/no duplicates)
+- **7 integration tests** (test_integration_session_2_7b.py): extraction has new columns, past_races_json populated, timeform_comment populated, past_races loaded into RunnerMeta, timeform_comment loaded, pr_* features populated, env runs full episode at obs_dim=1583
+- All 895 Python tests pass, 19 skipped, 102 deselected
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -425,8 +469,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 3.8     | 27 (Python) + 42 (Angular) | 4 (Python) | **781 + 118** (Python) + **137 + 6** (Angular) |
 | 3.5     | 51 (Angular)    | 6 (Angular)            | **781 + 118** (Python) + **188 + 12** (Angular) |
 | 2.7a    | 47              | 7                      | **828 + 125** (Python) + **188 + 12** (Angular) |
+| 2.7b    | 47              | 7                      | **875 + 132** (Python) + **188 + 12** (Angular) |
 
-**Python total: 883 passed, 3 skipped, 102 deselected.**
+**Python total: 895 passed, 19 skipped, 102 deselected.**
 **Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 2.7a.)**
 
 ---
@@ -456,3 +501,9 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 11. **Polled → SnapJson normalisation** (Session 2.7a) — `PolledMarketSnapshots.RunnersJson` uses a different layout (`selectionId`, `state.*`, `exchange.*`) than `ResolvedMarketSnaps.SnapJson` (`MarketRunners → RunnerId/Definition/Prices`). Rather than adding a second parser, the polled format is normalised into SnapJson format at extraction time, keeping all downstream code unchanged.
 
 12. **obs_dim breaking change** (Session 2.7a) — Adding 7 race status features changes obs_dim from 1338 to 1345. Existing trained models are incompatible and must be retrained. This is acceptable because the model registry is empty (no production models yet).
+
+13. **obs_dim breaking change** (Session 2.7b) — Adding 17 past race features per runner changes obs_dim from 1345 to 1583 (+238 = 17 × 14 max_runners). Same rationale as decision 12 — no production models yet.
+
+14. **RaceCardRunners field override** (Session 2.7b) — When both coldData (RunnerMetaData) and RaceCardRunners have the same field (age, weight, jockey, trainer, days_since_last_run, gender), prefer RaceCardRunners as it's fetched from Timeform race cards on race day and is fresher than the static coldData snapshot. Override only when the RaceCardRunners value is non-null.
+
+15. **recent_form over FORM** (Session 2.7b) — `RunnerMetaData.FORM` is a static snapshot. `RaceCardRunners.RecentForm` is fresher. `runner_meta_features()` now prefers `recent_form` when available, falling back to `form` when empty.

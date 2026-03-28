@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -62,6 +63,29 @@ class RunnerSnap:
 
 
 @dataclass(frozen=True, slots=True)
+class PastRace:
+    """One historical race result from ``RaceCardRunners.PastRacesJson``.
+
+    Session 2.7b — used by the feature engineer to derive course/distance/
+    going form, BSP trends, and performance history.
+    """
+
+    date: str                # ISO date string, e.g. "2026-03-11"
+    course: str              # e.g. "Huntingdon"
+    distance_yards: int      # distance in yards
+    going: str               # full going description, e.g. "Good to Soft"
+    going_abbr: str          # abbreviated going, e.g. "GS"
+    bsp: float               # Betfair starting price (NaN if missing)
+    ip_max: float            # in-play max price (NaN if missing)
+    ip_min: float            # in-play min price (NaN if missing)
+    race_type: str           # e.g. "Hurdle", "Flat", "Chase"
+    jockey: str
+    official_rating: float   # NaN if missing
+    position: int | None     # finishing position (None = DNF)
+    field_size: int | None   # total runners in the race
+
+
+@dataclass(frozen=True, slots=True)
 class RunnerMeta:
     """Static metadata for a runner in a specific market.
 
@@ -95,6 +119,10 @@ class RunnerMeta:
     wearing: str
     forecastprice_numerator: str
     forecastprice_denominator: str
+    # Session 2.7b — RaceCardRunners enrichment
+    past_races: tuple[PastRace, ...] = ()
+    timeform_comment: str = ""
+    recent_form: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +340,75 @@ def _opt_int(val: object) -> int | None:
 # ── Runner metadata parsing ──────────────────────────────────────────────────
 
 
+def _parse_position(pos_str: str) -> tuple[int | None, int | None]:
+    """Parse a position string like ``"3/6"`` into (position, field_size).
+
+    Non-numeric positions (``"U/9"``, ``"P/15"``, ``"F/8"``) return
+    ``(None, field_size)``.  Invalid strings return ``(None, None)``.
+    """
+    if not pos_str or "/" not in pos_str:
+        return None, None
+    parts = pos_str.split("/")
+    if len(parts) != 2:
+        return None, None
+    pos_part, size_part = parts[0].strip(), parts[1].strip()
+    try:
+        field_size = int(size_part)
+    except (ValueError, TypeError):
+        field_size = None
+    try:
+        position = int(pos_part)
+    except (ValueError, TypeError):
+        position = None
+    return position, field_size
+
+
+def _parse_past_races_json(raw: str | None) -> tuple[PastRace, ...]:
+    """Parse a ``PastRacesJson`` string into a tuple of :class:`PastRace`.
+
+    Handles null, empty string, empty array, and malformed JSON gracefully.
+    """
+    NaN = math.nan
+    if not raw or raw.strip() in ("", "[]", "null"):
+        return ()
+    try:
+        entries = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return ()
+    if not isinstance(entries, list):
+        return ()
+
+    results: list[PastRace] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        going_obj = e.get("going") or {}
+        race_type_obj = e.get("raceType") or {}
+        pos_str = e.get("position", "")
+        position, field_size = _parse_position(pos_str)
+
+        # Extract date — trim to YYYY-MM-DD
+        date_str = (e.get("date") or "")[:10]
+
+        results.append(PastRace(
+            date=date_str,
+            course=e.get("course", ""),
+            distance_yards=int(e.get("distance", 0)),
+            going=going_obj.get("full", ""),
+            going_abbr=going_obj.get("abbr", ""),
+            bsp=float(e["bsp"]) if e.get("bsp") is not None else NaN,
+            ip_max=float(e["inPlayMax"]) if e.get("inPlayMax") is not None else NaN,
+            ip_min=float(e["inPlayMin"]) if e.get("inPlayMin") is not None else NaN,
+            race_type=race_type_obj.get("full", ""),
+            jockey=e.get("jockey", ""),
+            official_rating=float(e["officialRating"]) if e.get("officialRating") is not None else NaN,
+            position=position,
+            field_size=field_size,
+        ))
+
+    return tuple(results)
+
+
 def _build_runner_meta(row: pd.Series) -> RunnerMeta:
     """Build a :class:`RunnerMeta` from one row of the runners DataFrame."""
     def s(col: str) -> str:
@@ -320,6 +417,13 @@ def _build_runner_meta(row: pd.Series) -> RunnerMeta:
         if pd.isna(v):
             return ""
         return str(v)
+
+    # Session 2.7b — parse PastRacesJson if present (backward-compatible)
+    past_races_raw = row.get("past_races_json")
+    if past_races_raw is not None and not pd.isna(past_races_raw):
+        past_races = _parse_past_races_json(str(past_races_raw))
+    else:
+        past_races = ()
 
     return RunnerMeta(
         selection_id=int(row["selection_id"]),
@@ -348,6 +452,9 @@ def _build_runner_meta(row: pd.Series) -> RunnerMeta:
         wearing=s("WEARING"),
         forecastprice_numerator=s("FORECASTPRICE_NUMERATOR"),
         forecastprice_denominator=s("FORECASTPRICE_DENOMINATOR"),
+        past_races=past_races,
+        timeform_comment=s("timeform_comment"),
+        recent_form=s("recent_form"),
     )
 
 

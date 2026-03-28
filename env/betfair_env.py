@@ -98,6 +98,14 @@ RUNNER_KEYS: list[str] = [
     "equip_tongue_tie", "equip_hood", "has_equipment",
     "form_avg_pos", "form_best_pos", "form_worst_pos",
     "form_wins", "form_places", "form_runs", "form_completion_rate",
+    # ── past race features (17, Session 2.7b) ──
+    "pr_course_runs", "pr_course_wins", "pr_course_win_rate",
+    "pr_distance_runs", "pr_distance_wins",
+    "pr_going_runs", "pr_going_wins", "pr_going_win_rate",
+    "pr_avg_bsp", "pr_best_bsp", "pr_bsp_trend",
+    "pr_avg_position", "pr_best_position",
+    "pr_runs_count", "pr_completion_rate", "pr_improving_form",
+    "pr_days_between_runs_avg",
     # ── cross-runner features (9) ──
     "ltp_rank", "ltp_rank_norm",
     "gap_to_favourite", "gap_to_favourite_pct",
@@ -120,7 +128,7 @@ AGENT_STATE_DIM = 5  # in_play, budget_frac, liability_frac, bets_norm, races_no
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 31 (25 + 6 race status one-hot)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 7 (6 + 1 time_since_status_change)
-RUNNER_DIM = len(RUNNER_KEYS)             # 93
+RUNNER_DIM = len(RUNNER_KEYS)             # 110 (was 93, +17 past race features)
 
 # Action thresholds
 _BACK_THRESHOLD = 0.33

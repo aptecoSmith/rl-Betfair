@@ -114,6 +114,10 @@ RUNNERS_COLUMNS: list[str] = [
     "COLOURS_DESCRIPTION",
     "COLOURS_FILENAME",
     "runner_id",
+    # Session 2.7b — RaceCardRunners enrichment
+    "timeform_comment",
+    "recent_form",
+    "past_races_json",
 ]
 
 # ── SQL queries ───────────────────────────────────────────────────────────────
@@ -291,6 +295,36 @@ SQL_RUNNERS = """
     JOIN coldData.RunnerMetaData rm ON rm.Id = rd.Id
     WHERE rd.MarketCatalogueMarketId IN :market_ids
 """
+
+#: Session 2.7b — enriched runner data from BetfairPoller's RaceCardRunners.
+#: Provides PastRacesJson, TimeformComment, and fresher metadata fields.
+SQL_RACECARD_RUNNERS = """
+    SELECT
+        MarketId       AS market_id,
+        SelectionId    AS selection_id,
+        Age            AS rc_age,
+        Weight         AS rc_weight,
+        TrainerName    AS rc_trainer,
+        JockeyName     AS rc_jockey,
+        TimeformComment AS timeform_comment,
+        RecentForm     AS recent_form,
+        DaysSinceLastRun AS rc_days_since_last_run,
+        Gender         AS rc_gender,
+        PastRacesJson  AS past_races_json
+    FROM RaceCardRunners
+    WHERE MarketId IN :market_ids
+"""
+
+# Field overrides: when RaceCardRunners has a non-null value for an overlapping
+# coldData field, prefer the fresher RaceCardRunners value.
+_RACECARD_OVERRIDES: dict[str, str] = {
+    "rc_age": "AGE",
+    "rc_weight": "WEIGHT_VALUE",
+    "rc_jockey": "JOCKEY_NAME",
+    "rc_trainer": "TRAINER_NAME",
+    "rc_days_since_last_run": "DAYS_SINCE_LAST_RUN",
+    "rc_gender": "SEX_TYPE",
+}
 
 
 # ── Engine factory ────────────────────────────────────────────────────────────
@@ -507,7 +541,13 @@ class DataExtractor:
     def _query_runners(
         self, market_ids: list[str], conn: sa.Connection
     ) -> pd.DataFrame:
-        """Execute the runners query for the given market IDs."""
+        """Fetch runner metadata from coldData, enriched with RaceCardRunners.
+
+        Session 2.7b: after loading coldData runners, left-join with
+        ``RaceCardRunners`` to add ``timeform_comment``, ``recent_form``,
+        ``past_races_json``, and override stale coldData fields (age, weight,
+        jockey, trainer, days_since_last_run, gender) with fresher values.
+        """
         if not market_ids:
             return pd.DataFrame(columns=RUNNERS_COLUMNS)
         stmt = text(SQL_RUNNERS).bindparams(
@@ -517,7 +557,12 @@ class DataExtractor:
         rows = result.fetchall()
         if not rows:
             return pd.DataFrame(columns=RUNNERS_COLUMNS)
-        return pd.DataFrame(rows, columns=list(result.keys()))
+        df = pd.DataFrame(rows, columns=list(result.keys()))
+
+        # ── Session 2.7b: merge RaceCardRunners ─────────────────────────
+        df = _merge_racecard_runners(df, market_ids, conn)
+
+        return df
 
     # ── Polled source helpers (Session 2.7a) ────────────────────────────────
 
@@ -666,6 +711,65 @@ def _cast_ticks(df: pd.DataFrame) -> pd.DataFrame:
 
     if "in_play" in df.columns:
         df["in_play"] = df["in_play"].astype(bool)
+
+    return df
+
+
+# ── RaceCardRunners enrichment (Session 2.7b) ────────────────────────────────
+
+
+def _merge_racecard_runners(
+    df: pd.DataFrame, market_ids: list[str], conn: sa.Connection,
+) -> pd.DataFrame:
+    """Left-join ``RaceCardRunners`` into the coldData runners DataFrame.
+
+    Adds ``timeform_comment``, ``recent_form``, and ``past_races_json``
+    columns.  Where RaceCardRunners has non-null values for overlapping
+    fields (age, weight, jockey, trainer, days_since_last_run, gender),
+    overrides the stale coldData values.
+    """
+    try:
+        stmt = text(SQL_RACECARD_RUNNERS).bindparams(
+            bindparam("market_ids", expanding=True)
+        )
+        result = conn.execute(stmt, {"market_ids": market_ids})
+        rows = result.fetchall()
+    except Exception:
+        # Table may not exist in older DB setups
+        for col in ("timeform_comment", "recent_form", "past_races_json"):
+            df[col] = None
+        return df
+
+    if not rows:
+        for col in ("timeform_comment", "recent_form", "past_races_json"):
+            df[col] = None
+        return df
+
+    rc_df = pd.DataFrame(rows, columns=list(result.keys()))
+    rc_df = rc_df.drop_duplicates(subset=["market_id", "selection_id"], keep="first")
+
+    # Ensure join key types match (cast to str for merge, then back to int)
+    original_sid_dtype = df["selection_id"].dtype
+    df["selection_id"] = df["selection_id"].astype(str)
+    rc_df["selection_id"] = rc_df["selection_id"].astype(str)
+
+    df = df.merge(rc_df, on=["market_id", "selection_id"], how="left")
+
+    # Restore selection_id to numeric
+    df["selection_id"] = pd.to_numeric(df["selection_id"], errors="coerce")
+
+    # Override stale coldData fields with fresher RaceCardRunners values
+    for rc_col, cold_col in _RACECARD_OVERRIDES.items():
+        if rc_col in df.columns and cold_col in df.columns:
+            mask = df[rc_col].notna() & (df[rc_col] != "")
+            df.loc[mask, cold_col] = df.loc[mask, rc_col].astype(str)
+        if rc_col in df.columns:
+            df.drop(columns=[rc_col], inplace=True)
+
+    # Fill missing new columns with None
+    for col in ("timeform_comment", "recent_form", "past_races_json"):
+        if col not in df.columns:
+            df[col] = None
 
     return df
 
