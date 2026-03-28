@@ -570,6 +570,41 @@ of redundant re-computation; rollout+eval = ~2.4 h/gen, all sequential.
 - **Integration test:** real data — windows computed and non-zero for some
   bets, tick_timestamp and seconds_to_off populated
 
+### Session 4.8 — AI-generated model & generation summaries
+- After evaluation completes, call Claude API (Haiku) to generate a natural
+  language summary describing each model's betting archetype — e.g. "Aggressive
+  early backer concentrating on favourites, 45s mean opportunity window suggests
+  genuine market views" — based on evaluation metrics, bet patterns, hyperparams
+- **Two levels of summary:**
+  1. **Per-model summary** — generated after each evaluation run. Analyses the
+     model's bet log (action distribution, timing, price ranges, opportunity
+     windows), per-day P&L distribution, hyperparameters, and genetic lineage.
+     Stored as `model_summary` on the model record in SQLite. Displayed on the
+     Model Detail page.
+  2. **Per-generation summary** — generated after selection/breeding. Compares
+     all agents in the generation: which archetypes survived, which were
+     eliminated, what traits the children inherited. Stored in the genetic log.
+     Describes population evolution narrative — e.g. "Value-finders dominate
+     Gen 3; snipers eliminated. Top traits: high entropy, large LSTM."
+- **Claude API integration:**
+  - `ANTHROPIC_API_KEY` in `.env` (optional — summaries skipped if not set)
+  - Model: `claude-haiku-4-5-20251001` (cheapest, ~$0.001 per summary)
+  - Configurable in `config.yaml` under `summaries.model` and `summaries.enabled`
+  - `training/summariser.py` — new module: `summarise_model(metrics, bets, hyperparams) -> str`
+    and `summarise_generation(scores, selection, breeding) -> str`
+  - Called from `TrainingOrchestrator` after evaluation phase (per-model) and
+    after breeding phase (per-generation)
+  - Graceful fallback: if API key missing or call fails, log a warning and
+    continue without summary (never blocks training)
+- **API endpoint:** `GET /models/{id}` response includes `model_summary` field
+- **Frontend:** Model Detail page displays summary in a card at the top
+- `anthropic` SDK added to `requirements.txt`
+- **Test:** pytest with mocked API — verify prompt construction, response
+  parsing, graceful failure on API error/missing key, summary stored in
+  registry. Verify generation summary captures selection/breeding narrative
+- **Integration test:** generate a real summary for a trained model (requires
+  API key — skip if not available)
+
 ---
 
 ## Phase 5 — Live Trading
