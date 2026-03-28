@@ -136,7 +136,7 @@ RUNNER_DIM = len(RUNNER_KEYS)             # 110 (was 93, +17 past race features)
 # Action thresholds
 _BACK_THRESHOLD = 0.33
 _LAY_THRESHOLD = -0.33
-_MIN_STAKE = 0.01  # minimum £ stake to bother placing
+_MIN_STAKE = 2.00  # Betfair Exchange minimum stake (£2)
 
 
 # ── Per-race record ─────────────────────────────────────────────────────────
