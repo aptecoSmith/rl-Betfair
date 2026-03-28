@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -109,10 +110,12 @@ class TrainingOrchestrator:
         model_store: ModelStore | None = None,
         progress_queue: asyncio.Queue | None = None,
         device: str | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.config = config
         self.model_store = model_store
         self.progress_queue = progress_queue
+        self.stop_event = stop_event
 
         # GPU auto-detection
         if device is not None:
@@ -147,12 +150,23 @@ class TrainingOrchestrator:
         # not once per agent per day per phase.
         self.feature_cache: dict[str, list] = {}
 
+        self._stopped = False
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(
             config, model_store, progress_queue=progress_queue, device=self.device,
             feature_cache=self.feature_cache,
         )
         self.scoreboard = Scoreboard(model_store, config) if model_store else None
+
+    def _check_stop(self) -> bool:
+        """Return True if a stop has been requested."""
+        if self.stop_event is not None and self.stop_event.is_set():
+            if not self._stopped:
+                self._stopped = True
+                logger.info("Stop requested — halting training")
+                self._emit_phase_complete("run_stopped", {})
+            return True
+        return False
 
     def run(
         self,
@@ -209,6 +223,8 @@ class TrainingOrchestrator:
         agents = self.pop_manager.initialise_population(generation=0, seed=seed)
 
         for gen in range(n_generations):
+            if self._check_stop():
+                break
             logger.info("=== Generation %d ===", gen)
             gen_result = self._run_generation(
                 generation=gen,
@@ -277,6 +293,8 @@ class TrainingOrchestrator:
         training_stats: dict[str, TrainingStats] = {}
 
         for agent in agents:
+            if self._check_stop():
+                break
             self._publish_progress(
                 "training", outer_tracker,
                 detail=f"Training agent {agent.model_id[:12]} ({agent.architecture_name})",
@@ -318,6 +336,12 @@ class TrainingOrchestrator:
             "generation": generation,
             "agents_trained": len(agents),
         })
+
+        if self._check_stop():
+            return GenerationResult(
+                generation=generation, training_stats=training_stats,
+                scores=[], selection=None, discarded=[], children=[], breeding_records=[],
+            )
 
         # ── Phase: Evaluation ────────────────────────────────────────────
         self._emit_phase_start("evaluating", {

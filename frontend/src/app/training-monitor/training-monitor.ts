@@ -1,6 +1,8 @@
 import { Component, inject, computed, effect, signal, OnDestroy } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import { JsonPipe } from '@angular/common';
 import { TrainingService } from '../services/training.service';
+import { ApiService } from '../services/api.service';
 import { WSEvent } from '../models/training.model';
 
 /** Phase label mapping (same as header, but full labels). */
@@ -23,16 +25,24 @@ export interface AgentGridItem {
 @Component({
   selector: 'app-training-monitor',
   standalone: true,
-  imports: [JsonPipe],
+  imports: [JsonPipe, FormsModule],
   templateUrl: './training-monitor.html',
   styleUrl: './training-monitor.scss',
 })
 export class TrainingMonitor implements OnDestroy {
   private readonly training = inject(TrainingService);
+  private readonly api = inject(ApiService);
   private tickTimer: ReturnType<typeof setInterval> | null = null;
 
   readonly status = this.training.status;
   readonly isRunning = this.training.isRunning;
+
+  // Training control
+  readonly isStarting = signal(false);
+  readonly isStopping = signal(false);
+  readonly startError = signal<string | null>(null);
+  nGenerations = 3;
+  nEpochs = 3;
   readonly rewardHistory = this.training.rewardHistory;
   readonly lossHistory = this.training.lossHistory;
 
@@ -90,12 +100,46 @@ export class TrainingMonitor implements OnDestroy {
     this.updateAgentGrid(event);
   });
 
+  private stopResetEffect = effect(() => {
+    if (!this.isRunning()) {
+      this.isStopping.set(false);
+    }
+  });
+
   constructor() {
     this.tickTimer = setInterval(() => this.now.set(Date.now()), 10_000);
   }
 
+  onStartTraining(): void {
+    this.isStarting.set(true);
+    this.startError.set(null);
+    this.api.startTraining({ n_generations: this.nGenerations, n_epochs: this.nEpochs }).subscribe({
+      next: () => {
+        this.isStarting.set(false);
+        this.training.clearHistory();
+      },
+      error: (err) => {
+        this.isStarting.set(false);
+        this.startError.set(err.error?.detail ?? 'Failed to start training');
+      },
+    });
+  }
+
+  onStopTraining(): void {
+    this.isStopping.set(true);
+    this.api.stopTraining().subscribe({
+      next: () => {
+        // Keep isStopping true until the run actually ends (WebSocket will set isRunning to false)
+      },
+      error: () => {
+        this.isStopping.set(false);
+      },
+    });
+  }
+
   ngOnDestroy(): void {
     this.agentEffect.destroy();
+    this.stopResetEffect.destroy();
     if (this.tickTimer) clearInterval(this.tickTimer);
   }
 

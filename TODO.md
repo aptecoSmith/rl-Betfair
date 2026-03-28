@@ -546,6 +546,27 @@ of redundant re-computation; rollout+eval = ~2.4 h/gen, all sequential.
   improved, no correctness regressions (same model on same data produces
   same P&L)
 
+### Session 4.9 — Start/stop training from the UI
+- **Start Training button** on Training Monitor page — opens a form with
+  generations (default 3) and epochs (default 3), POSTs to `/training/start`
+- **Stop Training button** (red) — visible when running, POSTs to
+  `/training/stop`, orchestrator halts after current agent completes
+- `POST /training/start` — loads available dates, splits chronologically,
+  spawns `TrainingOrchestrator.run()` in a background asyncio task via
+  `asyncio.to_thread()`. Returns immediately with run config. Rejects 409
+  if already running, 400 if no data.
+- `POST /training/stop` — sets a `threading.Event` that the orchestrator
+  checks between agents/phases. Graceful stop — never interrupts mid-agent.
+- `TrainingOrchestrator` gains `stop_event: threading.Event | None` param;
+  `_check_stop()` tested between agents, before eval, between generations
+- Pydantic schemas: `StartTrainingRequest`, `StartTrainingResponse`,
+  `StopTrainingResponse`
+- **Test:** pytest — orchestrator stop_event (6 tests), API endpoints (5
+  tests: start rejects running/no data, returns config; stop rejects not
+  running, sets event), schema validation (4 tests)
+- **Integration test:** (manual) start training from UI, watch progress
+  bars, stop mid-run
+
 ### Session 4.7 — Opportunity window metric
 - Per-bet **opportunity window** — measures how many seconds a bet's price (or
   better) was available in the order book before and after placement. Indicates

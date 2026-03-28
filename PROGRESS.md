@@ -614,6 +614,26 @@ At full scale (20 agents x 30 days x 5 generations): estimated savings of ~45 mi
 - **Angular integration:** 5 race replay tests + 6 bet explorer tests (skip when API not running)
 - All 978 Python unit tests pass, all 285 Angular tests pass (24 skipped — integration)
 
+### Session 4.9 — Start/stop training from the UI
+**Status:** Done
+
+#### Backend
+- `training/run_training.py` — `TrainingOrchestrator` gains `stop_event: threading.Event` param. `_check_stop()` tested between agents, before evaluation, and between generations. Emits `run_stopped` phase_complete event on stop.
+- `api/routers/training.py`:
+  - `POST /training/start` — loads available dates from Parquet, splits chronologically ~50/50, spawns `TrainingOrchestrator.run()` via `asyncio.to_thread()`. Returns immediately with `{run_id, train_days, test_days, n_generations, n_epochs}`. Rejects 409 if already running, 400 if no data.
+  - `POST /training/stop` — sets `stop_event`, orchestrator halts after current agent. Returns `{detail: "Stop requested..."}`. Rejects 409 if not running.
+- `api/main.py` — `app.state.stop_event` (threading.Event) and `app.state.training_task` added to lifespan
+- `api/schemas.py` — `StartTrainingRequest`, `StartTrainingResponse`, `StopTrainingResponse`
+
+#### Frontend
+- `training-monitor.ts` — Start Training form (generations + epochs inputs) shown when idle. Stop Training button (red) shown when running. Loading states for both.
+- `api.service.ts` — `startTraining()` and `stopTraining()` methods
+- `training-monitor.scss` — styled form fields, start/stop buttons
+
+#### Tests
+- **15 unit tests** (test_session_4_9.py): orchestrator stop_event (6 tests: accepted/default/false/true/emits event/only once), API endpoints (5 tests: start rejects running/no data/returns config, stop rejects not running/sets event), schemas (4 tests)
+- All 962 Python tests pass, no regressions
+
 ### Session 4.7 — Opportunity window metric
 **Status:** Done
 

@@ -287,3 +287,89 @@
   border-radius: 2px;
   display: inline-block;
 }
+
+/* ── Start / Stop Controls ───────────────────────────────── */
+
+.start-section {
+  margin-top: 1.5rem;
+}
+
+.start-form {
+  display: flex;
+  gap: 1.5rem;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+
+  span {
+    font-size: 0.75rem;
+    color: #808098;
+    font-weight: 600;
+  }
+
+  input {
+    width: 100px;
+    padding: 0.4rem 0.5rem;
+    background: #12122a;
+    border: 1px solid #2a2a4a;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+
+    &:focus {
+      outline: none;
+      border-color: #6c63ff;
+    }
+  }
+}
+
+.btn {
+  padding: 0.6rem 1.5rem;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s, background 0.2s;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.btn-start {
+  background: linear-gradient(135deg, #6c63ff, #a78bfa);
+  color: #ffffff;
+
+  &:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+}
+
+.btn-stop {
+  background: linear-gradient(135deg, #eb5757, #ff7878);
+  color: #ffffff;
+
+  &:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+}
+
+.stop-section {
+  margin-top: 0.75rem;
+  text-align: center;
+}
+
+.error-message {
+  color: #eb5757;
+  font-size: 0.8125rem;
+  margin-bottom: 0.75rem;
+}

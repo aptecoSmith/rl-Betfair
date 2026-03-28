@@ -306,3 +306,24 @@ class ImportRangeResponse(BaseModel):
 class ResetResponse(BaseModel):
     reset: bool
     detail: str
+
+
+# ── Training Control ──────────────────────────────────────────────────
+
+
+class StartTrainingRequest(BaseModel):
+    n_generations: int = 3
+    n_epochs: int = 3
+    seed: int | None = None
+
+
+class StartTrainingResponse(BaseModel):
+    run_id: str
+    train_days: list[str]
+    test_days: list[str]
+    n_generations: int
+    n_epochs: int
+
+
+class StopTrainingResponse(BaseModel):
+    detail: str

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -45,6 +46,8 @@ async def lifespan(app: FastAPI):
         "running": False,
         "latest_event": None,
     }
+    app.state.stop_event = threading.Event()
+    app.state.training_task = None
 
     yield
 

@@ -89,4 +89,21 @@ export class ApiService {
   resetSystem(confirm: string): Observable<ResetResponse> {
     return this.http.post<ResetResponse>(`${this.baseUrl}/admin/reset`, { confirm });
   }
+
+  // ── Training control endpoints ─────────────────────────────────────
+
+  startTraining(params: { n_generations?: number; n_epochs?: number; seed?: number | null }): Observable<{
+    run_id: string; train_days: string[]; test_days: string[];
+    n_generations: number; n_epochs: number;
+  }> {
+    return this.http.post<any>(`${this.baseUrl}/training/start`, {
+      n_generations: params.n_generations ?? 3,
+      n_epochs: params.n_epochs ?? 3,
+      seed: params.seed ?? null,
+    });
+  }
+
+  stopTraining(): Observable<{ detail: string }> {
+    return this.http.post<{ detail: string }>(`${this.baseUrl}/training/stop`, {});
+  }
 }
