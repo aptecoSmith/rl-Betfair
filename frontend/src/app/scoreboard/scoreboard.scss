@@ -1,43 +1,54 @@
 .scoreboard-container {
-  max-width: 1200px;
+  max-width: 1300px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 1.5rem 1rem;
+  color: #e0e0e0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
 
   h1 {
-    margin-bottom: 16px;
-    font-size: 1.5rem;
-    color: #1a1a2e;
+    margin-bottom: 1.25rem;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #ffffff;
   }
 }
 
 .loading,
 .error {
-  padding: 24px;
+  padding: 2rem;
   text-align: center;
-  font-size: 1.1rem;
+  font-size: 1rem;
+  color: #a0a0b8;
 }
 
 .error {
-  color: #d32f2f;
+  color: #eb5757;
 }
 
 .scoreboard-table {
   width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;
 
   th {
-    background: #1a1a2e;
-    color: #fff;
-    padding: 10px 12px;
+    background: #1e1e38;
+    color: #a0a0b8;
+    padding: 0.75rem 1rem;
     text-align: left;
-    font-weight: 600;
+    font-weight: 700;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
     white-space: nowrap;
+    border-bottom: 2px solid #2a2a4a;
   }
 
   td {
-    padding: 8px 12px;
-    border-bottom: 1px solid #e0e0e0;
+    padding: 0.875rem 1rem;
+    border-bottom: 1px solid #1e1e38;
+    color: #c0c0d8;
+    font-variant-numeric: tabular-nums;
   }
 
   tbody tr {
@@ -45,34 +56,46 @@
     transition: background 0.15s;
 
     &:hover {
-      background: #f5f5f5;
+      background: #1e1e38;
+    }
+  }
+
+  // Highlight the top-ranked row
+  tbody tr:first-child {
+    td {
+      color: #e8e8f0;
+      font-weight: 500;
     }
   }
 }
 
 .model-id {
-  font-family: monospace;
-  font-size: 0.85rem;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.8125rem;
+  color: #a78bfa;
 }
 
 .gen-badge {
   display: inline-block;
-  padding: 2px 8px;
+  padding: 0.2rem 0.6rem;
   border-radius: 12px;
   color: #fff;
-  font-weight: 600;
-  font-size: 0.8rem;
-  min-width: 24px;
+  font-weight: 700;
+  font-size: 0.75rem;
+  min-width: 26px;
   text-align: center;
 }
 
 .score {
   font-weight: 700;
+  font-size: 0.9375rem;
+  color: #e0e0e0;
 }
 
 .empty-state {
   text-align: center;
-  padding: 32px;
-  color: #999;
+  padding: 3rem;
+  color: #808098;
   font-style: italic;
+  font-size: 0.9375rem;
 }
