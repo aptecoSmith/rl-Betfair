@@ -131,6 +131,14 @@ async def start_training(request: Request, body: StartTrainingRequest):
     # Reset stop event for this run
     request.app.state.stop_event.clear()
 
+    # Apply population size override from request
+    import copy
+    run_config = copy.deepcopy(config)
+    if body.population_size is not None:
+        run_config["population"]["size"] = body.population_size
+        # Scale n_elite proportionally (at least 1)
+        run_config["population"]["n_elite"] = max(1, body.population_size // 10)
+
     async def _run_training():
         """Background coroutine that runs the orchestrator in a thread."""
         from data.episode_builder import load_days
@@ -164,7 +172,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
             test_days = load_days(test_dates, data_dir=data_dir)
 
             orch = TrainingOrchestrator(
-                config=config,
+                config=run_config,
                 model_store=request.app.state.store,
                 progress_queue=thread_q,
                 stop_event=request.app.state.stop_event,

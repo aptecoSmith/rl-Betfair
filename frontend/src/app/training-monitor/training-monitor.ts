@@ -149,7 +149,11 @@ export class TrainingMonitor implements OnDestroy {
   onStartTraining(): void {
     this.isStarting.set(true);
     this.startError.set(null);
-    this.api.startTraining({ n_generations: this.nGenerations, n_epochs: this.nEpochs }).subscribe({
+    this.api.startTraining({
+      n_generations: this.nGenerations,
+      n_epochs: this.nEpochs,
+      population_size: this.populationSize,
+    }).subscribe({
       next: () => {
         this.isStarting.set(false);
         this.training.clearHistory();

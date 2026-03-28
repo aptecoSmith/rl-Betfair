@@ -314,6 +314,7 @@ class ResetResponse(BaseModel):
 class StartTrainingRequest(BaseModel):
     n_generations: int = 3
     n_epochs: int = 3
+    population_size: int | None = None  # override config default if set
     seed: int | None = None
 
 

@@ -96,13 +96,17 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/training/info`);
   }
 
-  startTraining(params: { n_generations?: number; n_epochs?: number; seed?: number | null }): Observable<{
+  startTraining(params: {
+    n_generations?: number; n_epochs?: number;
+    population_size?: number; seed?: number | null;
+  }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
   }> {
     return this.http.post<any>(`${this.baseUrl}/training/start`, {
       n_generations: params.n_generations ?? 3,
       n_epochs: params.n_epochs ?? 3,
+      population_size: params.population_size ?? null,
       seed: params.seed ?? null,
     });
   }
