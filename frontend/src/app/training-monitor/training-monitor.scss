@@ -213,6 +213,19 @@
   font-size: 0.8125rem;
 }
 
+.chart-explain {
+  font-size: 0.6875rem;
+  color: #808098;
+  line-height: 1.5;
+  margin: 0.5rem 0 0;
+  padding-top: 0.5rem;
+  border-top: 1px solid #2a2a4a;
+
+  strong {
+    color: #a0a0b8;
+  }
+}
+
 /* ── Population Grid ───────────────────────────────────────── */
 
 .population-section {

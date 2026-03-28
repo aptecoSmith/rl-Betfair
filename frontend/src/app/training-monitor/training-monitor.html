@@ -137,6 +137,11 @@
       } @else {
         <div class="chart-empty">Waiting for data…</div>
       }
+      <p class="chart-explain">
+        Total reward per episode (P&amp;L + bonuses - penalties). Above the dashed zero line = the agent made money that day.
+        <strong>Good:</strong> trending upward over episodes, settling above zero.
+        <strong>Bad:</strong> flat at the bottom or wildly oscillating.
+      </p>
     </div>
     <div class="chart-card">
       <h3 class="chart-title">Loss</h3>
@@ -147,6 +152,11 @@
       } @else {
         <div class="chart-empty">Waiting for data…</div>
       }
+      <p class="chart-explain">
+        PPO policy loss — how much the agent's strategy changed this update.
+        <strong>Good:</strong> decreasing then stabilising near zero (agent has converged on a strategy).
+        <strong>Bad:</strong> spiking upward (unstable learning) or stuck high (not learning).
+      </p>
     </div>
   </div>
 
