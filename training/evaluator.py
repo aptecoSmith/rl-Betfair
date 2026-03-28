@@ -176,19 +176,23 @@ class Evaluator:
             hidden_state[1].to(self.device),
         )
 
+        # Pre-allocate reusable GPU buffer
+        obs_dim = obs.shape[0]
+        obs_buffer = torch.empty(
+            1, obs_dim, dtype=torch.float32, device=self.device,
+        )
+
         done = False
         with torch.no_grad():
             while not done:
-                obs_tensor = torch.as_tensor(
-                    obs, dtype=torch.float32, device=self.device,
-                ).unsqueeze(0)
+                obs_buffer[0] = torch.as_tensor(obs, dtype=torch.float32)
 
-                out: PolicyOutput = policy(obs_tensor, hidden_state)
+                out: PolicyOutput = policy(obs_buffer, hidden_state)
                 hidden_state = out.hidden_state
 
                 # Deterministic action (use mean, no sampling)
                 action = out.action_mean.squeeze(0).cpu().numpy()
-                action = np.clip(action, -1.0, 1.0)
+                np.clip(action, -1.0, 1.0, out=action)
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated

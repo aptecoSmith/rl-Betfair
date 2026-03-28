@@ -16,13 +16,26 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import orjson
+
+    def _json_loads(s: str | bytes) -> dict:
+        if isinstance(s, str):
+            return orjson.loads(s.encode("utf-8"))
+        return orjson.loads(s)
+
+except ImportError:
+    import json
+
+    def _json_loads(s: str | bytes) -> dict:  # type: ignore[misc]
+        return json.loads(s)
 
 import pandas as pd
 
@@ -235,7 +248,7 @@ def parse_snap_json(json_str: str) -> list[RunnerSnap]:
     **Flat layout** (used by unit tests and older snapshots) — top-level key
     ``Runners``, fields directly on each runner object.
     """
-    data = json.loads(json_str)
+    data = _json_loads(json_str)
 
     # Detect layout: nested (MarketRunners) vs flat (Runners)
     runners_raw = (
@@ -372,8 +385,8 @@ def _parse_past_races_json(raw: str | None) -> tuple[PastRace, ...]:
     if not raw or raw.strip() in ("", "[]", "null"):
         return ()
     try:
-        entries = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+        entries = _json_loads(raw)
+    except (ValueError, TypeError):
         return ()
     if not isinstance(entries, list):
         return ()
@@ -582,10 +595,13 @@ def _build_day(
     # Group by market_id → races
     races: list[Race] = []
     if not ticks_df.empty:
+        # Pre-sort the whole DataFrame once instead of per-group
+        ticks_df = ticks_df.sort_values(
+            ["market_id", "sequence_number"], ascending=True,
+        )
         for market_id, group in ticks_df.groupby("market_id", sort=False):
             market_id = str(market_id)
-            # Sort ticks by sequence_number ascending within each race
-            group = group.sort_values("sequence_number", ascending=True)
+            # Already sorted by sequence_number from the global sort
             ticks = [_row_to_tick(row) for _, row in group.iterrows()]
 
             # Derive race-level fields from the first tick / row

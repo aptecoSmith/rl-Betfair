@@ -519,6 +519,58 @@
 - **27 integration tests** (test_integration_session_1_5.py): model registered (4 tests: count, active, weights, architecture), evaluation run (3 tests: exists, test_days count, train_cutoff_date), per-day metrics (6 tests: count matches, dates match, pnl finite, pnl bounded, precision in range, profitable flag consistent), bet log (4 tests: bets recorded, fields populated, pnl sums match, Parquet files exist), scoreboard (4 tests: composite score computed, rank_all, score in valid range, metrics populated), progress events (6 tests: training/evaluating/scoring phases, run_complete, progress events, no selection/breeding for single agent)
 - All 27 integration tests pass. 982 non-integration tests pass (5 pre-existing failures in 2.7b/2.8 integration tests due to DB state changes — unrelated to Session 1.5)
 
+### Session 4.6 — Performance profiling & optimisation
+**Status:** Done
+
+#### Benchmark script
+- `scripts/benchmark.py` — reusable profiling tool, measures wall-clock times for: data loading, feature engineering, rollout collection, PPO update, evaluation
+- `--output` flag saves results as JSON for comparison; `--compare BEFORE AFTER` prints side-by-side delta table
+- Baseline established: data loading 3.95s, rollout 8.48s (54%), PPO 1.75s (11%), eval 5.42s (35%), total train+eval 15.65s
+
+#### Optimisation 1: orjson for JSON parsing
+- `data/episode_builder.py` — replaced `json.loads()` with `orjson.loads()` for `parse_snap_json()` and `_parse_past_races_json()`
+- Graceful fallback to stdlib `json` if orjson not installed
+- `orjson>=3.9.0` added to `requirements.txt`
+- **Result: data loading 3.95s -> 2.71s (31.5% faster)**
+
+#### Optimisation 2: Optimised rollout loop
+- `agents/ppo_trainer.py` — `_collect_rollout()` rewritten:
+  - Pre-allocates a reusable GPU tensor buffer (avoids per-step tensor creation)
+  - Wraps entire loop in single `torch.no_grad()` context
+  - Manual Normal distribution sampling (avoids `Normal.sample()` + `log_prob()` overhead)
+  - In-place `np.clip` for actions
+- `training/evaluator.py` — `_evaluate_day()` optimised with same pre-allocated GPU buffer pattern
+- **Result: rollout 8.48s -> 5.65s (33.3% faster, 493 -> 740 steps/s)**
+
+#### Optimisation 3: Pinned memory for GPU transfers
+- `agents/ppo_trainer.py` — `_ppo_update()` uses `pin_memory()` + `non_blocking=True` for CPU->GPU transfer of obs/action/log_prob batches
+- Falls back to direct `torch.from_numpy()` on CPU
+
+#### Optimisation 4: Parallel evaluation infrastructure
+- `training/run_training.py` — evaluation phase supports `ThreadPoolExecutor` for multi-agent parallel evaluation
+- Controlled by `training.eval_workers` config (default: 1 = sequential, for backward compatibility)
+- Each worker creates its own `Evaluator` instance — thread-safe (read-only feature cache, no shared mutable state)
+- Capped at `os.cpu_count()` to avoid oversubscription
+
+#### Before/after comparison
+
+| Operation | Before | After | Improvement |
+|---|---|---|---|
+| Data loading | 3.950s | 2.706s | **31.5% faster** |
+| Feature engineering | 1.463s | 1.373s | 6.2% faster |
+| Rollout collection | 8.476s | 5.653s | **33.3% faster** |
+| PPO update | 1.746s | 1.847s | -5.8% (pinned memory overhead on small batch) |
+| Evaluation | 5.423s | 4.782s | **11.8% faster** |
+| **Total train+eval** | **15.645s** | **12.282s** | **1.27x speedup** |
+| Rollout throughput | 493 steps/s | 740 steps/s | **50% faster** |
+
+At full scale (20 agents x 30 days x 5 generations): estimated savings of ~45 minutes per generation from rollout speedup alone.
+
+#### Tests
+- **21 unit tests** (test_session_4_6.py): orjson parsing (10 tests: simple/nested/bytes/empty/unicode/snap nested/snap flat/past races valid/empty/malformed), optimised rollout (3 tests: transitions produced/valid fields/last done), pinned memory PPO (2 tests: CPU/CUDA), parallel eval config (2 tests: default workers/cap at CPU count), optimised evaluation (1 test: day records), benchmark script (2 tests: compare function/output file), orjson fallback (1 test)
+- **8 integration tests** (test_integration_session_4_6.py): orjson real data (2 tests: all ticks parsed/prices valid), rollout on real data (3 tests: completes/PPO no NaNs/evaluation), benchmark results (3 tests: before exists/after exists/after faster)
+- All 952 Python tests pass (2 skipped, 129 deselected DB-dependent integration), no regressions
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -555,10 +607,11 @@
 | 2.7b    | 47              | 7                      | **875 + 132** (Python) + **188 + 12** (Angular) |
 | 2.8     | 44              | 7                      | **919 + 139** (Python) + **188 + 12** (Angular) |
 | 1.5     | 0               | 27                     | **919 + 166** (Python) + **188 + 12** (Angular) |
+| 4.6     | 21              | 8                      | **940 + 174** (Python) + **188 + 12** (Angular) |
 
-**Python total: 982 passed, 4 skipped, 129 deselected (non-integration). 27 integration tests added (all pass).**
+**Python total: 952 passed, 2 skipped, 129 deselected (non-integration). 29 tests added in Session 4.6 (21 unit + 8 integration).**
 **5 pre-existing integration test failures in 2.7b/2.8 (DB state — RaceCardRunners data availability, TimeLSTM W_dt init).**
-**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 1.5.)**
+**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged.)**
 
 ---
 

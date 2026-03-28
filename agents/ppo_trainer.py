@@ -229,7 +229,11 @@ class PPOTrainer:
     # -- Rollout collection ---------------------------------------------------
 
     def _collect_rollout(self, day: Day) -> tuple[Rollout, EpisodeStats]:
-        """Run one episode (one day) and collect transitions."""
+        """Run one episode (one day) and collect transitions.
+
+        Optimised hot loop: pre-allocates GPU tensors for observations,
+        keeps action log_std on GPU, and minimises per-step Python overhead.
+        """
         rollout_start = time.perf_counter()
         env = BetfairEnv(day, self.config, feature_cache=self.feature_cache)
         obs, info = env.reset()
@@ -245,40 +249,51 @@ class PPOTrainer:
         n_steps = 0
         done = False
 
-        while not done:
-            obs_tensor = torch.as_tensor(
-                obs, dtype=torch.float32, device=self.device,
-            ).unsqueeze(0)
+        # Pre-allocate a reusable GPU tensor for single-step observations
+        obs_dim = obs.shape[0]
+        obs_buffer = torch.empty(
+            1, obs_dim, dtype=torch.float32, device=self.device,
+        )
 
-            with torch.no_grad():
-                out: PolicyOutput = self.policy(obs_tensor, hidden_state)
+        with torch.no_grad():
+            while not done:
+                # Copy obs into pre-allocated GPU buffer (avoids tensor creation)
+                obs_buffer[0] = torch.as_tensor(obs, dtype=torch.float32)
+
+                out: PolicyOutput = self.policy(obs_buffer, hidden_state)
                 hidden_state = out.hidden_state
 
+                # Sample action — keep computation on GPU
                 std = out.action_log_std.exp()
-                dist = Normal(out.action_mean, std)
-                action = dist.sample()
-                log_prob = dist.log_prob(action).sum(dim=-1)
+                action_mean = out.action_mean
+                noise = torch.randn_like(action_mean)
+                action = action_mean + std * noise
+                log_prob = (
+                    -0.5 * ((action - action_mean) / std).pow(2)
+                    - std.log()
+                    - 0.5 * 1.8378770664093453  # log(2*pi)
+                ).sum(dim=-1)
                 value = out.value.squeeze(-1)
 
-            action_np = action.squeeze(0).cpu().numpy()
-            action_np = np.clip(action_np, -1.0, 1.0)
+                action_np = action.squeeze(0).cpu().numpy()
+                np.clip(action_np, -1.0, 1.0, out=action_np)
 
-            next_obs, reward, terminated, truncated, next_info = env.step(action_np)
-            done = terminated or truncated
+                next_obs, reward, terminated, truncated, next_info = env.step(action_np)
+                done = terminated or truncated
 
-            rollout.append(Transition(
-                obs=obs,
-                action=action_np,
-                log_prob=float(log_prob.item()),
-                value=float(value.item()),
-                reward=float(reward),
-                done=done,
-            ))
+                rollout.append(Transition(
+                    obs=obs,
+                    action=action_np,
+                    log_prob=float(log_prob.item()),
+                    value=float(value.item()),
+                    reward=float(reward),
+                    done=done,
+                ))
 
-            total_reward += reward
-            n_steps += 1
-            obs = next_obs
-            info = next_info
+                total_reward += reward
+                n_steps += 1
+                obs = next_obs
+                info = next_info
 
         rollout_elapsed = time.perf_counter() - rollout_start
         logger.info(
@@ -348,22 +363,23 @@ class PPOTrainer:
         transitions = rollout.transitions
         n = len(transitions)
 
-        # Prepare tensors
-        obs_batch = torch.as_tensor(
-            np.array([t.obs for t in transitions]),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        action_batch = torch.as_tensor(
-            np.array([t.action for t in transitions]),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        old_log_probs = torch.as_tensor(
-            [t.log_prob for t in transitions],
-            dtype=torch.float32,
-            device=self.device,
-        )
+        # Prepare tensors — build numpy arrays first, then transfer to GPU.
+        # Use pinned memory when CUDA is available for faster async transfer.
+        obs_np = np.array([t.obs for t in transitions], dtype=np.float32)
+        action_np = np.array([t.action for t in transitions], dtype=np.float32)
+        lp_np = np.array([t.log_prob for t in transitions], dtype=np.float32)
+
+        if self.device != "cpu":
+            obs_pin = torch.from_numpy(obs_np).pin_memory()
+            action_pin = torch.from_numpy(action_np).pin_memory()
+            lp_pin = torch.from_numpy(lp_np).pin_memory()
+            obs_batch = obs_pin.to(self.device, non_blocking=True)
+            action_batch = action_pin.to(self.device, non_blocking=True)
+            old_log_probs = lp_pin.to(self.device, non_blocking=True)
+        else:
+            obs_batch = torch.from_numpy(obs_np)
+            action_batch = torch.from_numpy(action_np)
+            old_log_probs = torch.from_numpy(lp_np)
 
         advantages, returns = self._compute_advantages(rollout)
         advantages = advantages.to(self.device)

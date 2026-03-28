@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import torch
@@ -330,25 +332,52 @@ class TrainingOrchestrator:
         )
         eval_tracker.reset_timer()
 
-        for agent in agents:
-            self._publish_progress(
-                "evaluating", eval_tracker,
-                detail=f"Evaluating agent {agent.model_id[:12]}",
+        # Determine parallelism: CPU-bound rollout benefits from threads
+        # (torch releases GIL during forward pass). Cap at available cores.
+        max_eval_workers = min(
+            len(agents),
+            self.config.get("training", {}).get("eval_workers", 1),
+            os.cpu_count() or 1,
+        )
+
+        def _eval_agent(agent: AgentRecord) -> None:
+            """Evaluate a single agent (thread-safe: no shared mutable state)."""
+            evaluator = Evaluator(
+                config=self.config,
+                model_store=self.model_store,
+                device=self.device,
+                feature_cache=self.feature_cache,
+            )
+            evaluator.evaluate(
+                model_id=agent.model_id,
+                policy=agent.policy,
+                test_days=test_days,
+                train_cutoff_date=train_cutoff,
             )
 
-            with perf_log(
-                logger,
-                f"Eval agent {agent.model_id[:12]}",
-                log_gpu=(self.device == "cuda"),
-            ):
-                self.evaluator.evaluate(
-                    model_id=agent.model_id,
-                    policy=agent.policy,
-                    test_days=test_days,
-                    train_cutoff_date=train_cutoff,
+        if max_eval_workers > 1:
+            logger.info(
+                "Parallel evaluation: %d agents across %d workers",
+                len(agents), max_eval_workers,
+            )
+            with ThreadPoolExecutor(max_workers=max_eval_workers) as pool:
+                futures = [pool.submit(_eval_agent, agent) for agent in agents]
+                for future in futures:
+                    future.result()  # raises if eval failed
+                    eval_tracker.tick()
+        else:
+            for agent in agents:
+                self._publish_progress(
+                    "evaluating", eval_tracker,
+                    detail=f"Evaluating agent {agent.model_id[:12]}",
                 )
-
-            eval_tracker.tick()
+                with perf_log(
+                    logger,
+                    f"Eval agent {agent.model_id[:12]}",
+                    log_gpu=(self.device == "cuda"),
+                ):
+                    _eval_agent(agent)
+                eval_tracker.tick()
 
         self._emit_phase_complete("evaluating", {
             "generation": generation,
