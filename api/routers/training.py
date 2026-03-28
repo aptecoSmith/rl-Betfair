@@ -27,7 +27,7 @@ def _state(request: Request) -> dict:
     return request.app.state.training_state
 
 
-@router.get("/training/status", response_model=TrainingStatus)
+@router.get("/training/status")
 def get_training_status(request: Request):
     """Current run snapshot: phase, process ETA, item ETA, generation."""
     state = _state(request)
@@ -202,48 +202,33 @@ def stop_training(request: Request):
 
 @router.websocket("/ws/training")
 async def ws_training(websocket: WebSocket):
-    """Broadcast progress events from the orchestrator's asyncio.Queue.
+    """Register as a broadcast client for training progress events.
 
-    Clients that connect mid-run receive the latest state immediately.
+    Events are consumed from the queue by a background task in main.py
+    and broadcast to all connected clients. Clients that connect mid-run
+    receive the latest state immediately.
     """
     await websocket.accept()
 
     state = websocket.app.state.training_state
-    queue: asyncio.Queue = websocket.app.state.progress_queue
 
     # Send latest state on connect so mid-run clients get caught up
     if state.get("latest_event"):
         await websocket.send_text(json.dumps(state["latest_event"]))
 
+    # Register this client for broadcasts
+    async def send_fn(msg: str) -> None:
+        await websocket.send_text(msg)
+
+    websocket.app.state.ws_clients.add(send_fn)
+
     try:
+        # Keep connection alive — wait for client disconnect
         while True:
-            # Wait for next event from the orchestrator queue
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=30.0)
-            except asyncio.TimeoutError:
-                # Send keepalive ping
-                await websocket.send_text(json.dumps({"event": "ping"}))
-                continue
-
-            # Update latest state for future mid-run connections
-            state["latest_event"] = event
-            if event.get("event") == "phase_start":
-                state["running"] = True
-            elif (
-                event.get("event") == "run_complete"
-                or (
-                    event.get("event") == "phase_complete"
-                    and event.get("phase") in ("run_complete", "run_stopped", "run_error")
-                )
-            ):
-                state["running"] = False
-
-            await websocket.send_text(json.dumps(event))
-
+            await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     except Exception:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        pass
+    finally:
+        websocket.app.state.ws_clients.discard(send_fn)

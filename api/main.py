@@ -48,8 +48,64 @@ async def lifespan(app: FastAPI):
     }
     app.state.stop_event = threading.Event()
     app.state.training_task = None
+    # Set of connected WebSocket send callbacks for broadcasting
+    app.state.ws_clients: set = set()
+
+    # Background task: drain progress_queue into training_state and broadcast
+    async def _queue_consumer():
+        state = app.state.training_state
+        queue = app.state.progress_queue
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Send keepalive to all WebSocket clients
+                import json
+                ping = json.dumps({"event": "ping"})
+                dead = set()
+                for send_fn in app.state.ws_clients:
+                    try:
+                        await send_fn(ping)
+                    except Exception:
+                        dead.add(send_fn)
+                app.state.ws_clients -= dead
+                continue
+            except asyncio.CancelledError:
+                break
+
+            # Update training_state for the status endpoint
+            state["latest_event"] = event
+            if event.get("event") == "phase_start":
+                state["running"] = True
+            elif (
+                event.get("event") == "run_complete"
+                or (
+                    event.get("event") == "phase_complete"
+                    and event.get("phase") in ("run_complete", "run_stopped", "run_error")
+                )
+            ):
+                state["running"] = False
+
+            # Broadcast to all connected WebSocket clients
+            import json
+            msg = json.dumps(event)
+            dead = set()
+            for send_fn in app.state.ws_clients:
+                try:
+                    await send_fn(msg)
+                except Exception:
+                    dead.add(send_fn)
+            app.state.ws_clients -= dead
+
+    consumer_task = asyncio.create_task(_queue_consumer())
 
     yield
+
+    consumer_task.cancel()
+    try:
+        await consumer_task
+    except asyncio.CancelledError:
+        pass
 
 
 def create_app() -> FastAPI:
