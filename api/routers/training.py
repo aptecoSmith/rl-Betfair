@@ -138,6 +138,27 @@ async def start_training(request: Request, body: StartTrainingRequest):
 
         state["running"] = True
         state["latest_event"] = None
+
+        # The orchestrator runs in a thread but asyncio.Queue is NOT
+        # thread-safe. Use a thread-safe queue and a bridge task.
+        import queue as thread_queue
+        thread_q: thread_queue.Queue = thread_queue.Queue()
+        async_q: asyncio.Queue = request.app.state.progress_queue
+        loop = asyncio.get_event_loop()
+
+        # Bridge: move events from thread-safe queue to asyncio queue
+        bridge_running = True
+
+        async def _bridge():
+            while bridge_running or not thread_q.empty():
+                try:
+                    event = await asyncio.to_thread(thread_q.get, timeout=0.5)
+                    await async_q.put(event)
+                except Exception:
+                    await asyncio.sleep(0.2)
+
+        bridge_task = asyncio.create_task(_bridge())
+
         try:
             train_days = load_days(train_dates, data_dir=data_dir)
             test_days = load_days(test_dates, data_dir=data_dir)
@@ -145,7 +166,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
             orch = TrainingOrchestrator(
                 config=config,
                 model_store=request.app.state.store,
-                progress_queue=request.app.state.progress_queue,
+                progress_queue=thread_q,
                 stop_event=request.app.state.stop_event,
             )
 
@@ -169,6 +190,8 @@ async def start_training(request: Request, body: StartTrainingRequest):
             except asyncio.QueueFull:
                 pass
         finally:
+            bridge_running = False
+            await bridge_task
             state["running"] = False
             request.app.state.training_task = None
 

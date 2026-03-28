@@ -533,5 +533,5 @@ class PPOTrainer:
         if self.progress_queue is not None:
             try:
                 self.progress_queue.put_nowait(progress)
-            except asyncio.QueueFull:
+            except Exception:
                 pass  # drop if consumer is behind

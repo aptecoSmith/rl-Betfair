@@ -543,9 +543,12 @@ class TrainingOrchestrator:
         self._put_event(event)
 
     def _put_event(self, event: dict) -> None:
-        """Put an event on the progress queue (non-blocking)."""
+        """Put an event on the progress queue (non-blocking).
+
+        Handles both ``asyncio.Queue`` and ``queue.Queue`` (thread-safe).
+        """
         if self.progress_queue is not None:
             try:
                 self.progress_queue.put_nowait(event)
-            except asyncio.QueueFull:
-                pass
+            except Exception:
+                pass  # drop if consumer is behind (Full for either queue type)
