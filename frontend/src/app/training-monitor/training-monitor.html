@@ -73,22 +73,52 @@
 
       <div class="start-section">
         <h3 class="section-title">Start Training</h3>
-        <div class="start-form">
-          <label class="form-field">
-            <span>Generations</span>
-            <input type="number" [(ngModel)]="nGenerations" min="1" max="50" />
-          </label>
-          <label class="form-field">
-            <span>Epochs per day</span>
-            <input type="number" [(ngModel)]="nEpochs" min="1" max="20" />
-          </label>
-        </div>
+
+        @if (trainingInfo(); as info) {
+          <div class="data-summary">
+            <span class="data-chip">{{ info.available_days }} days of data</span>
+            <span class="data-chip">{{ info.train_days }} train / {{ info.test_days }} test</span>
+          </div>
+
+          <div class="start-form">
+            <label class="form-field">
+              <span class="field-label">Population size</span>
+              <input type="number" [(ngModel)]="populationSize" min="2" max="200" (ngModelChange)="0" />
+              <span class="field-help">Number of agents competing. More = better diversity but slower.</span>
+            </label>
+            <label class="form-field">
+              <span class="field-label">Generations</span>
+              <input type="number" [(ngModel)]="nGenerations" min="1" max="50" (ngModelChange)="0" />
+              <span class="field-help">Rounds of evolution. Each generation trains all agents, evaluates them, then breeds the best into the next generation.</span>
+            </label>
+            <label class="form-field">
+              <span class="field-label">Epochs per day</span>
+              <input type="number" [(ngModel)]="nEpochs" min="1" max="20" (ngModelChange)="0" />
+              <span class="field-help">Passes over each training day. More passes = agents learn more from each day but takes longer.</span>
+            </label>
+          </div>
+
+          <div class="estimate-box">
+            <span class="estimate-label">Estimated duration</span>
+            <span class="estimate-value">{{ estimatedDuration() }}</span>
+            <span class="estimate-detail">
+              {{ populationSize }} agents x {{ nGenerations }} gen{{ nGenerations > 1 ? 's' : '' }} x {{ info.train_days }} train days x {{ nEpochs }} epoch{{ nEpochs > 1 ? 's' : '' }}
+            </span>
+          </div>
+
+          <div class="recommendation">
+            Recommended: 3 generations, 3 epochs to start. Increase generations for better evolution, epochs for deeper learning per day.
+          </div>
+        } @else {
+          <p class="no-run">Loading training configuration...</p>
+        }
+
         @if (startError()) {
           <div class="error-message">{{ startError() }}</div>
         }
         <button class="btn btn-start"
                 (click)="onStartTraining()"
-                [disabled]="isStarting()">
+                [disabled]="isStarting() || !trainingInfo()">
           {{ isStarting() ? 'Starting...' : 'Start Training' }}
         </button>
       </div>

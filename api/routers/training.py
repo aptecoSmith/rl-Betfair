@@ -73,6 +73,30 @@ def get_training_status(request: Request):
     )
 
 
+@router.get("/training/info")
+def get_training_info(request: Request):
+    """Return data availability and estimated training duration info."""
+    config = request.app.state.config
+    data_dir = config["paths"]["processed_data"]
+    processed = Path(data_dir)
+    dates = sorted(
+        f.stem
+        for f in processed.glob("*.parquet")
+        if not f.stem.endswith("_runners") and f.stem != ".gitkeep"
+    )
+    population_size = config.get("population", {}).get("size", 50)
+    split = max(1, len(dates) // 2)
+    return {
+        "available_days": len(dates),
+        "train_days": split,
+        "test_days": len(dates) - split,
+        "population_size": population_size,
+        "dates": dates,
+        # Benchmark: ~12s per agent per day (from Session 4.6)
+        "seconds_per_agent_per_day": 12.0,
+    }
+
+
 @router.post("/training/start", response_model=StartTrainingResponse)
 async def start_training(request: Request, body: StartTrainingRequest):
     """Start a multi-generation training run in the background.

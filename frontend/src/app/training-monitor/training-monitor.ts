@@ -41,8 +41,10 @@ export class TrainingMonitor implements OnDestroy {
   readonly isStarting = signal(false);
   readonly isStopping = signal(false);
   readonly startError = signal<string | null>(null);
+  readonly trainingInfo = signal<any>(null);
   nGenerations = 3;
   nEpochs = 3;
+  populationSize = 50;
   readonly rewardHistory = this.training.rewardHistory;
   readonly lossHistory = this.training.lossHistory;
 
@@ -108,6 +110,40 @@ export class TrainingMonitor implements OnDestroy {
 
   constructor() {
     this.tickTimer = setInterval(() => this.now.set(Date.now()), 10_000);
+    this.loadTrainingInfo();
+  }
+
+  private loadTrainingInfo(): void {
+    this.api.getTrainingInfo().subscribe({
+      next: (info) => {
+        this.trainingInfo.set(info);
+        this.populationSize = info.population_size;
+      },
+    });
+  }
+
+  estimatedDuration(): string {
+    const info = this.trainingInfo();
+    if (!info || info.available_days === 0) return 'No data available';
+
+    const trainDays = info.train_days;
+    const testDays = info.test_days;
+    const secsPerAgentDay = info.seconds_per_agent_per_day;
+    const pop = this.populationSize;
+    const gens = this.nGenerations;
+    const epochs = this.nEpochs;
+
+    // Per generation: (train_days * epochs * rollout+ppo) + (test_days * eval) per agent
+    const trainSecs = trainDays * epochs * secsPerAgentDay * 0.6; // rollout+ppo ~60% of benchmark
+    const evalSecs = testDays * secsPerAgentDay * 0.4; // eval ~40%
+    const perAgentPerGen = trainSecs + evalSecs;
+    const totalSecs = perAgentPerGen * pop * gens;
+
+    if (totalSecs < 60) return `~${Math.ceil(totalSecs)}s`;
+    if (totalSecs < 3600) return `~${Math.ceil(totalSecs / 60)} min`;
+    const hours = Math.floor(totalSecs / 3600);
+    const mins = Math.ceil((totalSecs % 3600) / 60);
+    return mins > 0 ? `~${hours}h ${mins}m` : `~${hours}h`;
   }
 
   onStartTraining(): void {

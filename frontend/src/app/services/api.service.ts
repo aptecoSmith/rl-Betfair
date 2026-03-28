@@ -92,6 +92,10 @@ export class ApiService {
 
   // ── Training control endpoints ─────────────────────────────────────
 
+  getTrainingInfo(): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/training/info`);
+  }
+
   startTraining(params: { n_generations?: number; n_epochs?: number; seed?: number | null }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
