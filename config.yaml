@@ -8,8 +8,8 @@ database:
   hot_data_db: hotDataRefactored
 
 population:
-  size: 20
-  n_elite: 3
+  size: 50                        # larger population = more diversity, less premature convergence
+  n_elite: 5                      # top 5 always survive (scaled from 3 at pop=20)
   selection_top_pct: 0.5        # top 50% survive each generation
   mutation_rate: 0.3            # probability of mutating each hyperparameter in bred children
 
