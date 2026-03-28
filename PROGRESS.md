@@ -371,13 +371,21 @@
 - Fully backward-compatible: old Parquet files with no `race_status` column produce all-zero race status features
 
 #### Notes
-- `PolledMarketSnapshots` and `RaceStatusEvents` tables exist in MySQL but are empty (BetfairPoller hasn't recorded data yet). All code is tested with mocks + the legacy path continues to work
 - Existing models (trained on obs_dim=1338) are incompatible with the new obs_dim=1345. Retraining required after this change
+
+#### Validated with real polled data (2026-03-28)
+- BetfairPoller captured 390 polled snapshots across 69 markets + 36 race status events
+- Full pipeline validated end-to-end: MySQL → extract → Parquet → episode builder → feature engineer → BetfairEnv (obs_dim=1345, 50 steps, no NaNs)
+- Three bugs found and fixed during real data validation:
+  1. `merge_asof` in `_join_race_status` — pandas 3.0 requires globally sorted `on` key even with `by` grouping; fixed by sorting on `timestamp` alone instead of `["market_id", "timestamp"]`
+  2. `_enrich_polled_ticks` — `updates` table only has legacy data; added coldData fallback (Todays_Markets → marketdescription → Event) to populate venue, market_start_time, market_type for polled markets
+  3. `_polled_runners_to_snap_json` — price ladder keys were passed through as lowercase (`price`/`size`) from polled source; normalised to uppercase (`Price`/`Size`) to match legacy SnapJson format
+- `test_real_extraction.py` — fixed `test_ticks_and_runners_share_markets` to compare same-date pairs only (was cross-joining all dates via independent parametrization)
 
 #### Tests
 - **47 unit tests** (test_session_2_7a.py): polled→snap conversion (16 tests incl. null/empty/invalid/missing state, parse_snap_json round-trip), race status join (4 tests: basic, no events, empty ticks, multiple markets), extractor auto-detect (4 tests: no table, no rows, rows exist, legacy adds race_status), episode builder (4 tests: race_status field, None default, all values, backward compat with old Parquet), feature engineer race status (8 tests: one-hot all zeros/parading/under orders/off/case insensitive/all 6 statuses, RACE_STATUSES constant), time_since_status_change (5 tests: initial zero, increases, resets on change, clamps at 1.0, reset clears), env dimensions (6 tests: market_dim, velocity_dim, keys contain statuses, obs_dim, backward compat env episode)
 - **7 integration tests** (test_integration_session_2_7a.py): auto-detect on real DB, available_dates includes legacy, extract_date legacy fallback, load_day backward compat, feature engineer handles None, time_since_status_change present, env runs full episode with old data
-- All 858 Python tests pass (was 804), 2 skipped, 102 deselected
+- All 883 Python tests pass (was 858), 3 skipped, 102 deselected
 
 ---
 
@@ -418,7 +426,7 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 3.5     | 51 (Angular)    | 6 (Angular)            | **781 + 118** (Python) + **188 + 12** (Angular) |
 | 2.7a    | 47              | 7                      | **828 + 125** (Python) + **188 + 12** (Angular) |
 
-**Python total: 858 passed, 2 skipped, 102 deselected.**
+**Python total: 883 passed, 3 skipped, 102 deselected.**
 **Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 2.7a.)**
 
 ---

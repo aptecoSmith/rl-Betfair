@@ -183,9 +183,19 @@ class TestDataQuality:
         assert counts.min() >= 1
         assert counts.max() <= 40
 
-    def test_ticks_and_runners_share_markets(self, ticks_df, runners_df):
-        """Markets in ticks should match markets in runners."""
-        tick_markets = set(ticks_df["market_id"].unique())
-        runner_markets = set(runners_df["market_id"].unique())
+    @pytest.mark.parametrize(
+        "ticks_path",
+        _ticks_paths(),
+        ids=lambda p: p.stem,
+    )
+    def test_ticks_and_runners_share_markets(self, ticks_path):
+        """Markets in ticks should match markets in runners (same date only)."""
+        runners_path = ticks_path.parent / f"{ticks_path.stem}_runners.parquet"
+        if not runners_path.exists():
+            pytest.skip(f"No runners file for {ticks_path.stem}")
+        ticks = pd.read_parquet(ticks_path)
+        runners = pd.read_parquet(runners_path)
+        tick_markets = set(ticks["market_id"].unique())
+        runner_markets = set(runners["market_id"].unique())
         # Every tick market should have runner metadata
         assert tick_markets == runner_markets

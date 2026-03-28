@@ -168,15 +168,15 @@ class TestPolledRunnersToSnapJson:
         r0 = result["MarketRunners"][0]
         backs = r0["Prices"]["AvailableToBack"]
         assert len(backs) == 2
-        assert backs[0]["price"] == 3.4
-        assert backs[0]["size"] == 100.0
+        assert backs[0]["Price"] == 3.4
+        assert backs[0]["Size"] == 100.0
 
     def test_lay_prices_mapped(self):
         result = json.loads(_polled_runners_to_snap_json(_sample_polled_runners_json()))
         r0 = result["MarketRunners"][0]
         lays = r0["Prices"]["AvailableToLay"]
         assert len(lays) == 2
-        assert lays[0]["price"] == 3.55
+        assert lays[0]["Price"] == 3.55
 
     def test_null_input(self):
         result = json.loads(_polled_runners_to_snap_json(None))

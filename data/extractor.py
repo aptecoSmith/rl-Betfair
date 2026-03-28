@@ -713,6 +713,17 @@ def _polled_runners_to_snap_json(runners_json_str: str | None) -> str:
         state = r.get("state") or {}
         exchange = r.get("exchange") or {}
 
+        # Normalise price ladder keys to match legacy SnapJson format
+        # (uppercase ``Price``/``Size`` instead of polled lowercase).
+        atb = [
+            {"Price": p.get("price", 0.0), "Size": p.get("size", 0.0)}
+            for p in (exchange.get("availableToBack") or [])
+        ]
+        atl = [
+            {"Price": p.get("price", 0.0), "Size": p.get("size", 0.0)}
+            for p in (exchange.get("availableToLay") or [])
+        ]
+
         runner = {
             "RunnerId": {"SelectionId": r.get("selectionId", 0)},
             "Definition": {
@@ -725,8 +736,8 @@ def _polled_runners_to_snap_json(runners_json_str: str | None) -> str:
                 "TradedVolume": state.get("totalMatched", 0.0),
                 "StartingPriceNear": 0.0,
                 "StartingPriceFar": 0.0,
-                "AvailableToBack": exchange.get("availableToBack", []),
-                "AvailableToLay": exchange.get("availableToLay", []),
+                "AvailableToBack": atb,
+                "AvailableToLay": atl,
             },
         }
         market_runners.append(runner)
@@ -738,15 +749,17 @@ def _enrich_polled_ticks(df: pd.DataFrame, conn: sa.Connection) -> pd.DataFrame:
     """Add venue, market_start_time and market_type to polled ticks.
 
     ``PolledMarketSnapshots`` doesn't carry venue, scheduled start time, or
-    market type — we pull these from the ``updates`` table (one lookup per
-    market).  Also drops the ``market_status`` column (not in TICKS_COLUMNS).
+    market type.  We try the ``updates`` table first (legacy), then fall back
+    to ``coldData`` (Todays_Markets / marketdescription / Event) for markets
+    not present in ``updates``.  Also drops the ``market_status`` column.
     """
     if df.empty:
         return df
 
     market_ids = list(df["market_id"].unique())
+    enrichment_df = pd.DataFrame(columns=["market_id", "venue", "market_start_time", "market_type"])
 
-    # Fetch venue + market start time + market type from updates
+    # ── Primary source: updates table (legacy) ──────────────────────────
     try:
         stmt = text("""
             SELECT DISTINCT MarketId AS market_id,
@@ -759,22 +772,47 @@ def _enrich_polled_ticks(df: pd.DataFrame, conn: sa.Connection) -> pd.DataFrame:
         result = conn.execute(stmt, {"market_ids": market_ids})
         rows = result.fetchall()
         if rows:
-            updates_df = pd.DataFrame(rows, columns=list(result.keys()))
-            updates_df = updates_df.drop_duplicates(subset=["market_id"], keep="first")
-            df = df.merge(
-                updates_df[["market_id", "venue", "market_start_time", "market_type"]],
-                on="market_id", how="left",
-            )
-            df["venue"] = df["venue"].fillna("")
-            df["market_type"] = df["market_type"].fillna("")
-        else:
-            df["venue"] = ""
-            df["market_start_time"] = None
-            df["market_type"] = ""
+            enrichment_df = pd.DataFrame(rows, columns=list(result.keys()))
+            enrichment_df = enrichment_df.drop_duplicates(subset=["market_id"], keep="first")
     except Exception:
+        pass
+
+    # ── Fallback source: coldData tables ─────────────────────────────────
+    found_ids = set(enrichment_df["market_id"]) if len(enrichment_df) else set()
+    missing_ids = [mid for mid in market_ids if mid not in found_ids]
+
+    if missing_ids:
+        try:
+            cold_stmt = text("""
+                SELECT tm.MarketId    AS market_id,
+                       e.Venue        AS venue,
+                       md.MarketTime  AS market_start_time,
+                       md.MarketType  AS market_type
+                FROM coldData.Todays_Markets tm
+                JOIN coldData.marketdescription md ON md.Id = tm.DescriptionId
+                JOIN coldData.Event e ON e.Id = tm.EventId
+                WHERE tm.MarketId IN :market_ids
+            """).bindparams(bindparam("market_ids", expanding=True))
+            result = conn.execute(cold_stmt, {"market_ids": missing_ids})
+            rows = result.fetchall()
+            if rows:
+                cold_df = pd.DataFrame(rows, columns=list(result.keys()))
+                cold_df = cold_df.drop_duplicates(subset=["market_id"], keep="first")
+                enrichment_df = pd.concat([enrichment_df, cold_df], ignore_index=True)
+        except Exception:
+            pass
+
+    # ── Merge enrichment onto ticks ──────────────────────────────────────
+    if len(enrichment_df):
+        df = df.merge(
+            enrichment_df[["market_id", "venue", "market_start_time", "market_type"]],
+            on="market_id", how="left",
+        )
+        df["venue"] = df["venue"].fillna("")
+        df["market_type"] = df["market_type"].fillna("")
+    else:
         df["venue"] = ""
-        if "market_start_time" not in df.columns:
-            df["market_start_time"] = None
+        df["market_start_time"] = None
         df["market_type"] = ""
 
     # Drop market_status (polled-only column, not in TICKS_COLUMNS)
@@ -809,14 +847,26 @@ def _join_race_status(
 
     events_df = pd.DataFrame(rows, columns=list(result.keys()))
     events_df["timestamp"] = pd.to_datetime(events_df["timestamp"])
+    # Ensure market_id dtypes match (pandas 3.0 may produce StringDtype vs object)
+    events_df["market_id"] = events_df["market_id"].astype(str)
     events_df = events_df.sort_values(["market_id", "timestamp"])
 
+    df["market_id"] = df["market_id"].astype(str)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # As-of merge: for each tick find the latest event at or before that timestamp
+    # As-of merge: for each tick find the latest event at or before that timestamp.
+    # pandas >=3.0 requires the ``on`` key to be globally monotonic even with
+    # ``by``, so we sort both sides by timestamp alone (interleaving markets).
+    right = (
+        events_df[["market_id", "timestamp", "status"]]
+        .rename(columns={"status": "race_status"})
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    left = df.sort_values("timestamp").reset_index(drop=True)
+
     merged = pd.merge_asof(
-        df.sort_values(["market_id", "timestamp"]),
-        events_df[["market_id", "timestamp", "status"]].rename(columns={"status": "race_status"}),
+        left, right,
         on="timestamp",
         by="market_id",
         direction="backward",
