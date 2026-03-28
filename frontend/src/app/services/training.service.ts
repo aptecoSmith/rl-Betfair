@@ -52,16 +52,34 @@ export class TrainingService implements OnDestroy {
   private pollStatus(): void {
     this.http.get<TrainingStatus>(`${this.baseUrl}/training/status`).subscribe({
       next: (s) => {
-        // Only update running state from poll if WebSocket hasn't provided richer data
-        if (s.running !== this.status().running) {
-          this.status.update((prev) => ({ ...prev, running: s.running }));
-        }
-        if (s.phase && s.phase !== this.status().phase) {
-          this.status.update((prev) => ({ ...prev, ...s }));
+        // Always sync the full status from poll — this is the source of truth
+        this.status.set(s);
+        if (s.detail) {
+          this.extractChartDataFromDetail(s.detail);
         }
       },
       error: () => {},
     });
+  }
+
+  /** Extract reward/loss from a detail string (used by both WS and poll). */
+  private extractChartDataFromDetail(detail: string): void {
+    const rewardMatch = detail.match(/reward=([+-]?[\d.]+)/);
+    const lossMatch = detail.match(/loss=([\d.]+)/);
+    if (rewardMatch) {
+      const reward = parseFloat(rewardMatch[1]);
+      const last = this.rewardHistory();
+      if (last.length === 0 || last[last.length - 1].reward !== reward) {
+        this.rewardHistory.update((prev) => [...prev, { step: prev.length, reward }]);
+      }
+    }
+    if (lossMatch) {
+      const loss = parseFloat(lossMatch[1]);
+      const last = this.lossHistory();
+      if (last.length === 0 || last[last.length - 1].loss !== loss) {
+        this.lossHistory.update((prev) => [...prev, { step: prev.length, loss }]);
+      }
+    }
   }
 
   /** Manually set running state (called from UI after start/stop). */
