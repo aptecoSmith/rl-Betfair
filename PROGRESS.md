@@ -477,14 +477,53 @@
 
 ---
 
+### Session 1.5 — End-to-end single agent run
+**Status:** Done
+
+#### Data extraction
+- `DataExtractor.get_available_dates()` discovered 2 dates in MySQL: 2026-03-26 (legacy ResolvedMarketSnaps) and 2026-03-28 (polled PolledMarketSnapshots)
+- 2026-03-26 extracted: 29.6 MB ticks Parquet (4,182 ticks, 53 races), 71 KB runners Parquet
+- 2026-03-28 already extracted: 200 KB ticks (390 ticks, 69 races), 272 KB runners
+
+#### Chronological train/test split
+- **Train:** 2026-03-26 (1 day, 53 races, 4,182 ticks)
+- **Test:** 2026-03-28 (1 day, 69 races, 390 ticks)
+
+#### Training (single agent, 3 epochs, CPU)
+- `scripts/run_session_1_5.py` — trains population=1 via `TrainingOrchestrator`, evaluates on test split, prints scoreboard + per-day P&L + bet log + sanity checks
+- Architecture: `ppo_lstm_v1` (randomised hyperparams, seed=42)
+- Completed in 32.4s on CPU (PyTorch CPU-only build — CUDA wheels not installed)
+- Training showed expected untrained-agent behaviour: epochs 1–2 reward ~-100 (losing entire budget), epoch 3 found degenerate "bet on everything" strategy (reward 211M, 21K bets — exploiting training environment)
+- 9/10 sanity checks passed; the failing check correctly flagged the exploding training reward
+
+#### Evaluation on test split (2026-03-28)
+- P&L: -£99.98 (lost nearly entire £100 budget)
+- 62 bets, 0 winning, precision 0.000
+- All bets were backs at 1000.00 odds (max price) — agent has not learned a useful strategy
+- Composite score: -0.1661 (win_rate=0.00, sharpe=0.00, mean_pnl=-99.98, efficiency=-0.08)
+
+#### Pipeline verification
+- Model registered in SQLite (active status, weights file saved)
+- Evaluation run recorded with correct train_cutoff_date and test_days
+- Per-day metrics persisted: day_pnl, bet_count, winning_bets, bet_precision, pnl_per_bet, early_picks, profitable
+- Bet log written to Parquet (62 bets with all fields populated)
+- Composite score computed via Scoreboard, scoreboard non-empty
+- Progress events emitted: phase_start/phase_complete for training, evaluating, scoring, run_complete
+
+#### Notes
+- The untrained single agent with random hyperparams and 3 epochs on 1 training day is not expected to be profitable. The purpose of Session 1.5 is pipeline validation, not profitable trading
+- The training reward explosion (epoch 3) is a known issue with the "bet on everything" archetype (documented in Session 2.5). This will be addressed by reward tuning and longer training in later sessions
+- PyTorch CUDA wheels need reinstalling (`pip install torch --index-url https://download.pytorch.org/whl/cu126`) — CPU-only build was present at runtime
+
+#### Tests
+- **27 integration tests** (test_integration_session_1_5.py): model registered (4 tests: count, active, weights, architecture), evaluation run (3 tests: exists, test_days count, train_cutoff_date), per-day metrics (6 tests: count matches, dates match, pnl finite, pnl bounded, precision in range, profitable flag consistent), bet log (4 tests: bets recorded, fields populated, pnl sums match, Parquet files exist), scoreboard (4 tests: composite score computed, rank_all, score in valid range, metrics populated), progress events (6 tests: training/evaluating/scoring phases, run_complete, progress events, no selection/breeding for single agent)
+- All 27 integration tests pass. 982 non-integration tests pass (5 pre-existing failures in 2.7b/2.8 integration tests due to DB state changes — unrelated to Session 1.5)
+
+---
+
 ## Skipped / Deferred Sessions
 
-### Session 1.5 — End-to-end single agent run
-**Status:** Blocked — requires 2+ days of extracted data
-
-The evaluation methodology requires a chronological train/test split (earliest ~50% train, later ~50% test). With only one day (2026-03-26), we cannot create a meaningful split. Will complete once a second day of data is available.
-
-**Dependencies:** Run `python -m data.extractor` after another race day has been recorded by StreamRecorder1.
+(none currently)
 
 ---
 
@@ -515,9 +554,11 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 2.7a    | 47              | 7                      | **828 + 125** (Python) + **188 + 12** (Angular) |
 | 2.7b    | 47              | 7                      | **875 + 132** (Python) + **188 + 12** (Angular) |
 | 2.8     | 44              | 7                      | **919 + 139** (Python) + **188 + 12** (Angular) |
+| 1.5     | 0               | 27                     | **919 + 166** (Python) + **188 + 12** (Angular) |
 
-**Python total: 946 passed, 19 skipped, 102 deselected.**
-**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 2.8.)**
+**Python total: 982 passed, 4 skipped, 129 deselected (non-integration). 27 integration tests added (all pass).**
+**5 pre-existing integration test failures in 2.7b/2.8 (DB state — RaceCardRunners data availability, TimeLSTM W_dt init).**
+**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 1.5.)**
 
 ---
 
