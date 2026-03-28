@@ -78,6 +78,37 @@ export class TrainingMonitor implements OnDestroy {
     return PHASE_LABELS[phase] ?? phase;
   });
 
+  /** Reward health indicator. */
+  readonly rewardVerdict = computed(() => {
+    const data = this.rewardHistory();
+    if (data.length < 3) return { label: 'Warming up', cls: 'verdict-neutral' };
+    const recent = data.slice(-3);
+    const avgRecent = recent.reduce((s, d) => s + d.reward, 0) / recent.length;
+    const first = data.slice(0, Math.max(1, Math.floor(data.length / 3)));
+    const avgFirst = first.reduce((s, d) => s + d.reward, 0) / first.length;
+
+    if (avgRecent > 0 && avgRecent > avgFirst) return { label: 'Making money', cls: 'verdict-good' };
+    if (avgRecent > 0) return { label: 'Profitable', cls: 'verdict-good' };
+    if (avgRecent > avgFirst) return { label: 'Improving', cls: 'verdict-ok' };
+    if (avgRecent < avgFirst && avgRecent < 0) return { label: 'Losing money', cls: 'verdict-bad' };
+    return { label: 'Learning', cls: 'verdict-neutral' };
+  });
+
+  /** Loss health indicator. */
+  readonly lossVerdict = computed(() => {
+    const data = this.lossHistory();
+    if (data.length < 3) return { label: 'Warming up', cls: 'verdict-neutral' };
+    const recent = data.slice(-3);
+    const avgRecent = recent.reduce((s, d) => s + d.loss, 0) / recent.length;
+    const first = data.slice(0, Math.max(1, Math.floor(data.length / 3)));
+    const avgFirst = first.reduce((s, d) => s + d.loss, 0) / first.length;
+
+    if (avgRecent < avgFirst * 0.5 && avgRecent < 0.1) return { label: 'Converged', cls: 'verdict-good' };
+    if (avgRecent < avgFirst) return { label: 'Converging', cls: 'verdict-ok' };
+    if (avgRecent > avgFirst * 2) return { label: 'Unstable', cls: 'verdict-bad' };
+    return { label: 'Learning', cls: 'verdict-neutral' };
+  });
+
   /** Max Y for reward chart. */
   readonly rewardMax = computed(() => {
     const data = this.rewardHistory();

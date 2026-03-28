@@ -128,7 +128,10 @@
   <!-- ── Charts ───────────────────────────────────────────── -->
   <div class="charts">
     <div class="chart-card">
-      <h3 class="chart-title">Reward</h3>
+      <div class="chart-header">
+        <h3 class="chart-title">Reward</h3>
+        <span class="verdict-badge" [class]="rewardVerdict().cls">{{ rewardVerdict().label }}</span>
+      </div>
       @if (rewardHistory().length >= 2) {
         <svg viewBox="0 0 600 150" class="chart-svg" preserveAspectRatio="none">
           <line x1="0" y1="75" x2="600" y2="75" class="zero-line" />
@@ -144,7 +147,10 @@
       </p>
     </div>
     <div class="chart-card">
-      <h3 class="chart-title">Loss</h3>
+      <div class="chart-header">
+        <h3 class="chart-title">Loss</h3>
+        <span class="verdict-badge" [class]="lossVerdict().cls">{{ lossVerdict().label }}</span>
+      </div>
       @if (lossHistory().length >= 2) {
         <svg viewBox="0 0 600 150" class="chart-svg" preserveAspectRatio="none">
           <path [attr.d]="lossPath()" class="chart-line loss-line" />
