@@ -546,6 +546,30 @@ of redundant re-computation; rollout+eval = ~2.4 h/gen, all sequential.
   improved, no correctness regressions (same model on same data produces
   same P&L)
 
+### Session 4.7 — Opportunity window metric
+- Per-bet **opportunity window** — measures how many seconds a bet's price (or
+  better) was available in the order book before and after placement. Indicates
+  whether the model found a genuine market inefficiency (long window) or
+  caught a fleeting blip (short window).
+- **Evaluation metric only** — does NOT affect reward signal or training. The
+  metric is purely observational; a "sniper" model (short windows) and a
+  "value finder" (long windows) are both valid strategies.
+- `Bet.tick_index` field stores which tick the bet was placed on
+- `compute_opportunity_window()` scans backward/forward through race ticks
+  checking price availability; converts tick span to seconds
+- Per-bet: `opportunity_window_s` on `EvaluationBetRecord`
+- Per-day: `mean_opportunity_window_s`, `median_opportunity_window_s` on
+  `EvaluationDayRecord`
+- Per-model: `mean_opportunity_window_s` on `ModelScore` (scoreboard display,
+  not part of composite score)
+- Also populates the previously-empty `tick_timestamp` and `seconds_to_off`
+  fields on bet records
+- **Test:** pytest — opportunity window computation for back/lay/single tick/
+  no tick_index/in-play stop, Parquet round-trip with new column, backward
+  compat with old Parquet, day-level aggregates, ModelScore field
+- **Integration test:** real data — windows computed and non-zero for some
+  bets, tick_timestamp and seconds_to_off populated
+
 ---
 
 ## Phase 5 — Live Trading

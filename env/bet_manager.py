@@ -58,6 +58,7 @@ class Bet:
     market_id: str
     outcome: BetOutcome = BetOutcome.UNSETTLED
     pnl: float = 0.0
+    tick_index: int = -1  # index into Race.ticks where bet was placed (-1 = not recorded)
 
     @property
     def liability(self) -> float:

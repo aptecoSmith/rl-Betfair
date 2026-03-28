@@ -48,6 +48,7 @@ class ModelScore:
     composite_score: float
     test_days: int
     profitable_days: int
+    mean_opportunity_window_s: float = 0.0
 
 
 class Scoreboard:
@@ -118,6 +119,10 @@ class Scoreboard:
             + efficiency * self.w_efficiency
         )
 
+        # Opportunity window: informational only, not part of composite score
+        opp_windows = [d.mean_opportunity_window_s for d in days]
+        mean_opp_window = float(np.mean(opp_windows)) if opp_windows else 0.0
+
         return ModelScore(
             model_id="",  # filled by caller
             win_rate=win_rate,
@@ -129,6 +134,7 @@ class Scoreboard:
             composite_score=composite,
             test_days=n,
             profitable_days=profitable_days,
+            mean_opportunity_window_s=mean_opp_window,
         )
 
     def score_model(self, model_id: str) -> ModelScore | None:

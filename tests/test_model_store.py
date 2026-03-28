@@ -379,5 +379,6 @@ class TestEvaluationBetsParquet:
             "run_id", "date", "market_id", "tick_timestamp",
             "seconds_to_off", "runner_id", "runner_name", "action",
             "price", "stake", "matched_size", "outcome", "pnl",
+            "opportunity_window_s",
         }
         assert set(df.columns) == expected_cols

@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from agents.policy_network import BasePolicy, PolicyOutput
-from data.episode_builder import Day
+from data.episode_builder import Day, Race
 from env.bet_manager import BetOutcome, BetSide
 from env.betfair_env import BetfairEnv
 import pandas as pd
@@ -41,6 +41,68 @@ from registry.model_store import (
 from training.progress_tracker import ProgressTracker
 
 logger = logging.getLogger(__name__)
+
+
+def compute_opportunity_window(
+    race: Race,
+    tick_index: int,
+    selection_id: int,
+    side: str,
+    price: float,
+) -> float:
+    """Compute how many seconds a bet's price was available in the order book.
+
+    Scans backward and forward from *tick_index* through *race.ticks*,
+    counting consecutive ticks where price *price* (or better) was available
+    for the runner with *selection_id*.
+
+    "Better" means:
+    - **Back** at price P: ``available_to_back`` has an entry with ``price >= P``
+    - **Lay** at price P: ``available_to_lay`` has an entry with ``price <= P``
+
+    Returns the total duration in seconds (from first available tick to last).
+    Returns 0.0 if *tick_index* is -1 (not recorded) or the race has no ticks.
+    """
+    if tick_index < 0 or not race.ticks:
+        return 0.0
+
+    ticks = race.ticks
+
+    def _price_available(tick_idx: int) -> bool:
+        """Check if the price is available for this runner at the given tick."""
+        tick = ticks[tick_idx]
+        for runner in tick.runners:
+            if runner.selection_id != selection_id:
+                continue
+            if side == "back":
+                return any(ps.price >= price for ps in runner.available_to_back)
+            else:  # lay
+                return any(ps.price <= price for ps in runner.available_to_lay)
+        return False
+
+    # Scan backward
+    first_idx = tick_index
+    for i in range(tick_index - 1, -1, -1):
+        if ticks[i].in_play:
+            break
+        if _price_available(i):
+            first_idx = i
+        else:
+            break
+
+    # Scan forward
+    last_idx = tick_index
+    for i in range(tick_index + 1, len(ticks)):
+        if ticks[i].in_play:
+            break
+        if _price_available(i):
+            last_idx = i
+        else:
+            break
+
+    # Convert to seconds using tick timestamps
+    duration = (ticks[last_idx].timestamp - ticks[first_idx].timestamp).total_seconds()
+    return max(duration, 0.0)
 
 
 class Evaluator:
@@ -233,21 +295,34 @@ class Evaluator:
                     race = r
                     break
 
-            # Determine seconds_to_off (approximate — from env's bet_times if available)
-            seconds_to_off = 0.0
             runner_name = ""
+            tick_timestamp = ""
+            seconds_to_off = 0.0
+            opp_window = 0.0
 
             if race is not None:
-                # Look up runner name from metadata
                 meta = race.runner_metadata.get(bet.selection_id)
                 if meta is not None:
                     runner_name = meta.runner_name
+
+                # Derive tick-level fields from stored tick_index
+                if bet.tick_index >= 0 and bet.tick_index < len(race.ticks):
+                    tick = race.ticks[bet.tick_index]
+                    tick_timestamp = tick.timestamp.isoformat()
+                    seconds_to_off = (
+                        race.market_start_time - tick.timestamp
+                    ).total_seconds()
+
+                    opp_window = compute_opportunity_window(
+                        race, bet.tick_index, bet.selection_id,
+                        bet.side.value, bet.average_price,
+                    )
 
             bet_records.append(EvaluationBetRecord(
                 run_id=run_id,
                 date=day.date,
                 market_id=bet.market_id,
-                tick_timestamp="",  # not tracked at eval level
+                tick_timestamp=tick_timestamp,
                 seconds_to_off=seconds_to_off,
                 runner_id=bet.selection_id,
                 runner_name=runner_name,
@@ -257,11 +332,19 @@ class Evaluator:
                 matched_size=bet.matched_stake,
                 outcome=bet.outcome.value,
                 pnl=bet.pnl,
+                opportunity_window_s=opp_window,
             ))
 
+        # Compute opportunity window aggregates for the day record
+        if bet_records:
+            windows = [b.opportunity_window_s for b in bet_records]
+            day_record.mean_opportunity_window_s = float(np.mean(windows))
+            day_record.median_opportunity_window_s = float(np.median(windows))
+
         logger.info(
-            "Eval %s | pnl=%.2f bets=%d winning=%d precision=%.2f",
+            "Eval %s | pnl=%.2f bets=%d winning=%d precision=%.2f opp_window=%.1fs",
             day.date, day_pnl, bet_count, winning_bets, bet_precision,
+            day_record.mean_opportunity_window_s,
         )
 
         return day_record, bet_records

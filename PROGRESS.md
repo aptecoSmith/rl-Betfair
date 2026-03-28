@@ -614,6 +614,24 @@ At full scale (20 agents x 30 days x 5 generations): estimated savings of ~45 mi
 - **Angular integration:** 5 race replay tests + 6 bet explorer tests (skip when API not running)
 - All 978 Python unit tests pass, all 285 Angular tests pass (24 skipped — integration)
 
+### Session 4.7 — Opportunity window metric
+**Status:** Done
+
+#### Motivation
+Measure whether a model's profitable bets found genuine market inefficiencies (price available for many seconds) vs fleeting noise (available for one tick). This is an **evaluation metric only** — does not affect reward signal or training. A "sniper" (short windows) and a "value finder" (long windows) are both valid strategies; the metric helps identify model archetypes.
+
+#### Changes
+- `env/bet_manager.py` — `Bet.tick_index: int = -1` field records which tick the bet was placed on
+- `env/betfair_env.py` — `_process_action()` sets `bet.tick_index` at bet placement; `_MIN_STAKE` raised to £2.00 (Betfair Exchange minimum)
+- `training/evaluator.py` — `compute_opportunity_window()` scans backward/forward through race ticks checking price availability, converts span to seconds. Evaluator now populates `tick_timestamp`, `seconds_to_off`, and `opportunity_window_s` on bet records, plus day-level mean/median aggregates
+- `registry/model_store.py` — `EvaluationBetRecord.opportunity_window_s`, `EvaluationDayRecord.mean/median_opportunity_window_s`, SQL migration, Parquet I/O (backward-compatible)
+- `registry/scoreboard.py` — `ModelScore.mean_opportunity_window_s` (informational, NOT part of composite score)
+
+#### Tests
+- **20 unit tests** (test_session_4_7.py): opportunity window computation (9 tests), tick_index (2), bet/day/score records (6), Parquet round-trip + backward compat (2), SQLite round-trip (1)
+- **2 integration tests** (test_integration_session_4_7.py): real data windows computed, tick_timestamp populated
+- All 980 Python tests pass, no regressions
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -652,9 +670,10 @@ At full scale (20 agents x 30 days x 5 generations): estimated savings of ~45 mi
 | 1.5     | 0               | 27                     | **919 + 166** (Python) + **188 + 12** (Angular) |
 | 4.6     | 21              | 8                      | **940 + 174** (Python) + **188 + 12** (Angular) |
 | 3.6+3.7 | 6 (Python) + 93 (Angular) | 11 (Angular) | **946 + 174** (Python) + **285 + 24** (Angular) |
+| 4.7     | 20              | 2                      | **966 + 176** (Python) + **285 + 24** (Angular) |
 
-**Python total: 978 passed, 2 skipped, 175 deselected (non-integration). 6 tests added in Session 3.6+3.7 (bet explorer endpoint).**
-**Angular total: 285 passed, 24 skipped (integration — API not running). 104 tests added in Session 3.6+3.7 (48 replay + 45 bet explorer + 11 integration).**
+**Python total: 980 passed, 2 skipped, 129 deselected. 22 tests added in Session 4.7 (20 unit + 2 integration).**
+**Angular total: 285 passed, 24 skipped (integration — API not running). (Unchanged.)**
 
 ---
 

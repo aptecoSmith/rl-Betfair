@@ -447,11 +447,13 @@ class BetfairEnv(gymnasium.Env):
             if action_signal > _BACK_THRESHOLD and runner.available_to_lay:
                 bet = bm.place_back(runner, stake, market_id=race.market_id)
                 if bet is not None:
+                    bet.tick_index = self._tick_idx
                     self._bet_times[len(bm.bets) - 1] = time_to_off
 
             elif action_signal < _LAY_THRESHOLD and runner.available_to_back:
                 bet = bm.place_lay(runner, stake, market_id=race.market_id)
                 if bet is not None:
+                    bet.tick_index = self._tick_idx
                     self._bet_times[len(bm.bets) - 1] = time_to_off
 
     # ── Settlement & reward ───────────────────────────────────────────────
