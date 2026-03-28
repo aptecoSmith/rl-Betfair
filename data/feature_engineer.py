@@ -671,6 +671,8 @@ class TickHistory:
     _last_race_status: str | None = field(default=None)
     _last_status_change_tick: int = field(default=0)
     _tick_counter: int = field(default=0)
+    # Timestamp tracking for time delta features (Session 2.8)
+    _timestamp_history: list[float] = field(default_factory=list)  # epoch seconds
 
     def update(self, tick: Tick, market_feats: dict[str, float]) -> None:
         """Record the latest tick's data into the history."""
@@ -680,6 +682,12 @@ class TickHistory:
         if current_status != self._last_race_status:
             self._last_race_status = current_status
             self._last_status_change_tick = self._tick_counter
+
+        # Track timestamps for time delta features (Session 2.8)
+        if tick.timestamp is not None:
+            self._timestamp_history.append(tick.timestamp.timestamp())
+        if len(self._timestamp_history) > self.max_window:
+            self._timestamp_history = self._timestamp_history[-self.max_window:]
 
         for runner in tick.runners:
             sid = runner.selection_id
@@ -771,6 +779,25 @@ class TickHistory:
         ticks_since = self._tick_counter - self._last_status_change_tick
         feats["time_since_status_change"] = min(ticks_since * 5.0 / 1800.0, 1.0)
 
+        # Time delta features (Session 2.8)
+        # seconds_since_last_tick: 0 for first tick, actual delta otherwise
+        # Normalised: delta / 300 (5 min max expected gap), clamped to [0, 1]
+        ts = self._timestamp_history
+        if len(ts) >= 2:
+            feats["seconds_since_last_tick"] = min((ts[-1] - ts[-2]) / 300.0, 1.0)
+        else:
+            feats["seconds_since_last_tick"] = 0.0
+
+        # seconds_spanned_last_N_ticks: wall-clock time covered by velocity window
+        # Normalised: span / (N * 60) — assumes ~60s max per tick gap, clamped [0, 1]
+        for window in (3, 5, 10):
+            key = f"seconds_spanned_{window}"
+            if len(ts) >= window:
+                span = ts[-1] - ts[-window]
+                feats[key] = min(span / (window * 60.0), 1.0)
+            else:
+                feats[key] = 0.0
+
         return feats
 
     def reset(self) -> None:
@@ -782,6 +809,7 @@ class TickHistory:
         self._last_race_status = None
         self._last_status_change_tick = 0
         self._tick_counter = 0
+        self._timestamp_history.clear()
 
 
 # ── High-level feature assembly ──────────────────────────────────────────────

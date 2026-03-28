@@ -137,7 +137,7 @@ class TestEnvironment:
         day = load_day("2026-03-28", data_dir=extracted_date)
         env = BetfairEnv(day, config)
         obs, _ = env.reset()
-        assert obs.shape == (1583,)
+        assert obs.shape == (1587,)
         assert np.isnan(obs).sum() == 0
 
         # Run 20 steps
@@ -146,5 +146,5 @@ class TestEnvironment:
             obs, reward, terminated, truncated, _ = env.step(action)
             if terminated or truncated:
                 break
-        assert obs.shape == (1583,)
+        assert obs.shape == (1587,)
         assert np.isnan(obs).sum() == 0

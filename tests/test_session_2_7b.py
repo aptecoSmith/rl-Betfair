@@ -460,10 +460,10 @@ class TestEnvDimensions:
             assert key in RUNNER_KEYS, f"Missing key: {key}"
 
     def test_obs_dim(self):
-        """obs_dim with max_runners=14 should be 1583."""
+        """obs_dim with max_runners=14 should be 1587."""
         from env.betfair_env import MARKET_DIM, VELOCITY_DIM, AGENT_STATE_DIM
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
-        assert obs_dim == 1583
+        assert obs_dim == 1587
 
     def test_no_duplicate_runner_keys(self):
         assert len(RUNNER_KEYS) == len(set(RUNNER_KEYS))

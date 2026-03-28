@@ -71,6 +71,9 @@ MARKET_VELOCITY_KEYS: list[str] = [
     "overround_delta_3", "overround_delta_5", "overround_delta_10",
     # Race status timing (Session 2.7a) — 1 dim
     "time_since_status_change",
+    # Time delta features (Session 2.8) — 4 dims
+    "seconds_since_last_tick",
+    "seconds_spanned_3", "seconds_spanned_5", "seconds_spanned_10",
 ]
 
 RUNNER_KEYS: list[str] = [
@@ -127,7 +130,7 @@ AGENT_STATE_DIM = 5  # in_play, budget_frac, liability_frac, bets_norm, races_no
 
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 31 (25 + 6 race status one-hot)
-VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 7 (6 + 1 time_since_status_change)
+VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
 RUNNER_DIM = len(RUNNER_KEYS)             # 110 (was 93, +17 past race features)
 
 # Action thresholds

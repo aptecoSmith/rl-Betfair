@@ -93,3 +93,6 @@ hyperparameters:
       type: float
       min: 0.001
       max: 0.05
+    architecture_name:
+      type: str_choice
+      choices: [ppo_lstm_v1, ppo_time_lstm_v1]

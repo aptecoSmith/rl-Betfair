@@ -431,6 +431,50 @@
 - **7 integration tests** (test_integration_session_2_7b.py): extraction has new columns, past_races_json populated, timeform_comment populated, past_races loaded into RunnerMeta, timeform_comment loaded, pr_* features populated, env runs full episode at obs_dim=1583
 - All 895 Python tests pass, 19 skipped, 102 deselected
 
+### Session 2.8 — Time-aware LSTM and time delta features
+**Status:** Done
+
+#### Feature engineer — time delta features
+- `data/feature_engineer.py` — `TickHistory` now tracks tick timestamps (epoch seconds) in `_timestamp_history`
+- `market_velocity_features()` produces 4 new features:
+  - `seconds_since_last_tick` — wall-clock gap since previous tick, normalised by 300s (5 min), clamped [0, 1]. 0 for first tick
+  - `seconds_spanned_3` — wall-clock time covered by last 3 ticks, normalised by 180s (3 min), clamped [0, 1]. 0 when < 3 ticks
+  - `seconds_spanned_5` — same for 5-tick window, normalised by 300s
+  - `seconds_spanned_10` — same for 10-tick window, normalised by 600s
+- `reset()` clears timestamp history
+
+#### Environment — observation space update
+- `MARKET_VELOCITY_KEYS` extended with 4 time delta keys → `VELOCITY_DIM` = 11 (was 7)
+- Total `obs_dim` = 31 + 11 + (110 × 14) + 5 = **1587** (was 1583, delta +4)
+- `MARKET_TOTAL_DIM` in `policy_network.py` updated to 47 (was 43)
+
+#### Policy network — TimeLSTMCell + PPOTimeLSTMPolicy
+- `TimeLSTMCell` — custom LSTM cell where the forget gate incorporates time delta:
+  `f_t = sigmoid(W_f @ [h, x] + W_dt * delta_t + b_f)`. Larger delta → more forgetting.
+  `W_dt` is a learned parameter (one scalar per hidden unit), initialised to zero
+- `PPOTimeLSTMPolicy` — wraps `TimeLSTMCell`, same interface as `PPOLSTMPolicy`.
+  Extracts `seconds_since_last_tick` from the observation and feeds it to the cell
+  at each timestep. Processes sequences by stepping through the cell (not `nn.LSTM`)
+- Registered as `ppo_time_lstm_v1` in architecture registry
+
+#### Population manager — str_choice support
+- `HyperparamSpec.type` now supports `"str_choice"` for string-valued choices
+- `sample_hyperparams()`, `validate_hyperparams()`, `mutate()` all handle `str_choice`
+- `initialise_population()` uses sampled `architecture_name` when present in hp specs
+- `mutate()` for `str_choice` jumps to adjacent choice in the list (no numeric delta)
+
+#### Config
+- `config.yaml` — `architecture_name` added to `hyperparameters.search_ranges` as `str_choice` with `[ppo_lstm_v1, ppo_time_lstm_v1]`. The genetic system can now evolve architecture alongside hyperparameters
+
+#### Notes
+- Existing models (trained on obs_dim=1583) are incompatible with the new obs_dim=1587. Retraining required
+- `W_dt` initialised to zero means the TimeLSTM behaves identically to standard LSTM until trained. This is intentional — the network learns the time-awareness from data
+
+#### Tests
+- **44 unit tests** (test_session_2_8.py): time delta features (12 tests: first tick zero, 5s gap, 180s gap, clamp, uniform 5s spans, non-uniform spans, insufficient ticks, spanned_5, spanned_10, reset, all keys present), env dimensions (8 tests: VELOCITY_DIM=11, MARKET_DIM=31, RUNNER_DIM=110, keys present, obs_dim=1587, MARKET_TOTAL_DIM=47, no duplicates, env episode), TimeLSTMCell (6 tests: shapes, forget gate responds, zero delta deterministic, gradients flow, 2D input, monotonic with positive W_dt), PPOTimeLSTMPolicy (9 tests: output types, hidden state, sequence, architecture_name, description, action distribution, init_hidden, gradients, time delta affects hidden), architecture registry (3 tests: registered, create_policy, both architectures), str_choice (5 tests: parse, sample, validate valid/invalid, config entry), backward compat (2 tests: defaults to zero, old features present)
+- **7 integration tests** (test_integration_session_2_8.py): time features populated on real data, first tick zero, nonzero after first, env full episode, forward pass on real obs, hidden state decay differs 5s vs 180s, training completes
+- All 946 Python tests pass, 19 skipped, 102 deselected
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -470,9 +514,10 @@ The evaluation methodology requires a chronological train/test split (earliest ~
 | 3.5     | 51 (Angular)    | 6 (Angular)            | **781 + 118** (Python) + **188 + 12** (Angular) |
 | 2.7a    | 47              | 7                      | **828 + 125** (Python) + **188 + 12** (Angular) |
 | 2.7b    | 47              | 7                      | **875 + 132** (Python) + **188 + 12** (Angular) |
+| 2.8     | 44              | 7                      | **919 + 139** (Python) + **188 + 12** (Angular) |
 
-**Python total: 895 passed, 19 skipped, 102 deselected.**
-**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 2.7a.)**
+**Python total: 946 passed, 19 skipped, 102 deselected.**
+**Angular total: 188 passed, 12 skipped (integration — API not running). (Unchanged in Session 2.8.)**
 
 ---
 

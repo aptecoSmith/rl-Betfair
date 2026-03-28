@@ -47,10 +47,10 @@ class HyperparamSpec:
     """Describes how to sample one hyperparameter."""
 
     name: str
-    type: str  # "float", "float_log", "int", "int_choice"
+    type: str  # "float", "float_log", "int", "int_choice", "str_choice"
     min: float | None = None
     max: float | None = None
-    choices: list[int] | None = None
+    choices: list | None = None  # int values (int_choice) or str values (str_choice)
 
 
 def parse_search_ranges(raw: dict[str, dict]) -> list[HyperparamSpec]:
@@ -95,6 +95,8 @@ def sample_hyperparams(
             params[spec.name] = rng.randint(int(spec.min), int(spec.max))
         elif spec.type == "int_choice":
             params[spec.name] = rng.choice(spec.choices)
+        elif spec.type == "str_choice":
+            params[spec.name] = rng.choice(spec.choices)
         else:
             raise ValueError(f"Unknown hyperparameter type: {spec.type!r}")
     return params
@@ -117,7 +119,7 @@ def validate_hyperparams(params: dict, specs: list[HyperparamSpec]) -> None:
                 raise ValueError(
                     f"{name}={value} outside [{int(spec.min)}, {int(spec.max)}]"
                 )
-        elif spec.type == "int_choice":
+        elif spec.type in ("int_choice", "str_choice"):
             if value not in spec.choices:
                 raise ValueError(
                     f"{name}={value} not in {spec.choices}"
@@ -214,7 +216,8 @@ class PopulationManager:
 
         for _ in range(self.population_size):
             hp = sample_hyperparams(self.hp_specs, rng)
-            arch_name = self.default_architecture
+            # Use sampled architecture_name if present (str_choice), else default
+            arch_name = hp.pop("architecture_name", self.default_architecture)
             hp["architecture_name"] = arch_name
 
             # Create the policy network
@@ -493,6 +496,14 @@ class PopulationManager:
                 new_idx = max(0, min(len(spec.choices) - 1, idx + direction))
                 new_val = spec.choices[new_idx]
                 deltas[name] = float(new_val - old_val)
+                hp[name] = new_val
+
+            elif spec.type == "str_choice":
+                idx = spec.choices.index(old_val)
+                direction = rng.choice([-1, 1])
+                new_idx = max(0, min(len(spec.choices) - 1, idx + direction))
+                new_val = spec.choices[new_idx]
+                deltas[name] = None  # no numeric delta for str choices
                 hp[name] = new_val
 
         return hp, deltas
