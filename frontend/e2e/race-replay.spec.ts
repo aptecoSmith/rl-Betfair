@@ -94,14 +94,23 @@ test.describe('Race Replay', () => {
     expect(raceOptions.length).toBeGreaterThanOrEqual(2);
   });
 
-  test('select race renders chart and action log', async ({ page, mockApi }) => {
+  test('select race renders chart container and bet panel', async ({ page, mockApi }) => {
     await mockApi(replayMocks());
     await page.goto('/replay');
     await selectCascade(page);
 
     await expect(page.locator('[data-testid="chart-container"]')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator('[data-testid="action-log"]')).toBeVisible();
+    await expect(page.locator('[data-testid="bet-panel"]')).toBeVisible();
     await expect(page.locator('[data-testid="summary-bar"]')).toBeVisible();
+  });
+
+  test('uPlot canvas is rendered in chart container', async ({ page, mockApi }) => {
+    await mockApi(replayMocks());
+    await page.goto('/replay');
+    await selectCascade(page);
+
+    // uPlot renders a canvas element inside the target div
+    await expect(page.locator('[data-testid="uplot-target"] canvas')).toBeVisible({ timeout: 10_000 });
   });
 
   test('playback controls toggle play/pause', async ({ page, mockApi }) => {
@@ -117,5 +126,77 @@ test.describe('Race Replay', () => {
     await page.waitForTimeout(300);
     const newText = (await playBtn.textContent())?.trim();
     expect(newText).not.toBe(initialText);
+  });
+
+  test('conclusion panel shows race result', async ({ page, mockApi }) => {
+    await mockApi(replayMocks());
+    await page.goto('/replay');
+    await selectCascade(page);
+
+    const conclusion = page.locator('[data-testid="conclusion-panel"]');
+    await expect(conclusion).toBeVisible({ timeout: 10_000 });
+    // Winner from mock data
+    await expect(conclusion).toContainText('Star Runner');
+    await expect(conclusion).toContainText('Race Result');
+  });
+
+  test('bet panel shows bets and updates during playback', async ({ page, mockApi }) => {
+    await mockApi(replayMocks());
+    await page.goto('/replay');
+    await selectCascade(page);
+
+    const betPanel = page.locator('[data-testid="bet-panel"]');
+    await expect(betPanel).toBeVisible({ timeout: 10_000 });
+
+    // At initial tick (tick 0), no bets should be visible yet (bets start at tick 3)
+    // Seek slider to end to show all bets
+    const slider = page.locator('[data-testid="tick-slider"]');
+    await slider.fill('9'); // last tick index
+    await page.waitForTimeout(300);
+
+    const betCards = page.locator('[data-testid="bet-card"]');
+    const count = await betCards.count();
+    expect(count).toBe(3); // 3 bets in mock data
+  });
+
+  test('clicking a bet card jumps to correct tick', async ({ page, mockApi }) => {
+    await mockApi(replayMocks());
+    await page.goto('/replay');
+    await selectCascade(page);
+
+    // Seek to last tick so all bets are visible
+    const slider = page.locator('[data-testid="tick-slider"]');
+    await slider.fill('9');
+    await page.waitForTimeout(300);
+
+    // Click first bet card
+    const firstCard = page.locator('[data-testid="bet-card"]').first();
+    await firstCard.click();
+    await page.waitForTimeout(300);
+
+    // Check tick counter updated (first bet is at tick 3)
+    const counter = page.locator('[data-testid="tick-counter"]');
+    await expect(counter).toContainText('4 / 10'); // tick index 3 → "Tick 4"
+  });
+
+  test('runner legend toggles runner visibility', async ({ page, mockApi }) => {
+    await mockApi(replayMocks());
+    await page.goto('/replay');
+    await selectCascade(page);
+
+    const legendItems = page.locator('[data-testid="runner-legend"] .legend-item');
+    await expect(legendItems.first()).toBeVisible({ timeout: 10_000 });
+
+    // Click first legend item to toggle
+    await legendItems.first().click();
+    await page.waitForTimeout(200);
+
+    // It should get the dimmed class
+    await expect(legendItems.first()).toHaveClass(/dimmed/);
+
+    // Click again to restore
+    await legendItems.first().click();
+    await page.waitForTimeout(200);
+    await expect(legendItems.first()).not.toHaveClass(/dimmed/);
   });
 });

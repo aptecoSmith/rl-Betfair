@@ -1,4 +1,7 @@
-import { Component, OnInit, OnDestroy, inject, signal, computed, ElementRef, ViewChild } from '@angular/core';
+import {
+  Component, OnInit, OnDestroy, inject, signal, computed,
+  ElementRef, ViewChild, effect, AfterViewInit,
+} from '@angular/core';
 import { DecimalPipe, CurrencyPipe, UpperCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
@@ -12,12 +15,39 @@ import {
   BetEvent,
   TickRunner,
 } from '../models/replay.model';
+import uPlot from 'uplot';
 
 const RUNNER_COLOURS = [
   '#2196F3', '#4CAF50', '#FF9800', '#E91E63', '#9C27B0',
   '#00BCD4', '#F44336', '#CDDC39', '#795548', '#607D8B',
   '#3F51B5', '#009688', '#FF5722', '#8BC34A',
 ];
+
+export interface BetCard {
+  index: number;
+  bet: BetEvent;
+  runningBalance: number;
+  liability: number;
+}
+
+export interface ConclusionData {
+  winnerName: string | null;
+  winnerBacked: boolean;
+  winnerBackPrice: number | null;
+  totalBets: number;
+  totalStake: number;
+  totalPnl: number;
+  wonCount: number;
+  lostCount: number;
+  earlyPicks: number;
+  betResults: {
+    action: string;
+    runnerName: string;
+    price: number;
+    pnl: number;
+    won: boolean;
+  }[];
+}
 
 @Component({
   selector: 'app-race-replay',
@@ -26,11 +56,14 @@ const RUNNER_COLOURS = [
   templateUrl: './race-replay.html',
   styleUrl: './race-replay.scss',
 })
-export class RaceReplay implements OnInit, OnDestroy {
+export class RaceReplay implements OnInit, OnDestroy, AfterViewInit {
   private readonly api = inject(ApiService);
   private readonly selectionState = inject(SelectionStateService);
 
-  @ViewChild('chartCanvas') chartCanvasRef!: ElementRef<HTMLCanvasElement>;
+  @ViewChild('chartEl') chartElRef!: ElementRef<HTMLDivElement>;
+
+  private chart: uPlot | null = null;
+  private resizeObserver: ResizeObserver | null = null;
 
   // ── Model selection ──
   readonly models = signal<ScoreboardEntry[]>([]);
@@ -55,8 +88,9 @@ export class RaceReplay implements OnInit, OnDestroy {
   readonly playbackSpeed = signal(1);
   private playbackTimer: ReturnType<typeof setInterval> | null = null;
 
-  // ── Selected runner for order book ──
-  readonly selectedRunnerId = signal<number | null>(null);
+  // ── Chart interaction ──
+  readonly highlightedBetIndex = signal<number | null>(null);
+  readonly visibleRunners = signal<Set<number>>(new Set());
 
   // ── Derived data ──
   readonly ticks = computed(() => this.raceData()?.ticks ?? []);
@@ -70,7 +104,6 @@ export class RaceReplay implements OnInit, OnDestroy {
     for (const bet of data.all_bets) {
       map.set(bet.runner_id, bet.runner_name);
     }
-    // Also try to populate from tick runners
     for (const tick of data.ticks) {
       for (const r of tick.runners) {
         if (!map.has(r.selection_id)) {
@@ -99,13 +132,6 @@ export class RaceReplay implements OnInit, OnDestroy {
     return t.length > 0 && idx < t.length ? t[idx] : null;
   });
 
-  readonly currentOrderBook = computed(() => {
-    const tick = this.currentTick();
-    const runnerId = this.selectedRunnerId();
-    if (!tick || runnerId == null) return null;
-    return tick.runners.find(r => r.selection_id === runnerId) ?? null;
-  });
-
   readonly timeToOff = computed(() => {
     const tick = this.currentTick();
     if (!tick) return null;
@@ -125,7 +151,37 @@ export class RaceReplay implements OnInit, OnDestroy {
     return { totalBets, totalPnl, earlyPicks };
   });
 
-  // ── Chart data ──
+  // ── uPlot data ──
+  readonly uPlotData = computed(() => {
+    const t = this.ticks();
+    const data = this.raceData();
+    if (t.length === 0 || !data) return null;
+
+    const startTime = new Date(data.market_start_time).getTime();
+    const ids = this.runnerIds();
+
+    // X values: seconds to off (positive = before off)
+    const xValues = t.map(tick => {
+      const tickTime = new Date(tick.timestamp).getTime();
+      return (startTime - tickTime) / 1000;
+    });
+
+    // Y values per runner
+    const ySeriesArrays = ids.map(id =>
+      t.map(tick => {
+        const runner = tick.runners.find(r => r.selection_id === id);
+        const ltp = runner?.last_traded_price ?? 0;
+        return ltp > 0 ? ltp : null;
+      }) as (number | null)[]
+    );
+
+    return {
+      xValues,
+      ySeriesArrays,
+      runnerIds: ids,
+    };
+  });
+
   readonly chartData = computed(() => {
     const t = this.ticks();
     const data = this.raceData();
@@ -139,65 +195,136 @@ export class RaceReplay implements OnInit, OnDestroy {
       name: this.runnerNames().get(id) ?? `Runner ${id}`,
       colour: RUNNER_COLOURS[i % RUNNER_COLOURS.length],
       isWinner: id === this.winnerSelectionId(),
-      points: t.map((tick, tickIdx) => {
-        const runner = tick.runners.find(r => r.selection_id === id);
-        const tickTime = new Date(tick.timestamp).getTime();
-        const secondsToOff = (startTime - tickTime) / 1000;
-        return {
-          tickIndex: tickIdx,
-          secondsToOff,
-          ltp: runner?.last_traded_price ?? 0,
-        };
-      }).filter(p => p.ltp > 0),
     }));
   });
 
-  readonly chartSvgPath = computed(() => {
-    const data = this.chartData();
+  // ── Bet panel ──
+  readonly visibleBets = computed((): BetCard[] => {
+    const bets = this.allBets();
     const t = this.ticks();
-    if (data.length === 0 || t.length === 0) return { paths: [], xRange: [0, 0], yRange: [0, 0] };
+    const idx = this.currentTickIndex();
+    if (bets.length === 0 || t.length === 0) return [];
 
-    const allPoints = data.flatMap(d => d.points);
-    const xMin = Math.min(...allPoints.map(p => p.secondsToOff));
-    const xMax = Math.max(...allPoints.map(p => p.secondsToOff));
-    const yMin = Math.max(1, Math.min(...allPoints.map(p => p.ltp)) * 0.9);
-    const yMax = Math.min(100, Math.max(...allPoints.map(p => p.ltp)) * 1.1);
+    const currentTimestamp = t[idx]?.timestamp;
+    if (!currentTimestamp) return [];
+    const currentTime = new Date(currentTimestamp).getTime();
 
-    const w = 800;
-    const h = 400;
+    let balance = 100;
+    const cards: BetCard[] = [];
 
-    const scaleX = (v: number) => w - ((v - xMin) / (xMax - xMin || 1)) * w;
-    const scaleY = (v: number) => h - ((v - yMin) / (yMax - yMin || 1)) * h;
+    for (let i = 0; i < bets.length; i++) {
+      const bet = bets[i];
+      const betTime = new Date(bet.tick_timestamp).getTime();
+      const liability = bet.action === 'lay' ? bet.stake * (bet.price - 1) : 0;
 
-    const paths = data.map(runner => {
-      if (runner.points.length < 2) return { ...runner, d: '' };
-      const d = runner.points
-        .map((p, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(p.secondsToOff).toFixed(1)} ${scaleY(p.ltp).toFixed(1)}`)
-        .join(' ');
-      return { ...runner, d };
-    });
+      if (bet.action === 'back') {
+        balance -= bet.stake;
+      } else {
+        balance -= liability;
+      }
 
-    return { paths, xRange: [xMin, xMax], yRange: [yMin, yMax] };
+      if (betTime <= currentTime) {
+        cards.push({
+          index: i,
+          bet,
+          runningBalance: Math.round(balance * 100) / 100,
+          liability: Math.round(liability * 100) / 100,
+        });
+      }
+    }
+
+    return cards;
   });
 
-  readonly cursorX = computed(() => {
-    const svg = this.chartSvgPath();
-    const tick = this.currentTick();
+  readonly runningBalances = computed((): number[] => {
+    const bets = this.allBets();
+    let balance = 100;
+    return bets.map(bet => {
+      if (bet.action === 'back') {
+        balance -= bet.stake;
+      } else {
+        balance -= bet.stake * (bet.price - 1);
+      }
+      return Math.round(balance * 100) / 100;
+    });
+  });
+
+  // ── Conclusion panel ──
+  readonly conclusionData = computed((): ConclusionData | null => {
     const data = this.raceData();
-    if (!tick || !data || svg.xRange[0] === svg.xRange[1]) return null;
+    if (!data) return null;
+
+    const bets = this.allBets();
+    const winnerId = this.winnerSelectionId();
+    const winnerName = winnerId ? (this.runnerNames().get(winnerId) ?? null) : null;
+
+    const winnerBacks = bets.filter(b => b.runner_id === winnerId && b.action === 'back');
+    const winnerBacked = winnerBacks.length > 0;
+    const winnerBackPrice = winnerBacked ? winnerBacks[0].price : null;
+
+    const totalStake = bets.reduce((sum, b) => sum + b.stake, 0);
+    const totalPnl = bets.reduce((sum, b) => sum + b.pnl, 0);
+    const wonCount = bets.filter(b => b.pnl > 0).length;
+    const lostCount = bets.filter(b => b.pnl < 0).length;
+    const earlyPicks = bets.filter(b => b.seconds_to_off >= 300 && b.pnl > 0).length;
+
+    const betResults = bets.map(b => ({
+      action: b.action,
+      runnerName: b.runner_name,
+      price: b.price,
+      pnl: b.pnl,
+      won: b.pnl > 0,
+    }));
+
+    return {
+      winnerName,
+      winnerBacked,
+      winnerBackPrice,
+      totalBets: bets.length,
+      totalStake: Math.round(totalStake * 100) / 100,
+      totalPnl: Math.round(totalPnl * 100) / 100,
+      wonCount,
+      lostCount,
+      earlyPicks,
+      betResults,
+    };
+  });
+
+  // ── Bet marker positions for uPlot overlay ──
+  readonly betMarkers = computed(() => {
+    const bets = this.allBets();
+    const t = this.ticks();
+    const data = this.raceData();
+    if (bets.length === 0 || t.length === 0 || !data) return [];
 
     const startTime = new Date(data.market_start_time).getTime();
-    const tickTime = new Date(tick.timestamp).getTime();
-    const secondsToOff = (startTime - tickTime) / 1000;
+    const ids = this.runnerIds();
 
-    const w = 800;
-    const [xMin, xMax] = svg.xRange;
-    return w - ((secondsToOff - xMin) / (xMax - xMin || 1)) * w;
+    return bets.map((bet, i) => {
+      const tickIdx = t.findIndex(tick => tick.timestamp === bet.tick_timestamp);
+      if (tickIdx < 0) return null;
+      const tickTime = new Date(t[tickIdx].timestamp).getTime();
+      const secondsToOff = (startTime - tickTime) / 1000;
+      const seriesIdx = ids.indexOf(bet.runner_id);
+      return {
+        betIndex: i,
+        tickIndex: tickIdx,
+        secondsToOff,
+        price: bet.price,
+        action: bet.action,
+        seriesIndex: seriesIdx,
+        runnerId: bet.runner_id,
+      };
+    }).filter(m => m !== null);
   });
 
   ngOnInit(): void {
     this.loadModels();
     this.restoreState();
+  }
+
+  ngAfterViewInit(): void {
+    // Chart creation is triggered by buildChart() called after race data loads
   }
 
   private restoreState(): void {
@@ -222,6 +349,152 @@ export class RaceReplay implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopPlayback();
+    this.destroyChart();
+  }
+
+  private destroyChart(): void {
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+    if (this.chart) {
+      this.chart.destroy();
+      this.chart = null;
+    }
+  }
+
+  buildChart(): void {
+    this.destroyChart();
+
+    const plotData = this.uPlotData();
+    if (!plotData || !this.chartElRef) return;
+
+    const container = this.chartElRef.nativeElement;
+    const ids = plotData.runnerIds;
+    const winnerId = this.winnerSelectionId();
+    const visible = this.visibleRunners();
+
+    const series: uPlot.Series[] = [
+      { label: 'Time to Off' },
+      ...ids.map((id, i) => ({
+        label: this.runnerNames().get(id) ?? `Runner ${id}`,
+        stroke: RUNNER_COLOURS[i % RUNNER_COLOURS.length],
+        width: id === winnerId ? 3 : 1.5,
+        show: visible.size === 0 || visible.has(id),
+        spanGaps: true,
+      })),
+    ];
+
+    const rect = container.getBoundingClientRect();
+    const width = Math.max(rect.width, 300);
+    const height = Math.max(rect.height - 10, 250);
+
+    const self = this;
+
+    const opts: uPlot.Options = {
+      width,
+      height,
+      cursor: {
+        show: true,
+        x: true,
+        y: false,
+      },
+      scales: {
+        x: {
+          time: false,
+          dir: -1, // right-to-left (countdown)
+        },
+        y: {
+          auto: true,
+        },
+      },
+      axes: [
+        {
+          label: 'Seconds to Off',
+          stroke: '#888',
+          grid: { stroke: 'rgba(255,255,255,0.05)' },
+          ticks: { stroke: 'rgba(255,255,255,0.1)' },
+          values: (_u: uPlot, vals: number[]) => vals.map(v => {
+            const mins = Math.floor(Math.abs(v) / 60);
+            const secs = Math.abs(v) % 60;
+            const sign = v < 0 ? '+' : '';
+            return `${sign}${mins}:${secs.toFixed(0).padStart(2, '0')}`;
+          }),
+        },
+        {
+          label: 'LTP',
+          stroke: '#888',
+          grid: { stroke: 'rgba(255,255,255,0.05)' },
+          ticks: { stroke: 'rgba(255,255,255,0.1)' },
+        },
+      ],
+      series,
+      hooks: {
+        draw: [
+          (u: uPlot) => {
+            const ctx = u.ctx;
+            const markers = self.betMarkers();
+            const currentIdx = self.currentTickIndex();
+
+            for (const marker of markers) {
+              if (marker.tickIndex > currentIdx) continue;
+
+              const cx = u.valToPos(marker.secondsToOff, 'x', true);
+              const cy = u.valToPos(marker.price, 'y', true);
+
+              if (cx == null || cy == null || isNaN(cx) || isNaN(cy)) continue;
+
+              ctx.save();
+              ctx.fillStyle = marker.action === 'back' ? '#4CAF50' : '#F44336';
+              ctx.font = 'bold 16px sans-serif';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('\u2605', cx, cy);
+              ctx.restore();
+            }
+          },
+        ],
+      },
+    };
+
+    // Build initial data sliced to current tick
+    const slicedData = this.getSlicedData(plotData);
+
+    this.chart = new uPlot(opts, slicedData, container);
+
+    // Resize observer
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.chart && container) {
+        const r = container.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          this.chart.setSize({ width: r.width, height: Math.max(r.height - 10, 250) });
+        }
+      }
+    });
+    this.resizeObserver.observe(container);
+  }
+
+  updateChartData(): void {
+    const plotData = this.uPlotData();
+    if (!this.chart || !plotData) return;
+    const slicedData = this.getSlicedData(plotData);
+    this.chart.setData(slicedData);
+  }
+
+  private getSlicedData(plotData: { xValues: number[]; ySeriesArrays: (number | null)[][]; runnerIds: number[] }): uPlot.AlignedData {
+    const idx = this.currentTickIndex() + 1;
+    const visible = this.visibleRunners();
+    const ids = plotData.runnerIds;
+
+    const x = plotData.xValues.slice(0, idx);
+    const ySeries = plotData.ySeriesArrays.map((arr, i) => {
+      if (visible.size > 0 && !visible.has(ids[i])) {
+        return new Array(idx).fill(null);
+      }
+      return arr.slice(0, idx);
+    });
+
+    return [x, ...ySeries] as uPlot.AlignedData;
   }
 
   loadModels(): void {
@@ -242,6 +515,7 @@ export class RaceReplay implements OnInit, OnDestroy {
     this.dates.set([]);
     this.races.set([]);
     this.stopPlayback();
+    this.destroyChart();
     this.loadDates(modelId);
   }
 
@@ -253,6 +527,7 @@ export class RaceReplay implements OnInit, OnDestroy {
     this.raceData.set(null);
     this.races.set([]);
     this.stopPlayback();
+    this.destroyChart();
     const modelId = this.selectedModelId();
     if (modelId) this.loadRaces(modelId, date);
   }
@@ -262,13 +537,13 @@ export class RaceReplay implements OnInit, OnDestroy {
     this.selectionState.replayRaceId.set(raceId);
     this.raceData.set(null);
     this.stopPlayback();
+    this.destroyChart();
     const modelId = this.selectedModelId();
     const date = this.selectedDate();
     if (modelId && date) this.loadRace(modelId, date, raceId);
   }
 
   private loadDates(modelId: string): void {
-    // Get evaluation days from the model detail
     this.api.getModelDetail(modelId).subscribe({
       next: (res) => {
         const evalDates = (res.metrics_history ?? []).map((m: any) => m.date).sort();
@@ -299,11 +574,19 @@ export class RaceReplay implements OnInit, OnDestroy {
       next: (res) => {
         this.raceData.set(res);
         this.currentTickIndex.set(0);
-        this.loading.set(false);
-        // Auto-select first runner
-        if (res.ticks.length > 0 && res.ticks[0].runners.length > 0) {
-          this.selectedRunnerId.set(res.ticks[0].runners[0].selection_id);
+        this.highlightedBetIndex.set(null);
+        // Initialise visible runners to all
+        const ids = new Set<number>();
+        for (const tick of res.ticks) {
+          for (const r of tick.runners) {
+            ids.add(r.selection_id);
+          }
         }
+        this.visibleRunners.set(ids);
+        this.loading.set(false);
+
+        // Build chart after a microtask so the template has rendered
+        setTimeout(() => this.buildChart(), 0);
       },
       error: (err) => {
         this.error.set(err.error?.detail ?? 'Failed to load race data');
@@ -331,6 +614,7 @@ export class RaceReplay implements OnInit, OnDestroy {
         this.stopPlayback();
       } else {
         this.currentTickIndex.set(next);
+        this.updateChartData();
       }
     }, 1000 / this.playbackSpeed());
   }
@@ -353,19 +637,51 @@ export class RaceReplay implements OnInit, OnDestroy {
 
   seekToTick(index: number): void {
     this.currentTickIndex.set(index);
+    this.updateChartData();
   }
 
-  onBetClick(bet: BetEvent): void {
+  // ── Bet panel interactions ──
+
+  onBetCardClick(card: BetCard): void {
     const t = this.ticks();
-    const idx = t.findIndex(tick => tick.timestamp === bet.tick_timestamp);
+    const idx = t.findIndex(tick => tick.timestamp === card.bet.tick_timestamp);
     if (idx >= 0) {
       this.currentTickIndex.set(idx);
-      this.selectedRunnerId.set(bet.runner_id);
+      this.highlightedBetIndex.set(card.index);
+      this.updateChartData();
     }
   }
 
-  selectRunner(runnerId: number): void {
-    this.selectedRunnerId.set(runnerId);
+  onBetMarkerClick(betIndex: number): void {
+    this.highlightedBetIndex.set(betIndex);
+  }
+
+  // ── Runner legend ──
+
+  toggleRunner(runnerId: number): void {
+    const current = new Set(this.visibleRunners());
+    if (current.has(runnerId)) {
+      current.delete(runnerId);
+    } else {
+      current.add(runnerId);
+    }
+    this.visibleRunners.set(current);
+
+    // Update chart series visibility
+    if (this.chart) {
+      const ids = this.runnerIds();
+      const seriesIdx = ids.indexOf(runnerId) + 1; // +1 because series[0] is x
+      if (seriesIdx > 0) {
+        this.chart.setSeries(seriesIdx, { show: current.has(runnerId) });
+      }
+    }
+
+    this.updateChartData();
+  }
+
+  isRunnerVisible(runnerId: number): boolean {
+    const v = this.visibleRunners();
+    return v.size === 0 || v.has(runnerId);
   }
 
   runnerColour(runnerId: number): string {

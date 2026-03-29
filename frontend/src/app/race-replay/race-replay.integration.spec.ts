@@ -149,7 +149,7 @@ describe.skipIf(!apiAvailable)('RaceReplay Integration (real API)', () => {
         await fixture.whenStable();
         fixture.detectChanges();
 
-        const chart = fixture.nativeElement.querySelector('[data-testid="ltp-chart"]');
+        const chart = fixture.nativeElement.querySelector('[data-testid="chart-container"]');
         expect(chart).toBeTruthy();
       }
     }

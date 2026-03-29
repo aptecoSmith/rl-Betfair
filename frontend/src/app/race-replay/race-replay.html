@@ -81,8 +81,13 @@
     </div>
 
     <div class="replay-layout">
-      <!-- ── Main chart area ── -->
+      <!-- ── Main chart + controls area ── -->
       <div class="chart-area">
+        <!-- LTP Price Chart (uPlot) -->
+        <div class="chart-container" data-testid="chart-container">
+          <div #chartEl class="uplot-target" data-testid="uplot-target"></div>
+        </div>
+
         <!-- Playback controls -->
         <div class="playback-controls" data-testid="playback-controls">
           <button class="btn btn-primary btn-sm" (click)="togglePlayback()" data-testid="play-btn">
@@ -108,36 +113,14 @@
                  (input)="seekToTick(+$any($event.target).value)" />
         </div>
 
-        <!-- LTP Price Chart (SVG) -->
-        <div class="chart-container" data-testid="chart-container">
-          @if (chartSvgPath().paths.length > 0) {
-            <svg viewBox="0 0 800 400" preserveAspectRatio="xMidYMid meet" class="ltp-chart" data-testid="ltp-chart">
-              @for (runner of chartSvgPath().paths; track runner.runnerId) {
-                @if (runner.d) {
-                  <path [attr.d]="runner.d" [attr.stroke]="runner.colour"
-                        [attr.stroke-width]="runner.isWinner ? 3 : 1.5"
-                        fill="none" class="runner-line"
-                        [class.winner-line]="runner.isWinner" />
-                }
-              }
-              <!-- Cursor line -->
-              @if (cursorX() != null) {
-                <line [attr.x1]="cursorX()" [attr.x2]="cursorX()"
-                      y1="0" y2="400" class="cursor-line" data-testid="cursor-line" />
-              }
-            </svg>
-          } @else {
-            <div class="chart-empty">No chart data available</div>
-          }
-        </div>
-
         <!-- Runner legend -->
         <div class="runner-legend" data-testid="runner-legend">
           @for (runner of chartData(); track runner.runnerId) {
             <button class="legend-item"
-                    [class.selected]="selectedRunnerId() === runner.runnerId"
+                    [class.active]="isRunnerVisible(runner.runnerId)"
+                    [class.dimmed]="!isRunnerVisible(runner.runnerId)"
                     [class.winner-legend]="runner.isWinner"
-                    (click)="selectRunner(runner.runnerId)">
+                    (click)="toggleRunner(runner.runnerId)">
               <span class="legend-colour" [style.background]="runner.colour"></span>
               <span class="legend-name">{{ runner.name }}</span>
               @if (runner.isWinner) {
@@ -148,82 +131,106 @@
         </div>
       </div>
 
-      <!-- ── Side panels ── -->
-      <div class="side-panels">
-        <!-- Order Book panel -->
-        <div class="panel order-book-panel" data-testid="order-book">
-          <h3>Order Book</h3>
-          @if (currentOrderBook(); as ob) {
-            <div class="runner-header">
-              <span class="legend-colour" [style.background]="runnerColour(ob.selection_id)"></span>
-              {{ runnerNames().get(ob.selection_id) ?? ob.selection_id }}
-            </div>
-            <div class="ob-grid">
-              <div class="ob-side back-side">
-                <div class="ob-header">Back</div>
-                @for (level of ob.available_to_back; track $index) {
-                  <div class="ob-level">
-                    <span class="ob-price">{{ level.Price | number:'1.2-2' }}</span>
-                    <span class="ob-size">£{{ level.Size | number:'1.0-0' }}</span>
-                  </div>
-                }
-                @if (ob.available_to_back.length === 0) {
-                  <div class="ob-empty">—</div>
+      <!-- ── Bet panel (right side) ── -->
+      <div class="bet-panel" data-testid="bet-panel">
+        <h3>Bets ({{ visibleBets().length }})</h3>
+        <div class="bet-list">
+          @for (card of visibleBets(); track card.index) {
+            <button class="bet-card"
+                    [class.highlighted]="highlightedBetIndex() === card.index"
+                    [class.back-card]="card.bet.action === 'back'"
+                    [class.lay-card]="card.bet.action === 'lay'"
+                    (click)="onBetCardClick(card)"
+                    data-testid="bet-card">
+              <div class="bet-card-header">
+                <span class="bet-time">T{{ formatSecondsToOff(card.bet.seconds_to_off) }}</span>
+                <span class="bet-action-badge" [class.back]="card.bet.action === 'back'" [class.lay]="card.bet.action === 'lay'">
+                  {{ card.bet.action | uppercase }}
+                </span>
+              </div>
+              <div class="bet-card-runner">{{ card.bet.runner_name }} @ {{ card.bet.price | number:'1.2-2' }}</div>
+              <div class="bet-card-details">
+                <span>Stake: {{ card.bet.stake | currency:'GBP':'symbol':'1.2-2' }}</span>
+                @if (card.bet.action === 'back') {
+                  <span>Matched: {{ card.bet.matched_size | currency:'GBP':'symbol':'1.2-2' }}</span>
+                } @else {
+                  <span>Liability: {{ card.liability | currency:'GBP':'symbol':'1.2-2' }}</span>
                 }
               </div>
-              <div class="ob-side lay-side">
-                <div class="ob-header">Lay</div>
-                @for (level of ob.available_to_lay; track $index) {
-                  <div class="ob-level">
-                    <span class="ob-price">{{ level.Price | number:'1.2-2' }}</span>
-                    <span class="ob-size">£{{ level.Size | number:'1.0-0' }}</span>
-                  </div>
-                }
-                @if (ob.available_to_lay.length === 0) {
-                  <div class="ob-empty">—</div>
-                }
+              <div class="bet-card-balance">
+                Balance: {{ card.runningBalance | currency:'GBP':'symbol':'1.2-2' }}
               </div>
-            </div>
-            <div class="ob-ltp">
-              LTP: <strong>{{ ob.last_traded_price | number:'1.2-2' }}</strong>
-            </div>
-          } @else {
-            <div class="panel-empty">Select a runner to view order book</div>
+            </button>
           }
-        </div>
-
-        <!-- Action Log panel -->
-        <div class="panel action-log-panel" data-testid="action-log">
-          <h3>Agent Actions ({{ allBets().length }})</h3>
-          <div class="action-list">
-            @for (bet of allBets(); track $index) {
-              <button class="action-item" (click)="onBetClick(bet)"
-                      [class.won]="bet.outcome === 'won'"
-                      [class.lost]="bet.outcome === 'lost'"
-                      data-testid="action-item">
-                <div class="action-header">
-                  <span class="action-type" [class.back]="bet.action === 'back'" [class.lay]="bet.action === 'lay'">
-                    {{ bet.action | uppercase }}
-                  </span>
-                  <span class="action-runner">{{ bet.runner_name }}</span>
-                </div>
-                <div class="action-details">
-                  <span>T{{ formatSecondsToOff(bet.seconds_to_off) }}</span>
-                  <span>@ {{ bet.price | number:'1.2-2' }}</span>
-                  <span>£{{ bet.stake | number:'1.2-2' }}</span>
-                  <span class="action-pnl" [class.positive]="bet.pnl > 0" [class.negative]="bet.pnl < 0">
-                    {{ bet.pnl > 0 ? '+' : '' }}{{ bet.pnl | number:'1.2-2' }}
-                  </span>
-                </div>
-              </button>
-            }
-            @if (allBets().length === 0) {
-              <div class="panel-empty">No bets in this race</div>
-            }
-          </div>
+          @if (visibleBets().length === 0) {
+            <div class="panel-empty">No bets placed yet</div>
+          }
         </div>
       </div>
     </div>
+
+    <!-- ── Conclusion panel ── -->
+    @if (conclusionData(); as conclusion) {
+      <div class="conclusion-panel" data-testid="conclusion-panel">
+        <h3>Race Result</h3>
+        <div class="conclusion-summary">
+          <div class="conclusion-row">
+            <div class="conclusion-stat">
+              <span class="conclusion-label">Winner</span>
+              <span class="conclusion-value winner-name">
+                {{ conclusion.winnerName ?? 'Unknown' }}
+                @if (conclusion.winnerBacked) {
+                  <span class="backed-badge">backed ✓</span>
+                }
+              </span>
+            </div>
+            <div class="conclusion-stat">
+              <span class="conclusion-label">Total Bets</span>
+              <span class="conclusion-value">{{ conclusion.totalBets }}</span>
+            </div>
+          </div>
+          <div class="conclusion-row">
+            <div class="conclusion-stat">
+              <span class="conclusion-label">Total Stake</span>
+              <span class="conclusion-value">{{ conclusion.totalStake | currency:'GBP':'symbol':'1.2-2' }}</span>
+            </div>
+            <div class="conclusion-stat">
+              <span class="conclusion-label">Total P&L</span>
+              <span class="conclusion-value" [class.positive]="conclusion.totalPnl > 0" [class.negative]="conclusion.totalPnl < 0">
+                {{ conclusion.totalPnl > 0 ? '+' : '' }}{{ conclusion.totalPnl | currency:'GBP':'symbol':'1.2-2' }}
+              </span>
+            </div>
+          </div>
+          <div class="conclusion-row">
+            <div class="conclusion-stat">
+              <span class="conclusion-label">Won / Lost</span>
+              <span class="conclusion-value">{{ conclusion.wonCount }} / {{ conclusion.lostCount }}</span>
+            </div>
+            <div class="conclusion-stat">
+              <span class="conclusion-label">Early Picks</span>
+              <span class="conclusion-value">{{ conclusion.earlyPicks }}</span>
+            </div>
+          </div>
+        </div>
+
+        @if (conclusion.betResults.length > 0) {
+          <div class="conclusion-bets">
+            <h4>Bet Results</h4>
+            @for (result of conclusion.betResults; track $index) {
+              <div class="conclusion-bet-row" [class.won-row]="result.won" [class.lost-row]="!result.won">
+                <span class="result-icon">{{ result.won ? '✓' : '✗' }}</span>
+                <span class="result-action">{{ result.action | uppercase }}</span>
+                <span class="result-runner">{{ result.runnerName }}</span>
+                <span class="result-price">@ {{ result.price | number:'1.2-2' }}</span>
+                <span class="result-pnl" [class.positive]="result.pnl > 0" [class.negative]="result.pnl < 0">
+                  {{ result.pnl > 0 ? '+' : '' }}{{ result.pnl | currency:'GBP':'symbol':'1.2-2' }}
+                </span>
+              </div>
+            }
+          </div>
+        }
+      </div>
+    }
   }
 
   @if (!raceData() && !loading() && !error()) {

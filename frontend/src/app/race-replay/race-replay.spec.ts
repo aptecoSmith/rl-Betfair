@@ -3,7 +3,7 @@ import { provideRouter, Router } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { of, throwError, Observable, EMPTY } from 'rxjs';
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
 import { RaceReplay } from './race-replay';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
@@ -75,9 +75,24 @@ function makeRaceResponse(overrides: Partial<ReplayRaceResponse> = {}): ReplayRa
         ],
         bets: [],
       },
+      {
+        timestamp: '2026-03-01T14:10:00Z',
+        sequence_number: 2,
+        in_play: false,
+        traded_volume: 2000,
+        runners: [
+          { selection_id: 123, status: 'ACTIVE', last_traded_price: 3.0, total_matched: 900, available_to_back: [{ Price: 2.9, Size: 150 }], available_to_lay: [{ Price: 3.1, Size: 100 }] },
+          { selection_id: 456, status: 'ACTIVE', last_traded_price: 6.0, total_matched: 500, available_to_back: [{ Price: 5.9, Size: 30 }], available_to_lay: [{ Price: 6.1, Size: 50 }] },
+        ],
+        bets: [],
+      },
     ],
-    all_bets: [makeBet()],
-    race_pnl: 25.0,
+    all_bets: [
+      makeBet(),
+      makeBet({ tick_timestamp: '2026-03-01T14:05:00Z', seconds_to_off: 300, runner_id: 456, runner_name: 'Fast Dash', action: 'lay', price: 4.2, stake: 5.0, matched_size: 5.0, outcome: 'won', pnl: 5.0 }),
+      makeBet({ tick_timestamp: '2026-03-01T14:10:00Z', seconds_to_off: 120, runner_id: 789, runner_name: 'Quick Silver', action: 'back', price: 3.8, stake: 8.0, matched_size: 8.0, outcome: 'lost', pnl: -8.0 }),
+    ],
+    race_pnl: 22.0,
     ...overrides,
   };
 }
@@ -232,7 +247,7 @@ describe('RaceReplay', () => {
     component.onRaceChange('race-1');
     fixture.detectChanges();
     expect(component.raceData()).toBeTruthy();
-    expect(component.ticks().length).toBe(2);
+    expect(component.ticks().length).toBe(3);
   });
 
   it('should show summary bar with race data', () => {
@@ -241,16 +256,16 @@ describe('RaceReplay', () => {
     fixture.detectChanges();
     const summary = fixture.nativeElement.querySelector('[data-testid="summary-bar"]');
     expect(summary).toBeTruthy();
-    expect(summary.textContent).toContain('25');
+    expect(summary.textContent).toContain('22');
   });
 
   it('should compute summary stats correctly', () => {
     setup();
     component.raceData.set(makeRaceResponse());
     const stats = component.summaryStats();
-    expect(stats.totalBets).toBe(1);
-    expect(stats.totalPnl).toBe(25.0);
-    expect(stats.earlyPicks).toBe(1); // 600 seconds > 300
+    expect(stats.totalBets).toBe(3);
+    expect(stats.totalPnl).toBe(22.0);
+    expect(stats.earlyPicks).toBe(2); // 600s and 300s bets with positive pnl
   });
 
   it('should not count non-early bets as early picks', () => {
@@ -261,14 +276,291 @@ describe('RaceReplay', () => {
     expect(component.summaryStats().earlyPicks).toBe(0);
   });
 
-  // ── Chart ──
+  // ── uPlot data ──
 
-  it('should render LTP chart with race data', () => {
+  it('should compute uPlotData with correct series count', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const plotData = component.uPlotData();
+    expect(plotData).not.toBeNull();
+    expect(plotData!.xValues.length).toBe(3); // 3 ticks
+    expect(plotData!.ySeriesArrays.length).toBe(2); // 2 runners
+    expect(plotData!.runnerIds.length).toBe(2);
+  });
+
+  it('should compute correct x values (seconds to off)', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const plotData = component.uPlotData()!;
+    // market_start_time is 14:30, tick 0 at 14:00 → 1800s to off
+    expect(plotData.xValues[0]).toBe(1800);
+    // tick 1 at 14:05 → 1500s to off
+    expect(plotData.xValues[1]).toBe(1500);
+    // tick 2 at 14:10 → 1200s to off
+    expect(plotData.xValues[2]).toBe(1200);
+  });
+
+  it('should compute correct y values (LTP)', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const plotData = component.uPlotData()!;
+    // Runner 123: LTPs are 3.5, 3.2, 3.0
+    expect(plotData.ySeriesArrays[0][0]).toBe(3.5);
+    expect(plotData.ySeriesArrays[0][1]).toBe(3.2);
+    expect(plotData.ySeriesArrays[0][2]).toBe(3.0);
+    // Runner 456: LTPs are 5.0, 5.5, 6.0
+    expect(plotData.ySeriesArrays[1][0]).toBe(5.0);
+    expect(plotData.ySeriesArrays[1][1]).toBe(5.5);
+    expect(plotData.ySeriesArrays[1][2]).toBe(6.0);
+  });
+
+  it('should handle null/zero LTP as null in uPlotData', () => {
+    setup();
+    const raceData = makeRaceResponse();
+    raceData.ticks[0].runners[0].last_traded_price = 0;
+    component.raceData.set(raceData);
+    const plotData = component.uPlotData()!;
+    expect(plotData.ySeriesArrays[0][0]).toBeNull();
+  });
+
+  it('should return null uPlotData when no ticks', () => {
+    setup();
+    component.raceData.set(makeRaceResponse({ ticks: [] }));
+    expect(component.uPlotData()).toBeNull();
+  });
+
+  // ── Visible bets (filtered by tick index) ──
+
+  it('should filter visibleBets by tick index', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    // At tick 0 (14:00) → only first bet (placed at 14:00)
+    component.currentTickIndex.set(0);
+    expect(component.visibleBets().length).toBe(1);
+    expect(component.visibleBets()[0].bet.runner_name).toBe('Test Horse');
+  });
+
+  it('should show all bets at last tick', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    component.currentTickIndex.set(2); // last tick
+    expect(component.visibleBets().length).toBe(3);
+  });
+
+  it('should show bets progressively during playback', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+
+    component.currentTickIndex.set(0);
+    expect(component.visibleBets().length).toBe(1);
+
+    component.currentTickIndex.set(1);
+    expect(component.visibleBets().length).toBe(2);
+
+    component.currentTickIndex.set(2);
+    expect(component.visibleBets().length).toBe(3);
+  });
+
+  // ── Running balances ──
+
+  it('should compute running balances correctly for back bets', () => {
+    setup();
+    component.raceData.set(makeRaceResponse({
+      all_bets: [
+        makeBet({ stake: 10, action: 'back', price: 3.5 }),
+        makeBet({ stake: 20, action: 'back', price: 2.0 }),
+      ],
+    }));
+    const balances = component.runningBalances();
+    expect(balances.length).toBe(2);
+    expect(balances[0]).toBe(90); // 100 - 10
+    expect(balances[1]).toBe(70); // 90 - 20
+  });
+
+  it('should compute running balances correctly for lay bets', () => {
+    setup();
+    component.raceData.set(makeRaceResponse({
+      all_bets: [
+        makeBet({ stake: 5, action: 'lay', price: 4.2 }), // liability = 5 * 3.2 = 16
+      ],
+    }));
+    const balances = component.runningBalances();
+    expect(balances[0]).toBe(84); // 100 - 16
+  });
+
+  it('should compute running balances for mixed back and lay', () => {
+    setup();
+    component.raceData.set(makeRaceResponse({
+      all_bets: [
+        makeBet({ stake: 10, action: 'back', price: 3.5 }),
+        makeBet({ stake: 5, action: 'lay', price: 4.2 }), // liability = 5 * 3.2 = 16
+      ],
+    }));
+    const balances = component.runningBalances();
+    expect(balances[0]).toBe(90); // 100 - 10
+    expect(balances[1]).toBe(74); // 90 - 16
+  });
+
+  // ── Visible bet running balance ──
+
+  it('should include running balance on visible bet cards', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    component.currentTickIndex.set(2);
+    const cards = component.visibleBets();
+    expect(cards.length).toBe(3);
+    // First bet: BACK £10 → balance = 90
+    expect(cards[0].runningBalance).toBe(90);
+    // Second bet: LAY £5 @ 4.2 → liability = 5*(4.2-1) = 16 → balance = 90 - 16 = 74
+    expect(cards[1].runningBalance).toBe(74);
+    // Third bet: BACK £8 → balance = 74 - 8 = 66
+    expect(cards[2].runningBalance).toBe(66);
+  });
+
+  it('should include liability on lay bet cards', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    component.currentTickIndex.set(2);
+    const layCard = component.visibleBets().find(c => c.bet.action === 'lay');
+    expect(layCard).toBeTruthy();
+    // Liability = 5 * (4.2 - 1) = 16
+    expect(layCard!.liability).toBe(16);
+  });
+
+  // ── Conclusion data ──
+
+  it('should compute conclusion data', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const conclusion = component.conclusionData();
+    expect(conclusion).not.toBeNull();
+    expect(conclusion!.totalBets).toBe(3);
+    expect(conclusion!.winnerName).toBe('Test Horse');
+  });
+
+  it('should detect winner backed in conclusion', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const conclusion = component.conclusionData()!;
+    // Winner is runner 123, and there's a back bet on 123
+    expect(conclusion.winnerBacked).toBe(true);
+    expect(conclusion.winnerBackPrice).toBe(3.5);
+  });
+
+  it('should detect winner not backed', () => {
+    setup();
+    component.raceData.set(makeRaceResponse({
+      all_bets: [makeBet({ runner_id: 456, action: 'back' })],
+    }));
+    const conclusion = component.conclusionData()!;
+    expect(conclusion.winnerBacked).toBe(false);
+    expect(conclusion.winnerBackPrice).toBeNull();
+  });
+
+  it('should compute won/lost counts in conclusion', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const conclusion = component.conclusionData()!;
+    expect(conclusion.wonCount).toBe(2); // 2 bets with pnl > 0
+    expect(conclusion.lostCount).toBe(1); // 1 bet with pnl < 0
+  });
+
+  it('should compute total stake in conclusion', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const conclusion = component.conclusionData()!;
+    expect(conclusion.totalStake).toBe(23); // 10 + 5 + 8
+  });
+
+  it('should compute total P&L in conclusion', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const conclusion = component.conclusionData()!;
+    expect(conclusion.totalPnl).toBe(22); // 25 + 5 - 8
+  });
+
+  it('should compute per-bet results in conclusion', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const conclusion = component.conclusionData()!;
+    expect(conclusion.betResults.length).toBe(3);
+    expect(conclusion.betResults[0].action).toBe('back');
+    expect(conclusion.betResults[0].runnerName).toBe('Test Horse');
+    expect(conclusion.betResults[0].won).toBe(true);
+    expect(conclusion.betResults[2].won).toBe(false);
+  });
+
+  it('should return null conclusion when no race data', () => {
+    setup();
+    expect(component.conclusionData()).toBeNull();
+  });
+
+  // ── Highlighted bet index ──
+
+  it('should set highlightedBetIndex on bet card click', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    component.currentTickIndex.set(2);
+    const card = component.visibleBets()[1];
+    component.onBetCardClick(card);
+    expect(component.highlightedBetIndex()).toBe(1);
+  });
+
+  it('should jump to correct tick on bet card click', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    component.currentTickIndex.set(2);
+    const card = component.visibleBets()[0]; // first bet at tick 0
+    component.onBetCardClick(card);
+    expect(component.currentTickIndex()).toBe(0);
+  });
+
+  // ── Visible runners (legend toggle) ──
+
+  it('should initialise visibleRunners as empty set', () => {
+    setup();
+    expect(component.visibleRunners().size).toBe(0);
+  });
+
+  it('should toggle runner visibility', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    // Start with runners populated via loadRace (manually set for unit test)
+    component.visibleRunners.set(new Set([123, 456]));
+    expect(component.isRunnerVisible(123)).toBe(true);
+
+    component.toggleRunner(123);
+    expect(component.visibleRunners().has(123)).toBe(false);
+    expect(component.isRunnerVisible(123)).toBe(false);
+
+    component.toggleRunner(123);
+    expect(component.visibleRunners().has(123)).toBe(true);
+  });
+
+  it('should show all runners when visibleRunners is empty', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    expect(component.isRunnerVisible(123)).toBe(true);
+    expect(component.isRunnerVisible(456)).toBe(true);
+    expect(component.isRunnerVisible(999)).toBe(true); // unknown runner
+  });
+
+  // ── Chart rendering ──
+
+  it('should render chart container with race data', () => {
     setup();
     component.raceData.set(makeRaceResponse());
     fixture.detectChanges();
-    const chart = fixture.nativeElement.querySelector('[data-testid="ltp-chart"]');
-    expect(chart).toBeTruthy();
+    const container = fixture.nativeElement.querySelector('[data-testid="chart-container"]');
+    expect(container).toBeTruthy();
+  });
+
+  it('should render uplot target div', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    fixture.detectChanges();
+    const target = fixture.nativeElement.querySelector('[data-testid="uplot-target"]');
+    expect(target).toBeTruthy();
   });
 
   it('should generate chart data for each runner', () => {
@@ -276,7 +568,6 @@ describe('RaceReplay', () => {
     component.raceData.set(makeRaceResponse());
     const chartData = component.chartData();
     expect(chartData.length).toBe(2); // 2 runners
-    expect(chartData[0].points.length).toBe(2); // 2 ticks
   });
 
   it('should mark winner runner in chart data', () => {
@@ -285,14 +576,6 @@ describe('RaceReplay', () => {
     const chartData = component.chartData();
     const winner = chartData.find(r => r.runnerId === 123);
     expect(winner?.isWinner).toBe(true);
-  });
-
-  it('should generate SVG paths', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    const svg = component.chartSvgPath();
-    expect(svg.paths.length).toBe(2);
-    expect(svg.paths[0].d).toBeTruthy();
   });
 
   it('should render runner legend', () => {
@@ -313,81 +596,75 @@ describe('RaceReplay', () => {
     expect(badge).toBeTruthy();
   });
 
-  // ── Order book ──
+  // ── Bet panel ──
 
-  it('should show order book panel', () => {
+  it('should render bet panel', () => {
     setup();
     component.raceData.set(makeRaceResponse());
     fixture.detectChanges();
-    const ob = fixture.nativeElement.querySelector('[data-testid="order-book"]');
-    expect(ob).toBeTruthy();
+    const panel = fixture.nativeElement.querySelector('[data-testid="bet-panel"]');
+    expect(panel).toBeTruthy();
   });
 
-  it('should display order book for selected runner', () => {
+  it('should render bet cards in bet panel', () => {
     setup();
     component.raceData.set(makeRaceResponse());
-    component.selectedRunnerId.set(123);
+    component.currentTickIndex.set(2);
     fixture.detectChanges();
-    const ob = fixture.nativeElement.querySelector('[data-testid="order-book"]');
-    expect(ob.textContent).toContain('Back');
-    expect(ob.textContent).toContain('Lay');
-  });
-
-  it('should show empty message when no runner selected', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    component.selectedRunnerId.set(null);
-    fixture.detectChanges();
-    const ob = fixture.nativeElement.querySelector('[data-testid="order-book"]');
-    expect(ob.textContent).toContain('Select a runner');
-  });
-
-  it('should update order book when tick changes', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    component.selectedRunnerId.set(123);
-    component.currentTickIndex.set(0);
-    const ob1 = component.currentOrderBook();
-    expect(ob1?.last_traded_price).toBe(3.5);
-
-    component.currentTickIndex.set(1);
-    const ob2 = component.currentOrderBook();
-    expect(ob2?.last_traded_price).toBe(3.2);
-  });
-
-  // ── Action log ──
-
-  it('should show action log panel', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    fixture.detectChanges();
-    const log = fixture.nativeElement.querySelector('[data-testid="action-log"]');
-    expect(log).toBeTruthy();
-  });
-
-  it('should render action items', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    fixture.detectChanges();
-    const items = fixture.nativeElement.querySelectorAll('[data-testid="action-item"]');
-    expect(items.length).toBe(1);
+    const cards = fixture.nativeElement.querySelectorAll('[data-testid="bet-card"]');
+    expect(cards.length).toBe(3);
   });
 
   it('should show empty message when no bets', () => {
     setup();
     component.raceData.set(makeRaceResponse({ all_bets: [] }));
     fixture.detectChanges();
-    const log = fixture.nativeElement.querySelector('[data-testid="action-log"]');
-    expect(log.textContent).toContain('No bets');
+    const panel = fixture.nativeElement.querySelector('[data-testid="bet-panel"]');
+    expect(panel.textContent).toContain('No bets');
   });
 
-  it('should jump to tick when bet clicked', () => {
+  // ── Conclusion panel ──
+
+  it('should render conclusion panel', () => {
     setup();
-    const raceData = makeRaceResponse();
-    component.raceData.set(raceData);
-    component.currentTickIndex.set(1);
-    component.onBetClick(raceData.all_bets[0]);
-    expect(component.currentTickIndex()).toBe(0); // First tick matches bet timestamp
+    component.raceData.set(makeRaceResponse());
+    fixture.detectChanges();
+    const panel = fixture.nativeElement.querySelector('[data-testid="conclusion-panel"]');
+    expect(panel).toBeTruthy();
+  });
+
+  it('should show winner name in conclusion', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    fixture.detectChanges();
+    const panel = fixture.nativeElement.querySelector('[data-testid="conclusion-panel"]');
+    expect(panel.textContent).toContain('Test Horse');
+  });
+
+  it('should show bet results in conclusion', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    fixture.detectChanges();
+    const rows = fixture.nativeElement.querySelectorAll('.conclusion-bet-row');
+    expect(rows.length).toBe(3);
+  });
+
+  // ── Bet markers ──
+
+  it('should compute bet markers', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const markers = component.betMarkers();
+    expect(markers.length).toBe(3);
+    expect(markers[0].action).toBe('back');
+    expect(markers[0].secondsToOff).toBe(1800);
+    expect(markers[0].price).toBe(3.5);
+  });
+
+  it('should return empty markers when no bets', () => {
+    setup();
+    component.raceData.set(makeRaceResponse({ all_bets: [] }));
+    expect(component.betMarkers().length).toBe(0);
   });
 
   // ── Playback controls ──
@@ -429,7 +706,7 @@ describe('RaceReplay', () => {
     component.raceData.set(makeRaceResponse());
     fixture.detectChanges();
     const counter = fixture.nativeElement.querySelector('[data-testid="tick-counter"]');
-    expect(counter?.textContent).toContain('1 / 2');
+    expect(counter?.textContent).toContain('1 / 3');
   });
 
   it('should render tick slider', () => {
@@ -464,64 +741,6 @@ describe('RaceReplay', () => {
     fixture.detectChanges();
     const tto = fixture.nativeElement.querySelector('[data-testid="time-to-off"]');
     expect(tto).toBeTruthy();
-  });
-
-  // ── Cursor ──
-
-  it('should compute cursor X position', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    component.currentTickIndex.set(0);
-    const x = component.cursorX();
-    expect(x).not.toBeNull();
-    expect(typeof x).toBe('number');
-  });
-
-  it('should render cursor line on chart', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    fixture.detectChanges();
-    const cursor = fixture.nativeElement.querySelector('[data-testid="cursor-line"]');
-    expect(cursor).toBeTruthy();
-  });
-
-  // ── Runner selection ──
-
-  it('should auto-select first runner on race load', () => {
-    setup();
-    component.selectedModelId.set('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
-    component.selectedDate.set('2026-03-01');
-    component.onRaceChange('race-1');
-    expect(component.selectedRunnerId()).toBe(123);
-  });
-
-  it('should change selected runner', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    component.selectRunner(456);
-    expect(component.selectedRunnerId()).toBe(456);
-  });
-
-  // ── Helpers ──
-
-  it('should format short ID', () => {
-    setup();
-    expect(component.shortId('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBe('aaaaaaaa');
-  });
-
-  it('should format seconds to off', () => {
-    setup();
-    expect(component.formatSecondsToOff(600)).toBe('-10:00');
-    expect(component.formatSecondsToOff(90)).toBe('-1:30');
-    expect(component.formatSecondsToOff(-30)).toBe('+0:30');
-  });
-
-  it('should return runner colour', () => {
-    setup();
-    component.raceData.set(makeRaceResponse());
-    const colour = component.runnerColour(123);
-    expect(colour).toBeTruthy();
-    expect(colour.startsWith('#')).toBe(true);
   });
 
   // ── Winner display ──
@@ -597,6 +816,28 @@ describe('RaceReplay', () => {
     expect(component.selectedDate()).toBeNull();
     expect(component.selectedRaceId()).toBeNull();
     expect(component.raceData()).toBeNull();
+  });
+
+  // ── Helpers ──
+
+  it('should format short ID', () => {
+    setup();
+    expect(component.shortId('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBe('aaaaaaaa');
+  });
+
+  it('should format seconds to off', () => {
+    setup();
+    expect(component.formatSecondsToOff(600)).toBe('-10:00');
+    expect(component.formatSecondsToOff(90)).toBe('-1:30');
+    expect(component.formatSecondsToOff(-30)).toBe('+0:30');
+  });
+
+  it('should return runner colour', () => {
+    setup();
+    component.raceData.set(makeRaceResponse());
+    const colour = component.runnerColour(123);
+    expect(colour).toBeTruthy();
+    expect(colour.startsWith('#')).toBe(true);
   });
 
   // ── Selection state service integration ──

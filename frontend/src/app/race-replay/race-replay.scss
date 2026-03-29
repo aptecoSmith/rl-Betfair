@@ -121,7 +121,7 @@
 
 .replay-layout {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: 1fr 300px;
   gap: 1rem;
 }
 
@@ -131,7 +131,28 @@
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  min-width: 0; // prevent grid blowout
 }
+
+.chart-container {
+  background: #1a1a2a;
+  border-radius: 8px;
+  padding: 0.75rem;
+  min-height: 350px;
+  position: relative;
+}
+
+.uplot-target {
+  width: 100%;
+  height: 340px;
+
+  // Override uPlot's default light-mode styles for dark theme
+  :global(.u-legend) {
+    display: none; // we use our own legend
+  }
+}
+
+// ── Playback Controls ──
 
 .playback-controls {
   display: flex;
@@ -186,42 +207,6 @@
   &-active { background: #2196f3; color: #fff; }
 }
 
-.chart-container {
-  background: #1a1a2a;
-  border-radius: 8px;
-  padding: 0.75rem;
-  min-height: 300px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ltp-chart {
-  width: 100%;
-  height: auto;
-
-  .runner-line {
-    opacity: 0.8;
-  }
-
-  .winner-line {
-    opacity: 1;
-    filter: drop-shadow(0 0 3px rgba(129, 199, 132, 0.6));
-  }
-
-  .cursor-line {
-    stroke: #fff;
-    stroke-width: 1;
-    stroke-dasharray: 4 2;
-    opacity: 0.6;
-  }
-}
-
-.chart-empty {
-  color: #666;
-  font-style: italic;
-}
-
 // ── Runner Legend ──
 
 .runner-legend {
@@ -241,10 +226,11 @@
   color: #ccc;
   font-size: 0.75rem;
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, opacity 0.15s;
 
   &:hover { border-color: #555; }
-  &.selected { border-color: #2196f3; background: rgba(33, 150, 243, 0.1); }
+  &.active { border-color: #555; }
+  &.dimmed { opacity: 0.35; }
   &.winner-legend { border-color: #81c784; }
 }
 
@@ -272,127 +258,74 @@
   border-radius: 3px;
 }
 
-// ── Side Panels ──
+// ── Bet Panel (right side) ──
 
-.side-panels {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.panel {
+.bet-panel {
   background: #1e1e2e;
   border-radius: 8px;
   padding: 1rem;
+  max-height: calc(350px + 6rem + 2rem); // roughly chart + controls + legend
+  display: flex;
+  flex-direction: column;
 
   h3 {
     font-size: 1rem;
     margin-bottom: 0.75rem;
     color: #fff;
+    flex-shrink: 0;
   }
 }
 
-.panel-empty {
-  color: #666;
-  font-style: italic;
-  font-size: 0.85rem;
-}
-
-// ── Order Book ──
-
-.runner-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-.ob-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.5rem;
-}
-
-.ob-side {
-  .ob-header {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: #888;
-    margin-bottom: 0.35rem;
-    font-weight: 600;
-  }
-}
-
-.back-side .ob-header { color: #64b5f6; }
-.lay-side .ob-header { color: #ef9a9a; }
-
-.ob-level {
-  display: flex;
-  justify-content: space-between;
-  padding: 0.2rem 0.4rem;
-  border-radius: 3px;
-  font-size: 0.8rem;
-  margin-bottom: 0.15rem;
-}
-
-.back-side .ob-level { background: rgba(33, 150, 243, 0.1); }
-.lay-side .ob-level { background: rgba(244, 67, 54, 0.1); }
-
-.ob-price { font-weight: 600; }
-.ob-size { color: #aaa; font-size: 0.75rem; }
-.ob-empty { color: #555; font-style: italic; font-size: 0.8rem; }
-
-.ob-ltp {
-  margin-top: 0.5rem;
-  font-size: 0.85rem;
-  color: #aaa;
-  border-top: 1px solid #333;
-  padding-top: 0.5rem;
-}
-
-// ── Action Log ──
-
-.action-list {
-  max-height: 400px;
+.bet-list {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.5rem;
+  flex: 1;
+  min-height: 0;
 }
 
-.action-item {
+.bet-card {
   display: block;
   width: 100%;
   text-align: left;
-  padding: 0.5rem;
+  padding: 0.6rem;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid #2a2a3a;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, background 0.15s;
   color: #ccc;
   font-family: inherit;
   font-size: 0.8rem;
 
   &:hover { border-color: #555; }
 
-  &.won { border-left: 3px solid #81c784; }
-  &.lost { border-left: 3px solid #e57373; }
+  &.highlighted {
+    border-color: #2196f3;
+    background: rgba(33, 150, 243, 0.1);
+  }
+
+  &.back-card { border-left: 3px solid #64b5f6; }
+  &.lay-card { border-left: 3px solid #ef9a9a; }
 }
 
-.action-header {
+.bet-card-header {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.3rem;
 }
 
-.action-type {
+.bet-time {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #00bcd4;
+}
+
+.bet-action-badge {
   font-weight: 700;
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   text-transform: uppercase;
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
@@ -401,23 +334,157 @@
   &.lay { background: rgba(244, 67, 54, 0.2); color: #ef9a9a; }
 }
 
-.action-runner {
+.bet-card-runner {
   font-weight: 500;
+  margin-bottom: 0.2rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.action-details {
+.bet-card-details {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.75rem;
   color: #888;
   font-size: 0.75rem;
+}
+
+.bet-card-balance {
+  margin-top: 0.3rem;
+  font-size: 0.75rem;
+  color: #aaa;
+  border-top: 1px solid #2a2a3a;
+  padding-top: 0.3rem;
   font-family: monospace;
 }
 
-.action-pnl {
+.panel-empty {
+  color: #666;
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+// ── Conclusion Panel ──
+
+.conclusion-panel {
+  background: #1e1e2e;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-top: 1rem;
+
+  h3 {
+    font-size: 1.1rem;
+    margin-bottom: 0.75rem;
+    color: #fff;
+  }
+
+  h4 {
+    font-size: 0.85rem;
+    color: #aaa;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 0.5rem;
+  }
+}
+
+.conclusion-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.conclusion-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.conclusion-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.conclusion-label {
+  font-size: 0.7rem;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.conclusion-value {
+  font-size: 0.95rem;
   font-weight: 600;
+
+  &.positive { color: #81c784; }
+  &.negative { color: #e57373; }
+}
+
+.winner-name {
+  color: #81c784;
+}
+
+.backed-badge {
+  font-size: 0.7rem;
+  color: #81c784;
+  margin-left: 0.35rem;
+}
+
+.conclusion-bets {
+  border-top: 1px solid #333;
+  padding-top: 0.75rem;
+}
+
+.conclusion-bet-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  margin-bottom: 0.25rem;
+
+  &.won-row { background: rgba(129, 199, 132, 0.08); }
+  &.lost-row { background: rgba(229, 115, 115, 0.08); }
+}
+
+.result-icon {
+  font-weight: 700;
+  width: 1.2em;
+  text-align: center;
+
+  .won-row & { color: #81c784; }
+  .lost-row & { color: #e57373; }
+}
+
+.result-action {
+  font-weight: 700;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  min-width: 2.5rem;
+  color: #aaa;
+}
+
+.result-runner {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.result-price {
+  color: #888;
+  font-family: monospace;
+  font-size: 0.75rem;
+}
+
+.result-pnl {
+  font-weight: 600;
+  font-family: monospace;
+  min-width: 5rem;
+  text-align: right;
+
   &.positive { color: #81c784; }
   &.negative { color: #e57373; }
 }

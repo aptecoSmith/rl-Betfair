@@ -800,3 +800,55 @@ With the old carry-over budget, proportional staking caused exponential compound
 16. **Budget-per-race over carry-over** (Session 4.10) — With proportional staking and carry-over budget, early wins compounded exponentially (£100 → £10,000+ by race 5). Agents exploited this by laying every runner. Per-race budget reset eliminates this exploit. Day P&L = sum of race P&Ls. Capital at risk = `starting_budget × races_played`.
 
 17. **Position features in observation** (Session 4.10) — Per-runner position info (back/lay exposure, bet count) added to observation so the agent can manage accumulated positions within a race. Concatenated with runner features in the policy network's runner encoder (RUNNER_INPUT_DIM = 113).
+
+### Session 4.11 — Race replay rework
+**Status:** Done
+
+#### Overview
+Replaced the race replay page's hand-rolled SVG chart and order book panel with a three-panel design: uPlot price chart, bet panel with running balance, and conclusion panel with race results.
+
+#### Chart — uPlot integration
+- Installed `uplot` (~35KB canvas-based time-series library), replaces SVG `<path>` rendering
+- Multiline price chart: one line per runner, colour-coded, winner line thicker (3px vs 1.5px)
+- X-axis: seconds to off (countdown, right-to-left via `dir: -1`), formatted as `M:SS`
+- Y-axis: LTP (last traded price), auto-scaled
+- Bet markers: green/red stars (`★`) drawn on runner price lines at bet ticks via uPlot `draw` hook
+- Progressive reveal during playback: data sliced to `currentTickIndex + 1`, updated via `uPlot.setData()`
+- Built-in cursor crosshair, ResizeObserver for responsive sizing
+- uPlot CSS imported in global `styles.scss` (component budget too tight for 8KB CSS)
+
+#### Bet panel (replaces order book)
+- Chronological bet cards filtered by playback position (`visibleBets` computed)
+- Each card: time to off, BACK/LAY badge, runner name, price, stake, matched (back) or liability (lay), running balance
+- Running balance: starts at £100, deducts stake (back) or liability (lay: stake × (price − 1))
+- Click card → jumps chart to that tick + highlights card
+- `highlightedBetIndex` signal for chart↔panel click linking
+
+#### Conclusion panel (new)
+- Race result summary: winner name, "backed ✓" indicator, total bets/stake/P&L, won/lost counts, early picks
+- Per-bet results: action, runner, price, individual P&L with ✓/✗ icons
+- Colour-coded: green for profitable, red for losses
+
+#### Runner legend (updated)
+- Click toggles runner line visibility on chart (was: select runner for order book)
+- `visibleRunners` signal (Set of runner IDs), `toggleRunner()` calls `uPlot.setSeries()` and re-slices data
+- Dimmed appearance for hidden runners
+
+#### Removed
+- Hand-rolled SVG chart (`chartSvgPath`, `cursorX` computeds, `<svg>` block)
+- Order book panel (`currentOrderBook` computed, `selectedRunnerId` signal)
+- Action log panel (replaced by bet panel with more detail)
+
+#### Signals & computeds
+- **New:** `highlightedBetIndex`, `visibleRunners`, `uPlotData`, `visibleBets`, `runningBalances`, `conclusionData`, `betMarkers`
+- **Removed:** `chartSvgPath`, `cursorX`, `currentOrderBook`, `selectedRunnerId`
+- **Kept:** selectors, playback, `chartData` (adapted for legend), `summaryStats`, `timeToOff`
+
+#### Test setup
+- `src/test-setup.ts` — global polyfills for `matchMedia` and `ResizeObserver` (uPlot needs these in jsdom)
+- `angular.json` test config updated with `setupFiles` option
+
+#### Tests
+- **83 unit tests** (vitest): component creation, loading/error/empty states, selectors, race data rendering, uPlotData computed (series count, x values, y values, null/zero LTP, empty ticks), visibleBets (filter by tick index, show all at last tick, progressive during playback), runningBalances (back deductions, lay liability, mixed), visible bet cards (running balance, liability), conclusionData (winner detection, backed detection, won/lost counts, total stake, total P&L, per-bet results, null when no data), highlightedBetIndex (set/clear, tick jump), visibleRunners (toggle, show all when empty), chart/legend/bet panel/conclusion panel rendering, bet markers, playback controls, time to off, winner display, error handling, edge cases, helpers, selection state service integration
+- **10 e2e tests** (Playwright): empty state, cascade selectors (model→date→race), chart container + bet panel visible, uPlot canvas rendered, play/pause toggle, conclusion panel with winner, bet cards + slider interaction, click bet card jumps tick, runner legend toggle dimming
+- All 345 unit tests pass, build succeeds
