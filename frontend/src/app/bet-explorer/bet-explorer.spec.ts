@@ -4,7 +4,7 @@ import { provideHttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { BetExplorer } from './bet-explorer';
+import { BetExplorer, formatTimeToOff } from './bet-explorer';
 import { ApiService } from '../services/api.service';
 import { ScoreboardResponse, ScoreboardEntry } from '../models/scoreboard.model';
 import { BetExplorerResponse, ExplorerBet } from '../models/bet-explorer.model';
@@ -30,6 +30,8 @@ function makeBet(overrides: Partial<ExplorerBet> = {}): ExplorerBet {
   return {
     date: '2026-03-01',
     race_id: 'race-1',
+    venue: 'Newmarket',
+    race_time: '2026-03-01T14:00:00Z',
     tick_timestamp: '2026-03-01T14:00:00Z',
     seconds_to_off: 600,
     runner_id: 123,
@@ -53,8 +55,8 @@ function makeBetResponse(overrides: Partial<BetExplorerResponse> = {}): BetExplo
     pnl_per_bet: 5.0,
     bets: [
       makeBet(),
-      makeBet({ date: '2026-03-02', runner_name: 'Another Horse', action: 'lay', outcome: 'lost', pnl: -5.0, price: 4.0, seconds_to_off: 300 }),
-      makeBet({ date: '2026-03-01', race_id: 'race-2', runner_name: 'Third Horse', pnl: -5.0, outcome: 'lost', price: 2.0, seconds_to_off: 120 }),
+      makeBet({ date: '2026-03-02', race_id: 'race-3', venue: 'Ascot', race_time: '2026-03-02T15:30:00Z', tick_timestamp: '2026-03-02T15:20:00Z', runner_name: 'Another Horse', action: 'lay', outcome: 'lost', pnl: -5.0, price: 4.0, seconds_to_off: 300 }),
+      makeBet({ date: '2026-03-01', race_id: 'race-2', venue: 'Cheltenham', race_time: '2026-03-01T15:00:00Z', tick_timestamp: '2026-03-01T14:50:00Z', runner_name: 'Third Horse', pnl: -5.0, outcome: 'lost', price: 2.0, seconds_to_off: 120 }),
     ],
     ...overrides,
   };
@@ -283,19 +285,25 @@ describe('BetExplorer', () => {
     expect(component.uniqueDates()).toEqual(['2026-03-01', '2026-03-02']);
   });
 
-  it('should populate unique races', () => {
+  it('should populate unique races with venue labels', () => {
     setup();
     component.betData.set(makeBetResponse());
-    expect(component.uniqueRaces().length).toBe(2);
+    const races = component.uniqueRaces();
+    expect(races.length).toBe(3);
+    expect(races[0].label).toContain('Newmarket');
+    expect(races[0].label).toContain('14:00');
+    expect(races[1].label).toContain('Cheltenham');
+    expect(races[2].label).toContain('Ascot');
   });
 
   // ── Sorting ──
 
-  it('should sort by seconds_to_off descending by default', () => {
+  it('should sort by tick_timestamp ascending by default', () => {
     setup();
     component.betData.set(makeBetResponse());
     const sorted = component.sortedBets();
-    expect(sorted[0].seconds_to_off).toBeGreaterThanOrEqual(sorted[1].seconds_to_off);
+    expect(sorted[0].tick_timestamp.localeCompare(sorted[1].tick_timestamp)).toBeLessThanOrEqual(0);
+    expect(sorted[1].tick_timestamp.localeCompare(sorted[2].tick_timestamp)).toBeLessThanOrEqual(0);
   });
 
   it('should toggle sort direction', () => {
@@ -351,13 +359,16 @@ describe('BetExplorer', () => {
     expect(rows.length).toBe(3);
   });
 
-  it('should render all table columns', () => {
+  it('should render all 11 table columns', () => {
     setup();
     component.betData.set(makeBetResponse());
     fixture.detectChanges();
     const headers = fixture.nativeElement.querySelectorAll('th');
     const headerTexts = Array.from(headers).map((h: any) => h.textContent.trim());
+    expect(headers.length).toBe(11);
     expect(headerTexts).toContain('Date');
+    expect(headerTexts).toContain('Venue');
+    expect(headerTexts).toContain('Race');
     expect(headerTexts).toContain('Runner');
     expect(headerTexts).toContain('Action');
     expect(headerTexts).toContain('Outcome');
@@ -440,13 +451,6 @@ describe('BetExplorer', () => {
     expect(component.shortId('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBe('aaaaaaaa');
   });
 
-  it('should format seconds to off', () => {
-    setup();
-    expect(component.formatSecondsToOff(600)).toBe('-10:00');
-    expect(component.formatSecondsToOff(90)).toBe('-1:30');
-    expect(component.formatSecondsToOff(-30)).toBe('+0:30');
-  });
-
   // ── State reset ──
 
   it('should clear data when model changes', () => {
@@ -456,5 +460,46 @@ describe('BetExplorer', () => {
     component.onModelChange('new-model');
     expect(component.filterDate()).toBe('');
     expect(component.filterAction()).toBe('');
+  });
+});
+
+// ── formatTimeToOff unit tests ──
+
+describe('formatTimeToOff', () => {
+  it('should format minutes and seconds', () => {
+    expect(formatTimeToOff(450)).toBe('7m 30s');
+  });
+
+  it('should format hours, minutes, and seconds', () => {
+    expect(formatTimeToOff(3735)).toBe('1h 2m 15s');
+  });
+
+  it('should format seconds only', () => {
+    expect(formatTimeToOff(45)).toBe('45s');
+  });
+
+  it('should format in-play with plus prefix', () => {
+    expect(formatTimeToOff(-12)).toBe('+12s');
+  });
+
+  it('should handle zero seconds', () => {
+    expect(formatTimeToOff(0)).toBe('0s');
+  });
+
+  it('should drop leading zero units', () => {
+    // 7m 30s, not 0h 7m 30s
+    expect(formatTimeToOff(450)).not.toContain('h');
+  });
+
+  it('should format exact minutes without trailing 0s', () => {
+    expect(formatTimeToOff(300)).toBe('5m');
+  });
+
+  it('should format exact hours without trailing units', () => {
+    expect(formatTimeToOff(3600)).toBe('1h');
+  });
+
+  it('should format in-play minutes', () => {
+    expect(formatTimeToOff(-90)).toBe('+1m 30s');
   });
 });

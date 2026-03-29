@@ -216,6 +216,8 @@ class ReplayRaceResponse(BaseModel):
 class ExplorerBet(BaseModel):
     date: str
     race_id: str
+    venue: str
+    race_time: str
     tick_timestamp: str
     seconds_to_off: float
     runner_id: int

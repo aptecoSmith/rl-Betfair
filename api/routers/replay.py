@@ -77,6 +77,7 @@ def _load_tick_data(config: dict, date: str) -> pd.DataFrame | None:
 def get_model_bets(model_id: str, request: Request):
     """All bets for a model across all evaluation days."""
     store = _store(request)
+    config = _config(request)
 
     rec = store.get_model(model_id)
     if not rec:
@@ -88,10 +89,26 @@ def get_model_bets(model_id: str, request: Request):
 
     bet_records = store.get_evaluation_bets(run.run_id)
 
+    # Build market_id → {venue, market_start_time} lookup from tick data
+    market_info: dict[str, dict[str, str]] = {}
+    unique_dates = {b.date for b in bet_records}
+    for date in unique_dates:
+        ticks_df = _load_tick_data(config, date)
+        if ticks_df is None:
+            continue
+        for market_id, group in ticks_df.groupby("market_id"):
+            first = group.iloc[0]
+            market_info[str(market_id)] = {
+                "venue": str(first.get("venue", "")),
+                "market_start_time": str(first.get("market_start_time", "")),
+            }
+
     bets = [
         ExplorerBet(
             date=b.date,
             race_id=b.market_id,
+            venue=market_info.get(b.market_id, {}).get("venue", ""),
+            race_time=market_info.get(b.market_id, {}).get("market_start_time", ""),
             tick_timestamp=b.tick_timestamp,
             seconds_to_off=b.seconds_to_off,
             runner_id=b.runner_id,

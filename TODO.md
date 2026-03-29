@@ -440,6 +440,14 @@ management. Playwright e2e tests (3.9) come last so all pages exist to test.)
 - **Test:** Playwright tests covering all flows above
 - **Integration test:** full e2e suite against real API with trained models
 
+### Session 3.10 — Bet explorer refinements
+- **Time to off** — display as human-readable `Xh Ym Zs` (or `Xm Zs` / `Zs` when hours/minutes are zero) instead of raw seconds. Change applies to both the table column and the sort key (sort still by numeric value, display formatted string).
+- **Add Venue and Race columns** — the API already returns `race_id`; the backend needs to enrich `ExplorerBet` with `venue` and `race_time` (market start time) by joining against evaluation data. Add these two columns to the bets table between Date and Runner.
+- **Race filter shows race times** — the race filter dropdown currently populates with raw `race_id` values (UUIDs/market IDs). Replace with human-readable labels: `"Venue HH:MM"` (e.g. `"Newmarket 11:30"`). The filter itself still groups by `race_id`, just display the label instead.
+- **Chronological default sort** — bets should default to ascending `tick_timestamp` order (earliest bet first) rather than the current `seconds_to_off` descending. Update the initial `sortField` / `sortDir` defaults.
+- **Backend changes** — `api/routers/replay.py` `GET /replay/{model_id}/bets` response needs `venue` and `race_time` per bet. Add these fields to the `ExplorerBet` Pydantic schema and populate from evaluation data (join bet records with race metadata stored at evaluation time).
+- **Test:** update existing bet-explorer unit tests for new column display and sort default; add tests for the time-formatting helper; update e2e mock data (`bet-explorer.mock.ts`) to include `venue` and `race_time` fields; update `bet-explorer.spec.ts` to assert the new columns are present and the race filter shows human-readable labels.
+
 ---
 
 ## Phase 4 — Scale & Refine

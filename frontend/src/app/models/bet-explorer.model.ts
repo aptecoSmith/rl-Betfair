@@ -1,6 +1,8 @@
 export interface ExplorerBet {
   date: string;
   race_id: string;
+  venue: string;
+  race_time: string;
   tick_timestamp: string;
   seconds_to_off: number;
   runner_id: number;

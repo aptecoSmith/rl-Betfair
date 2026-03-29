@@ -5,8 +5,14 @@ import { ApiService } from '../services/api.service';
 import { ScoreboardEntry } from '../models/scoreboard.model';
 import { ExplorerBet, BetExplorerResponse } from '../models/bet-explorer.model';
 
-type SortField = 'seconds_to_off' | 'price' | 'stake' | 'pnl';
+type SortField = 'tick_timestamp' | 'seconds_to_off' | 'price' | 'stake' | 'pnl';
 type SortDir = 'asc' | 'desc';
+
+interface RaceOption {
+  race_id: string;
+  label: string;
+  race_time: string;
+}
 
 @Component({
   selector: 'app-bet-explorer',
@@ -35,8 +41,8 @@ export class BetExplorer implements OnInit {
   readonly filterOutcome = signal('');
 
   // ── Sort ──
-  readonly sortField = signal<SortField>('seconds_to_off');
-  readonly sortDir = signal<SortDir>('desc');
+  readonly sortField = signal<SortField>('tick_timestamp');
+  readonly sortDir = signal<SortDir>('asc');
 
   // ── Derived ──
   readonly allBets = computed(() => this.betData()?.bets ?? []);
@@ -46,9 +52,16 @@ export class BetExplorer implements OnInit {
     return Array.from(dates).sort();
   });
 
-  readonly uniqueRaces = computed(() => {
-    const races = new Set(this.allBets().map(b => b.race_id));
-    return Array.from(races).sort();
+  readonly uniqueRaces = computed((): RaceOption[] => {
+    const seen = new Map<string, RaceOption>();
+    for (const b of this.allBets()) {
+      if (!seen.has(b.race_id)) {
+        const time = b.race_time ? new Date(b.race_time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+        const label = b.venue && time ? `${b.venue} ${time}` : time || this.shortId(b.race_id);
+        seen.set(b.race_id, { race_id: b.race_id, label, race_time: b.race_time || '' });
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.race_time.localeCompare(b.race_time));
   });
 
   readonly filteredBets = computed(() => {
@@ -74,7 +87,11 @@ export class BetExplorer implements OnInit {
     const dir = this.sortDir();
     const mult = dir === 'asc' ? 1 : -1;
 
-    bets.sort((a, b) => (a[field] - b[field]) * mult);
+    if (field === 'tick_timestamp') {
+      bets.sort((a, b) => a.tick_timestamp.localeCompare(b.tick_timestamp) * mult);
+    } else {
+      bets.sort((a, b) => (a[field] - b[field]) * mult);
+    }
     return bets;
   });
 
@@ -148,9 +165,26 @@ export class BetExplorer implements OnInit {
   }
 
   formatSecondsToOff(seconds: number): string {
-    const mins = Math.floor(Math.abs(seconds) / 60);
-    const secs = Math.round(Math.abs(seconds)) % 60;
-    const sign = seconds < 0 ? '+' : '-';
-    return `${sign}${mins}:${secs.toString().padStart(2, '0')}`;
+    return formatTimeToOff(seconds);
   }
+
+  formatRaceTime(isoTimestamp: string): string {
+    if (!isoTimestamp) return '';
+    return new Date(isoTimestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+}
+
+export function formatTimeToOff(seconds: number): string {
+  const abs = Math.round(Math.abs(seconds));
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  const s = abs % 60;
+
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  if (s > 0 || parts.length === 0) parts.push(`${s}s`);
+
+  const formatted = parts.join(' ');
+  return seconds < 0 ? `+${formatted}` : formatted;
 }

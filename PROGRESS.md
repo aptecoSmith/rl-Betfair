@@ -694,6 +694,15 @@ With the old carry-over budget, proportional staking caused exponential compound
 - API mocking strategy: `page.route('**/api/...')` intercepts before Angular proxy, deterministic and backend-independent
 - All 41 tests pass (smoke tests skip when no backend)
 
+### Session 3.10 — Bet explorer refinements
+**Status:** Done
+
+- **Human-readable time to off:** Replaced `±M:SS` format with `Xh Ym Zs` (e.g. `7m 30s`, `1h 2m 15s`, `45s`). In-play bets prefixed with `+` (e.g. `+12s`). Leading zero units dropped. Exported `formatTimeToOff()` helper for unit testing.
+- **Venue and Race columns:** Added `venue: str` and `race_time: str` to `ExplorerBet` (backend Pydantic + frontend TypeScript). Backend `get_model_bets()` enriches bets by loading tick data Parquet files and building a `market_id → {venue, market_start_time}` lookup. Table now has 11 columns (was 9).
+- **Race filter labels:** Dropdown now shows `"Venue HH:MM"` labels (e.g. `"Newmarket 11:30"`) instead of truncated market UUIDs. Filter logic still matches on `race_id`. `uniqueRaces` returns `RaceOption[]` sorted by `race_time`.
+- **Chronological default sort:** Default sort changed from `seconds_to_off desc` to `tick_timestamp asc`. Added `'tick_timestamp'` to `SortField` type with string comparison in `sortedBets`. Time to Off column header now sorts by `tick_timestamp`.
+- **Tests:** 9 new `formatTimeToOff` unit tests. Updated all mock data with `venue`/`race_time` fields. 2 new e2e tests (race filter labels, chronological default sort). Updated existing e2e/unit tests for 11-column table. All 292 unit tests pass, 6 e2e tests pass.
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -735,10 +744,11 @@ With the old carry-over budget, proportional staking caused exponential compound
 | 4.7     | 20              | 2                      | **966 + 176** (Python) + **285 + 24** (Angular) |
 | 4.10    | 19              | 0                      | **985 + 176** (Python) + **285 + 24** (Angular) |
 | 3.9     | 0               | 41 (Playwright e2e)    | **985 + 176** (Python) + **285 + 24** (Angular) + **41 e2e** |
+| 3.10    | 9 (Angular)     | 2 (Playwright e2e)     | **985 + 176** (Python) + **292 + 24** (Angular) + **43 e2e** |
 
 **Python total: 487+ unit tests passed.**
-**Angular total: 285 unit tests passed, 24 skipped (integration — API not running).**
-**Playwright e2e total: 41 tests passed (smoke tests skip when no backend).**
+**Angular total: 292 unit tests passed, 24 skipped (integration — API not running).**
+**Playwright e2e total: 43 tests passed (smoke tests skip when no backend).**
 
 ---
 
