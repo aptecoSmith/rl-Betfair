@@ -584,8 +584,9 @@ class TestEnvDimensions:
         assert "time_since_status_change" in MARKET_VELOCITY_KEYS
 
     def test_obs_dim_correct(self):
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
-        assert obs_dim == 1587  # was 1583 (Session 2.8: +4 market velocity)
+        from env.betfair_env import POSITION_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
+        assert obs_dim == 1630  # was 1587 (Session 4.10: +1 agent state + 42 position)
 
     def test_env_backward_compat_with_none_race_status(self):
         """Env should handle ticks with race_status=None gracefully."""
@@ -600,7 +601,7 @@ class TestEnvDimensions:
         )
         day = Day(date="2026-03-27", races=[race])
         config = {
-            "training": {"max_runners": 14, "starting_budget": 100.0},
+            "training": {"max_runners": 14, "starting_budget": 100.0, "max_bets_per_race": 20},
             "reward": {
                 "early_pick_bonus_min": 1.2, "early_pick_bonus_max": 1.5,
                 "early_pick_min_seconds": 300, "efficiency_penalty": 0.01,
@@ -609,7 +610,7 @@ class TestEnvDimensions:
         }
         env = BetfairEnv(day, config)
         obs, info = env.reset()
-        assert obs.shape == (1587,)  # was 1583 (Session 2.8: +4 market velocity)
+        assert obs.shape == (1630,)  # was 1587 (Session 4.10: +1 agent state + 42 position)
         # Race status features should all be 0
         # Market features start at index 0, race status at indices 25-30
         for i in range(25, 31):

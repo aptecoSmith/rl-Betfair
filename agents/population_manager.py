@@ -177,6 +177,7 @@ class PopulationManager:
         from env.betfair_env import (
             AGENT_STATE_DIM,
             MARKET_DIM,
+            POSITION_DIM,
             RUNNER_DIM,
             VELOCITY_DIM,
         )
@@ -186,6 +187,7 @@ class PopulationManager:
             + VELOCITY_DIM
             + (RUNNER_DIM * self.max_runners)
             + AGENT_STATE_DIM
+            + (POSITION_DIM * self.max_runners)
         )
         self.action_dim = self.max_runners * 2
 

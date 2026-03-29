@@ -723,3 +723,86 @@ class TestCommission:
         pnl = mgr.settle_race({1001, 2001}, market_id="m1", commission=0.10)
         # Gross profit: 10 × 4 = 40. Commission: 40 × 0.10 = 4. Net: 36
         assert pnl == pytest.approx(36.0)
+
+
+# ── Session 4.10 — Position tracking & race bet count ──────────────────────
+
+
+class TestPositionTracking:
+    """Tests for BetManager.get_positions() and race_bet_count()."""
+
+    def test_get_positions_empty(self):
+        mgr = BetManager(starting_budget=100.0)
+        positions = mgr.get_positions("m1")
+        assert positions == {}
+
+    def test_get_positions_single_back(self):
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+
+        positions = mgr.get_positions("m1")
+        assert 1001 in positions
+        assert positions[1001]["back_exposure"] == pytest.approx(10.0)
+        assert positions[1001]["lay_exposure"] == pytest.approx(0.0)
+        assert positions[1001]["bet_count"] == 1
+
+    def test_get_positions_accumulated_back(self):
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        mgr.place_back(runner, stake=5.0, market_id="m1")
+
+        positions = mgr.get_positions("m1")
+        assert positions[1001]["back_exposure"] == pytest.approx(15.0)
+        assert positions[1001]["bet_count"] == 2
+
+    def test_get_positions_lay(self):
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        mgr.place_lay(runner, stake=10.0, market_id="m1")
+
+        positions = mgr.get_positions("m1")
+        assert 1001 in positions
+        assert positions[1001]["back_exposure"] == pytest.approx(0.0)
+        # Liability = 10 × (4 - 1) = 30
+        assert positions[1001]["lay_exposure"] == pytest.approx(30.0)
+        assert positions[1001]["bet_count"] == 1
+
+    def test_get_positions_mixed(self):
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(
+            selection_id=1001,
+            back_levels=[(4.0, 50.0)],
+            lay_levels=[(3.0, 50.0)],
+        )
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        mgr.place_lay(runner, stake=5.0, market_id="m1")
+
+        positions = mgr.get_positions("m1")
+        assert positions[1001]["back_exposure"] == pytest.approx(10.0)
+        # Lay liability = 5 × (4 - 1) = 15
+        assert positions[1001]["lay_exposure"] == pytest.approx(15.0)
+        assert positions[1001]["bet_count"] == 2
+
+    def test_get_positions_filtered_by_market(self):
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        mgr.place_back(runner, stake=5.0, market_id="m2")
+
+        pos_m1 = mgr.get_positions("m1")
+        pos_m2 = mgr.get_positions("m2")
+        assert pos_m1[1001]["back_exposure"] == pytest.approx(10.0)
+        assert pos_m2[1001]["back_exposure"] == pytest.approx(5.0)
+
+    def test_race_bet_count(self):
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        mgr.place_back(runner, stake=10.0, market_id="m1")
+        mgr.place_back(runner, stake=5.0, market_id="m1")
+        mgr.place_back(runner, stake=5.0, market_id="m2")
+
+        assert mgr.race_bet_count("m1") == 2
+        assert mgr.race_bet_count("m2") == 1
+        assert mgr.race_bet_count("m3") == 0

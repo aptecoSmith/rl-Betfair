@@ -652,6 +652,27 @@ Measure whether a model's profitable bets found genuine market inefficiencies (p
 - **2 integration tests** (test_integration_session_4_7.py): real data windows computed, tick_timestamp populated
 - All 980 Python tests pass, no regressions
 
+### Session 4.10 — Budget-per-race and bet limits
+**Status:** Done
+
+#### Motivation
+With the old carry-over budget, proportional staking caused exponential compounding — a £100 budget could grow to £10,000+ by race 5, allowing absurdly large bets. Agents exploited this by laying every runner (most lay bets win since most runners lose), compounding into millions. This session fixes the economics to be realistic.
+
+#### Changes
+- **Budget reset per race** — `env/betfair_env.py` creates a fresh `BetManager(starting_budget)` at the start of each race. Day P&L = sum of per-race P&Ls (true accounting). An agent that bets on nothing shows £0 P&L, not £100 "profit".
+- **Max bets per race** — `config.yaml: training.max_bets_per_race: 20` (configurable). `_process_action()` checks `bm.race_bet_count()` and stops placing bets when the limit is reached. Prevents tick-spamming.
+- **Accumulated positions** — `BetManager.get_positions(market_id)` returns net back/lay exposure and bet count per `selection_id` within a race. `BetManager.race_bet_count(market_id)` counts bets for a specific race.
+- **Agent state observation** — `AGENT_STATE_DIM` increased from 5 to 6 (+`day_pnl_norm`). New `POSITION_DIM = 3` per runner: back_exposure, lay_exposure, runner_bet_count. Total per-runner position vector = 3 × 14 = 42 dims appended to observation.
+- **Observation dim change** — obs_dim: 1587 → 1630 (+1 agent state + 42 position features). All policy network `_split_obs()` methods updated to extract and concatenate position features with runner features. `RUNNER_INPUT_DIM = RUNNER_DIM + POSITION_DIM = 113` used for runner encoder input.
+- **Info dict** — `day_pnl` key added. `bet_count` and `winning_bets` now sum across completed races + current race (avoids double-counting). `budget_before` in `RaceRecord` now stores `starting_budget` (not post-bet economic value).
+- **Breaking change** — all existing models are incompatible (different env dynamics and observation space). Registry must be cleared before retraining.
+
+#### Tests
+- **7 new BetManager tests**: `get_positions` (empty, single back, accumulated, lay, mixed, filtered by market), `race_bet_count`
+- **12 new BetfairEnv tests**: budget resets between races (3), day P&L accounting (2), do-nothing zero P&L, voided race doesn't affect next race, max bets enforced (3), position tracking in observation (4)
+- Updated 15 existing tests for new budget semantics, obs_dim (1630), AGENT_STATE_DIM (6), MARKET_TOTAL_DIM (48), RUNNER_INPUT_DIM (113)
+- All 487+ Python unit tests pass
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -691,8 +712,9 @@ Measure whether a model's profitable bets found genuine market inefficiencies (p
 | 4.6     | 21              | 8                      | **940 + 174** (Python) + **188 + 12** (Angular) |
 | 3.6+3.7 | 6 (Python) + 93 (Angular) | 11 (Angular) | **946 + 174** (Python) + **285 + 24** (Angular) |
 | 4.7     | 20              | 2                      | **966 + 176** (Python) + **285 + 24** (Angular) |
+| 4.10    | 19              | 0                      | **985 + 176** (Python) + **285 + 24** (Angular) |
 
-**Python total: 980 passed, 2 skipped, 129 deselected. 22 tests added in Session 4.7 (20 unit + 2 integration).**
+**Python total: 487+ unit tests passed. 19 tests added in Session 4.10 (7 BetManager + 12 BetfairEnv). 15 existing tests updated for new obs_dim/budget semantics.**
 **Angular total: 285 passed, 24 skipped (integration — API not running). (Unchanged.)**
 
 ---
@@ -728,3 +750,7 @@ Measure whether a model's profitable bets found genuine market inefficiencies (p
 14. **RaceCardRunners field override** (Session 2.7b) — When both coldData (RunnerMetaData) and RaceCardRunners have the same field (age, weight, jockey, trainer, days_since_last_run, gender), prefer RaceCardRunners as it's fetched from Timeform race cards on race day and is fresher than the static coldData snapshot. Override only when the RaceCardRunners value is non-null.
 
 15. **recent_form over FORM** (Session 2.7b) — `RunnerMetaData.FORM` is a static snapshot. `RaceCardRunners.RecentForm` is fresher. `runner_meta_features()` now prefers `recent_form` when available, falling back to `form` when empty.
+
+16. **Budget-per-race over carry-over** (Session 4.10) — With proportional staking and carry-over budget, early wins compounded exponentially (£100 → £10,000+ by race 5). Agents exploited this by laying every runner. Per-race budget reset eliminates this exploit. Day P&L = sum of race P&Ls. Capital at risk = `starting_budget × races_played`.
+
+17. **Position features in observation** (Session 4.10) — Per-runner position info (back/lay exposure, bet count) added to observation so the agent can manage accumulated positions within a race. Concatenated with runner features in the policy network's runner encoder (RUNNER_INPUT_DIM = 113).

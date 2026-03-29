@@ -8,6 +8,7 @@ import torch
 from agents.architecture_registry import REGISTRY, create_policy
 from agents.policy_network import (
     MARKET_TOTAL_DIM,
+    RUNNER_INPUT_DIM,
     BasePolicy,
     PolicyOutput,
     PPOLSTMPolicy,
@@ -15,6 +16,7 @@ from agents.policy_network import (
 from env.betfair_env import (
     AGENT_STATE_DIM,
     MARKET_DIM,
+    POSITION_DIM,
     RUNNER_DIM,
     VELOCITY_DIM,
 )
@@ -23,7 +25,7 @@ from env.betfair_env import (
 # ── Constants for tests ─────────────────────────────────────────────────────
 
 MAX_RUNNERS = 14
-OBS_DIM = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM
+OBS_DIM = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM + (POSITION_DIM * MAX_RUNNERS)
 ACTION_DIM = MAX_RUNNERS * 2  # action_signal + stake_fraction per runner
 
 
@@ -94,15 +96,18 @@ class TestObsDimConstants:
         assert RUNNER_DIM == 110  # was 93, +17 past race features (Session 2.7b)
 
     def test_agent_state_dim(self):
-        assert AGENT_STATE_DIM == 5
+        assert AGENT_STATE_DIM == 6  # +1 day_pnl_norm (Session 4.10)
+
+    def test_position_dim(self):
+        assert POSITION_DIM == 3  # back_exposure, lay_exposure, bet_count per runner
 
     def test_market_total_dim(self):
-        assert MARKET_TOTAL_DIM == 47  # 31 + 11 + 5
+        assert MARKET_TOTAL_DIM == 48  # 31 + 11 + 6
 
     def test_obs_dim_matches_env(self):
-        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM
-        assert expected == 1587  # was 1583 (Session 2.8: +4 market velocity)
-        assert OBS_DIM == 1587
+        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM + (POSITION_DIM * MAX_RUNNERS)
+        assert expected == 1630  # was 1587 (Session 4.10: +1 agent state + 42 position)
+        assert OBS_DIM == 1630
 
 
 # ── PPOLSTMPolicy architecture ──────────────────────────────────────────────
@@ -342,7 +347,7 @@ class TestObsSplitting:
         obs = torch.randn(2, OBS_DIM)
         market_feats, runner_feats = policy._split_obs(obs)
         assert market_feats.shape == (2, MARKET_TOTAL_DIM)
-        assert runner_feats.shape == (2, MAX_RUNNERS, RUNNER_DIM)
+        assert runner_feats.shape == (2, MAX_RUNNERS, RUNNER_INPUT_DIM)
 
     def test_split_obs_market_values_correct(self, policy: PPOLSTMPolicy):
         """Verify the split correctly extracts market features."""
@@ -417,14 +422,14 @@ class TestHyperparamVariations:
 class TestRunnerEncoderSharing:
     def test_shared_weights_produce_same_output(self, policy: PPOLSTMPolicy):
         """Identical runner inputs should produce identical embeddings."""
-        runner_input = torch.randn(1, RUNNER_DIM)
+        runner_input = torch.randn(1, RUNNER_INPUT_DIM)
         emb1 = policy.runner_encoder(runner_input)
         emb2 = policy.runner_encoder(runner_input)
         assert torch.allclose(emb1, emb2)
 
     def test_different_runners_produce_different_output(self, policy: PPOLSTMPolicy):
-        r1 = torch.randn(1, RUNNER_DIM)
-        r2 = torch.randn(1, RUNNER_DIM)
+        r1 = torch.randn(1, RUNNER_INPUT_DIM)
+        r2 = torch.randn(1, RUNNER_INPUT_DIM)
         emb1 = policy.runner_encoder(r1)
         emb2 = policy.runner_encoder(r2)
         assert not torch.allclose(emb1, emb2)

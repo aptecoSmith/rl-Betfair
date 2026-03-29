@@ -293,13 +293,14 @@ class TestEnvTimeDeltaDims:
             assert key in MARKET_VELOCITY_KEYS, f"Missing key: {key}"
 
     def test_obs_dim_correct(self):
-        """obs_dim = 31 + 11 + (110 × 14) + 5 = 1587."""
-        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
-        assert expected == 1587
+        """obs_dim = 31 + 11 + (110 × 14) + 6 + (3 × 14) = 1630."""
+        from env.betfair_env import POSITION_DIM
+        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
+        assert expected == 1630
 
     def test_market_total_dim_correct(self):
-        """MARKET_TOTAL_DIM = 31 + 11 + 5 = 47."""
-        assert MARKET_TOTAL_DIM == 47
+        """MARKET_TOTAL_DIM = 31 + 11 + 6 = 48."""
+        assert MARKET_TOTAL_DIM == 48
 
     def test_no_duplicate_velocity_keys(self):
         assert len(MARKET_VELOCITY_KEYS) == len(set(MARKET_VELOCITY_KEYS))
@@ -315,7 +316,8 @@ class TestEnvTimeDeltaDims:
         day = Day(date="2026-03-28", races=[race])
         env = BetfairEnv(day, config)
         obs, info = env.reset()
-        assert obs.shape[0] == MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
+        from env.betfair_env import POSITION_DIM
+        assert obs.shape[0] == MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
         assert not np.any(np.isnan(obs))
 
 
@@ -426,7 +428,8 @@ class TestPPOTimeLSTMPolicy:
     def _make_policy(self, **kwargs) -> PPOTimeLSTMPolicy:
         hp = {"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1}
         hp.update(kwargs)
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
+        from env.betfair_env import POSITION_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
         return PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
             action_dim=28,
@@ -516,7 +519,8 @@ class TestArchitectureRegistry:
         assert "ppo_time_lstm_v1" in REGISTRY
 
     def test_create_policy(self):
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
+        from env.betfair_env import POSITION_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
         policy = create_policy(
             "ppo_time_lstm_v1",
             obs_dim=obs_dim,

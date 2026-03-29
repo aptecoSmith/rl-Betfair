@@ -12,6 +12,7 @@ from env.betfair_env import (
     AGENT_STATE_DIM,
     MARKET_DIM,
     MARKET_VELOCITY_KEYS,
+    POSITION_DIM,
     RUNNER_DIM,
     RUNNER_KEYS,
     VELOCITY_DIM,
@@ -208,6 +209,7 @@ def config() -> dict:
         "training": {
             "max_runners": 14,
             "starting_budget": 100.0,
+            "max_bets_per_race": 20,
         },
         "reward": {
             "early_pick_bonus_min": 1.2,
@@ -233,7 +235,7 @@ def env(day, config) -> BetfairEnv:
 
 class TestObservationSpace:
     def test_observation_shape(self, env):
-        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
+        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
         assert env.observation_space.shape == (expected,)
 
     def test_reset_returns_correct_shape(self, env):
@@ -260,18 +262,21 @@ class TestObservationSpace:
 
     def test_agent_state_in_observation(self, env):
         obs, _ = env.reset()
-        # Agent state is the last AGENT_STATE_DIM values
-        agent = obs[-AGENT_STATE_DIM:]
+        # Agent state is before the position vector at the end
+        pos_size = POSITION_DIM * 14
+        agent = obs[-(AGENT_STATE_DIM + pos_size):-(pos_size)]
         # in_play should be 0 (first tick is pre-race)
         assert agent[0] == 0.0
         # budget_fraction should be 1.0 (no bets yet)
         assert agent[1] == pytest.approx(1.0)
         # liability should be 0
         assert agent[2] == pytest.approx(0.0)
-        # bets_placed should be 0
+        # race_bets should be 0
         assert agent[3] == pytest.approx(0.0)
         # races_completed should be 0
         assert agent[4] == pytest.approx(0.0)
+        # day_pnl should be 0
+        assert agent[5] == pytest.approx(0.0)
 
     def test_runner_slots_padded_with_zeros(self, config):
         """Runners beyond the active count should be zero-padded."""
@@ -577,8 +582,8 @@ class TestEpisodeLifecycle:
 
 
 class TestBudgetManagement:
-    def test_budget_carries_across_races(self, config):
-        """Budget should carry from race 1 to race 2."""
+    def test_budget_resets_per_race(self, config):
+        """Budget should reset to starting_budget at the start of each race."""
         day = _make_day(n_races=2, n_pre_ticks=1, n_inplay_ticks=1)
         env = BetfairEnv(day, config)
         env.reset()
@@ -588,21 +593,14 @@ class TestBudgetManagement:
         action[0] = 1.0
         action[14] = -0.8  # 10% stake
 
-        budgets = []
         terminated = False
         while not terminated:
             _, _, terminated, _, info = env.step(action)
-            budgets.append(info["budget"])
 
-        # After race 1, budget should have changed (win or loss)
-        # Since 101 is the winner, backing it should increase budget
-        race1_end_budget = budgets[1]  # after 2 ticks (1 pre + 1 ip)
-        assert race1_end_budget != pytest.approx(100.0)
-
-        # Race 2 starts with race 1's ending budget (carried over)
         records = info["race_records"]
         assert len(records) == 2
-        assert records[1].budget_before != pytest.approx(100.0)
+        # Race 2 starts with fresh budget (100), not race 1's ending budget
+        assert records[1].budget_before == pytest.approx(100.0, abs=1.0)
 
     def test_stake_is_fraction_of_budget(self, config):
         """Stake should be computed as fraction of current budget."""
@@ -639,8 +637,8 @@ class TestBudgetManagement:
         assert len(bets) == 1
         assert bets[0].requested_stake == pytest.approx(100.0, abs=0.1)
 
-    def test_budget_tracks_correctly_after_settlement(self, config):
-        """Final budget should match starting budget + realised P&L."""
+    def test_per_race_budget_tracks_correctly(self, config):
+        """Each race's final budget should match starting_budget + race P&L."""
         day = _make_day(n_races=2, n_pre_ticks=1, n_inplay_ticks=1)
         env = BetfairEnv(day, config)
         env.reset()
@@ -653,10 +651,10 @@ class TestBudgetManagement:
         while not terminated:
             _, _, terminated, _, info = env.step(action)
 
-        # Budget should be starting + realised P&L (no open liability at end)
-        assert info["open_liability"] == pytest.approx(0.0)
-        expected_budget = config["training"]["starting_budget"] + info["realised_pnl"]
-        assert info["budget"] == pytest.approx(expected_budget, abs=0.01)
+        # Each race starts with starting_budget and ends with starting_budget + race_pnl
+        for record in info["race_records"]:
+            expected = config["training"]["starting_budget"] + record.pnl
+            assert record.budget_after == pytest.approx(expected, abs=0.01)
 
     def test_day_pnl_equals_sum_of_race_pnls(self, config):
         """Total day P&L should equal sum of per-race P&Ls."""
@@ -673,7 +671,7 @@ class TestBudgetManagement:
             _, _, terminated, _, info = env.step(action)
 
         race_pnl_sum = sum(r.pnl for r in info["race_records"])
-        assert info["realised_pnl"] == pytest.approx(race_pnl_sum, abs=0.01)
+        assert info["day_pnl"] == pytest.approx(race_pnl_sum, abs=0.01)
 
 
 # ── Edge cases ──────────────────────────────────────────────────────────────
@@ -804,7 +802,7 @@ class TestInfoDict:
         _, info = env.reset()
         required = [
             "race_idx", "tick_idx", "budget", "available_budget",
-            "open_liability", "realised_pnl", "bet_count",
+            "open_liability", "realised_pnl", "day_pnl", "bet_count",
             "winning_bets", "races_completed", "race_records",
         ]
         for key in required:
@@ -850,7 +848,287 @@ class TestInfoDict:
 
         records = info["race_records"]
         assert len(records) == 2
-        # Race 2's budget_before should relate to race 1's budget_after
-        # (they may not be exactly equal due to open liability being included
-        # in budget_before calculation, but they should be close)
+        # Each race starts with fresh budget (100)
+        assert records[0].budget_before == pytest.approx(100.0, abs=1.0)
+        assert records[1].budget_before == pytest.approx(100.0, abs=1.0)
         assert records[0].budget_after > 0
+
+
+# ── Session 4.10 — Budget-per-race and bet limits ─────────────────────────
+
+
+class TestBudgetPerRace:
+    """Tests for per-race budget reset (Session 4.10)."""
+
+    def test_budget_resets_between_races(self, config):
+        """Budget should reset to starting_budget at the start of each race."""
+        day = _make_day(n_races=3, n_pre_ticks=2, n_inplay_ticks=1)
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        # Back winner with large stake to change budget significantly
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0    # back
+        action[14] = 0.6   # stake fraction = (0.6+1)/2 = 0.8 → 80% of budget
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        records = info["race_records"]
+        assert len(records) == 3
+        # Every race should start with 100 (not compounded from previous)
+        for record in records:
+            assert record.budget_before == pytest.approx(100.0, abs=1.0)
+
+    def test_day_pnl_is_sum_of_race_pnls(self, config):
+        """day_pnl should be the sum of all race P&Ls."""
+        day = _make_day(n_races=3, n_pre_ticks=2, n_inplay_ticks=1)
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        expected = sum(r.pnl for r in info["race_records"])
+        assert info["day_pnl"] == pytest.approx(expected, abs=0.01)
+
+    def test_do_nothing_shows_zero_pnl(self, config):
+        """An agent that bets on nothing should show £0 P&L, not £100 profit."""
+        day = _make_day(n_races=3, n_pre_ticks=2, n_inplay_ticks=1)
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)  # do nothing
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        assert info["day_pnl"] == pytest.approx(0.0)
+        assert info["bet_count"] == 0
+
+    def test_voided_race_does_not_affect_budget(self, config):
+        """Voided race (no winner) should not affect next race's budget."""
+        # Race 1: no winner (voided), Race 2: has winner
+        race1 = _make_race(
+            market_id="1.200000001", n_pre_ticks=1, n_inplay_ticks=1,
+            winner_id=None,
+        )
+        race2 = _make_race(
+            market_id="1.200000002", n_pre_ticks=1, n_inplay_ticks=1,
+            winner_id=101,
+        )
+        # Offset race 2
+        offset = timedelta(hours=1)
+        race2.market_start_time = race2.market_start_time + offset
+        for j, tick in enumerate(race2.ticks):
+            race2.ticks[j] = Tick(
+                market_id=tick.market_id,
+                timestamp=tick.timestamp + offset,
+                sequence_number=tick.sequence_number,
+                venue=tick.venue,
+                market_start_time=tick.market_start_time + offset,
+                number_of_active_runners=tick.number_of_active_runners,
+                traded_volume=tick.traded_volume,
+                in_play=tick.in_play,
+                winner_selection_id=tick.winner_selection_id,
+                race_status=tick.race_status,
+                temperature=tick.temperature,
+                precipitation=tick.precipitation,
+                wind_speed=tick.wind_speed,
+                wind_direction=tick.wind_direction,
+                humidity=tick.humidity,
+                weather_code=tick.weather_code,
+                runners=tick.runners,
+            )
+        day = Day(date="2026-03-26", races=[race1, race2])
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        # Bet on every tick
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        records = info["race_records"]
+        assert len(records) == 2
+        assert records[0].pnl == 0.0  # voided
+        # Race 2 starts fresh
+        assert records[1].budget_before == pytest.approx(100.0, abs=1.0)
+
+
+class TestMaxBetsPerRace:
+    """Tests for max bets per race limit (Session 4.10)."""
+
+    def test_max_bets_enforced(self, config):
+        """Should not place more than max_bets_per_race bets in a single race."""
+        config = {**config, "training": {**config["training"], "max_bets_per_race": 3}}
+        race = _make_race(
+            n_pre_ticks=10, n_inplay_ticks=1,
+            winner_id=101, runner_ids=[101, 102, 103],
+        )
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        # Try to back on every tick (should be capped at 3)
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        assert info["bet_count"] <= 3
+
+    def test_max_bets_configurable(self, config):
+        """Different max_bets_per_race values should be respected."""
+        config_5 = {**config, "training": {**config["training"], "max_bets_per_race": 5}}
+        race = _make_race(
+            n_pre_ticks=20, n_inplay_ticks=1,
+            winner_id=101, runner_ids=[101, 102, 103],
+        )
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config_5)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        assert info["bet_count"] <= 5
+
+    def test_max_bets_resets_per_race(self, config):
+        """Bet count limit should reset for each new race."""
+        config = {**config, "training": {**config["training"], "max_bets_per_race": 2}}
+        day = _make_day(n_races=2, n_pre_ticks=5, n_inplay_ticks=1)
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        records = info["race_records"]
+        assert len(records) == 2
+        # Each race should have at most 2 bets
+        assert records[0].bet_count <= 2
+        assert records[1].bet_count <= 2
+        # But total across both races can be up to 4
+        assert info["bet_count"] <= 4
+
+
+class TestPositionTracking:
+    """Tests for accumulated position tracking (Session 4.10)."""
+
+    def test_position_in_observation(self, config):
+        """Observation should include per-runner position data."""
+        race = _make_race(n_pre_ticks=2, n_inplay_ticks=1, winner_id=101)
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config)
+        obs, _ = env.reset()
+
+        # Position vector is the last POSITION_DIM * max_runners values
+        pos_size = POSITION_DIM * 14
+        pos_vec = obs[-pos_size:]
+        # Initially all zeros (no bets yet)
+        assert np.all(pos_vec == 0.0)
+
+        # Place a back bet
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0    # back runner 0
+        action[14] = -0.8  # 10% stake
+
+        obs, _, _, _, _ = env.step(action)
+        pos_vec = obs[-pos_size:]
+        # Runner 0 should now have back exposure > 0
+        assert pos_vec[0] > 0  # back_exposure for slot 0
+        assert pos_vec[1] == 0.0  # lay_exposure for slot 0
+        assert pos_vec[2] > 0  # bet_count for slot 0
+
+    def test_position_accumulates(self, config):
+        """Multiple bets on the same runner should accumulate."""
+        race = _make_race(n_pre_ticks=3, n_inplay_ticks=1, winner_id=101)
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8  # 10% stake
+
+        # Place bet on tick 0
+        obs1, _, _, _, _ = env.step(action)
+        pos1 = obs1[-(POSITION_DIM * 14):]
+        back_exp_1 = pos1[0]
+
+        # Place bet on tick 1
+        obs2, _, _, _, _ = env.step(action)
+        pos2 = obs2[-(POSITION_DIM * 14):]
+        back_exp_2 = pos2[0]
+
+        # Exposure should have grown
+        assert back_exp_2 > back_exp_1
+
+    def test_bet_manager_get_positions(self):
+        """BetManager.get_positions should track accumulated positions."""
+        from env.bet_manager import BetManager
+        mgr = BetManager(starting_budget=100.0)
+
+        r1 = _make_runner_snap(101, lay_price=3.0)
+        r2 = _make_runner_snap(102, back_price=4.0)
+
+        mgr.place_back(r1, stake=10.0, market_id="m1")
+        mgr.place_back(r1, stake=5.0, market_id="m1")
+        mgr.place_lay(r2, stake=8.0, market_id="m1")
+
+        positions = mgr.get_positions("m1")
+        assert 101 in positions
+        assert 102 in positions
+        assert positions[101]["back_exposure"] == pytest.approx(15.0, abs=0.1)
+        assert positions[101]["bet_count"] == 2
+        assert positions[102]["lay_exposure"] > 0
+        assert positions[102]["bet_count"] == 1
+
+    def test_positions_reset_per_race(self, config):
+        """Position tracking should reset when budget resets for new race."""
+        day = _make_day(n_races=2, n_pre_ticks=2, n_inplay_ticks=1)
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        # Step through race 1
+        pos_size = POSITION_DIM * 14
+        for _ in range(3):  # 2 pre + 1 ip
+            obs, _, _, _, _ = env.step(action)
+
+        # At start of race 2, positions should be zero
+        obs, _, _, _, _ = env.step(action)  # first tick of race 2
+        pos_vec = obs[-pos_size:]
+        # After one tick with a bet, only that bet should show
+        # But before any bet on the new race, check: the bet was placed on this tick
+        # so position reflects just this one bet (not accumulated from race 1)
+        # The key check is that race 1's positions don't carry over
+        assert pos_vec[0] <= 0.1 + 1e-6  # at most one bet worth of exposure (10% of 100 / 100)

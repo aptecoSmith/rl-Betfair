@@ -2,17 +2,17 @@
 env/betfair_env.py — Gymnasium environment for Betfair horse racing RL.
 
 One episode = one full racing day.  The agent observes every tick (pre-race
-and in-play) but can only place bets on pre-race ticks.  Budget carries
-across races within the day.
+and in-play) but can only place bets on pre-race ticks.
 
-**Stake = fraction of current budget** — the agent outputs a value in [0, 1]
-per runner, which is multiplied by the current budget to compute the actual
-£ stake.  This means the agent bets proportionally: winning days compound,
-losing days naturally shrink stakes.
+**Budget resets per race** — each race starts with the full starting budget
+(e.g. £100).  Day P&L = sum of per-race P&Ls.  This prevents compounding
+exploits where early wins inflate the budget exponentially.
 
-Two scoreboards are tracked:
-- **Per-race**: P&L, bet count, budget-at-start (so we can see % return).
-- **Per-day**: total P&L, final budget, total bets.
+**Max bets per race** — configurable limit (default 20) prevents the agent
+from spamming bets on every tick.
+
+**Per-runner position tracking** — the agent observes its accumulated
+back/lay exposure per runner, so it can manage positions within a race.
 
 Usage::
 
@@ -126,7 +126,8 @@ RUNNER_KEYS: list[str] = [
     "tick_count",
 ]
 
-AGENT_STATE_DIM = 5  # in_play, budget_frac, liability_frac, bets_norm, races_norm
+AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
+POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 31 (25 + 6 race status one-hot)
@@ -200,6 +201,7 @@ class BetfairEnv(gymnasium.Env):
         self.config = config
         self.max_runners: int = config["training"]["max_runners"]
         self.starting_budget: float = config["training"]["starting_budget"]
+        self.max_bets_per_race: int = config["training"].get("max_bets_per_race", 20)
         self._total_races = len(day.races)
 
         # Reward parameters
@@ -214,7 +216,13 @@ class BetfairEnv(gymnasium.Env):
         self._precompute(feature_cache)
 
         # Observation / action spaces
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * self.max_runners) + AGENT_STATE_DIM
+        obs_dim = (
+            MARKET_DIM
+            + VELOCITY_DIM
+            + (RUNNER_DIM * self.max_runners)
+            + AGENT_STATE_DIM
+            + (POSITION_DIM * self.max_runners)
+        )
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32,
         )
@@ -227,6 +235,7 @@ class BetfairEnv(gymnasium.Env):
         self._race_idx = 0
         self._tick_idx = 0
         self._races_completed = 0
+        self._day_pnl = 0.0  # sum of per-race P&Ls
         self._race_records: list[RaceRecord] = []
         self._bet_times: dict[int, float] = {}  # bet_index → seconds_to_off
 
@@ -318,20 +327,46 @@ class BetfairEnv(gymnasium.Env):
         """Build the full observation for the current position."""
         static = self._static_obs[self._race_idx][self._tick_idx]
         agent_state = self._get_agent_state()
-        return np.concatenate([static, agent_state])
+        position_vec = self._get_position_vector()
+        return np.concatenate([static, agent_state, position_vec])
 
     def _get_agent_state(self) -> np.ndarray:
         """Dynamic agent-state features appended to each observation."""
         tick = self.day.races[self._race_idx].ticks[self._tick_idx]
+        race = self.day.races[self._race_idx]
         bm = self.bet_manager
         assert bm is not None
+        race_bets = bm.race_bet_count(race.market_id)
         return np.array([
             1.0 if tick.in_play else 0.0,
             bm.budget / self.starting_budget,
             bm.open_liability / self.starting_budget if self.starting_budget > 0 else 0.0,
-            bm.bet_count / 100.0,  # normalised (100 bets ≈ heavy day)
+            race_bets / max(self.max_bets_per_race, 1),
             self._races_completed / max(self._total_races, 1),
+            np.clip(self._day_pnl / self.starting_budget, -10.0, 10.0),
         ], dtype=np.float32)
+
+    def _get_position_vector(self) -> np.ndarray:
+        """Per-runner position features: back exposure, lay exposure, bet count."""
+        bm = self.bet_manager
+        assert bm is not None
+        race = self.day.races[self._race_idx]
+        positions = bm.get_positions(race.market_id)
+        slot_map = self._slot_maps[self._race_idx]
+        budget = max(self.starting_budget, 1.0)
+        max_bets = max(self.max_bets_per_race, 1)
+
+        vec = np.zeros(self.max_runners * POSITION_DIM, dtype=np.float32)
+        for slot_idx in range(self.max_runners):
+            sid = slot_map.get(slot_idx)
+            if sid is None or sid not in positions:
+                continue
+            pos = positions[sid]
+            offset = slot_idx * POSITION_DIM
+            vec[offset] = pos["back_exposure"] / budget
+            vec[offset + 1] = pos["lay_exposure"] / budget
+            vec[offset + 2] = pos["bet_count"] / max_bets
+        return vec
 
     def _terminal_obs(self) -> np.ndarray:
         """Return a zero observation for terminal states."""
@@ -341,6 +376,14 @@ class BetfairEnv(gymnasium.Env):
         """Build the info dict returned alongside observations."""
         bm = self.bet_manager
         assert bm is not None
+        # Sum completed race metrics from records
+        total_bets = sum(r.bet_count for r in self._race_records)
+        total_winning = sum(r.winning_bets for r in self._race_records)
+        # Add current (unsettled) race's bets from the live BetManager —
+        # but only if we're mid-race (otherwise the last race is already in records)
+        if self._race_idx < self._total_races:
+            total_bets += bm.bet_count
+            total_winning += bm.winning_bets
         return {
             "race_idx": self._race_idx,
             "tick_idx": self._tick_idx,
@@ -348,8 +391,9 @@ class BetfairEnv(gymnasium.Env):
             "available_budget": bm.available_budget,
             "open_liability": bm.open_liability,
             "realised_pnl": bm.realised_pnl,
-            "bet_count": bm.bet_count,
-            "winning_bets": bm.winning_bets,
+            "day_pnl": self._day_pnl,
+            "bet_count": total_bets,
+            "winning_bets": total_winning,
             "races_completed": self._races_completed,
             "race_records": list(self._race_records),
         }
@@ -367,6 +411,7 @@ class BetfairEnv(gymnasium.Env):
         self._race_idx = 0
         self._tick_idx = 0
         self._races_completed = 0
+        self._day_pnl = 0.0
         self._race_records = []
         self._bet_times = {}
 
@@ -400,14 +445,18 @@ class BetfairEnv(gymnasium.Env):
             self._tick_idx = 0
             self._races_completed += 1
 
+            # Reset BetManager for the next race (fresh budget)
+            if self._race_idx < self._total_races:
+                self.bet_manager = BetManager(starting_budget=self.starting_budget)
+                self._bet_times = {}
+
         # 4. Check if episode is over
         terminated = self._race_idx >= self._total_races
 
         # 5. End-of-day bonus on final step
         if terminated:
-            bm = self.bet_manager
-            assert bm is not None
-            day_pnl = bm.realised_pnl
+            # Day P&L = sum of race P&Ls (true accounting)
+            day_pnl = self._day_pnl
             # Small bonus proportional to day P&L (normalised by budget)
             reward += day_pnl / self.starting_budget
 
@@ -425,6 +474,10 @@ class BetfairEnv(gymnasium.Env):
         runner_by_sid = {r.selection_id: r for r in tick.runners}
 
         for slot_idx in range(self.max_runners):
+            # Enforce max bets per race
+            if bm.race_bet_count(race.market_id) >= self.max_bets_per_race:
+                break
+
             sid = slot_map.get(slot_idx)
             if sid is None:
                 continue
@@ -462,7 +515,7 @@ class BetfairEnv(gymnasium.Env):
         """Settle the race, compute reward, record metrics."""
         bm = self.bet_manager
         assert bm is not None
-        budget_before = bm.budget + bm.open_liability  # total economic value
+        budget_before = bm.starting_budget  # each race starts with fresh budget
 
         # Use winning_selection_ids (WINNER + PLACED for EACH_WAY markets).
         # Fall back to {winner_selection_id} for backward compatibility with
@@ -480,6 +533,9 @@ class BetfairEnv(gymnasium.Env):
             race_pnl = bm.settle_race(
                 winning_ids, market_id=race.market_id, commission=self._commission,
             )
+
+        # Accumulate day P&L (sum of per-race P&Ls)
+        self._day_pnl += race_pnl
 
         race_bets = bm.race_bets(race.market_id)
         race_bet_count = len(race_bets)

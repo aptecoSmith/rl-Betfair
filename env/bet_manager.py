@@ -300,3 +300,33 @@ class BetManager:
     def race_bets(self, market_id: str) -> list[Bet]:
         """Return all bets for a specific market/race."""
         return [b for b in self.bets if b.market_id == market_id]
+
+    def race_bet_count(self, market_id: str) -> int:
+        """Return the number of bets placed in a specific race."""
+        return sum(1 for b in self.bets if b.market_id == market_id)
+
+    def get_positions(self, market_id: str) -> dict[int, dict]:
+        """Get accumulated net position per runner for a race.
+
+        Returns a dict keyed by ``selection_id`` with values::
+
+            {
+                "back_exposure": float,  # total matched back stake
+                "lay_exposure": float,   # total matched lay stake (liability)
+                "bet_count": int,
+            }
+        """
+        positions: dict[int, dict] = {}
+        for bet in self.bets:
+            if bet.market_id != market_id:
+                continue
+            sid = bet.selection_id
+            if sid not in positions:
+                positions[sid] = {"back_exposure": 0.0, "lay_exposure": 0.0, "bet_count": 0}
+            pos = positions[sid]
+            pos["bet_count"] += 1
+            if bet.side is BetSide.BACK:
+                pos["back_exposure"] += bet.matched_stake
+            elif bet.side is BetSide.LAY:
+                pos["lay_exposure"] += bet.liability
+        return positions

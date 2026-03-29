@@ -21,12 +21,13 @@ from agents.population_manager import (
 from env.betfair_env import (
     AGENT_STATE_DIM,
     MARKET_DIM,
+    POSITION_DIM,
     RUNNER_DIM,
     VELOCITY_DIM,
 )
 
 MAX_RUNNERS = 14
-OBS_DIM = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM
+OBS_DIM = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM + (POSITION_DIM * MAX_RUNNERS)
 ACTION_DIM = MAX_RUNNERS * 2
 
 
@@ -401,9 +402,9 @@ class TestEdgeCases:
 
     def test_obs_dim_matches_env(self, small_config: dict):
         pm = PopulationManager(small_config, model_store=None)
-        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
+        expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
         assert pm.obs_dim == expected
-        assert pm.obs_dim == 1587  # was 1583 (Session 2.8: +4 market velocity)
+        assert pm.obs_dim == 1630  # was 1587 (Session 4.10: +1 agent state + 42 position)
 
     def test_action_dim_matches_env(self, small_config: dict):
         pm = PopulationManager(small_config, model_store=None)

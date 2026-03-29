@@ -41,8 +41,9 @@ paths:
 
 training:
   architecture: ppo_lstm_v1
-  starting_budget: 100.0        # £ per episode day
+  starting_budget: 100.0        # £ per race (budget resets each race)
   max_runners: 14               # observation vector padded to this many runners
+  max_bets_per_race: 20         # max bets per race (prevents tick-spamming)
   require_gpu: true             # CUDA-enabled PyTorch installed (cu126, RTX 3090)
   retraining:
     min_days: 30                # trigger threshold for automatic retraining

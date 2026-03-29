@@ -35,13 +35,15 @@ from torch.distributions import Normal
 from env.betfair_env import (
     AGENT_STATE_DIM,
     MARKET_DIM,
+    POSITION_DIM,
     RUNNER_DIM,
     VELOCITY_DIM,
 )
 
 # ── Observation layout constants ────────────────────────────────────────────
 
-MARKET_TOTAL_DIM = MARKET_DIM + VELOCITY_DIM + AGENT_STATE_DIM  # 31 + 11 + 5 = 47
+MARKET_TOTAL_DIM = MARKET_DIM + VELOCITY_DIM + AGENT_STATE_DIM  # 31 + 11 + 6 = 48
+RUNNER_INPUT_DIM = RUNNER_DIM + POSITION_DIM  # 110 + 3 = 113 (per-runner features + position)
 
 
 # ── Base class ──────────────────────────────────────────────────────────────
@@ -153,7 +155,7 @@ class PPOLSTMPolicy(BasePolicy):
 
         # ── Runner encoder (shared weights across all runners) ──────────
         self.runner_encoder = _build_mlp(
-            input_dim=RUNNER_DIM,
+            input_dim=RUNNER_INPUT_DIM,
             hidden_dim=mlp_hidden,
             output_dim=runner_embed_dim,
             n_layers=mlp_layers,
@@ -229,20 +231,25 @@ class PPOLSTMPolicy(BasePolicy):
         Returns
         -------
         market_feats : (batch, MARKET_TOTAL_DIM)
-            Market (25) + velocity (6) + agent state (5).
-        runner_feats : (batch, max_runners, RUNNER_DIM)
-            Per-runner features reshaped from flat vector.
+            Market (31) + velocity (11) + agent state (6).
+        runner_feats : (batch, max_runners, RUNNER_DIM + POSITION_DIM)
+            Per-runner features + per-runner position, reshaped from flat vector.
         """
-        # Layout: [market(25) | velocity(6) | runners(max_runners×93) | agent_state(5)]
+        # Layout: [market(31) | velocity(11) | runners(max_runners×110) | agent_state(6) | position(max_runners×3)]
         market = obs[:, :MARKET_DIM]
         velocity = obs[:, MARKET_DIM : MARKET_DIM + VELOCITY_DIM]
         runner_start = MARKET_DIM + VELOCITY_DIM
         runner_end = runner_start + self.max_runners * RUNNER_DIM
         runners_flat = obs[:, runner_start:runner_end]
         agent_state = obs[:, runner_end : runner_end + AGENT_STATE_DIM]
+        position_start = runner_end + AGENT_STATE_DIM
+        position_end = position_start + self.max_runners * POSITION_DIM
+        position_flat = obs[:, position_start:position_end]
 
         market_feats = torch.cat([market, velocity, agent_state], dim=-1)
-        runner_feats = runners_flat.view(-1, self.max_runners, RUNNER_DIM)
+        runner_feats_raw = runners_flat.view(-1, self.max_runners, RUNNER_DIM)
+        position_feats = position_flat.view(-1, self.max_runners, POSITION_DIM)
+        runner_feats = torch.cat([runner_feats_raw, position_feats], dim=-1)
         return market_feats, runner_feats
 
     def forward(
@@ -283,9 +290,9 @@ class PPOLSTMPolicy(BasePolicy):
         market_emb = self.market_encoder(market_feats)
 
         # Runner encoding: shared weights across all runners
-        # (batch*seq_len, max_runners, RUNNER_DIM) → (batch*seq_len, max_runners, embed)
+        # (batch*seq_len, max_runners, RUNNER_INPUT_DIM) → (batch*seq_len, max_runners, embed)
         b_s = runner_feats.shape[0]
-        runners_flat = runner_feats.reshape(b_s * self.max_runners, RUNNER_DIM)
+        runners_flat = runner_feats.reshape(b_s * self.max_runners, RUNNER_INPUT_DIM)
         runner_embs = self.runner_encoder(runners_flat)
         runner_embs = runner_embs.view(b_s, self.max_runners, self.runner_embed_dim)
 
@@ -311,7 +318,7 @@ class PPOLSTMPolicy(BasePolicy):
             last_obs = obs[:, -1, :]  # (batch, obs_dim)
             _, last_runner_feats = self._split_obs(last_obs)
             last_runners_flat = last_runner_feats.reshape(
-                batch * self.max_runners, RUNNER_DIM
+                batch * self.max_runners, RUNNER_INPUT_DIM
             )
             last_runner_embs = self.runner_encoder(last_runners_flat)
             last_runner_embs = last_runner_embs.view(
@@ -504,7 +511,7 @@ class PPOTimeLSTMPolicy(BasePolicy):
 
         # Runner encoder (shared weights)
         self.runner_encoder = _build_mlp(
-            input_dim=RUNNER_DIM,
+            input_dim=RUNNER_INPUT_DIM,
             hidden_dim=mlp_hidden,
             output_dim=runner_embed_dim,
             n_layers=mlp_layers,
@@ -570,9 +577,14 @@ class PPOTimeLSTMPolicy(BasePolicy):
         runner_end = runner_start + self.max_runners * RUNNER_DIM
         runners_flat = obs[:, runner_start:runner_end]
         agent_state = obs[:, runner_end : runner_end + AGENT_STATE_DIM]
+        position_start = runner_end + AGENT_STATE_DIM
+        position_end = position_start + self.max_runners * POSITION_DIM
+        position_flat = obs[:, position_start:position_end]
 
         market_feats = torch.cat([market, velocity, agent_state], dim=-1)
-        runner_feats = runners_flat.view(-1, self.max_runners, RUNNER_DIM)
+        runner_feats_raw = runners_flat.view(-1, self.max_runners, RUNNER_DIM)
+        position_feats = position_flat.view(-1, self.max_runners, POSITION_DIM)
+        runner_feats = torch.cat([runner_feats_raw, position_feats], dim=-1)
         return market_feats, runner_feats
 
     def _extract_time_delta(self, obs: torch.Tensor) -> torch.Tensor:
@@ -612,7 +624,7 @@ class PPOTimeLSTMPolicy(BasePolicy):
         market_emb = self.market_encoder(market_feats)
 
         b_s = runner_feats.shape[0]
-        runners_flat = runner_feats.reshape(b_s * self.max_runners, RUNNER_DIM)
+        runners_flat = runner_feats.reshape(b_s * self.max_runners, RUNNER_INPUT_DIM)
         runner_embs = self.runner_encoder(runners_flat)
         runner_embs = runner_embs.view(b_s, self.max_runners, self.runner_embed_dim)
 
@@ -652,7 +664,7 @@ class PPOTimeLSTMPolicy(BasePolicy):
             last_obs = obs[:, -1, :]
             _, last_runner_feats = self._split_obs(last_obs)
             last_runners_flat = last_runner_feats.reshape(
-                batch * self.max_runners, RUNNER_DIM,
+                batch * self.max_runners, RUNNER_INPUT_DIM,
             )
             last_runner_embs = self.runner_encoder(last_runners_flat)
             last_runner_embs = last_runner_embs.view(

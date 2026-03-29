@@ -242,10 +242,10 @@ class TestOptimisedRollout:
     def test_rollout_produces_transitions(self, config, synthetic_day):
         from agents.architecture_registry import create_policy
         from agents.ppo_trainer import PPOTrainer
-        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, POSITION_DIM
 
         max_runners = config["training"]["max_runners"]
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM + (POSITION_DIM * max_runners)
         action_dim = max_runners * 2
 
         policy = create_policy("ppo_lstm_v1", obs_dim, action_dim, max_runners, {
@@ -264,10 +264,10 @@ class TestOptimisedRollout:
     def test_rollout_transitions_have_valid_fields(self, config, synthetic_day):
         from agents.architecture_registry import create_policy
         from agents.ppo_trainer import PPOTrainer
-        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, POSITION_DIM
 
         max_runners = config["training"]["max_runners"]
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM + (POSITION_DIM * max_runners)
         action_dim = max_runners * 2
 
         policy = create_policy("ppo_lstm_v1", obs_dim, action_dim, max_runners, {
@@ -291,10 +291,10 @@ class TestOptimisedRollout:
     def test_rollout_last_transition_is_done(self, config, synthetic_day):
         from agents.architecture_registry import create_policy
         from agents.ppo_trainer import PPOTrainer
-        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, POSITION_DIM
 
         max_runners = config["training"]["max_runners"]
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM + (POSITION_DIM * max_runners)
         action_dim = max_runners * 2
 
         policy = create_policy("ppo_lstm_v1", obs_dim, action_dim, max_runners, {
@@ -322,10 +322,10 @@ class TestPinnedMemoryPPO:
         """PPO update on CPU (no pinning) still works correctly."""
         from agents.architecture_registry import create_policy
         from agents.ppo_trainer import PPOTrainer
-        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, POSITION_DIM
 
         max_runners = config["training"]["max_runners"]
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM + (POSITION_DIM * max_runners)
         action_dim = max_runners * 2
 
         policy = create_policy("ppo_lstm_v1", obs_dim, action_dim, max_runners, {
@@ -350,10 +350,10 @@ class TestPinnedMemoryPPO:
         """PPO update on CUDA with pinned memory transfers."""
         from agents.architecture_registry import create_policy
         from agents.ppo_trainer import PPOTrainer
-        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, POSITION_DIM
 
         max_runners = config["training"]["max_runners"]
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM + (POSITION_DIM * max_runners)
         action_dim = max_runners * 2
 
         policy = create_policy("ppo_lstm_v1", obs_dim, action_dim, max_runners, {
@@ -400,10 +400,10 @@ class TestOptimisedEvaluation:
     def test_evaluation_produces_day_records(self, config, synthetic_day):
         from agents.architecture_registry import create_policy
         from training.evaluator import Evaluator
-        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, POSITION_DIM
 
         max_runners = config["training"]["max_runners"]
-        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
+        obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM + (POSITION_DIM * max_runners)
         action_dim = max_runners * 2
 
         policy = create_policy("ppo_lstm_v1", obs_dim, action_dim, max_runners, {
