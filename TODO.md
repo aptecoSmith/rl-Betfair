@@ -238,7 +238,7 @@ No item is done until all three steps are complete.
 
 ## Phase 3 — API & UI
 
-**Execution order:** 3.1 → 3.2 → 3.3 → 3.4 → **3.8** → 3.5 → 3.6 → 3.7 → **3.9** → **3.10** ✅
+**Execution order:** 3.1 → 3.2 → 3.3 → 3.4 → **3.8** → 3.5 → 3.6 → 3.7 → **3.9** → **3.10** ✅ → 3.11
 (Admin tools (3.8) is done early because it's immediately useful for data
 management. Playwright e2e tests (3.9) come last so all pages exist to test.)
 
@@ -554,14 +554,68 @@ of redundant re-computation; rollout+eval = ~2.4 h/gen, all sequential.
   improved, no correctness regressions (same model on same data produces
   same P&L)
 
-### Session 4.11 — Race replay improvements
-- **Agent Actions panel** — show stake, price, liability, and running balance
-  per bet. Currently truncated/unreadable. Format: "LAY Horse @ 4.75 | stake
-  £32.13 | liability £119.99 | balance £67.87"
-- **Price chart** — the main chart area is blank for races with data. Debug
-  and fix the LTP price line rendering.
-- **Play button** — verify animation works (step through ticks, update order
-  book and chart cursor)
+### Session 3.11 — Angular tab memory
+- **Problem:** switching between pages (scoreboard, bet explorer, replay, etc.)
+  resets all state — the user has to re-select the model, re-apply filters, etc.
+  every time they navigate away and back.
+- **Solution:** preserve component state across route changes so selections and
+  filters survive tab switching. Options:
+  - Route reuse strategy (`RouteReuseStrategy`) — Angular caches component
+    instances so they survive navigation. Most transparent approach.
+  - Shared state service — a singleton service stores selected model ID, filter
+    values, scroll position per page. Components read from it on init and write
+    on change.
+  - URL query params — encode key state (selected model, active filters) in the
+    URL so the browser back button and bookmarks work naturally.
+- **Scope:** at minimum, preserve: selected model ID (global across pages),
+  bet explorer filters, race replay selections (model → date → race), training
+  monitor form values.
+- **Test:** e2e test — select a model on scoreboard, navigate to bet explorer,
+  navigate back to scoreboard, model should still be selected. Unit tests for
+  the state service or route reuse strategy.
+
+### Session 4.11 — Race replay rework
+- **Replace current replay page** with a multiline price chart + bet panel +
+  conclusion panel. The current implementation doesn't convey market dynamics
+  well enough.
+- **Multiline price chart (main area):**
+  - Y-axis: back price (last traded price / LTP)
+  - X-axis: tick timestamp
+  - One colour-coded line per runner — lines grow across the chart as ticks
+    play forward
+  - Chart library: consider lightweight options (Chart.js with streaming plugin,
+    D3.js for full control, or uPlot for performance with many data points)
+  - When a bet is placed at a tick, render a **star marker** (or similar symbol)
+    on the runner's price line at that tick point. Different markers or colours
+    for back vs lay.
+  - Clicking a star marker scrolls to and highlights the corresponding bet in
+    the bet panel.
+- **Time slider / playback controls:**
+  - Draggable slider spanning the full tick range — drag to jump to any point
+  - Play / pause button — auto-advance through ticks at configurable speed
+  - Speed control (1×, 2×, 5×, 10×)
+  - Current tick timestamp and time-to-off displayed alongside the slider
+  - As the slider advances, price lines grow and bet markers appear
+- **Bet panel (side panel):**
+  - Shows all bets placed in this race, listed chronologically
+  - Per bet: tick time, runner name, back/lay badge, price, stake, matched size,
+    liability (for lays), and running balance after the bet
+  - Highlighted row when a bet marker is clicked on the chart
+  - Auto-scroll to newly placed bets during playback
+- **Conclusion panel (bottom or collapsible):**
+  - Timeline of agent actions across the race (visual — horizontal bar with
+    bet markers at their tick positions)
+  - Per-bet results: won/lost, individual P&L
+  - Race summary: total bets, total stake, total P&L, final balance,
+    winning/losing bet breakdown
+  - Winner highlighted — which runner won, what price, did the agent back it?
+- **Backend:** the existing `GET /replay/{model_id}/{date}/{race_id}` endpoint
+  already returns tick-by-tick data with runner prices and overlaid bet events.
+  No backend changes expected unless the response shape needs adjustment for
+  chart rendering efficiency (e.g. pre-grouping LTP by runner).
+- **Test:** e2e — chart renders with lines, bet markers appear at correct ticks,
+  clicking marker highlights bet in panel, play/pause works, slider scrubs
+  correctly. Unit tests for data transformation (tick data → chart series).
 
 ### Session 4.10 — Budget-per-race and bet limits
 - **Budget reset per race** — each race starts with the starting budget (£100),
