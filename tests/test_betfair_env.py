@@ -691,7 +691,7 @@ class TestEdgeCases:
         assert terminated
 
     def test_race_without_winner(self, config):
-        """Race with no winner should still settle (all backs lose)."""
+        """Race with no winner should void all bets (zero P&L)."""
         race = _make_race(n_pre_ticks=1, n_inplay_ticks=1, winner_id=None)
         day = Day(date="2026-03-26", races=[race])
         env = BetfairEnv(day, config)
@@ -705,8 +705,8 @@ class TestEdgeCases:
         for _ in range(2):
             _, _, _, _, info = env.step(action)
 
-        # Back bet should lose (no winner matched)
-        assert info["race_records"][0].pnl < 0
+        # Bets should be voided (no winner data = void race, zero P&L)
+        assert info["race_records"][0].pnl == 0.0
 
     def test_single_tick_race(self, config):
         """Race with just one tick should work."""

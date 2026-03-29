@@ -43,6 +43,7 @@ class BetSide(str, Enum):
 class BetOutcome(str, Enum):
     WON = "won"
     LOST = "lost"
+    VOID = "void"
     UNSETTLED = "unsettled"
 
 
@@ -261,6 +262,31 @@ class BetManager:
 
         self.realised_pnl += race_pnl
         return race_pnl
+
+    def void_race(self, market_id: str = "") -> float:
+        """Void all unsettled bets for a race — refund stakes and liability.
+
+        Used when no winner is known (e.g. race result missing from data).
+        Returns 0.0 (no P&L impact).
+        """
+        for bet in self.bets:
+            if bet.outcome is not BetOutcome.UNSETTLED:
+                continue
+            if market_id and bet.market_id != market_id:
+                continue
+
+            if bet.side is BetSide.BACK:
+                # Refund the stake that was deducted on placement
+                self.budget += bet.matched_stake
+            elif bet.side is BetSide.LAY:
+                # Release the reserved liability
+                liability = bet.matched_stake * (bet.average_price - 1.0)
+                self._open_liability -= liability
+
+            bet.pnl = 0.0
+            bet.outcome = BetOutcome.VOID
+
+        return 0.0
 
     def unsettled_bets(self, market_id: str = "") -> list[Bet]:
         """Return all unsettled bets, optionally filtered by market."""

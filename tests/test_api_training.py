@@ -26,6 +26,7 @@ def _make_app(training_state: dict | None = None) -> tuple[TestClient, FastAPI]:
         "latest_event": None,
     }
     app.state.progress_queue = asyncio.Queue()
+    app.state.ws_clients = set()
 
     return TestClient(app), app
 

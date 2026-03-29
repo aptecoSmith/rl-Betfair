@@ -470,11 +470,16 @@ class BetfairEnv(gymnasium.Env):
         winning_ids = race.winning_selection_ids
         if not winning_ids and race.winner_selection_id:
             winning_ids = {race.winner_selection_id}
-        elif not winning_ids:
-            winning_ids = {-1}
-        race_pnl = bm.settle_race(
-            winning_ids, market_id=race.market_id, commission=self._commission,
-        )
+
+        if not winning_ids:
+            # No result data — void all bets in this race (zero P&L).
+            # This prevents lay bets from being treated as winners when
+            # the race result is simply missing from the data.
+            race_pnl = bm.void_race(market_id=race.market_id)
+        else:
+            race_pnl = bm.settle_race(
+                winning_ids, market_id=race.market_id, commission=self._commission,
+            )
 
         race_bets = bm.race_bets(race.market_id)
         race_bet_count = len(race_bets)
