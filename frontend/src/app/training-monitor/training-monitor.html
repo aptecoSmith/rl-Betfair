@@ -3,7 +3,7 @@
 
   <!-- ── ETA Bars ─────────────────────────────────────────── -->
   @if (isRunning()) {
-    <div class="eta-bars">
+    <div class="eta-bars" data-testid="eta-bars">
       @if (processBar()) {
         <div class="eta-bar">
           <div class="eta-header">
@@ -51,6 +51,7 @@
 
       <div class="stop-section">
         <button class="btn btn-stop"
+                data-testid="stop-btn"
                 (click)="onStopTraining()"
                 [disabled]="isStopping()">
           {{ isStopping() ? 'Stopping...' : 'Stop Training' }}
@@ -59,7 +60,7 @@
     </div>
   } @else {
     <!-- ── Idle State ─────────────────────────────────────── -->
-    <div class="idle-state">
+    <div class="idle-state" data-testid="idle-state">
       @if (lastRunSummary()) {
         <div class="last-run">
           <h3>Last Run Complete
@@ -75,25 +76,25 @@
         <h3 class="section-title">Start Training</h3>
 
         @if (trainingInfo(); as info) {
-          <div class="data-summary">
-            <span class="data-chip">{{ info.available_days }} days of data</span>
+          <div class="data-summary" data-testid="data-summary">
+            <span class="data-chip" data-testid="data-chip">{{ info.available_days }} days of data</span>
             <span class="data-chip">{{ info.train_days }} train / {{ info.test_days }} test</span>
           </div>
 
-          <div class="start-form">
+          <div class="start-form" data-testid="start-form">
             <label class="form-field">
               <span class="field-label">Population size</span>
-              <input type="number" [(ngModel)]="populationSize" min="2" max="200" (ngModelChange)="0" />
+              <input type="number" [(ngModel)]="populationSize" min="2" max="200" (ngModelChange)="0" data-testid="input-population" />
               <span class="field-help">Number of agents competing. More = better diversity but slower.</span>
             </label>
             <label class="form-field">
               <span class="field-label">Generations</span>
-              <input type="number" [(ngModel)]="nGenerations" min="1" max="50" (ngModelChange)="0" />
+              <input type="number" [(ngModel)]="nGenerations" min="1" max="50" (ngModelChange)="0" data-testid="input-generations" />
               <span class="field-help">Rounds of evolution. Each generation trains all agents, evaluates them, then breeds the best into the next generation.</span>
             </label>
             <label class="form-field">
               <span class="field-label">Epochs per day</span>
-              <input type="number" [(ngModel)]="nEpochs" min="1" max="20" (ngModelChange)="0" />
+              <input type="number" [(ngModel)]="nEpochs" min="1" max="20" (ngModelChange)="0" data-testid="input-epochs" />
               <span class="field-help">Passes over each training day. More passes = agents learn more from each day but takes longer.</span>
             </label>
           </div>

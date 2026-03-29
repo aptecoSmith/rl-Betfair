@@ -673,6 +673,27 @@ With the old carry-over budget, proportional staking caused exponential compound
 - Updated 15 existing tests for new budget semantics, obs_dim (1630), AGENT_STATE_DIM (6), MARKET_TOTAL_DIM (48), RUNNER_INPUT_DIM (113)
 - All 487+ Python unit tests pass
 
+### Session 3.9 — Playwright end-to-end tests
+**Status:** Done
+
+- Installed `@playwright/test` + Chromium browser, created `playwright.config.ts` with `webServer` auto-starting `ng serve` (120s timeout)
+- Shared test fixtures (`e2e/fixtures.ts`): `backendAvailable` flag (fetch check), `mockApi` helper wrapping `page.route()`, WebSocket abort for `/api/ws/**`
+- 6 mock data factories in `e2e/mocks/`: scoreboard (5 models), model-detail (with lineage + genetics + 3-day metrics), training (idle + running + info), admin (2 days, 1 backup, 2 agents), replay (2 races, 10 ticks, 3 bets), bet-explorer (10 bets)
+- **41 e2e tests across 8 spec files:**
+  - `smoke.spec.ts` (6) — real backend, skip if unavailable. App loads, each page renders
+  - `scoreboard.spec.ts` (6) — table renders, columns present, sorted by score, click navigates, empty state, error state
+  - `model-detail.spec.ts` (6) — all sections render, hyperparams table, back button, P&L chart SVG, lineage tree, full scoreboard→detail→back flow
+  - `training-monitor.spec.ts` (4) — idle shows form, running shows ETA bars + stop button, data chips, form input min/max ranges
+  - `admin.spec.ts` (7) — sections load, delete day confirm/cancel, reset wrong text rejected, reset correct text enables confirm, empty states, import day
+  - `race-replay.spec.ts` (5) — empty state, cascading selectors (model→date→race), chart + action log, play/pause toggle
+  - `bet-explorer.spec.ts` (4) — empty state, table loads on model select, filters work, sort toggles order
+  - `responsive.spec.ts` (3) — scoreboard at 1280×800 (no overflow), 768×1024 (renders), header nav visible at tablet
+- Added `data-testid` attributes to `admin.html` (9: days-table, backup-table, agents-table, delete-day-dialog, cancel/confirm-delete-day, reset-dialog, reset-input, cancel/confirm-reset, success/error-message) and `training-monitor.html` (8: eta-bars, stop-btn, idle-state, data-summary, data-chip, start-form, input-population/generations/epochs)
+- npm scripts: `e2e`, `e2e:ui`, `e2e:headed`
+- `.gitignore` updated: `/test-results/`, `/playwright-report/`, `/playwright/.cache/`
+- API mocking strategy: `page.route('**/api/...')` intercepts before Angular proxy, deterministic and backend-independent
+- All 41 tests pass (smoke tests skip when no backend)
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -713,9 +734,11 @@ With the old carry-over budget, proportional staking caused exponential compound
 | 3.6+3.7 | 6 (Python) + 93 (Angular) | 11 (Angular) | **946 + 174** (Python) + **285 + 24** (Angular) |
 | 4.7     | 20              | 2                      | **966 + 176** (Python) + **285 + 24** (Angular) |
 | 4.10    | 19              | 0                      | **985 + 176** (Python) + **285 + 24** (Angular) |
+| 3.9     | 0               | 41 (Playwright e2e)    | **985 + 176** (Python) + **285 + 24** (Angular) + **41 e2e** |
 
-**Python total: 487+ unit tests passed. 19 tests added in Session 4.10 (7 BetManager + 12 BetfairEnv). 15 existing tests updated for new obs_dim/budget semantics.**
-**Angular total: 285 passed, 24 skipped (integration — API not running). (Unchanged.)**
+**Python total: 487+ unit tests passed.**
+**Angular total: 285 unit tests passed, 24 skipped (integration — API not running).**
+**Playwright e2e total: 41 tests passed (smoke tests skip when no backend).**
 
 ---
 

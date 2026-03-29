@@ -3,10 +3,10 @@
 
   <!-- Success / Error messages -->
   @if (successMessage()) {
-    <div class="message success">{{ successMessage() }}</div>
+    <div class="message success" data-testid="success-message">{{ successMessage() }}</div>
   }
   @if (error()) {
-    <div class="message error">{{ error() }}</div>
+    <div class="message error" data-testid="error-message">{{ error() }}</div>
   }
 
   <!-- ── Manage Days ───────────────────────────────────────────── -->
@@ -19,7 +19,7 @@
     } @else if (extractedDays().length === 0) {
       <p class="empty">No extracted days found.</p>
     } @else {
-      <table class="admin-table days-table">
+      <table class="admin-table days-table" data-testid="days-table">
         <thead>
           <tr>
             <th>Date</th>
@@ -48,12 +48,12 @@
     <!-- Delete day confirmation dialog -->
     @if (confirmDeleteDay()) {
       <div class="dialog-overlay">
-        <div class="dialog">
+        <div class="dialog" data-testid="delete-day-dialog">
           <h3>Confirm Delete</h3>
           <p>Delete all data for <strong>{{ confirmDeleteDay() }}</strong>? This removes Parquet files and evaluation records for this date.</p>
           <div class="dialog-actions">
-            <button class="btn btn-secondary" (click)="cancelDeleteDay()">Cancel</button>
-            <button class="btn btn-danger" (click)="confirmAndDeleteDay()">Delete</button>
+            <button class="btn btn-secondary" (click)="cancelDeleteDay()" data-testid="cancel-delete-day">Cancel</button>
+            <button class="btn btn-danger" (click)="confirmAndDeleteDay()" data-testid="confirm-delete-day">Delete</button>
           </div>
         </div>
       </div>
@@ -76,7 +76,7 @@
         </button>
       </div>
 
-      <table class="admin-table backup-table">
+      <table class="admin-table backup-table" data-testid="backup-table">
         <thead>
           <tr>
             <th>Date</th>
@@ -139,7 +139,7 @@
     } @else if (agents().length === 0) {
       <p class="empty">No agents in registry.</p>
     } @else {
-      <table class="admin-table agents-table">
+      <table class="admin-table agents-table" data-testid="agents-table">
         <thead>
           <tr>
             <th>Model ID</th>
@@ -199,7 +199,7 @@
 
     @if (showResetDialog()) {
       <div class="dialog-overlay">
-        <div class="dialog reset-dialog">
+        <div class="dialog reset-dialog" data-testid="reset-dialog">
           <h3>Are you sure?</h3>
           <p>This will permanently delete:</p>
           <ul>
@@ -213,14 +213,16 @@
           <input
             type="text"
             class="reset-input"
+            data-testid="reset-input"
             [ngModel]="resetConfirmText()"
             (ngModelChange)="resetConfirmText.set($event)"
             placeholder="DELETE_EVERYTHING"
           />
           <div class="dialog-actions">
-            <button class="btn btn-secondary" (click)="cancelReset()">Cancel</button>
+            <button class="btn btn-secondary" (click)="cancelReset()" data-testid="cancel-reset">Cancel</button>
             <button
               class="btn btn-danger"
+              data-testid="confirm-reset"
               (click)="confirmAndReset()"
               [disabled]="resetConfirmText() !== 'DELETE_EVERYTHING'">
               Confirm Reset
