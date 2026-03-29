@@ -2,6 +2,7 @@ import { Component, OnInit, OnDestroy, inject, signal, computed, ElementRef, Vie
 import { DecimalPipe, CurrencyPipe, UpperCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardEntry } from '../models/scoreboard.model';
 import {
   ReplayDayResponse,
@@ -27,6 +28,7 @@ const RUNNER_COLOURS = [
 })
 export class RaceReplay implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
+  private readonly selectionState = inject(SelectionStateService);
 
   @ViewChild('chartCanvas') chartCanvasRef!: ElementRef<HTMLCanvasElement>;
 
@@ -195,6 +197,27 @@ export class RaceReplay implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadModels();
+    this.restoreState();
+  }
+
+  private restoreState(): void {
+    const modelId = this.selectionState.selectedModelId();
+    if (!modelId) return;
+
+    this.selectedModelId.set(modelId);
+    this.loadDates(modelId);
+
+    const date = this.selectionState.replayDate();
+    if (date) {
+      this.selectedDate.set(date);
+      this.loadRaces(modelId, date);
+
+      const raceId = this.selectionState.replayRaceId();
+      if (raceId) {
+        this.selectedRaceId.set(raceId);
+        this.loadRace(modelId, date, raceId);
+      }
+    }
   }
 
   ngOnDestroy(): void {
@@ -210,8 +233,11 @@ export class RaceReplay implements OnInit, OnDestroy {
 
   onModelChange(modelId: string): void {
     this.selectedModelId.set(modelId);
+    this.selectionState.selectedModelId.set(modelId);
     this.selectedDate.set(null);
     this.selectedRaceId.set(null);
+    this.selectionState.replayDate.set(null);
+    this.selectionState.replayRaceId.set(null);
     this.raceData.set(null);
     this.dates.set([]);
     this.races.set([]);
@@ -221,7 +247,9 @@ export class RaceReplay implements OnInit, OnDestroy {
 
   onDateChange(date: string): void {
     this.selectedDate.set(date);
+    this.selectionState.replayDate.set(date);
     this.selectedRaceId.set(null);
+    this.selectionState.replayRaceId.set(null);
     this.raceData.set(null);
     this.races.set([]);
     this.stopPlayback();
@@ -231,6 +259,7 @@ export class RaceReplay implements OnInit, OnDestroy {
 
   onRaceChange(raceId: string): void {
     this.selectedRaceId.set(raceId);
+    this.selectionState.replayRaceId.set(raceId);
     this.raceData.set(null);
     this.stopPlayback();
     const modelId = this.selectedModelId();

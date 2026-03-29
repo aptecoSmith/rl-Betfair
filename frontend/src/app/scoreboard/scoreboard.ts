@@ -1,6 +1,7 @@
 import { Component, OnInit, inject, signal, computed } from '@angular/core';
 import { Router } from '@angular/router';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardEntry } from '../models/scoreboard.model';
 import { DecimalPipe, CurrencyPipe, PercentPipe } from '@angular/common';
 
@@ -28,6 +29,7 @@ const GENERATION_COLOURS = [
 export class Scoreboard implements OnInit {
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
+  private readonly selectionState = inject(SelectionStateService);
 
   readonly models = signal<ScoreboardEntry[]>([]);
   readonly loading = signal(true);
@@ -67,6 +69,7 @@ export class Scoreboard implements OnInit {
   }
 
   onRowClick(model: ScoreboardEntry): void {
+    this.selectionState.selectedModelId.set(model.model_id);
     this.router.navigate(['/models', model.model_id]);
   }
 }

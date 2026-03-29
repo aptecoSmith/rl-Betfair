@@ -2,6 +2,7 @@ import { Component, OnInit, inject, signal, computed } from '@angular/core';
 import { DecimalPipe, CurrencyPipe, PercentPipe, UpperCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardEntry } from '../models/scoreboard.model';
 import { ExplorerBet, BetExplorerResponse } from '../models/bet-explorer.model';
 
@@ -23,6 +24,7 @@ interface RaceOption {
 })
 export class BetExplorer implements OnInit {
   private readonly api = inject(ApiService);
+  private readonly selectionState = inject(SelectionStateService);
 
   // ── Model selection ──
   readonly models = signal<ScoreboardEntry[]>([]);
@@ -107,6 +109,23 @@ export class BetExplorer implements OnInit {
 
   ngOnInit(): void {
     this.loadModels();
+    this.restoreState();
+  }
+
+  private restoreState(): void {
+    // Restore model selection from shared state
+    const modelId = this.selectionState.selectedModelId();
+    if (modelId) {
+      this.selectedModelId.set(modelId);
+      this.loadBets(modelId);
+      // Restore filters
+      const filters = this.selectionState.betExplorerFilters();
+      this.filterDate.set(filters.date);
+      this.filterRace.set(filters.race);
+      this.filterRunner.set(filters.runner);
+      this.filterAction.set(filters.action);
+      this.filterOutcome.set(filters.outcome);
+    }
   }
 
   loadModels(): void {
@@ -118,6 +137,7 @@ export class BetExplorer implements OnInit {
 
   onModelChange(modelId: string): void {
     this.selectedModelId.set(modelId);
+    this.selectionState.selectedModelId.set(modelId);
     this.betData.set(null);
     this.clearFilters();
     this.loadBets(modelId);
@@ -152,12 +172,48 @@ export class BetExplorer implements OnInit {
     return this.sortDir() === 'asc' ? ' ▲' : ' ▼';
   }
 
+  setFilterDate(value: string): void {
+    this.filterDate.set(value);
+    this.syncFiltersToService();
+  }
+
+  setFilterRace(value: string): void {
+    this.filterRace.set(value);
+    this.syncFiltersToService();
+  }
+
+  setFilterRunner(value: string): void {
+    this.filterRunner.set(value);
+    this.syncFiltersToService();
+  }
+
+  setFilterAction(value: string): void {
+    this.filterAction.set(value);
+    this.syncFiltersToService();
+  }
+
+  setFilterOutcome(value: string): void {
+    this.filterOutcome.set(value);
+    this.syncFiltersToService();
+  }
+
   clearFilters(): void {
     this.filterDate.set('');
     this.filterRace.set('');
     this.filterRunner.set('');
     this.filterAction.set('');
     this.filterOutcome.set('');
+    this.syncFiltersToService();
+  }
+
+  private syncFiltersToService(): void {
+    this.selectionState.betExplorerFilters.set({
+      date: this.filterDate(),
+      race: this.filterRace(),
+      runner: this.filterRunner(),
+      action: this.filterAction(),
+      outcome: this.filterOutcome(),
+    });
   }
 
   shortId(id: string): string {

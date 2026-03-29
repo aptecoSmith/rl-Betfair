@@ -238,7 +238,7 @@ No item is done until all three steps are complete.
 
 ## Phase 3 — API & UI
 
-**Execution order:** 3.1 → 3.2 → 3.3 → 3.4 → **3.8** → 3.5 → 3.6 → 3.7 → **3.9** → **3.10** ✅ → 3.11
+**Execution order:** 3.1 → 3.2 → 3.3 → 3.4 → **3.8** → 3.5 → 3.6 → 3.7 → **3.9** → **3.10** ✅ → **3.11** ✅
 (Admin tools (3.8) is done early because it's immediately useful for data
 management. Playwright e2e tests (3.9) come last so all pages exist to test.)
 

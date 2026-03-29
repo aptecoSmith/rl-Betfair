@@ -5,6 +5,7 @@ import { signal } from '@angular/core';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { TrainingMonitor, AgentGridItem } from './training-monitor';
 import { TrainingService } from '../services/training.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { TrainingStatus, WSEvent } from '../models/training.model';
 
 function idleStatus(): TrainingStatus {
@@ -103,7 +104,7 @@ describe('TrainingMonitor', () => {
     setup(idleStatus());
     const el = fixture.nativeElement.querySelector('.no-run');
     expect(el).toBeTruthy();
-    expect(el.textContent).toContain('No training run');
+    expect(el.textContent).toContain('Loading training configuration');
   });
 
   it('shows ETA bars when running', () => {
@@ -280,5 +281,66 @@ describe('TrainingMonitor', () => {
   it('timeSinceCompleted returns days for old completions', () => {
     setup(idleStatus(), Date.now() - 3 * 24 * 60 * 60 * 1000); // 3 days ago
     expect(component.timeSinceCompleted()).toBe('3d ago');
+  });
+
+  // ── Selection state service integration ──
+
+  it('should restore form values from service on init', () => {
+    // Set up TestBed manually so we can set service state before component creation
+    statusSignal = signal(idleStatus());
+    eventSignal = signal(null);
+    rewardSignal = signal([]);
+    lossSignal = signal([]);
+    completedAtSignal = signal(null);
+    const mockTraining = {
+      status: statusSignal,
+      isRunning: signal(false),
+      latestEvent: eventSignal,
+      rewardHistory: rewardSignal,
+      lossHistory: lossSignal,
+      lastRunCompletedAt: completedAtSignal,
+      phase: signal(null),
+      connect: vi.fn(),
+      clearHistory: vi.fn(),
+    };
+    TestBed.configureTestingModule({
+      imports: [TrainingMonitor],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: TrainingService, useValue: mockTraining },
+      ],
+    });
+    const selectionState = TestBed.inject(SelectionStateService);
+    selectionState.trainingFormValues.set({
+      generations: 7,
+      epochs: 5,
+      populationSize: 30,
+    });
+    fixture = TestBed.createComponent(TrainingMonitor);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    expect(component.nGenerations).toBe(7);
+    expect(component.nEpochs).toBe(5);
+    expect(component.populationSize).toBe(30);
+  });
+
+  it('should sync form values to service on change', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.nGenerations = 10;
+    component.nEpochs = 8;
+    component.populationSize = 75;
+    component.syncFormValues();
+    const form = selectionState.trainingFormValues();
+    expect(form.generations).toBe(10);
+    expect(form.epochs).toBe(8);
+    expect(form.populationSize).toBe(75);
+  });
+
+  it('should use default populationSize when service has null', () => {
+    setup();
+    // populationSize should remain at 50 (default) when service has null
+    expect(component.populationSize).toBe(50);
   });
 });

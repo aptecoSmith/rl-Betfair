@@ -703,6 +703,18 @@ With the old carry-over budget, proportional staking caused exponential compound
 - **Chronological default sort:** Default sort changed from `seconds_to_off desc` to `tick_timestamp asc`. Added `'tick_timestamp'` to `SortField` type with string comparison in `sortedBets`. Time to Off column header now sorts by `tick_timestamp`.
 - **Tests:** 9 new `formatTimeToOff` unit tests. Updated all mock data with `venue`/`race_time` fields. 2 new e2e tests (race filter labels, chronological default sort). Updated existing e2e/unit tests for 11-column table. All 292 unit tests pass, 6 e2e tests pass.
 
+### Session 3.11 — Angular tab memory
+**Status:** Done
+
+- **`SelectionStateService`** (`services/selection-state.service.ts`): New `providedIn: 'root'` singleton service holding UI selections that persist across route navigations. Stores: `selectedModelId` (global, shared across all pages), `betExplorerFilters` (date/race/runner/action/outcome), `replayDate` + `replayRaceId` (race replay cascade), `trainingFormValues` (generations/epochs/populationSize).
+- **Bet Explorer:** Injects service. On init, restores model ID and filters from service; auto-loads bets if model was previously selected. On model change, writes to global `selectedModelId`. Filter changes sync to service via `setFilter*()` methods (template bindings updated). `clearFilters()` also clears service state.
+- **Race Replay:** Injects service. On init, restores model/date/race cascade from service — loads dates if model set, loads races if date set, loads race data if all three set. On model/date/race change, writes to service. Model change clears service replay date and race.
+- **Scoreboard:** Injects service. `onRowClick()` writes `selectedModelId` to service before navigating to model detail, so the model is pre-selected on bet explorer and replay.
+- **Training Monitor:** Injects service. Constructor restores `nGenerations`, `nEpochs`, `populationSize` from service. Template `(ngModelChange)` handlers call `syncFormValues()` to persist form values to service on every change.
+- **No route reuse strategy** — pure state service approach avoids stale WebSocket/timer issues.
+- **Tests:** 12 new `SelectionStateService` unit tests (defaults, persistence, singleton, independence). 7 new component integration tests (bet explorer: restore model/filters from service, sync filters, clear filters; scoreboard: write model on click; race replay: restore model/date, write to service, clear on model change; training monitor: restore/sync form values). 3 new Playwright e2e tests (model persists bet explorer → replay; filters persist across navigation; replay cascade persists). Fixed pre-existing test assertion (`shows idle message` expected wrong text).
+- **Test totals:** 323 unit tests pass, 24 skipped (integration). 46 e2e tests.
+
 ---
 
 ## Skipped / Deferred Sessions
@@ -745,10 +757,11 @@ With the old carry-over budget, proportional staking caused exponential compound
 | 4.10    | 19              | 0                      | **985 + 176** (Python) + **285 + 24** (Angular) |
 | 3.9     | 0               | 41 (Playwright e2e)    | **985 + 176** (Python) + **285 + 24** (Angular) + **41 e2e** |
 | 3.10    | 9 (Angular)     | 2 (Playwright e2e)     | **985 + 176** (Python) + **292 + 24** (Angular) + **43 e2e** |
+| 3.11    | 31 (Angular)    | 3 (Playwright e2e)     | **985 + 176** (Python) + **323 + 24** (Angular) + **46 e2e** |
 
 **Python total: 487+ unit tests passed.**
-**Angular total: 292 unit tests passed, 24 skipped (integration — API not running).**
-**Playwright e2e total: 43 tests passed (smoke tests skip when no backend).**
+**Angular total: 323 unit tests passed, 24 skipped (integration — API not running).**
+**Playwright e2e total: 46 tests (smoke tests skip when no backend).**
 
 ---
 

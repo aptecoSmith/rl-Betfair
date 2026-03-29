@@ -3,6 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { JsonPipe } from '@angular/common';
 import { TrainingService } from '../services/training.service';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { WSEvent } from '../models/training.model';
 
 /** Phase label mapping (same as header, but full labels). */
@@ -32,6 +33,7 @@ export interface AgentGridItem {
 export class TrainingMonitor implements OnDestroy {
   private readonly training = inject(TrainingService);
   private readonly api = inject(ApiService);
+  private readonly selectionState = inject(SelectionStateService);
   private tickTimer: ReturnType<typeof setInterval> | null = null;
 
   readonly status = this.training.status;
@@ -142,6 +144,24 @@ export class TrainingMonitor implements OnDestroy {
   constructor() {
     this.tickTimer = setInterval(() => this.now.set(Date.now()), 10_000);
     this.loadTrainingInfo();
+    this.restoreFormValues();
+  }
+
+  private restoreFormValues(): void {
+    const saved = this.selectionState.trainingFormValues();
+    this.nGenerations = saved.generations;
+    this.nEpochs = saved.epochs;
+    if (saved.populationSize !== null) {
+      this.populationSize = saved.populationSize;
+    }
+  }
+
+  syncFormValues(): void {
+    this.selectionState.trainingFormValues.set({
+      generations: this.nGenerations,
+      epochs: this.nEpochs,
+      populationSize: this.populationSize,
+    });
   }
 
   private loadTrainingInfo(): void {

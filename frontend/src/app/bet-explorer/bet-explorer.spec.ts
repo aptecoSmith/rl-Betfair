@@ -6,6 +6,7 @@ import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { BetExplorer, formatTimeToOff } from './bet-explorer';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardResponse, ScoreboardEntry } from '../models/scoreboard.model';
 import { BetExplorerResponse, ExplorerBet } from '../models/bet-explorer.model';
 
@@ -460,6 +461,94 @@ describe('BetExplorer', () => {
     component.onModelChange('new-model');
     expect(component.filterDate()).toBe('');
     expect(component.filterAction()).toBe('');
+  });
+
+  // ── Selection state service integration ──
+
+  it('should write selectedModelId to service on model change', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.onModelChange('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    expect(selectionState.selectedModelId()).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  });
+
+  it('should restore model from service on init', () => {
+    // Setup TestBed without creating component yet
+    mockApi = new MockApiService();
+    TestBed.configureTestingModule({
+      imports: [BetExplorer],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: ApiService, useValue: mockApi },
+      ],
+    });
+    // Set service state before component creation
+    const selectionState = TestBed.inject(SelectionStateService);
+    selectionState.selectedModelId.set('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    // Now create component (triggers ngOnInit → restoreState)
+    fixture = TestBed.createComponent(BetExplorer);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    expect(component.selectedModelId()).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    expect(component.betData()).toBeTruthy();
+  });
+
+  it('should restore filters from service on init', () => {
+    mockApi = new MockApiService();
+    TestBed.configureTestingModule({
+      imports: [BetExplorer],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: ApiService, useValue: mockApi },
+      ],
+    });
+    const selectionState = TestBed.inject(SelectionStateService);
+    selectionState.selectedModelId.set('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    selectionState.betExplorerFilters.set({
+      date: '2026-03-01',
+      race: 'race-1',
+      runner: 'Test',
+      action: 'back',
+      outcome: 'won',
+    });
+    fixture = TestBed.createComponent(BetExplorer);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    expect(component.filterDate()).toBe('2026-03-01');
+    expect(component.filterRace()).toBe('race-1');
+    expect(component.filterRunner()).toBe('Test');
+    expect(component.filterAction()).toBe('back');
+    expect(component.filterOutcome()).toBe('won');
+  });
+
+  it('should sync filter changes to service', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.onModelChange('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    component.setFilterDate('2026-03-01');
+    component.setFilterAction('back');
+    const filters = selectionState.betExplorerFilters();
+    expect(filters.date).toBe('2026-03-01');
+    expect(filters.action).toBe('back');
+  });
+
+  it('should clear service filters on clearFilters', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.onModelChange('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    component.setFilterDate('2026-03-01');
+    component.clearFilters();
+    const filters = selectionState.betExplorerFilters();
+    expect(filters.date).toBe('');
+    expect(filters.action).toBe('');
+  });
+
+  it('should not restore if no model in service', () => {
+    setup();
+    expect(component.selectedModelId()).toBeNull();
+    expect(component.betData()).toBeNull();
   });
 });
 

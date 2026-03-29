@@ -6,6 +6,7 @@ import { of, throwError, Observable, EMPTY } from 'rxjs';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { RaceReplay } from './race-replay';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardResponse, ScoreboardEntry } from '../models/scoreboard.model';
 import { ReplayDayResponse, ReplayRaceResponse, BetEvent } from '../models/replay.model';
 import { ModelDetailResponse } from '../models/model-detail.model';
@@ -596,5 +597,85 @@ describe('RaceReplay', () => {
     expect(component.selectedDate()).toBeNull();
     expect(component.selectedRaceId()).toBeNull();
     expect(component.raceData()).toBeNull();
+  });
+
+  // ── Selection state service integration ──
+
+  it('should write selectedModelId to service on model change', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.onModelChange('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    expect(selectionState.selectedModelId()).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  });
+
+  it('should write replayDate to service on date change', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.selectedModelId.set('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    component.onDateChange('2026-03-01');
+    expect(selectionState.replayDate()).toBe('2026-03-01');
+  });
+
+  it('should write replayRaceId to service on race change', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.selectedModelId.set('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    component.selectedDate.set('2026-03-01');
+    component.onRaceChange('race-1');
+    expect(selectionState.replayRaceId()).toBe('race-1');
+  });
+
+  it('should clear service replay state on model change', () => {
+    setup();
+    const selectionState = TestBed.inject(SelectionStateService);
+    selectionState.replayDate.set('2026-03-01');
+    selectionState.replayRaceId.set('race-1');
+    component.onModelChange('new-model-id');
+    expect(selectionState.replayDate()).toBeNull();
+    expect(selectionState.replayRaceId()).toBeNull();
+  });
+
+  it('should restore model from service on init', () => {
+    mockApi = new MockApiService();
+    TestBed.configureTestingModule({
+      imports: [RaceReplay],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: ApiService, useValue: mockApi },
+      ],
+    });
+    const selectionState = TestBed.inject(SelectionStateService);
+    selectionState.selectedModelId.set('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    fixture = TestBed.createComponent(RaceReplay);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    expect(component.selectedModelId()).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  });
+
+  it('should restore model and date from service on init', () => {
+    mockApi = new MockApiService();
+    TestBed.configureTestingModule({
+      imports: [RaceReplay],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: ApiService, useValue: mockApi },
+      ],
+    });
+    const selectionState = TestBed.inject(SelectionStateService);
+    selectionState.selectedModelId.set('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    selectionState.replayDate.set('2026-03-01');
+    fixture = TestBed.createComponent(RaceReplay);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    expect(component.selectedModelId()).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    expect(component.selectedDate()).toBe('2026-03-01');
+  });
+
+  it('should not restore if no model in service', () => {
+    setup();
+    expect(component.selectedModelId()).toBeNull();
+    expect(component.selectedDate()).toBeNull();
   });
 });

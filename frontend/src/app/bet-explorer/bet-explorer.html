@@ -56,7 +56,7 @@
       <div class="filter">
         <label>Date</label>
         <select data-testid="filter-date" [value]="filterDate()"
-                (change)="filterDate.set($any($event.target).value)">
+                (change)="setFilterDate($any($event.target).value)">
           <option value="">All dates</option>
           @for (d of uniqueDates(); track d) {
             <option [value]="d">{{ d }}</option>
@@ -66,7 +66,7 @@
       <div class="filter">
         <label>Race</label>
         <select data-testid="filter-race" [value]="filterRace()"
-                (change)="filterRace.set($any($event.target).value)">
+                (change)="setFilterRace($any($event.target).value)">
           <option value="">All races</option>
           @for (r of uniqueRaces(); track r.race_id) {
             <option [value]="r.race_id">{{ r.label }}</option>
@@ -78,12 +78,12 @@
         <input type="text" data-testid="filter-runner"
                placeholder="Search runner…"
                [value]="filterRunner()"
-               (input)="filterRunner.set($any($event.target).value)" />
+               (input)="setFilterRunner($any($event.target).value)" />
       </div>
       <div class="filter">
         <label>Action</label>
         <select data-testid="filter-action" [value]="filterAction()"
-                (change)="filterAction.set($any($event.target).value)">
+                (change)="setFilterAction($any($event.target).value)">
           <option value="">All</option>
           <option value="back">Back</option>
           <option value="lay">Lay</option>
@@ -92,7 +92,7 @@
       <div class="filter">
         <label>Outcome</label>
         <select data-testid="filter-outcome" [value]="filterOutcome()"
-                (change)="filterOutcome.set($any($event.target).value)">
+                (change)="setFilterOutcome($any($event.target).value)">
           <option value="">All</option>
           <option value="won">Won</option>
           <option value="lost">Lost</option>

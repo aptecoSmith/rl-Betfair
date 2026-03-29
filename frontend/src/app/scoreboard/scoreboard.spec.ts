@@ -7,6 +7,7 @@ import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Scoreboard } from './scoreboard';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardEntry, ScoreboardResponse } from '../models/scoreboard.model';
 
 function makeEntry(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
@@ -239,6 +240,15 @@ describe('Scoreboard', () => {
     const row = fixture.nativeElement.querySelector('.scoreboard-row') as HTMLElement;
     row.click();
     expect(navigateSpy).toHaveBeenCalledWith(['/models', 'click-test-model-id-full']);
+  });
+
+  it('should write selectedModelId to service on row click', () => {
+    setup({ models: [makeEntry({ model_id: 'click-test-model-id-full' })] });
+    vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    const selectionState = TestBed.inject(SelectionStateService);
+    const row = fixture.nativeElement.querySelector('.scoreboard-row') as HTMLElement;
+    row.click();
+    expect(selectionState.selectedModelId()).toBe('click-test-model-id-full');
   });
 
   // ── Formatted Values ──
