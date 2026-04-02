@@ -81,7 +81,10 @@ async def lifespan(app: FastAPI):
                 event.get("event") == "run_complete"
                 or (
                     event.get("event") == "phase_complete"
-                    and event.get("phase") in ("run_complete", "run_stopped", "run_error")
+                    and event.get("phase") in (
+                        "run_complete", "run_stopped", "run_error",
+                        "extracting",
+                    )
                 )
             ):
                 state["running"] = False

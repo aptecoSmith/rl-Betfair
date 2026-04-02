@@ -135,7 +135,8 @@ export class TrainingService implements OnDestroy {
     // Handle run end events (complete, stopped, error)
     const isRunEnd =
       event.event === 'run_complete' ||
-      (event.event === 'phase_complete' && ['run_complete', 'run_stopped', 'run_error'].includes(event.phase ?? ''));
+      (event.event === 'phase_complete' &&
+        ['run_complete', 'run_stopped', 'run_error', 'extracting'].includes(event.phase ?? ''));
 
     if (isRunEnd) {
       this.lastRunCompletedAt.set(
