@@ -99,6 +99,22 @@
             </label>
           </div>
 
+          @if (trainingInfo()?.garage_count > 0) {
+            <div class="garage-options" data-testid="garage-options">
+              <label class="form-field checkbox-field">
+                <input type="checkbox" [(ngModel)]="reevaluateGaraged" />
+                <span class="field-label">Re-evaluate garaged models ({{ trainingInfo().garage_count }} in garage)</span>
+              </label>
+              @if (reevaluateGaraged) {
+                <label class="form-field">
+                  <span class="field-label">Minimum composite score (optional)</span>
+                  <input type="number" [(ngModel)]="reevaluateMinScore" min="0" max="1" step="0.01" placeholder="No threshold" data-testid="input-min-score" />
+                  <span class="field-help">Only re-evaluate garaged models with a composite score at or above this value. Leave empty for all.</span>
+                </label>
+              }
+            </div>
+          }
+
           <div class="estimate-box">
             <span class="estimate-label">Estimated duration</span>
             <span class="estimate-value">{{ estimatedDuration() }}</span>

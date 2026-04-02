@@ -23,6 +23,7 @@ function makeEntry(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
     efficiency: 0.6,
     test_days: 10,
     profitable_days: 8,
+    garaged: false,
     ...overrides,
   };
 }
@@ -33,6 +34,9 @@ class MockApiService {
   response$: Observable<ScoreboardResponse> = of({ models: [] });
   getScoreboard(): Observable<ScoreboardResponse> {
     return this.response$;
+  }
+  toggleGarage(modelId: string, garaged: boolean): Observable<{ model_id: string; garaged: boolean }> {
+    return of({ model_id: modelId, garaged });
   }
 }
 
@@ -125,7 +129,7 @@ describe('Scoreboard', () => {
     const headers = fixture.nativeElement.querySelectorAll('th');
     const headerTexts = Array.from(headers).map((h: any) => h.textContent.trim());
     expect(headerTexts).toEqual([
-      'Rank', 'Model ID', 'Gen', 'Architecture',
+      'Rank', '', 'Model ID', 'Gen', 'Architecture',
       'Win Rate', 'Sharpe', 'Mean Daily P&L', 'Efficiency', 'Composite Score',
     ]);
   });
@@ -257,8 +261,8 @@ describe('Scoreboard', () => {
     setup({ models: [makeEntry({ win_rate: 0.85 })] });
     const el = fixture.nativeElement as HTMLElement;
     const cells = el.querySelectorAll('.scoreboard-row td');
-    // Win rate is column 5 (0-indexed: 4)
-    expect(cells[4]?.textContent?.trim()).toBe('85%');
+    // Win rate is column 6 (0-indexed: 5) — garage star column at index 1
+    expect(cells[5]?.textContent?.trim()).toBe('85%');
   });
 
   it('should show dash for null composite score', () => {

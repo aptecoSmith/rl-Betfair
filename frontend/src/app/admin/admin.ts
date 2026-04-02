@@ -35,6 +35,8 @@ export class Admin implements OnInit, OnDestroy {
   readonly confirmDeleteAgent = signal<string | null>(null);
   readonly showResetDialog = signal(false);
   readonly resetConfirmText = signal('');
+  readonly clearGarage = signal(false);
+  readonly garageCount = signal(0);
 
   // ── Import state ──────────────────────────────────────────────
 
@@ -77,6 +79,13 @@ export class Admin implements OnInit, OnDestroy {
     this.loadExtractedDays();
     this.loadBackupDays();
     this.loadAgents();
+    this.loadGarageCount();
+  }
+
+  private loadGarageCount(): void {
+    this.api.getGarage().subscribe({
+      next: (res) => this.garageCount.set(res.models.length),
+    });
   }
 
   // ── Data loading ──────────────────────────────────────────────
@@ -250,6 +259,7 @@ export class Admin implements OnInit, OnDestroy {
   cancelReset(): void {
     this.showResetDialog.set(false);
     this.resetConfirmText.set('');
+    this.clearGarage.set(false);
   }
 
   confirmAndReset(): void {
@@ -257,9 +267,11 @@ export class Admin implements OnInit, OnDestroy {
     if (text !== 'DELETE_EVERYTHING') return;
 
     this.showResetDialog.set(false);
+    const shouldClearGarage = this.clearGarage();
     this.resetConfirmText.set('');
+    this.clearGarage.set(false);
 
-    this.api.resetSystem(text).subscribe({
+    this.api.resetSystem(text, shouldClearGarage).subscribe({
       next: (res) => {
         this.successMessage.set(res.detail);
         this.loadAll();

@@ -114,6 +114,26 @@
   }
 }
 
+.garaged-badge {
+  color: #ffc107;
+  font-size: 0.875rem;
+  margin-left: 0.35rem;
+}
+
+.garage-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.85rem;
+  color: #c0c0d8;
+  cursor: pointer;
+
+  input[type="checkbox"] {
+    accent-color: #ffc107;
+  }
+}
+
 // ── Buttons ─────────────────────────────────────────────────────
 
 .btn {

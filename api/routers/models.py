@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from api.schemas import (
+    GarageToggleRequest,
+    GarageToggleResponse,
     GeneticEvent,
     GeneticsResponse,
     LineageNode,
@@ -42,6 +44,7 @@ def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
         efficiency=model.efficiency,
         test_days=model.test_days,
         profitable_days=model.profitable_days,
+        garaged=rec.garaged if rec else False,
     )
 
 
@@ -53,6 +56,39 @@ def get_scoreboard(request: Request):
     ranked = sb.rank_all()
     entries = [_score_to_entry(m, store) for m in ranked]
     return ScoreboardResponse(models=entries)
+
+
+@router.get("/garage", response_model=ScoreboardResponse)
+def get_garage(request: Request):
+    """List all garaged models with scores."""
+    store = _store(request)
+    sb = _scoreboard(request)
+    garaged = store.list_garaged_models()
+    entries = []
+    for m in garaged:
+        score = sb.score_model(m.model_id)
+        if score:
+            entries.append(_score_to_entry(score, store))
+        else:
+            entries.append(ScoreboardEntry(
+                model_id=m.model_id, generation=m.generation,
+                architecture_name=m.architecture_name, status=m.status,
+                garaged=True, composite_score=m.composite_score,
+                win_rate=0, sharpe=0, mean_daily_pnl=0,
+                efficiency=0, test_days=0, profitable_days=0,
+            ))
+    return ScoreboardResponse(models=entries)
+
+
+@router.put("/{model_id}/garage", response_model=GarageToggleResponse)
+def toggle_garage(model_id: str, body: GarageToggleRequest, request: Request):
+    """Set or clear the garaged flag on a model."""
+    store = _store(request)
+    rec = store.get_model(model_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Model not found")
+    store.set_garaged(model_id, body.garaged)
+    return GarageToggleResponse(model_id=model_id, garaged=body.garaged)
 
 
 @router.get("/{model_id}", response_model=ModelDetail)
@@ -94,6 +130,7 @@ def get_model_detail(model_id: str, request: Request):
         created_at=rec.created_at,
         last_evaluated_at=rec.last_evaluated_at,
         composite_score=rec.composite_score,
+        garaged=rec.garaged,
         metrics_history=metrics,
     )
 

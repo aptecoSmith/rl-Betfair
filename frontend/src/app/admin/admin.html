@@ -161,6 +161,9 @@
                 <span class="status-badge" [class.status-active]="agent.status === 'active'" [class.status-discarded]="agent.status === 'discarded'">
                   {{ agent.status }}
                 </span>
+                @if (agent.garaged) {
+                  <span class="garaged-badge" title="Garaged">&#9733;</span>
+                }
               </td>
               <td>{{ agent.composite_score != null ? (agent.composite_score | number:'1.3-3') : '—' }}</td>
               <td>{{ agent.created_at | slice:0:10 }}</td>
@@ -209,6 +212,12 @@
             <li>All scoreboard data</li>
           </ul>
           <p>Extracted market data (Parquet files) will <strong>not</strong> be deleted.</p>
+          @if (garageCount() > 0) {
+            <label class="garage-checkbox">
+              <input type="checkbox" [ngModel]="clearGarage()" (ngModelChange)="clearGarage.set($event)" />
+              Also clear the garage ({{ garageCount() }} garaged model{{ garageCount() > 1 ? 's' : '' }})
+            </label>
+          }
           <p>Type <code>DELETE_EVERYTHING</code> to confirm:</p>
           <input
             type="text"

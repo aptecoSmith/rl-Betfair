@@ -123,6 +123,7 @@ async def list_agents(request: Request):
             status=m.status,
             composite_score=m.composite_score,
             created_at=m.created_at,
+            garaged=m.garaged,
         )
         for m in models
     ]
@@ -392,36 +393,82 @@ async def reset_system(body: ResetRequest, request: Request):
         )
 
     store = request.app.state.store
+    skip_garaged = not body.clear_garage
 
-    # Delete all weight files
+    # Build set of garaged model IDs and their evaluation run IDs to preserve
+    garaged_ids: set[str] = set()
+    garaged_run_ids: set[str] = set()
+    if skip_garaged:
+        for m in store.list_garaged_models():
+            garaged_ids.add(m.model_id)
+        if garaged_ids:
+            conn_tmp = store._get_conn()
+            try:
+                placeholders = ",".join("?" for _ in garaged_ids)
+                rows = conn_tmp.execute(
+                    f"SELECT run_id FROM evaluation_runs WHERE model_id IN ({placeholders})",
+                    list(garaged_ids),
+                ).fetchall()
+                garaged_run_ids = {r["run_id"] for r in rows}
+            finally:
+                conn_tmp.close()
+
+    # Delete weight files (skip garaged)
     weights_deleted = 0
     if store.weights_dir.exists():
         for f in store.weights_dir.glob("*.pt"):
+            if skip_garaged and f.stem in garaged_ids:
+                continue
             f.unlink()
             weights_deleted += 1
 
-    # Delete all bet log Parquets
+    # Delete bet log Parquets (skip garaged run dirs)
     bet_dirs_deleted = 0
     if store.bet_logs_dir.exists():
         for d in store.bet_logs_dir.iterdir():
             if d.is_dir():
+                if skip_garaged and d.name in garaged_run_ids:
+                    continue
                 shutil.rmtree(d)
                 bet_dirs_deleted += 1
 
-    # Clear all DB tables (order matters for foreign keys)
+    # Clear DB tables (order matters for foreign keys; skip garaged rows)
     conn = store._get_conn()
     try:
-        conn.execute("DELETE FROM evaluation_days")
-        conn.execute("DELETE FROM evaluation_runs")
-        conn.execute("DELETE FROM genetic_events")
-        conn.execute("DELETE FROM models")
+        if garaged_ids and skip_garaged:
+            placeholders = ",".join("?" for _ in garaged_ids)
+            ids = list(garaged_ids)
+            conn.execute(
+                f"DELETE FROM evaluation_days WHERE run_id IN "
+                f"(SELECT run_id FROM evaluation_runs WHERE model_id NOT IN ({placeholders}))",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM evaluation_runs WHERE model_id NOT IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM genetic_events WHERE child_model_id IS NULL "
+                f"OR child_model_id NOT IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM models WHERE model_id NOT IN ({placeholders})",
+                ids,
+            )
+        else:
+            conn.execute("DELETE FROM evaluation_days")
+            conn.execute("DELETE FROM evaluation_runs")
+            conn.execute("DELETE FROM genetic_events")
+            conn.execute("DELETE FROM models")
         conn.commit()
     finally:
         conn.close()
 
+    garage_note = f" (preserved {len(garaged_ids)} garaged model(s))" if garaged_ids and skip_garaged else ""
     detail = (
         f"Reset complete: deleted {weights_deleted} weight file(s), "
-        f"{bet_dirs_deleted} bet log dir(s), cleared all DB tables"
+        f"{bet_dirs_deleted} bet log dir(s), cleared DB tables{garage_note}"
     )
     logger.info(detail)
     return ResetResponse(reset=True, detail=detail)

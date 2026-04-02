@@ -15,6 +15,7 @@ const PHASE_LABELS: Record<string, string> = {
   selecting: 'Genetic selection',
   breeding: 'Breeding next generation',
   scoring: 'Updating scoreboard',
+  reevaluating_garaged: 'Re-evaluating garaged models on new test data',
 };
 
 /** Status for each agent in the population grid. */
@@ -47,6 +48,8 @@ export class TrainingMonitor implements OnDestroy {
   nGenerations = 3;
   nEpochs = 3;
   populationSize = 50;
+  reevaluateGaraged = false;
+  reevaluateMinScore: number | null = null;
   readonly rewardHistory = this.training.rewardHistory;
   readonly lossHistory = this.training.lossHistory;
 
@@ -204,6 +207,8 @@ export class TrainingMonitor implements OnDestroy {
       n_generations: this.nGenerations,
       n_epochs: this.nEpochs,
       population_size: this.populationSize,
+      reevaluate_garaged: this.reevaluateGaraged,
+      reevaluate_min_score: this.reevaluateMinScore,
     }).subscribe({
       next: () => {
         this.isStarting.set(false);

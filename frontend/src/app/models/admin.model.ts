@@ -24,6 +24,7 @@ export interface AdminAgentEntry {
   status: string;
   composite_score: number | null;
   created_at: string;
+  garaged: boolean;
 }
 
 export interface AdminAgentsResponse {

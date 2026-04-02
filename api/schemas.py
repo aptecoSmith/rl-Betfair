@@ -31,10 +31,20 @@ class ScoreboardEntry(BaseModel):
     efficiency: float
     test_days: int
     profitable_days: int
+    garaged: bool = False
 
 
 class ScoreboardResponse(BaseModel):
     models: list[ScoreboardEntry]
+
+
+class GarageToggleRequest(BaseModel):
+    garaged: bool
+
+
+class GarageToggleResponse(BaseModel):
+    model_id: str
+    garaged: bool
 
 
 class ModelDetail(BaseModel):
@@ -49,6 +59,7 @@ class ModelDetail(BaseModel):
     created_at: str
     last_evaluated_at: str | None
     composite_score: float | None
+    garaged: bool = False
     metrics_history: list[DayMetric]
 
 
@@ -268,6 +279,7 @@ class AdminAgentEntry(BaseModel):
     status: str
     composite_score: float | None
     created_at: str
+    garaged: bool = False
 
 
 class AdminAgentsResponse(BaseModel):
@@ -286,6 +298,7 @@ class ImportRangeRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     confirm: str
+    clear_garage: bool = False
 
 
 class AdminDeleteResponse(BaseModel):
@@ -318,6 +331,8 @@ class StartTrainingRequest(BaseModel):
     n_epochs: int = 3
     population_size: int | None = None  # override config default if set
     seed: int | None = None
+    reevaluate_garaged: bool = False
+    reevaluate_min_score: float | None = None
 
 
 class StartTrainingResponse(BaseModel):

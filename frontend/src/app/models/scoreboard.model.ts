@@ -10,6 +10,7 @@ export interface ScoreboardEntry {
   efficiency: number;
   test_days: number;
   profitable_days: number;
+  garaged: boolean;
 }
 
 export interface ScoreboardResponse {

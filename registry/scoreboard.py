@@ -150,10 +150,16 @@ class Scoreboard:
         return score
 
     def rank_all(self) -> list[ModelScore]:
-        """Score and rank all active models.  Returns sorted by composite_score desc."""
+        """Score and rank all active + garaged models.  Returns sorted by composite_score desc."""
         models = self.store.list_models(status="active")
-        scores: list[ModelScore] = []
+        seen = {m.model_id for m in models}
+        # Include garaged models even if discarded
+        for g in self.store.list_garaged_models():
+            if g.model_id not in seen:
+                models.append(g)
+                seen.add(g.model_id)
 
+        scores: list[ModelScore] = []
         for m in models:
             s = self.score_model(m.model_id)
             if s is not None:

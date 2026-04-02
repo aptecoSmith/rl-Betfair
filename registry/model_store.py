@@ -53,6 +53,7 @@ class ModelRecord:
     last_evaluated_at: str | None
     weights_path: str | None
     composite_score: float | None
+    garaged: bool = False
 
 
 @dataclass
@@ -167,6 +168,13 @@ class ModelStore:
         conn = self._get_conn()
         try:
             conn.executescript(_SCHEMA_SQL)
+            # Migration: add garaged column to existing databases
+            try:
+                conn.execute(
+                    "ALTER TABLE models ADD COLUMN garaged INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass  # column already exists
             # Migration: add opportunity window columns to existing databases
             for col in ("mean_opportunity_window_s", "median_opportunity_window_s"):
                 try:
@@ -275,6 +283,29 @@ class ModelStore:
                 (score, now, model_id),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def set_garaged(self, model_id: str, garaged: bool) -> None:
+        """Set or clear the garaged flag on a model."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE models SET garaged = ? WHERE model_id = ?",
+                (1 if garaged else 0, model_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_garaged_models(self) -> list[ModelRecord]:
+        """List all garaged models regardless of active/discarded status."""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM models WHERE garaged = 1 ORDER BY composite_score DESC",
+            ).fetchall()
+            return [self._row_to_model(r) for r in rows]
         finally:
             conn.close()
 
@@ -578,6 +609,7 @@ class ModelStore:
 
     @staticmethod
     def _row_to_model(row: sqlite3.Row) -> ModelRecord:
+        keys = row.keys()
         return ModelRecord(
             model_id=row["model_id"],
             generation=row["generation"],
@@ -591,6 +623,7 @@ class ModelStore:
             last_evaluated_at=row["last_evaluated_at"],
             weights_path=row["weights_path"],
             composite_score=row["composite_score"],
+            garaged=bool(row["garaged"]) if "garaged" in keys else False,
         )
 
 

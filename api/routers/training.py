@@ -80,6 +80,8 @@ def get_training_info(request: Request):
     )
     population_size = config.get("population", {}).get("size", 50)
     split = max(1, len(dates) // 2)
+    store = request.app.state.store
+    garage_count = len(store.list_garaged_models())
     return {
         "available_days": len(dates),
         "train_days": split,
@@ -88,6 +90,7 @@ def get_training_info(request: Request):
         "dates": dates,
         # Benchmark: ~12s per agent per day (from Session 4.6)
         "seconds_per_agent_per_day": 12.0,
+        "garage_count": garage_count,
     }
 
 
@@ -180,6 +183,8 @@ async def start_training(request: Request, body: StartTrainingRequest):
                 n_generations=body.n_generations,
                 n_epochs=body.n_epochs,
                 seed=body.seed,
+                reevaluate_garaged=body.reevaluate_garaged,
+                reevaluate_min_score=body.reevaluate_min_score,
             )
         except Exception:
             logger.exception("Training run failed")

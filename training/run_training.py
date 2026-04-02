@@ -175,6 +175,8 @@ class TrainingOrchestrator:
         n_generations: int = 1,
         n_epochs: int = 1,
         seed: int | None = None,
+        reevaluate_garaged: bool = False,
+        reevaluate_min_score: float | None = None,
     ) -> TrainingRunResult:
         """Execute the full generational training loop.
 
@@ -258,6 +260,13 @@ class TrainingOrchestrator:
                 else:
                     result.final_rankings = gen_result.scores
 
+        # Re-evaluate garaged models on the current test data
+        if reevaluate_garaged and self.model_store is not None and not self._check_stop():
+            self._reevaluate_garaged(test_days, train_cutoff, reevaluate_min_score)
+            # Recompute rankings to include re-evaluated garaged models
+            if self.scoreboard is not None:
+                result.final_rankings = self.scoreboard.update_scores()
+
         self._emit_phase_complete("run_complete", {
             "run_id": run_id,
             "generations_completed": n_generations,
@@ -265,6 +274,61 @@ class TrainingOrchestrator:
         })
 
         return result
+
+    def _reevaluate_garaged(
+        self,
+        test_days: list[Day],
+        train_cutoff: str,
+        min_score: float | None = None,
+    ) -> None:
+        """Re-evaluate garaged models on the current test data."""
+        garaged = self.model_store.list_garaged_models()
+        if min_score is not None:
+            garaged = [
+                m for m in garaged
+                if m.composite_score is not None and m.composite_score >= min_score
+            ]
+        if not garaged:
+            logger.info("No garaged models to re-evaluate")
+            return
+
+        self._emit_phase_start("reevaluating_garaged", {
+            "model_count": len(garaged),
+            "test_days": len(test_days),
+        })
+
+        tracker = ProgressTracker(
+            total=len(garaged),
+            label=f"Re-evaluating {len(garaged)} garaged model(s)",
+        )
+        tracker.reset_timer()
+
+        for model_rec in garaged:
+            if self._check_stop():
+                break
+            self._publish_progress(
+                "reevaluating_garaged", tracker,
+                detail=f"Re-evaluating {model_rec.model_id[:12]}",
+            )
+            try:
+                agent = self.pop_manager.load_agent(model_rec.model_id)
+                self.evaluator.evaluate(
+                    model_id=model_rec.model_id,
+                    policy=agent.policy,
+                    test_days=test_days,
+                    train_cutoff_date=train_cutoff,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to re-evaluate garaged model %s",
+                    model_rec.model_id[:12],
+                )
+            tracker.tick()
+            self._publish_progress("reevaluating_garaged", tracker)
+
+        self._emit_phase_complete("reevaluating_garaged", {
+            "models_reevaluated": tracker.completed,
+        })
 
     def _run_generation(
         self,

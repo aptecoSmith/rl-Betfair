@@ -86,8 +86,16 @@ export class ApiService {
     });
   }
 
-  resetSystem(confirm: string): Observable<ResetResponse> {
-    return this.http.post<ResetResponse>(`${this.baseUrl}/admin/reset`, { confirm });
+  resetSystem(confirm: string, clearGarage: boolean = false): Observable<ResetResponse> {
+    return this.http.post<ResetResponse>(`${this.baseUrl}/admin/reset`, { confirm, clear_garage: clearGarage });
+  }
+
+  toggleGarage(modelId: string, garaged: boolean): Observable<{ model_id: string; garaged: boolean }> {
+    return this.http.put<{ model_id: string; garaged: boolean }>(`${this.baseUrl}/models/${modelId}/garage`, { garaged });
+  }
+
+  getGarage(): Observable<ScoreboardResponse> {
+    return this.http.get<ScoreboardResponse>(`${this.baseUrl}/models/garage`);
   }
 
   // ── Training control endpoints ─────────────────────────────────────
@@ -99,6 +107,7 @@ export class ApiService {
   startTraining(params: {
     n_generations?: number; n_epochs?: number;
     population_size?: number; seed?: number | null;
+    reevaluate_garaged?: boolean; reevaluate_min_score?: number | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
@@ -108,6 +117,8 @@ export class ApiService {
       n_epochs: params.n_epochs ?? 3,
       population_size: params.population_size ?? null,
       seed: params.seed ?? null,
+      reevaluate_garaged: params.reevaluate_garaged ?? false,
+      reevaluate_min_score: params.reevaluate_min_score ?? null,
     });
   }
 

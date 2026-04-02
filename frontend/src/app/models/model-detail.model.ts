@@ -21,6 +21,7 @@ export interface ModelDetailResponse {
   created_at: string;
   last_evaluated_at: string | null;
   composite_score: number | null;
+  garaged: boolean;
   metrics_history: DayMetric[];
 }
 

@@ -72,4 +72,18 @@ export class Scoreboard implements OnInit {
     this.selectionState.selectedModelId.set(model.model_id);
     this.router.navigate(['/models', model.model_id]);
   }
+
+  onToggleGarage(event: Event, model: ScoreboardEntry): void {
+    event.stopPropagation();
+    const newState = !model.garaged;
+    this.api.toggleGarage(model.model_id, newState).subscribe({
+      next: () => {
+        this.models.update(models =>
+          models.map(m =>
+            m.model_id === model.model_id ? { ...m, garaged: newState } : m
+          )
+        );
+      },
+    });
+  }
 }

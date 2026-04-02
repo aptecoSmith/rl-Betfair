@@ -24,6 +24,7 @@ function makeModel(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
     efficiency: 0.6,
     test_days: 10,
     profitable_days: 8,
+    garaged: false,
     ...overrides,
   };
 }

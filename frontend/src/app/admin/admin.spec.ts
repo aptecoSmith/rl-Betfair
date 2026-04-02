@@ -28,6 +28,7 @@ function makeAgent(id: string, status = 'active', score: number | null = 0.75) {
     status,
     composite_score: score,
     created_at: '2026-03-26T10:00:00',
+    garaged: false,
   };
 }
 
@@ -48,8 +49,9 @@ class MockApiService {
   deleteAgent(_id: string) { return this.deleteResponse$; }
   importDay(_date: string) { return this.importDayResponse$; }
   importRange(_s: string, _e: string, _f: boolean) { return this.importRangeResponse$; }
-  resetSystem(_confirm: string) { return this.resetResponse$; }
+  resetSystem(_confirm: string, _clearGarage?: boolean) { return this.resetResponse$; }
   getScoreboard() { return of({ models: [] }); }
+  getGarage() { return of({ models: [] }); }
 }
 
 describe('Admin', () => {
@@ -377,7 +379,7 @@ describe('Admin', () => {
     component.promptReset();
     component.resetConfirmText.set('DELETE_EVERYTHING');
     component.confirmAndReset();
-    expect(spy).toHaveBeenCalledWith('DELETE_EVERYTHING');
+    expect(spy).toHaveBeenCalledWith('DELETE_EVERYTHING', false);
   });
 
   it('should not call resetSystem if text is wrong', () => {

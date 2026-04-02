@@ -35,6 +35,7 @@ function makeModel(overrides: Partial<ModelDetailResponse> = {}): ModelDetailRes
     created_at: '2026-03-26T10:00:00',
     last_evaluated_at: '2026-03-26T12:00:00',
     composite_score: 0.752,
+    garaged: false,
     metrics_history: [
       makeDayMetric({ date: '2026-03-25', day_pnl: 12.5, profitable: true }),
       makeDayMetric({ date: '2026-03-26', day_pnl: -3.2, profitable: false }),

@@ -380,6 +380,30 @@
   }
 }
 
+.garage-options {
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.checkbox-field {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem !important;
+
+  input[type="checkbox"] {
+    width: auto !important;
+    accent-color: #ffc107;
+  }
+
+  .field-label {
+    font-size: 0.8125rem !important;
+    color: #c0c0d8 !important;
+  }
+}
+
 .btn {
   padding: 0.6rem 1.5rem;
   border: none;
