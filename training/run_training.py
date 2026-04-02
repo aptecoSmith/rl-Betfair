@@ -550,6 +550,16 @@ class TrainingOrchestrator:
                     discarded=discarded,
                 )
 
+        # Purge discarded models (weights, eval data) to free space
+        if discarded and self.model_store is not None:
+            purged = self.model_store.purge_discarded()
+            if purged:
+                logger.info(
+                    "Purged %d discarded model(s): %s",
+                    len(purged),
+                    ", ".join(mid[:12] for mid in purged),
+                )
+
         # GPU memory summary at end of generation
         mem = gpu_memory_summary()
         if mem:

@@ -309,6 +309,65 @@ class ModelStore:
         finally:
             conn.close()
 
+    def delete_model(self, model_id: str) -> bool:
+        """Fully delete a model: weights, bet logs, eval data, genetic events, DB record.
+
+        Returns True if the model existed and was deleted.
+        """
+        model = self.get_model(model_id)
+        if model is None:
+            return False
+
+        # Delete weights file
+        if model.weights_path:
+            wp = Path(model.weights_path)
+            if wp.exists():
+                wp.unlink()
+
+        # Delete bet log Parquets for all evaluation runs
+        conn = self._get_conn()
+        try:
+            runs = conn.execute(
+                "SELECT run_id FROM evaluation_runs WHERE model_id = ?",
+                (model_id,),
+            ).fetchall()
+            for run in runs:
+                run_dir = self.bet_logs_dir / run["run_id"]
+                if run_dir.exists():
+                    import shutil
+                    shutil.rmtree(run_dir)
+
+            # Delete DB records (order matters for foreign keys)
+            for run in runs:
+                conn.execute("DELETE FROM evaluation_days WHERE run_id = ?", (run["run_id"],))
+            conn.execute("DELETE FROM evaluation_runs WHERE model_id = ?", (model_id,))
+            conn.execute("DELETE FROM genetic_events WHERE child_model_id = ?", (model_id,))
+            conn.execute("DELETE FROM models WHERE model_id = ?", (model_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+
+    def purge_discarded(self) -> list[str]:
+        """Delete all discarded, non-garaged models and their artefacts.
+
+        Returns list of deleted model IDs.
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT model_id FROM models WHERE status = 'discarded' AND garaged = 0",
+            ).fetchall()
+        finally:
+            conn.close()
+
+        purged = []
+        for row in rows:
+            mid = row["model_id"]
+            if self.delete_model(mid):
+                purged.append(mid)
+        return purged
+
     # -- Weights I/O ----------------------------------------------------------
 
     def save_weights(self, model_id: str, state_dict: dict) -> str:

@@ -37,6 +37,7 @@ export class Admin implements OnInit, OnDestroy {
   readonly resetConfirmText = signal('');
   readonly clearGarage = signal(false);
   readonly garageCount = signal(0);
+  readonly purging = signal(false);
 
   // ── Import state ──────────────────────────────────────────────
 
@@ -244,6 +245,25 @@ export class Admin implements OnInit, OnDestroy {
       error: (err) => {
         this.importingRange.set(false);
         this.error.set(err.error?.detail || 'Import range failed');
+        this.clearMessageAfterDelay();
+      },
+    });
+  }
+
+  // ── Purge discarded ───────────────────────────────────────────
+
+  purgeDiscarded(): void {
+    this.purging.set(true);
+    this.api.purgeDiscarded().subscribe({
+      next: (res) => {
+        this.purging.set(false);
+        this.successMessage.set(res.detail);
+        this.loadAgents();
+        this.clearMessageAfterDelay();
+      },
+      error: (err) => {
+        this.purging.set(false);
+        this.error.set(err.error?.detail || 'Purge failed');
         this.clearMessageAfterDelay();
       },
     });

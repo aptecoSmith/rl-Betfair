@@ -52,6 +52,7 @@ class MockApiService {
   resetSystem(_confirm: string, _clearGarage?: boolean) { return this.resetResponse$; }
   getScoreboard() { return of({ models: [] }); }
   getGarage() { return of({ models: [] }); }
+  purgeDiscarded() { return this.deleteResponse$; }
 }
 
 describe('Admin', () => {

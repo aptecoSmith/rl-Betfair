@@ -90,6 +90,10 @@ export class ApiService {
     return this.http.post<ResetResponse>(`${this.baseUrl}/admin/reset`, { confirm, clear_garage: clearGarage });
   }
 
+  purgeDiscarded(): Observable<AdminDeleteResponse> {
+    return this.http.post<AdminDeleteResponse>(`${this.baseUrl}/admin/purge-discarded`, {});
+  }
+
   toggleGarage(modelId: string, garaged: boolean): Observable<{ model_id: string; garaged: boolean }> {
     return this.http.put<{ model_id: string; garaged: boolean }>(`${this.baseUrl}/models/${modelId}/garage`, { garaged });
   }

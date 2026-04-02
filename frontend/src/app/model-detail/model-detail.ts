@@ -61,6 +61,7 @@ export class ModelDetail implements OnInit {
   readonly model = signal<ModelDetailResponse | null>(null);
   readonly lineageNodes = signal<LineageNode[]>([]);
   readonly geneticEvents = signal<GeneticEvent[]>([]);
+  readonly showDeleteDialog = signal(false);
 
   // ── Computed ───────────────────────────────────────────────────────
 
@@ -303,6 +304,22 @@ export class ModelDetail implements OnInit {
 
   goBack(): void {
     this.router.navigate(['/scoreboard']);
+  }
+
+  promptDelete(): void {
+    this.showDeleteDialog.set(true);
+  }
+
+  cancelDelete(): void {
+    this.showDeleteDialog.set(false);
+  }
+
+  confirmDelete(): void {
+    this.showDeleteDialog.set(false);
+    this.api.deleteAgent(this.modelId).subscribe({
+      next: () => this.router.navigate(['/scoreboard']),
+      error: (err) => this.error.set(err.error?.detail || 'Failed to delete model'),
+    });
   }
 
   formatParamValue(value: unknown): string {

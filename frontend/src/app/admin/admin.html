@@ -133,6 +133,9 @@
   <section class="admin-section">
     <h2>Manage Agents</h2>
     <p class="section-desc">All models (active and discarded)</p>
+    <button class="btn btn-warning" (click)="purgeDiscarded()" [disabled]="purging()" data-testid="purge-btn">
+      {{ purging() ? 'Purging...' : 'Purge Discarded' }}
+    </button>
 
     @if (loadingAgents()) {
       <p class="loading">Loading agents...</p>

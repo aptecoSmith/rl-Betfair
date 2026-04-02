@@ -22,8 +22,28 @@
         <span class="score-label">Composite Score</span>
         <span class="score-value">{{ m.composite_score !== null ? (m.composite_score | number:'1.3-3') : '—' }}</span>
       </div>
+      <button class="btn-delete-model" (click)="promptDelete()" data-testid="delete-model-btn" title="Delete this model">Delete</button>
     }
   </div>
+
+  @if (showDeleteDialog()) {
+    <div class="dialog-overlay">
+      <div class="dialog delete-dialog" data-testid="delete-dialog">
+        <h3>Delete Model?</h3>
+        <p>This will permanently delete model <code>{{ shortId() }}</code> including:</p>
+        <ul>
+          <li>Saved weights</li>
+          <li>All evaluation runs and bet logs</li>
+          <li>Genetic event history</li>
+        </ul>
+        <p>This cannot be undone.</p>
+        <div class="dialog-actions">
+          <button class="btn-secondary" (click)="cancelDelete()">Cancel</button>
+          <button class="btn-danger" (click)="confirmDelete()" data-testid="confirm-delete-btn">Delete</button>
+        </div>
+      </div>
+    </div>
+  }
 
   <!-- Loading / Error -->
   @if (loading()) {

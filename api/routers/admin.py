@@ -202,46 +202,24 @@ async def delete_agent(model_id: str, request: Request, confirm: bool = False):
         )
     store = request.app.state.store
 
-    model = store.get_model(model_id)
-    if model is None:
+    if not store.get_model(model_id):
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
 
-    # 1. Delete weights file
-    if model.weights_path:
-        wp = Path(model.weights_path)
-        if wp.exists():
-            wp.unlink()
+    store.delete_model(model_id)
 
-    # 2. Delete bet log Parquets for all evaluation runs of this model
-    eval_runs = _get_all_evaluation_runs(store, model_id)
-    for run in eval_runs:
-        run_dir = store.bet_logs_dir / run["run_id"]
-        if run_dir.exists():
-            shutil.rmtree(run_dir)
-
-    # 3. Delete evaluation_days, evaluation_runs from DB
-    conn = store._get_conn()
-    try:
-        for run in eval_runs:
-            conn.execute("DELETE FROM evaluation_days WHERE run_id = ?", (run["run_id"],))
-        conn.execute("DELETE FROM evaluation_runs WHERE model_id = ?", (model_id,))
-
-        # 4. Delete genetic events where this model is the child
-        conn.execute("DELETE FROM genetic_events WHERE child_model_id = ?", (model_id,))
-
-        # 5. Delete the model record itself
-        conn.execute("DELETE FROM models WHERE model_id = ?", (model_id,))
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    detail = (
-        f"Deleted model {model_id}: weights, {len(eval_runs)} evaluation run(s), "
-        f"genetic events, registry record"
-    )
+    detail = f"Deleted model {model_id}: weights, evaluation data, genetic events, registry record"
     logger.info(detail)
     return AdminDeleteResponse(deleted=True, detail=detail)
+
+
+@router.post("/purge-discarded", response_model=AdminDeleteResponse)
+async def purge_discarded(request: Request):
+    """Delete all discarded, non-garaged models and their artefacts."""
+    store = request.app.state.store
+    purged = store.purge_discarded()
+    detail = f"Purged {len(purged)} discarded model(s)" if purged else "No discarded models to purge"
+    logger.info(detail)
+    return AdminDeleteResponse(deleted=bool(purged), detail=detail)
 
 
 def _get_all_evaluation_runs(store, model_id: str) -> list[dict]:

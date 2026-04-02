@@ -109,6 +109,9 @@ class MockApiService {
   getScoreboard() {
     return of({ models: [] });
   }
+  deleteAgent(_id: string) {
+    return of({ deleted: true, detail: 'Deleted' });
+  }
 }
 
 describe('ModelDetail', () => {

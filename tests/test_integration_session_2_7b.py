@@ -46,31 +46,43 @@ def config():
 
 
 @pytest.fixture(scope="module")
-def extracted_date(config, tmp_path_factory):
-    """Extract 2026-03-28 to a temp dir and return the path."""
+def _available_date(config):
+    """Pick the first available date from the database."""
+    from data.extractor import DataExtractor
+    ext = DataExtractor(config)
+    dates = ext.get_available_dates()
+    if not dates:
+        pytest.skip("No dates available in database")
+    return dates[0]
+
+
+@pytest.fixture(scope="module")
+def extracted_date(config, _available_date, tmp_path_factory):
+    """Extract an available date to a temp dir and return (path, date_str)."""
     from data.extractor import DataExtractor
 
     out = tmp_path_factory.mktemp("parquet")
     ext = DataExtractor(config, output_dir=out)
-    ok = ext.extract_date(date(2026, 3, 28))
-    assert ok, "Extraction failed — no polled data for 2026-03-28?"
+    ok = ext.extract_date(_available_date)
+    assert ok, f"Extraction failed for {_available_date}"
     return out
+
 
 
 class TestExtraction:
     def test_runners_parquet_has_past_races_json(self, extracted_date):
-        runners = pd.read_parquet(extracted_date / "2026-03-28_runners.parquet")
+        runners = pd.read_parquet(next(extracted_date.glob("*_runners.parquet")))
         assert "past_races_json" in runners.columns
         assert "timeform_comment" in runners.columns
         assert "recent_form" in runners.columns
 
     def test_past_races_json_populated(self, extracted_date):
-        runners = pd.read_parquet(extracted_date / "2026-03-28_runners.parquet")
+        runners = pd.read_parquet(next(extracted_date.glob("*_runners.parquet")))
         non_null = runners["past_races_json"].notna().sum()
         assert non_null > 0, "No past_races_json values populated"
 
     def test_timeform_comment_populated(self, extracted_date):
-        runners = pd.read_parquet(extracted_date / "2026-03-28_runners.parquet")
+        runners = pd.read_parquet(next(extracted_date.glob("*_runners.parquet")))
         non_null = runners["timeform_comment"].notna().sum()
         assert non_null > 0
 
@@ -79,7 +91,8 @@ class TestEpisodeBuilder:
     def test_past_races_populated(self, extracted_date):
         from data.episode_builder import load_day
 
-        day = load_day("2026-03-28", data_dir=extracted_date)
+        date_str = next(p.stem for p in extracted_date.glob("*.parquet") if "_runners" not in p.stem)
+        day = load_day(date_str, data_dir=extracted_date)
         found_past_races = False
         for race in day.races:
             for meta in race.runner_metadata.values():
@@ -95,7 +108,8 @@ class TestEpisodeBuilder:
     def test_timeform_comment_loaded(self, extracted_date):
         from data.episode_builder import load_day
 
-        day = load_day("2026-03-28", data_dir=extracted_date)
+        date_str = next(p.stem for p in extracted_date.glob("*.parquet") if "_runners" not in p.stem)
+        day = load_day(date_str, data_dir=extracted_date)
         found = False
         for race in day.races:
             for meta in race.runner_metadata.values():
@@ -112,7 +126,8 @@ class TestFeatureEngineer:
         from data.episode_builder import load_day
         from data.feature_engineer import TickHistory, engineer_tick
 
-        day = load_day("2026-03-28", data_dir=extracted_date)
+        date_str = next(p.stem for p in extracted_date.glob("*.parquet") if "_runners" not in p.stem)
+        day = load_day(date_str, data_dir=extracted_date)
         history = TickHistory()
         # Find a race with runners that have past races
         for race in day.races:
@@ -134,10 +149,12 @@ class TestEnvironment:
         from data.episode_builder import load_day
         from env.betfair_env import BetfairEnv
 
-        day = load_day("2026-03-28", data_dir=extracted_date)
+        date_str = next(p.stem for p in extracted_date.glob("*.parquet") if "_runners" not in p.stem)
+        day = load_day(date_str, data_dir=extracted_date)
         env = BetfairEnv(day, config)
         obs, _ = env.reset()
-        assert obs.shape == (1587,)
+        obs_dim = env.observation_space.shape[0]
+        assert obs.shape == (obs_dim,)
         assert np.isnan(obs).sum() == 0
 
         # Run 20 steps
@@ -146,5 +163,5 @@ class TestEnvironment:
             obs, reward, terminated, truncated, _ = env.step(action)
             if terminated or truncated:
                 break
-        assert obs.shape == (1587,)
+        assert obs.shape == (obs_dim,)
         assert np.isnan(obs).sum() == 0
