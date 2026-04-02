@@ -45,6 +45,8 @@ async def lifespan(app: FastAPI):
     app.state.training_state = {
         "running": False,
         "latest_event": None,
+        "latest_process": None,
+        "latest_item": None,
     }
     app.state.stop_event = threading.Event()
     app.state.training_task = None
@@ -75,8 +77,19 @@ async def lifespan(app: FastAPI):
 
             # Update training_state for the status endpoint
             state["latest_event"] = event
+
+            # Track process and item snapshots independently so the
+            # status endpoint can return both even when only one is
+            # present in the current event.
+            if event.get("process"):
+                state["latest_process"] = event["process"]
+            if event.get("item"):
+                state["latest_item"] = event["item"]
+
             if event.get("event") == "phase_start":
                 state["running"] = True
+                # New phase — clear stale item progress
+                state["latest_item"] = None
             elif (
                 event.get("event") == "run_complete"
                 or (
@@ -88,6 +101,8 @@ async def lifespan(app: FastAPI):
                 )
             ):
                 state["running"] = False
+                state["latest_process"] = None
+                state["latest_item"] = None
 
             # Broadcast to all connected WebSocket clients
             import json

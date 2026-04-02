@@ -38,29 +38,23 @@ def get_training_status(request: Request):
     if not latest:
         return TrainingStatus(running=True)
 
-    process = None
-    if latest.get("process"):
-        p = latest["process"]
-        process = ProgressSnapshot(
-            label=p.get("label", ""),
-            completed=p.get("completed", 0),
-            total=p.get("total", 0),
-            pct=p.get("pct", 0.0),
-            item_eta_human=p.get("item_eta_human", ""),
-            process_eta_human=p.get("process_eta_human", ""),
+    def _snap(d: dict | None) -> ProgressSnapshot | None:
+        if not d:
+            return None
+        return ProgressSnapshot(
+            label=d.get("label", ""),
+            completed=d.get("completed", 0),
+            total=d.get("total", 0),
+            pct=d.get("pct", 0.0),
+            item_eta_human=d.get("item_eta_human", ""),
+            process_eta_human=d.get("process_eta_human", ""),
         )
 
-    item = None
-    if latest.get("item"):
-        i = latest["item"]
-        item = ProgressSnapshot(
-            label=i.get("label", ""),
-            completed=i.get("completed", 0),
-            total=i.get("total", 0),
-            pct=i.get("pct", 0.0),
-            item_eta_human=i.get("item_eta_human", ""),
-            process_eta_human=i.get("process_eta_human", ""),
-        )
+    # Use independently-tracked snapshots so the poll response
+    # always contains both process and item, even when the latest
+    # event only carried one of them.
+    process = _snap(state.get("latest_process"))
+    item = _snap(state.get("latest_item"))
 
     return TrainingStatus(
         running=True,

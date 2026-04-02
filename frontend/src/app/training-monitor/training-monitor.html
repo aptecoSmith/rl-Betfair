@@ -28,7 +28,7 @@
             <span class="eta-label">{{ itemBar()!.label }}</span>
             <span class="eta-stats">
               {{ itemBar()!.completed }}/{{ itemBar()!.total }}
-              · ETA {{ itemBar()!.item_eta_human || '—' }}
+              · ETA {{ itemBar()!.process_eta_human || itemBar()!.item_eta_human || '—' }}
             </span>
           </div>
           <div class="bar-track">

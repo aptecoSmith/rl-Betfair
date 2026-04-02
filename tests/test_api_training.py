@@ -45,8 +45,14 @@ async def _lifespan(app: FastAPI):
                 break
 
             state["latest_event"] = event
+            if event.get("process"):
+                state["latest_process"] = event["process"]
+            if event.get("item"):
+                state["latest_item"] = event["item"]
+
             if event.get("event") == "phase_start":
                 state["running"] = True
+                state["latest_item"] = None
             elif (
                 event.get("event") == "run_complete"
                 or (
@@ -58,6 +64,8 @@ async def _lifespan(app: FastAPI):
                 )
             ):
                 state["running"] = False
+                state["latest_process"] = None
+                state["latest_item"] = None
 
             msg = json.dumps(event)
             dead = set()
@@ -84,6 +92,8 @@ def _make_app(training_state: dict | None = None) -> tuple[TestClient, FastAPI]:
     app.state.training_state = training_state or {
         "running": False,
         "latest_event": None,
+        "latest_process": None,
+        "latest_item": None,
     }
     app.state.progress_queue = asyncio.Queue()
     app.state.ws_clients = set()
@@ -107,37 +117,41 @@ class TestTrainingStatus:
         assert data["phase"] is None
 
     def test_running_no_event(self):
-        client, _ = _make_app({"running": True, "latest_event": None})
+        client, _ = _make_app({"running": True, "latest_event": None, "latest_process": None, "latest_item": None})
         resp = client.get("/training/status")
         data = resp.json()
         assert data["running"] is True
         assert data["phase"] is None
 
     def test_running_with_progress(self):
+        process_snap = {
+            "label": "Generation 3 — training 20 agents",
+            "completed": 7,
+            "total": 20,
+            "pct": 35.0,
+            "item_eta_human": "6 min",
+            "process_eta_human": "1h 18m",
+        }
+        item_snap = {
+            "label": "Training agent model_xyz",
+            "completed": 312,
+            "total": 1000,
+            "pct": 31.2,
+            "item_eta_human": "4m 12s",
+            "process_eta_human": "6m 05s",
+        }
         state = {
             "running": True,
             "latest_event": {
                 "event": "progress",
                 "phase": "training",
                 "generation": 3,
-                "process": {
-                    "label": "Generation 3 — training 20 agents",
-                    "completed": 7,
-                    "total": 20,
-                    "pct": 35.0,
-                    "item_eta_human": "6 min",
-                    "process_eta_human": "1h 18m",
-                },
-                "item": {
-                    "label": "Training agent model_xyz",
-                    "completed": 312,
-                    "total": 1000,
-                    "pct": 31.2,
-                    "item_eta_human": "4m 12s",
-                    "process_eta_human": "6m 05s",
-                },
+                "process": process_snap,
+                "item": item_snap,
                 "detail": "Episode 312 | reward=+1.24",
             },
+            "latest_process": process_snap,
+            "latest_item": item_snap,
         }
         client, _ = _make_app(state)
         resp = client.get("/training/status")
@@ -170,7 +184,7 @@ class TestTrainingWebSocket:
             "phase": "evaluating",
             "process": {"label": "Evaluating", "completed": 3, "total": 10},
         }
-        client, _ = _make_app({"running": True, "latest_event": latest})
+        client, _ = _make_app({"running": True, "latest_event": latest, "latest_process": None, "latest_item": None})
         with client.websocket_connect("/ws/training") as ws:
             data = ws.receive_json()
             assert data["event"] == "progress"
@@ -197,7 +211,7 @@ class TestTrainingWebSocket:
 
     def test_ws_run_complete_sets_not_running(self):
         """run_complete event sets training_state.running to False."""
-        client, app = _make_app({"running": True, "latest_event": None})
+        client, app = _make_app({"running": True, "latest_event": None, "latest_process": None, "latest_item": None})
         queue: asyncio.Queue = app.state.progress_queue
 
         event = {"event": "run_complete", "timestamp": 1234567890.0}
@@ -210,7 +224,7 @@ class TestTrainingWebSocket:
 
     def test_ws_phase_start_sets_running(self):
         """phase_start event sets running to True."""
-        client, app = _make_app({"running": False, "latest_event": None})
+        client, app = _make_app({"running": False, "latest_event": None, "latest_process": None, "latest_item": None})
         queue: asyncio.Queue = app.state.progress_queue
 
         event = {"event": "phase_start", "phase": "training", "timestamp": 123.0}
