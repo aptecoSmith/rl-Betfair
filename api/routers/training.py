@@ -233,11 +233,14 @@ def stop_training(request: Request):
 
 @router.websocket("/ws/training")
 async def ws_training(websocket: WebSocket):
-    """Register as a broadcast client for training progress events.
+    """Stream training progress events to a client.
 
-    Events are consumed from the queue by a background task in main.py
-    and broadcast to all connected clients. Clients that connect mid-run
-    receive the latest state immediately.
+    Events are consumed from the main progress queue by a background task
+    in main.py and pushed into each client's per-connection mailbox.
+    The handler drains the mailbox and forwards to the WebSocket, while
+    also listening for client disconnect.
+
+    Clients that connect mid-run receive the latest state immediately.
     """
     await websocket.accept()
 
@@ -247,19 +250,46 @@ async def ws_training(websocket: WebSocket):
     if state.get("latest_event"):
         await websocket.send_text(json.dumps(state["latest_event"]))
 
-    # Register this client for broadcasts
+    # Per-client mailbox — the queue consumer in main.py pushes here
+    mailbox: asyncio.Queue[str] = asyncio.Queue()
+
     async def send_fn(msg: str) -> None:
-        await websocket.send_text(msg)
+        await mailbox.put(msg)
 
     websocket.app.state.ws_clients.add(send_fn)
 
     try:
-        # Keep connection alive — wait for client disconnect
+        receive_task: asyncio.Task | None = None
+        mailbox_task: asyncio.Task | None = None
+
         while True:
-            await websocket.receive_text()
+            # Start both tasks if not already running
+            if receive_task is None:
+                receive_task = asyncio.ensure_future(websocket.receive_text())
+            if mailbox_task is None:
+                mailbox_task = asyncio.ensure_future(mailbox.get())
+
+            done, _ = await asyncio.wait(
+                {receive_task, mailbox_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if mailbox_task in done:
+                msg = mailbox_task.result()
+                await websocket.send_text(msg)
+                mailbox_task = None
+
+            if receive_task in done:
+                # Client sent something (or disconnected — triggers exception)
+                receive_task.result()  # propagates WebSocketDisconnect
+                receive_task = None
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
+        # Cancel any pending tasks
+        for t in (receive_task, mailbox_task):
+            if t and not t.done():
+                t.cancel()
         websocket.app.state.ws_clients.discard(send_fn)

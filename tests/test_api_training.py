@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -16,9 +17,68 @@ from api.routers import training
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+# Short keepalive so test_ws_connect_idle doesn't wait 30 s.
+_KEEPALIVE_TIMEOUT = 1.0
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Queue consumer identical to main.py but with a fast keepalive for tests."""
+    state = app.state.training_state
+    queue = app.state.progress_queue
+
+    async def _queue_consumer():
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE_TIMEOUT)
+            except asyncio.TimeoutError:
+                ping = json.dumps({"event": "ping"})
+                dead = set()
+                for send_fn in app.state.ws_clients:
+                    try:
+                        await send_fn(ping)
+                    except Exception:
+                        dead.add(send_fn)
+                app.state.ws_clients -= dead
+                continue
+            except asyncio.CancelledError:
+                break
+
+            state["latest_event"] = event
+            if event.get("event") == "phase_start":
+                state["running"] = True
+            elif (
+                event.get("event") == "run_complete"
+                or (
+                    event.get("event") == "phase_complete"
+                    and event.get("phase") in (
+                        "run_complete", "run_stopped", "run_error",
+                        "extracting",
+                    )
+                )
+            ):
+                state["running"] = False
+
+            msg = json.dumps(event)
+            dead = set()
+            for send_fn in app.state.ws_clients:
+                try:
+                    await send_fn(msg)
+                except Exception:
+                    dead.add(send_fn)
+            app.state.ws_clients -= dead
+
+    consumer_task = asyncio.create_task(_queue_consumer())
+    yield
+    consumer_task.cancel()
+    try:
+        await consumer_task
+    except asyncio.CancelledError:
+        pass
+
 
 def _make_app(training_state: dict | None = None) -> tuple[TestClient, FastAPI]:
-    app = FastAPI()
+    app = FastAPI(lifespan=_lifespan)
     app.include_router(training.router)
 
     app.state.training_state = training_state or {
@@ -28,7 +88,10 @@ def _make_app(training_state: dict | None = None) -> tuple[TestClient, FastAPI]:
     app.state.progress_queue = asyncio.Queue()
     app.state.ws_clients = set()
 
-    return TestClient(app), app
+    # Use context manager so the lifespan (and queue consumer) actually starts
+    client = TestClient(app)
+    client.__enter__()
+    return client, app
 
 
 # ── Status Endpoint Tests ────────────────────────────────────────────
