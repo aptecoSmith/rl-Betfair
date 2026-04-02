@@ -240,6 +240,15 @@
 
 .pnl-bar {
   rx: 1;
+
+  &.clickable {
+    cursor: pointer;
+    transition: opacity 0.15s;
+
+    &:hover {
+      opacity: 0.7;
+    }
+  }
 }
 
 .chart-legend {

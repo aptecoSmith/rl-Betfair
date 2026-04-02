@@ -2,6 +2,7 @@ import { Component, OnInit, inject, signal, computed } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { CommonModule, DecimalPipe, CurrencyPipe } from '@angular/common';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import {
   ModelDetailResponse,
   DayMetric,
@@ -49,6 +50,7 @@ export class ModelDetail implements OnInit {
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly api = inject(ApiService);
+  private readonly selectionState = inject(SelectionStateService);
 
   readonly modelId = this.route.snapshot.paramMap.get('id') ?? '';
 
@@ -290,6 +292,13 @@ export class ModelDetail implements OnInit {
 
   navigateToModel(modelId: string): void {
     this.router.navigate(['/models', modelId]);
+  }
+
+  navigateToReplay(date: string): void {
+    this.selectionState.selectedModelId.set(this.modelId);
+    this.selectionState.replayDate.set(date);
+    this.selectionState.replayRaceId.set(null);
+    this.router.navigate(['/replay']);
   }
 
   goBack(): void {

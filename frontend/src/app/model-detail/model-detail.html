@@ -97,8 +97,9 @@
               <rect [attr.x]="bar.x" [attr.y]="bar.y"
                     [attr.width]="bar.width" [attr.height]="bar.height"
                     [attr.fill]="bar.colour"
-                    class="pnl-bar">
-                <title>{{ bar.date }}: £{{ bar.pnl | number:'1.2-2' }}</title>
+                    class="pnl-bar clickable"
+                    (click)="navigateToReplay(bar.date)">
+                <title>{{ bar.date }}: £{{ bar.pnl | number:'1.2-2' }} — click to replay</title>
               </rect>
             }
           </svg>
