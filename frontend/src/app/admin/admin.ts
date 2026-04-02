@@ -1,7 +1,8 @@
-import { Component, OnInit, inject, signal } from '@angular/core';
+import { Component, OnInit, OnDestroy, inject, signal, effect } from '@angular/core';
 import { DecimalPipe, SlicePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
+import { TrainingService } from '../services/training.service';
 import { ExtractedDay, BackupDay, AdminAgentEntry } from '../models/admin.model';
 
 @Component({
@@ -11,8 +12,9 @@ import { ExtractedDay, BackupDay, AdminAgentEntry } from '../models/admin.model'
   templateUrl: './admin.html',
   styleUrl: './admin.scss',
 })
-export class Admin implements OnInit {
+export class Admin implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
+  private readonly training = inject(TrainingService);
 
   // ── State signals ──────────────────────────────────────────────
 
@@ -42,8 +44,33 @@ export class Admin implements OnInit {
   readonly importingRange = signal(false);
   readonly importProgress = signal<{ completed: number; total: number } | null>(null);
 
+  private readonly progressEffect = effect(() => {
+    const event = this.training.latestEvent();
+    if (!event || event.phase !== 'extracting') return;
+
+    if (event.event === 'progress' && event.process) {
+      this.importProgress.set({
+        completed: event.process.completed,
+        total: event.process.total,
+      });
+    }
+
+    if (event.event === 'phase_complete') {
+      // Brief delay so user sees the completed bar before it disappears
+      setTimeout(() => {
+        this.importProgress.set(null);
+        this.loadExtractedDays();
+        this.loadBackupDays();
+      }, 1500);
+    }
+  });
+
   ngOnInit(): void {
     this.loadAll();
+  }
+
+  ngOnDestroy(): void {
+    this.progressEffect.destroy();
   }
 
   loadAll(): void {
@@ -199,14 +226,10 @@ export class Admin implements OnInit {
     this.api.importRange(start, end, force).subscribe({
       next: (res) => {
         this.importingRange.set(false);
+        this.successMessage.set(res.detail);
         if (res.dates_queued > 0) {
-          this.successMessage.set(res.detail);
           this.importProgress.set({ completed: 0, total: res.dates_queued });
-        } else {
-          this.successMessage.set(res.detail);
         }
-        this.loadExtractedDays();
-        this.loadBackupDays();
         this.clearMessageAfterDelay();
       },
       error: (err) => {
