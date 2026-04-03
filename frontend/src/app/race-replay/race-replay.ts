@@ -101,9 +101,19 @@ export class RaceReplay implements OnInit, OnDestroy, AfterViewInit {
     const data = this.raceData();
     if (!data || data.ticks.length === 0) return new Map<number, string>();
     const map = new Map<number, string>();
-    for (const bet of data.all_bets) {
-      map.set(bet.runner_id, bet.runner_name);
+    // Primary: runner_names from backend (loaded from _runners.parquet)
+    if (data.runner_names) {
+      for (const [sid, name] of Object.entries(data.runner_names)) {
+        map.set(Number(sid), name);
+      }
     }
+    // Secondary: bet records (in case runner_names missing)
+    for (const bet of data.all_bets) {
+      if (!map.has(bet.runner_id)) {
+        map.set(bet.runner_id, bet.runner_name);
+      }
+    }
+    // Fallback: selection ID for any remaining
     for (const tick of data.ticks) {
       for (const r of tick.runners) {
         if (!map.has(r.selection_id)) {
@@ -187,14 +197,20 @@ export class RaceReplay implements OnInit, OnDestroy, AfterViewInit {
     const data = this.raceData();
     if (t.length === 0 || !data) return [];
 
-    const startTime = new Date(data.market_start_time).getTime();
     const ids = this.runnerIds();
+
+    // Sum stakes per runner from bets
+    const stakeByRunner = new Map<number, number>();
+    for (const bet of data.all_bets) {
+      stakeByRunner.set(bet.runner_id, (stakeByRunner.get(bet.runner_id) ?? 0) + bet.stake);
+    }
 
     return ids.map((id, i) => ({
       runnerId: id,
       name: this.runnerNames().get(id) ?? `Runner ${id}`,
       colour: RUNNER_COLOURS[i % RUNNER_COLOURS.length],
       isWinner: id === this.winnerSelectionId(),
+      totalStake: stakeByRunner.get(id) ?? 0,
     }));
   });
 
@@ -573,7 +589,8 @@ export class RaceReplay implements OnInit, OnDestroy, AfterViewInit {
     this.api.getReplayRace(modelId, date, raceId).subscribe({
       next: (res) => {
         this.raceData.set(res);
-        this.currentTickIndex.set(0);
+        // Show all data by default so the chart renders full price lines
+        this.currentTickIndex.set(Math.max(0, res.ticks.length - 1));
         this.highlightedBetIndex.set(null);
         // Initialise visible runners to all
         const ids = new Set<number>();

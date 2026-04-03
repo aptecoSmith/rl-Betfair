@@ -46,6 +46,7 @@ def _make_config(pop_size=6, n_elite=2, top_pct=0.5, logs_dir=None):
                 "observation_window_ticks": {"type": "int", "min": 3, "max": 360},
                 "reward_early_pick_bonus": {"type": "float", "min": 1.0, "max": 1.5},
                 "reward_efficiency_penalty": {"type": "float", "min": 0.001, "max": 0.05},
+                "reward_precision_bonus": {"type": "float", "min": 0.0, "max": 3.0},
             }
         },
         "discard_policy": {
@@ -84,6 +85,7 @@ PARENT_A_HP = {
     "observation_window_ticks": 60,
     "reward_early_pick_bonus": 1.3,
     "reward_efficiency_penalty": 0.01,
+    "reward_precision_bonus": 1.0,
     "architecture_name": "ppo_lstm_v1",
 }
 
@@ -97,6 +99,7 @@ PARENT_B_HP = {
     "observation_window_ticks": 120,
     "reward_early_pick_bonus": 1.1,
     "reward_efficiency_penalty": 0.03,
+    "reward_precision_bonus": 2.0,
     "architecture_name": "ppo_lstm_v1",
 }
 

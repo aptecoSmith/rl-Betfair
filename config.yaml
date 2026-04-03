@@ -25,6 +25,9 @@ reward:
   # Small cost per bet to discourage low-conviction churn
   efficiency_penalty: 0.01
 
+  # Flat bonus scaled by bet win rate per race (does not affect P&L)
+  precision_bonus: 1.0
+
   # Composite scoreboard weights — must sum to 1.0
   coefficients:
     win_rate: 0.35
@@ -94,6 +97,10 @@ hyperparameters:
       type: float
       min: 0.001
       max: 0.05
+    reward_precision_bonus:
+      type: float
+      min: 0.0
+      max: 3.0
     architecture_name:
       type: str_choice
       choices: [ppo_lstm_v1, ppo_time_lstm_v1]

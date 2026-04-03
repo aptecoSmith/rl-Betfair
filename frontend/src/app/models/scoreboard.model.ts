@@ -7,10 +7,13 @@ export interface ScoreboardEntry {
   win_rate: number;
   sharpe: number;
   mean_daily_pnl: number;
+  bet_precision: number;
   efficiency: number;
   test_days: number;
   profitable_days: number;
+  early_picks: number;
   garaged: boolean;
+  garaged_at: string | null;
 }
 
 export interface ScoreboardResponse {

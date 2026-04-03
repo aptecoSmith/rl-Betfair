@@ -8,4 +8,5 @@ export const routes: Routes = [
   { path: 'admin', loadComponent: () => import('./admin/admin').then(m => m.Admin) },
   { path: 'replay', loadComponent: () => import('./race-replay/race-replay').then(m => m.RaceReplay) },
   { path: 'bets', loadComponent: () => import('./bet-explorer/bet-explorer').then(m => m.BetExplorer) },
+  { path: 'garage', loadComponent: () => import('./garage/garage').then(m => m.Garage) },
 ];

@@ -1,0 +1,140 @@
+.garage-container {
+  max-width: 1300px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  color: #e0e0e0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+
+  h1 {
+    margin-bottom: 0.25rem;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #ffffff;
+  }
+
+  .subtitle {
+    margin: 0 0 1.25rem;
+    font-size: 0.85rem;
+    color: #808098;
+  }
+}
+
+.loading,
+.error {
+  padding: 2rem;
+  text-align: center;
+  font-size: 1rem;
+  color: #a0a0b8;
+}
+
+.error {
+  color: #eb5757;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 3rem;
+  color: #808098;
+  font-style: italic;
+  font-size: 0.9375rem;
+}
+
+.garage-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;
+
+  th {
+    background: #1e1e38;
+    color: #a0a0b8;
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 700;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    border-bottom: 2px solid #2a2a4a;
+  }
+
+  td {
+    padding: 0.875rem 1rem;
+    border-bottom: 1px solid #1e1e38;
+    color: #c0c0d8;
+    font-variant-numeric: tabular-nums;
+  }
+
+  tbody tr {
+    cursor: pointer;
+    transition: background 0.15s;
+
+    &:hover {
+      background: #1e1e38;
+    }
+  }
+}
+
+.model-id {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.8125rem;
+  color: #a78bfa;
+}
+
+.gen-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 12px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.75rem;
+  min-width: 26px;
+  text-align: center;
+}
+
+.status-badge {
+  font-size: 0.7rem;
+  padding: 3px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  font-weight: 600;
+
+  &.active {
+    background: rgba(76, 175, 80, 0.2);
+    color: #81c784;
+  }
+
+  &.discarded {
+    background: rgba(244, 67, 54, 0.2);
+    color: #e57373;
+  }
+}
+
+.score {
+  font-weight: 700;
+  font-size: 0.9375rem;
+  color: #e0e0e0;
+}
+
+.garaged-date {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #808098;
+}
+
+.btn-remove {
+  background: transparent;
+  border: 1px solid #ff9800;
+  color: #ff9800;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover {
+    background: #ff9800;
+    color: #fff;
+  }
+}

@@ -225,6 +225,7 @@ def _make_full_config() -> dict:
                 "observation_window_ticks": {"type": "int", "min": 3, "max": 20},
                 "reward_early_pick_bonus": {"type": "float", "min": 1.0, "max": 1.5},
                 "reward_efficiency_penalty": {"type": "float", "min": 0.001, "max": 0.05},
+                "reward_precision_bonus": {"type": "float", "min": 0.0, "max": 3.0},
             },
         },
     }

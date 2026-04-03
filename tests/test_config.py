@@ -94,6 +94,7 @@ def test_hyperparameter_search_ranges_present(config):
         "observation_window_ticks",
         "reward_early_pick_bonus",
         "reward_efficiency_penalty",
+        "reward_precision_bonus",
     ]
     for param in expected_params:
         assert param in ranges, f"Missing hyperparameter search range: '{param}'"

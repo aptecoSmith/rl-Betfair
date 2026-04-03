@@ -41,10 +41,13 @@ def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
         win_rate=model.win_rate,
         sharpe=model.sharpe,
         mean_daily_pnl=model.mean_daily_pnl,
+        bet_precision=model.bet_precision,
         efficiency=model.efficiency,
         test_days=model.test_days,
         profitable_days=model.profitable_days,
+        early_picks=model.total_early_picks,
         garaged=rec.garaged if rec else False,
+        garaged_at=rec.garaged_at if rec else None,
     )
 
 
@@ -73,9 +76,11 @@ def get_garage(request: Request):
             entries.append(ScoreboardEntry(
                 model_id=m.model_id, generation=m.generation,
                 architecture_name=m.architecture_name, status=m.status,
-                garaged=True, composite_score=m.composite_score,
+                garaged=True, garaged_at=m.garaged_at,
+                composite_score=m.composite_score,
                 win_rate=0, sharpe=0, mean_daily_pnl=0,
-                efficiency=0, test_days=0, profitable_days=0,
+                bet_precision=0, efficiency=0, test_days=0,
+                profitable_days=0, early_picks=0,
             ))
     return ScoreboardResponse(models=entries)
 

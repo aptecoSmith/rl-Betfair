@@ -1,5 +1,5 @@
 import { TestBed, ComponentFixture } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { provideRouter, Router } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { of, throwError, Observable } from 'rxjs';
@@ -20,10 +20,13 @@ function makeModel(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
     win_rate: 0.8,
     sharpe: 1.2,
     mean_daily_pnl: 5.0,
+    bet_precision: 0.7,
     efficiency: 0.6,
     test_days: 10,
     profitable_days: 8,
+    early_picks: 3,
     garaged: false,
+    garaged_at: null,
     ...overrides,
   };
 }
@@ -361,13 +364,13 @@ describe('BetExplorer', () => {
     expect(rows.length).toBe(3);
   });
 
-  it('should render all 11 table columns', () => {
+  it('should render all 12 table columns', () => {
     setup();
     component.betData.set(makeBetResponse());
     fixture.detectChanges();
     const headers = fixture.nativeElement.querySelectorAll('th');
     const headerTexts = Array.from(headers).map((h: any) => h.textContent.trim());
-    expect(headers.length).toBe(11);
+    expect(headers.length).toBe(12);
     expect(headerTexts).toContain('Date');
     expect(headerTexts).toContain('Venue');
     expect(headerTexts).toContain('Race');
@@ -550,6 +553,34 @@ describe('BetExplorer', () => {
     setup();
     expect(component.selectedModelId()).toBeNull();
     expect(component.betData()).toBeNull();
+  });
+
+  // ── Navigate to replay ──
+
+  it('should navigate to replay with model, date, and race pre-set', () => {
+    setup();
+    component.onModelChange('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    fixture.detectChanges();
+
+    const router = TestBed.inject(Router);
+    const selectionState = TestBed.inject(SelectionStateService);
+    const navSpy = vi.spyOn(router, 'navigate');
+
+    const bet = makeBet({ date: '2026-03-01', race_id: 'race-42' });
+    component.navigateToReplay(bet);
+
+    expect(navSpy).toHaveBeenCalledWith(['/replay']);
+    expect(selectionState.selectedModelId()).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    expect(selectionState.replayDate()).toBe('2026-03-01');
+    expect(selectionState.replayRaceId()).toBe('race-42');
+  });
+
+  it('should render replay button on bet rows', () => {
+    setup();
+    component.betData.set(makeBetResponse());
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('.btn-replay');
+    expect(btn).toBeTruthy();
   });
 });
 

@@ -249,27 +249,35 @@ def get_replay_race(model_id: str, date: str, race_id: str, request: Request):
                     sid = r.get("RunnerId", r.get("selection_id", 0))
                     if isinstance(sid, dict):
                         sid = sid.get("SelectionId", 0)
+                    # Prices and status may be nested inside sub-objects
+                    prices = r.get("Prices", r.get("prices", {})) or {}
+                    defn = r.get("Definition", r.get("definition", {})) or {}
+                    ltp = (
+                        prices.get("LastTradedPrice")
+                        or r.get("LastTradedPrice")
+                        or r.get("last_traded_price")
+                        or 0
+                    )
+                    status = (
+                        defn.get("Status")
+                        or r.get("Status")
+                        or r.get("status")
+                        or "ACTIVE"
+                    )
+                    total_matched = (
+                        prices.get("TradedVolume")
+                        or r.get("TotalMatched")
+                        or r.get("total_matched")
+                        or 0
+                    )
                     runners.append(
                         TickRunner(
                             selection_id=int(sid),
-                            status=str(
-                                r.get("Status", r.get("status", "ACTIVE"))
-                            ),
-                            last_traded_price=float(
-                                r.get("LastTradedPrice", r.get("last_traded_price", 0))
-                                or 0
-                            ),
-                            total_matched=float(
-                                r.get("TotalMatched", r.get("total_matched", 0)) or 0
-                            ),
-                            available_to_back=_parse_prices(
-                                r.get("Prices", r.get("prices", {})),
-                                "AvailableToBack",
-                            ),
-                            available_to_lay=_parse_prices(
-                                r.get("Prices", r.get("prices", {})),
-                                "AvailableToLay",
-                            ),
+                            status=str(status),
+                            last_traded_price=float(ltp or 0),
+                            total_matched=float(total_matched or 0),
+                            available_to_back=_parse_prices(prices, "AvailableToBack"),
+                            available_to_lay=_parse_prices(prices, "AvailableToLay"),
                         )
                     )
             except (json.JSONDecodeError, TypeError, KeyError):
@@ -322,6 +330,17 @@ def get_replay_race(model_id: str, date: str, race_id: str, request: Request):
 
     race_pnl = sum(b.get("pnl", 0.0) for b in race_bets)
 
+    # Load runner names from runners Parquet
+    runner_names: dict[str, str] = {}
+    data_dir = Path(config["paths"]["processed_data"])
+    runners_path = data_dir / f"{date}_runners.parquet"
+    if runners_path.exists():
+        runners_df = pd.read_parquet(runners_path)
+        race_runners = runners_df[runners_df["market_id"] == race_id]
+        for _, r in race_runners.iterrows():
+            sid = str(int(r["selection_id"]))
+            runner_names[sid] = str(r["runner_name"])
+
     return ReplayRaceResponse(
         model_id=model_id,
         date=date,
@@ -332,6 +351,7 @@ def get_replay_race(model_id: str, date: str, race_id: str, request: Request):
         ticks=replay_ticks,
         all_bets=all_bet_events,
         race_pnl=round(race_pnl, 2),
+        runner_names=runner_names,
     )
 
 

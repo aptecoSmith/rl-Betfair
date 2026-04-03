@@ -182,7 +182,7 @@ class BetfairEnv(gymnasium.Env):
     Reward
     ------
     Sparse — emitted at race settlement:
-    ``race_pnl + early_pick_bonus − (bet_count × efficiency_penalty)``
+    ``race_pnl + early_pick_bonus + precision_bonus − (bet_count × efficiency_penalty)``
 
     An end-of-day bonus proportional to total day P&L is added on the final
     step.
@@ -210,6 +210,7 @@ class BetfairEnv(gymnasium.Env):
         self._early_pick_max = reward_cfg["early_pick_bonus_max"]
         self._early_pick_seconds = reward_cfg["early_pick_min_seconds"]
         self._efficiency_penalty = reward_cfg["efficiency_penalty"]
+        self._precision_bonus = reward_cfg.get("precision_bonus", 0.0)
         self._commission = reward_cfg.get("commission", 0.05)
 
         # Pre-compute features and runner mappings
@@ -548,9 +549,15 @@ class BetfairEnv(gymnasium.Env):
         # Efficiency penalty
         efficiency_cost = race_bet_count * self._efficiency_penalty
 
-        reward = race_pnl + early_pick_bonus - efficiency_cost
-
+        # Precision bonus: reward high win rate on bets (does not affect P&L)
         winning = sum(1 for b in race_bets if b.outcome is BetOutcome.WON)
+        if race_bet_count > 0 and self._precision_bonus > 0:
+            precision = winning / race_bet_count
+            precision_reward = precision * self._precision_bonus
+        else:
+            precision_reward = 0.0
+
+        reward = race_pnl + early_pick_bonus + precision_reward - efficiency_cost
 
         self._race_records.append(RaceRecord(
             market_id=race.market_id,

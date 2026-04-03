@@ -47,6 +47,7 @@ def search_ranges_raw() -> dict:
         "observation_window_ticks": {"type": "int", "min": 3, "max": 360},
         "reward_early_pick_bonus": {"type": "float", "min": 1.0, "max": 1.5},
         "reward_efficiency_penalty": {"type": "float", "min": 0.001, "max": 0.05},
+        "reward_precision_bonus": {"type": "float", "min": 0.0, "max": 3.0},
     }
 
 
@@ -71,7 +72,7 @@ def small_config(search_ranges_raw: dict) -> dict:
 class TestParseSearchRanges:
     def test_returns_correct_count(self, search_ranges_raw: dict):
         specs = parse_search_ranges(search_ranges_raw)
-        assert len(specs) == 9
+        assert len(specs) == 10
 
     def test_float_log_spec(self, hp_specs: list[HyperparamSpec]):
         lr = next(s for s in hp_specs if s.name == "learning_rate")

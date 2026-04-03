@@ -295,6 +295,11 @@ export class ModelDetail implements OnInit {
     this.router.navigate(['/models', modelId]);
   }
 
+  navigateToBets(): void {
+    this.selectionState.selectedModelId.set(this.modelId);
+    this.router.navigate(['/bets']);
+  }
+
   navigateToReplay(date: string): void {
     this.selectionState.selectedModelId.set(this.modelId);
     this.selectionState.replayDate.set(date);

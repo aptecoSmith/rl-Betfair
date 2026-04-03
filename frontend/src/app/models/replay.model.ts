@@ -60,4 +60,5 @@ export interface ReplayRaceResponse {
   ticks: ReplayTick[];
   all_bets: BetEvent[];
   race_pnl: number;
+  runner_names: Record<string, string>;
 }

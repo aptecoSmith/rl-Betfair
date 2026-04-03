@@ -54,6 +54,7 @@ class ModelRecord:
     weights_path: str | None
     composite_score: float | None
     garaged: bool = False
+    garaged_at: str | None = None
 
 
 @dataclass
@@ -175,6 +176,12 @@ class ModelStore:
                 )
             except Exception:
                 pass  # column already exists
+            try:
+                conn.execute(
+                    "ALTER TABLE models ADD COLUMN garaged_at TEXT"
+                )
+            except Exception:
+                pass  # column already exists
             # Migration: add opportunity window columns to existing databases
             for col in ("mean_opportunity_window_s", "median_opportunity_window_s"):
                 try:
@@ -288,11 +295,12 @@ class ModelStore:
 
     def set_garaged(self, model_id: str, garaged: bool) -> None:
         """Set or clear the garaged flag on a model."""
+        now = datetime.now(UTC).isoformat() if garaged else None
         conn = self._get_conn()
         try:
             conn.execute(
-                "UPDATE models SET garaged = ? WHERE model_id = ?",
-                (1 if garaged else 0, model_id),
+                "UPDATE models SET garaged = ?, garaged_at = ? WHERE model_id = ?",
+                (1 if garaged else 0, now, model_id),
             )
             conn.commit()
         finally:
@@ -683,6 +691,7 @@ class ModelStore:
             weights_path=row["weights_path"],
             composite_score=row["composite_score"],
             garaged=bool(row["garaged"]) if "garaged" in keys else False,
+            garaged_at=row["garaged_at"] if "garaged_at" in keys else None,
         )
 
 

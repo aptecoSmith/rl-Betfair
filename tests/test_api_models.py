@@ -162,6 +162,25 @@ class TestScoreboard:
                 scores = [m["composite_score"] for m in models if m["composite_score"] is not None]
                 assert scores == sorted(scores, reverse=True)
 
+    def test_scoreboard_includes_bet_precision_and_early_picks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            gp_id, _, _ = _seed_models(store)
+            _seed_evaluation(store, gp_id)
+
+            client = _make_app(store, _test_config())
+            resp = client.get("/models")
+            assert resp.status_code == 200
+            models = resp.json()["models"]
+            assert len(models) >= 1
+            m = models[0]
+            assert "bet_precision" in m
+            assert "early_picks" in m
+            # Our seed data has 7/10 and 3/8 winning bets
+            assert m["bet_precision"] > 0
+            # Seed data has early_picks=2 + early_picks=1 = 3
+            assert m["early_picks"] == 3
+
 
 # ── Model Detail Tests ───────────────────────────────────────────────
 
@@ -351,3 +370,81 @@ class TestGenetics:
             assert events[0]["event_type"] == "crossover"
             assert events[0]["hyperparameter"] == "learning_rate"
             assert events[1]["mutation_delta"] == 256.0
+
+
+# ── Garage endpoints ─────────────────────────────────────────────────────────
+
+
+class TestGarageEndpoints:
+    """Tests for GET /models/garage and PUT /models/{id}/garage."""
+
+    def test_garage_toggle_on(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = _create_store(d)
+            mid, _, _ = _seed_models(store)
+            client = _make_app(store, _test_config())
+
+            resp = client.put(f"/models/{mid}/garage", json={"garaged": True})
+            assert resp.status_code == 200
+            assert resp.json()["garaged"] is True
+            assert store.get_model(mid).garaged is True
+
+    def test_garage_toggle_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = _create_store(d)
+            mid, _, _ = _seed_models(store)
+            store.set_garaged(mid, True)
+            client = _make_app(store, _test_config())
+
+            resp = client.put(f"/models/{mid}/garage", json={"garaged": False})
+            assert resp.status_code == 200
+            assert resp.json()["garaged"] is False
+
+    def test_garage_toggle_not_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = _create_store(d)
+            client = _make_app(store, _test_config())
+            resp = client.put("/models/nonexistent/garage", json={"garaged": True})
+            assert resp.status_code == 404
+
+    def test_get_garage_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = _create_store(d)
+            _seed_models(store)
+            client = _make_app(store, _test_config())
+            resp = client.get("/models/garage")
+            assert resp.status_code == 200
+            assert resp.json()["models"] == []
+
+    def test_get_garage_returns_garaged(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = _create_store(d)
+            mid, _, _ = _seed_models(store)
+            store.set_garaged(mid, True)
+            client = _make_app(store, _test_config())
+            resp = client.get("/models/garage")
+            assert resp.status_code == 200
+            models = resp.json()["models"]
+            assert len(models) == 1
+            assert models[0]["model_id"] == mid
+            assert models[0]["garaged"] is True
+
+    def test_scoreboard_includes_garaged_field(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = _create_store(d)
+            mid, _, _ = _seed_models(store)
+            client = _make_app(store, _test_config())
+            resp = client.get("/models")
+            assert resp.status_code == 200
+            for m in resp.json()["models"]:
+                assert "garaged" in m
+
+    def test_model_detail_includes_garaged(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = _create_store(d)
+            mid, _, _ = _seed_models(store)
+            store.set_garaged(mid, True)
+            client = _make_app(store, _test_config())
+            resp = client.get(f"/models/{mid}")
+            assert resp.status_code == 200
+            assert resp.json()["garaged"] is True

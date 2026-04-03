@@ -48,6 +48,8 @@ class ModelScore:
     composite_score: float
     test_days: int
     profitable_days: int
+    total_early_picks: int = 0
+    early_picks_per_day: float = 0.0
     mean_opportunity_window_s: float = 0.0
 
 
@@ -119,6 +121,10 @@ class Scoreboard:
             + efficiency * self.w_efficiency
         )
 
+        # Early picks: informational only, not part of composite score
+        total_early_picks = sum(d.early_picks for d in days)
+        early_picks_per_day = total_early_picks / n
+
         # Opportunity window: informational only, not part of composite score
         opp_windows = [d.mean_opportunity_window_s for d in days]
         mean_opp_window = float(np.mean(opp_windows)) if opp_windows else 0.0
@@ -134,6 +140,8 @@ class Scoreboard:
             composite_score=composite,
             test_days=n,
             profitable_days=profitable_days,
+            total_early_picks=total_early_picks,
+            early_picks_per_day=early_picks_per_day,
             mean_opportunity_window_s=mean_opp_window,
         )
 

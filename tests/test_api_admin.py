@@ -627,6 +627,70 @@ class TestReset:
             assert resp.status_code == 200
             assert resp.json()["reset"] is True
 
+    def test_reset_preserves_garaged_models(self):
+        """Garaged models should survive a reset when clear_garage is false."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+
+            # Create two models, garage one
+            mid_keep = store.create_model(0, "arch", "d", {"lr": 0.001})
+            mid_delete = store.create_model(0, "arch", "d", {"lr": 0.002})
+            import torch
+            store.save_weights(mid_keep, {"w": torch.randn(2, 2)})
+            store.save_weights(mid_delete, {"w": torch.randn(2, 2)})
+            store.set_garaged(mid_keep, True)
+
+            client = _make_app(store, config)
+            resp = client.post("/admin/reset", json={"confirm": "DELETE_EVERYTHING"})
+            assert resp.status_code == 200
+
+            # Garaged model survives
+            assert store.get_model(mid_keep) is not None
+            assert store.get_model(mid_keep).garaged is True
+            # Non-garaged model deleted
+            assert store.get_model(mid_delete) is None
+            # Garaged weights survive
+            assert Path(store.get_model(mid_keep).weights_path).exists()
+
+    def test_reset_clear_garage_deletes_everything(self):
+        """With clear_garage=true, garaged models are also deleted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+
+            mid = store.create_model(0, "arch", "d", {"lr": 0.001})
+            store.set_garaged(mid, True)
+
+            client = _make_app(store, config)
+            resp = client.post("/admin/reset", json={
+                "confirm": "DELETE_EVERYTHING",
+                "clear_garage": True,
+            })
+            assert resp.status_code == 200
+            assert store.get_model(mid) is None
+
+    def test_purge_discarded_endpoint(self):
+        """POST /admin/purge-discarded removes discarded non-garaged models."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+
+            mid_active = store.create_model(0, "arch", "d", {"lr": 0.001})
+            mid_disc = store.create_model(0, "arch", "d", {"lr": 0.002})
+            mid_garaged = store.create_model(0, "arch", "d", {"lr": 0.003})
+            store.update_model_status(mid_disc, "discarded")
+            store.update_model_status(mid_garaged, "discarded")
+            store.set_garaged(mid_garaged, True)
+
+            client = _make_app(store, config)
+            resp = client.post("/admin/purge-discarded")
+            assert resp.status_code == 200
+
+            assert store.get_model(mid_active) is not None
+            assert store.get_model(mid_disc) is None
+            assert store.get_model(mid_garaged) is not None
+
 
 # ── Integration tests ────────────────────────────────────────────────
 

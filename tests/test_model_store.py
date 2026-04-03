@@ -382,3 +382,127 @@ class TestEvaluationBetsParquet:
             "opportunity_window_s",
         }
         assert set(df.columns) == expected_cols
+
+
+# ── Garage ───────────────────────────────────────────────────────────────────
+
+
+class TestGarage:
+    """Tests for garage (star/persist) functionality."""
+
+    def test_new_model_not_garaged(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        rec = store.get_model(mid)
+        assert rec.garaged is False
+
+    def test_set_garaged_true(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        store.set_garaged(mid, True)
+        rec = store.get_model(mid)
+        assert rec.garaged is True
+
+    def test_set_garaged_false(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        store.set_garaged(mid, True)
+        store.set_garaged(mid, False)
+        rec = store.get_model(mid)
+        assert rec.garaged is False
+
+    def test_list_garaged_models_empty(self, store: ModelStore):
+        store.create_model(0, "arch", "", _sample_hyperparams())
+        assert store.list_garaged_models() == []
+
+    def test_list_garaged_models(self, store: ModelStore):
+        m1 = store.create_model(0, "arch", "", _sample_hyperparams())
+        m2 = store.create_model(0, "arch", "", _sample_hyperparams())
+        store.set_garaged(m1, True)
+        garaged = store.list_garaged_models()
+        assert len(garaged) == 1
+        assert garaged[0].model_id == m1
+
+    def test_list_garaged_includes_discarded(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        store.set_garaged(mid, True)
+        store.update_model_status(mid, "discarded")
+        garaged = store.list_garaged_models()
+        assert len(garaged) == 1
+        assert garaged[0].status == "discarded"
+
+
+# ── Delete model ─────────────────────────────────────────────────────────────
+
+
+class TestDeleteModel:
+    """Tests for full model deletion."""
+
+    def test_delete_model_removes_record(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        assert store.delete_model(mid) is True
+        assert store.get_model(mid) is None
+
+    def test_delete_model_removes_weights(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        sd = {"layer.weight": torch.randn(4, 4)}
+        path = store.save_weights(mid, sd)
+        assert Path(path).exists()
+        store.delete_model(mid)
+        assert not Path(path).exists()
+
+    def test_delete_model_removes_eval_data(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+        day = EvaluationDayRecord(
+            run_id=rid, date="2026-03-21", day_pnl=5.0,
+            bet_count=10, winning_bets=6, bet_precision=0.6,
+            pnl_per_bet=0.5, early_picks=2, profitable=True,
+        )
+        store.record_evaluation_day(day)
+        store.delete_model(mid)
+        assert store.get_model(mid) is None
+        assert store.get_latest_evaluation_run(mid) is None
+
+    def test_delete_nonexistent_model(self, store: ModelStore):
+        assert store.delete_model("nonexistent-id") is False
+
+
+# ── Purge discarded ──────────────────────────────────────────────────────────
+
+
+class TestPurgeDiscarded:
+    """Tests for bulk purge of discarded non-garaged models."""
+
+    def test_purge_removes_discarded(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        store.update_model_status(mid, "discarded")
+        purged = store.purge_discarded()
+        assert mid in purged
+        assert store.get_model(mid) is None
+
+    def test_purge_preserves_active(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        purged = store.purge_discarded()
+        assert purged == []
+        assert store.get_model(mid) is not None
+
+    def test_purge_preserves_garaged_discarded(self, store: ModelStore):
+        mid = store.create_model(0, "arch", "", _sample_hyperparams())
+        store.update_model_status(mid, "discarded")
+        store.set_garaged(mid, True)
+        purged = store.purge_discarded()
+        assert purged == []
+        assert store.get_model(mid) is not None
+
+    def test_purge_mixed(self, store: ModelStore):
+        m_active = store.create_model(0, "arch", "", _sample_hyperparams())
+        m_discarded = store.create_model(0, "arch", "", _sample_hyperparams())
+        m_garaged_disc = store.create_model(0, "arch", "", _sample_hyperparams())
+        store.update_model_status(m_discarded, "discarded")
+        store.update_model_status(m_garaged_disc, "discarded")
+        store.set_garaged(m_garaged_disc, True)
+
+        purged = store.purge_discarded()
+        assert m_discarded in purged
+        assert m_active not in purged
+        assert m_garaged_disc not in purged
+        assert store.get_model(m_active) is not None
+        assert store.get_model(m_garaged_disc) is not None

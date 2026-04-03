@@ -6,11 +6,10 @@
     <div class="selector">
       <label>Model</label>
       <select data-testid="model-select"
-              [value]="selectedModelId() ?? ''"
               (change)="onModelChange($any($event.target).value)">
-        <option value="" disabled>Select model…</option>
+        <option value="" disabled [selected]="!selectedModelId()">Select model…</option>
         @for (m of models(); track m.model_id) {
-          <option [value]="m.model_id">{{ shortId(m.model_id) }} (Gen {{ m.generation }})</option>
+          <option [value]="m.model_id" [selected]="m.model_id === selectedModelId()">{{ shortId(m.model_id) }} (Gen {{ m.generation }})</option>
         }
       </select>
     </div>
@@ -18,12 +17,11 @@
     <div class="selector">
       <label>Date</label>
       <select data-testid="date-select"
-              [value]="selectedDate() ?? ''"
               [disabled]="!selectedModelId()"
               (change)="onDateChange($any($event.target).value)">
-        <option value="" disabled>Select date…</option>
+        <option value="" disabled [selected]="!selectedDate()">Select date…</option>
         @for (d of dates(); track d) {
-          <option [value]="d">{{ d }}</option>
+          <option [value]="d" [selected]="d === selectedDate()">{{ d }}</option>
         }
       </select>
     </div>
@@ -31,12 +29,11 @@
     <div class="selector">
       <label>Race</label>
       <select data-testid="race-select"
-              [value]="selectedRaceId() ?? ''"
               [disabled]="!selectedDate()"
               (change)="onRaceChange($any($event.target).value)">
-        <option value="" disabled>Select race…</option>
+        <option value="" disabled [selected]="!selectedRaceId()">Select race…</option>
         @for (r of races(); track r.race_id) {
-          <option [value]="r.race_id">{{ r.venue }} — {{ r.market_name }}</option>
+          <option [value]="r.race_id" [selected]="r.race_id === selectedRaceId()">{{ r.venue }} — {{ r.market_name }}</option>
         }
       </select>
     </div>
@@ -123,6 +120,9 @@
                     (click)="toggleRunner(runner.runnerId)">
               <span class="legend-colour" [style.background]="runner.colour"></span>
               <span class="legend-name">{{ runner.name }}</span>
+              @if (runner.totalStake > 0) {
+                <span class="stake-badge">£{{ runner.totalStake | number:'1.0-0' }}</span>
+              }
               @if (runner.isWinner) {
                 <span class="winner-badge">W</span>
               }

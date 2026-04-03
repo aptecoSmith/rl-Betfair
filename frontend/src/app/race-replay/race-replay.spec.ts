@@ -21,10 +21,13 @@ function makeModel(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
     win_rate: 0.8,
     sharpe: 1.2,
     mean_daily_pnl: 5.0,
+    bet_precision: 0.7,
     efficiency: 0.6,
     test_days: 10,
     profitable_days: 8,
+    early_picks: 3,
     garaged: false,
+    garaged_at: null,
     ...overrides,
   };
 }
@@ -94,6 +97,7 @@ function makeRaceResponse(overrides: Partial<ReplayRaceResponse> = {}): ReplayRa
       makeBet({ tick_timestamp: '2026-03-01T14:10:00Z', seconds_to_off: 120, runner_id: 789, runner_name: 'Quick Silver', action: 'back', price: 3.8, stake: 8.0, matched_size: 8.0, outcome: 'lost', pnl: -8.0 }),
     ],
     race_pnl: 22.0,
+    runner_names: { '123': 'Thunder Bolt', '456': 'Fast Dash' },
     ...overrides,
   };
 }
@@ -436,7 +440,7 @@ describe('RaceReplay', () => {
     const conclusion = component.conclusionData();
     expect(conclusion).not.toBeNull();
     expect(conclusion!.totalBets).toBe(3);
-    expect(conclusion!.winnerName).toBe('Test Horse');
+    expect(conclusion!.winnerName).toBe('Thunder Bolt');
   });
 
   it('should detect winner backed in conclusion', () => {

@@ -114,6 +114,25 @@
   }
 }
 
+.btn-view-bets {
+  background: #1e1e38;
+  border: 1px solid #2196f3;
+  color: #2196f3;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+  align-self: center;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover {
+    background: #2196f3;
+    color: #fff;
+  }
+}
+
 .btn-delete-model {
   background: transparent;
   border: 1px solid #f44336;

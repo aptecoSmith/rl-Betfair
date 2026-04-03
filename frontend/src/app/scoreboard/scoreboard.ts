@@ -1,6 +1,7 @@
-import { Component, OnInit, inject, signal, computed } from '@angular/core';
+import { Component, OnInit, OnDestroy, inject, signal, computed, effect } from '@angular/core';
 import { Router } from '@angular/router';
 import { ApiService } from '../services/api.service';
+import { TrainingService } from '../services/training.service';
 import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardEntry } from '../models/scoreboard.model';
 import { DecimalPipe, CurrencyPipe, PercentPipe } from '@angular/common';
@@ -26,9 +27,10 @@ const GENERATION_COLOURS = [
   templateUrl: './scoreboard.html',
   styleUrl: './scoreboard.scss',
 })
-export class Scoreboard implements OnInit {
+export class Scoreboard implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
+  private readonly training = inject(TrainingService);
   private readonly selectionState = inject(SelectionStateService);
 
   readonly models = signal<ScoreboardEntry[]>([]);
@@ -41,8 +43,26 @@ export class Scoreboard implements OnInit {
       .sort((a, b) => (b.composite_score ?? -Infinity) - (a.composite_score ?? -Infinity))
   );
 
+  /** Auto-reload scoreboard when a scoring phase completes during training. */
+  private readonly refreshEffect = effect(() => {
+    const event = this.training.latestEvent();
+    if (!event) return;
+
+    const isScoringDone =
+      event.event === 'phase_complete' &&
+      (event.phase === 'scoring' || event.phase === 'run_complete');
+
+    if (isScoringDone) {
+      this.loadScoreboard();
+    }
+  });
+
   ngOnInit(): void {
     this.loadScoreboard();
+  }
+
+  ngOnDestroy(): void {
+    this.refreshEffect.destroy();
   }
 
   loadScoreboard(): void {

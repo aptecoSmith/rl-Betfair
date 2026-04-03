@@ -513,6 +513,90 @@ class TestReward:
         # Reward should include the bonus
         assert record.reward > record.pnl  # bonus pushes reward above raw P&L
 
+    def test_precision_bonus_applied(self, config):
+        """High bet win rate should earn a precision bonus in reward."""
+        config_with_precision = {
+            **config,
+            "reward": {**config["reward"], "precision_bonus": 2.0},
+        }
+
+        start = datetime(2026, 3, 26, 14, 0, 0)
+        runners = [_make_runner_snap(101), _make_runner_snap(102)]
+        meta = {101: _make_runner_meta(101), 102: _make_runner_meta(102)}
+
+        ticks = []
+        for i in range(3):
+            ticks.append(_make_tick(
+                "1.111", seq=i, runners=runners,
+                start_time=start, timestamp=start - timedelta(seconds=120 - i * 5),
+                in_play=False, winner=101,
+            ))
+        ticks.append(_make_tick(
+            "1.111", seq=3, runners=runners,
+            start_time=start, timestamp=start + timedelta(seconds=5),
+            in_play=True, winner=101,
+        ))
+        race = Race("1.111", "Test", start, 101, ticks, meta)
+        day = Day(date="2026-03-26", races=[race])
+
+        env = BetfairEnv(day, config_with_precision)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        for _ in range(4):
+            _, _, _, _, info = env.step(action)
+
+        record = info["race_records"][0]
+        bet_count = record.bet_count
+        winning = record.winning_bets
+        assert bet_count > 0
+        # Precision bonus = (winning/bet_count) * precision_bonus_value
+        precision = winning / bet_count
+        expected_bonus = precision * 2.0
+        penalty = bet_count * config["reward"]["efficiency_penalty"]
+        assert record.reward == pytest.approx(record.pnl + expected_bonus - penalty)
+
+    def test_precision_bonus_zero_when_not_configured(self, config):
+        """Without precision_bonus in config, no bonus should be applied."""
+        # Default config has no precision_bonus key
+        start = datetime(2026, 3, 26, 14, 0, 0)
+        runners = [_make_runner_snap(101), _make_runner_snap(102)]
+        meta = {101: _make_runner_meta(101), 102: _make_runner_meta(102)}
+
+        ticks = []
+        for i in range(3):
+            ticks.append(_make_tick(
+                "1.111", seq=i, runners=runners,
+                start_time=start, timestamp=start - timedelta(seconds=120 - i * 5),
+                in_play=False, winner=101,
+            ))
+        ticks.append(_make_tick(
+            "1.111", seq=3, runners=runners,
+            start_time=start, timestamp=start + timedelta(seconds=5),
+            in_play=True, winner=101,
+        ))
+        race = Race("1.111", "Test", start, 101, ticks, meta)
+        day = Day(date="2026-03-26", races=[race])
+
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.8
+
+        for _ in range(4):
+            _, _, _, _, info = env.step(action)
+
+        record = info["race_records"][0]
+        bet_count = record.bet_count
+        penalty = bet_count * config["reward"]["efficiency_penalty"]
+        # No precision bonus → reward = pnl - penalty
+        assert record.reward == pytest.approx(record.pnl - penalty)
+
 
 # ── Episode lifecycle ───────────────────────────────────────────────────────
 

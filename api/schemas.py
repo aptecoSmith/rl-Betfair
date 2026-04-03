@@ -28,10 +28,13 @@ class ScoreboardEntry(BaseModel):
     win_rate: float
     sharpe: float
     mean_daily_pnl: float
+    bet_precision: float
     efficiency: float
     test_days: int
     profitable_days: int
+    early_picks: int = 0
     garaged: bool = False
+    garaged_at: str | None = None
 
 
 class ScoreboardResponse(BaseModel):
@@ -222,6 +225,7 @@ class ReplayRaceResponse(BaseModel):
     ticks: list[ReplayTick]
     all_bets: list[BetEvent]
     race_pnl: float
+    runner_names: dict[str, str] = {}  # selection_id → horse name
 
 
 class ExplorerBet(BaseModel):

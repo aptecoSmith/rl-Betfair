@@ -127,6 +127,7 @@
             <th class="sortable" (click)="toggleSort('pnl')" data-testid="sort-pnl">
               P&L{{ sortIndicator('pnl') }}
             </th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -154,11 +155,14 @@
               <td class="mono pnl-cell" [class.positive]="bet.pnl > 0" [class.negative]="bet.pnl < 0">
                 {{ bet.pnl > 0 ? '+' : '' }}{{ bet.pnl | number:'1.2-2' }}
               </td>
+              <td>
+                <button class="btn-replay" (click)="navigateToReplay(bet)" title="Replay this race">&#9654;</button>
+              </td>
             </tr>
           }
           @if (sortedBets().length === 0) {
             <tr>
-              <td colspan="11" class="empty-row" data-testid="empty-row">
+              <td colspan="12" class="empty-row" data-testid="empty-row">
                 @if (allBets().length === 0) {
                   No bets found for this model.
                 } @else {

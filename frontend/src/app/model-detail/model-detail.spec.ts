@@ -6,6 +6,7 @@ import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { ModelDetail } from './model-detail';
 import { ApiService } from '../services/api.service';
+import { SelectionStateService } from '../services/selection-state.service';
 import {
   ModelDetailResponse,
   LineageResponse,
@@ -663,5 +664,72 @@ describe('ModelDetail', () => {
     expect(legend).toBeTruthy();
     const items = legend?.querySelectorAll('.legend-item');
     expect(items?.length).toBe(2);
+  });
+
+  // ── Navigate to replay ──
+
+  it('should navigate to replay with date', () => {
+    setup();
+    const spy = vi.spyOn(router, 'navigate');
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.navigateToReplay('2026-03-25');
+    expect(spy).toHaveBeenCalledWith(['/replay']);
+    expect(selectionState.selectedModelId()).toBe(MODEL_ID);
+    expect(selectionState.replayDate()).toBe('2026-03-25');
+    expect(selectionState.replayRaceId()).toBeNull();
+  });
+
+  // ── Navigate to bets ──
+
+  it('should navigate to bets page for this model', () => {
+    setup();
+    const spy = vi.spyOn(router, 'navigate');
+    const selectionState = TestBed.inject(SelectionStateService);
+    component.navigateToBets();
+    expect(spy).toHaveBeenCalledWith(['/bets']);
+    expect(selectionState.selectedModelId()).toBe(MODEL_ID);
+  });
+
+  // ── Delete dialog ──
+
+  it('should show delete dialog on promptDelete', () => {
+    setup();
+    component.promptDelete();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('[data-testid="delete-dialog"]');
+    expect(dialog).toBeTruthy();
+  });
+
+  it('should hide delete dialog on cancelDelete', () => {
+    setup();
+    component.promptDelete();
+    fixture.detectChanges();
+    component.cancelDelete();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('[data-testid="delete-dialog"]');
+    expect(dialog).toBeFalsy();
+  });
+
+  it('should call deleteAgent and navigate on confirmDelete', () => {
+    setup();
+    const deleteSpy = vi.spyOn(mockApi, 'deleteAgent');
+    const navSpy = vi.spyOn(router, 'navigate');
+    component.confirmDelete();
+    expect(deleteSpy).toHaveBeenCalledWith(MODEL_ID);
+    expect(navSpy).toHaveBeenCalledWith(['/scoreboard']);
+  });
+
+  it('should render delete button', () => {
+    setup();
+    const btn = fixture.nativeElement.querySelector('[data-testid="delete-model-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn?.textContent?.trim()).toBe('Delete');
+  });
+
+  it('should render view bets button', () => {
+    setup();
+    const btn = fixture.nativeElement.querySelector('[data-testid="view-bets-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn?.textContent?.trim()).toBe('View Bets');
   });
 });

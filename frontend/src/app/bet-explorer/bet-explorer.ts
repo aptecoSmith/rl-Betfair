@@ -1,4 +1,5 @@
 import { Component, OnInit, inject, signal, computed } from '@angular/core';
+import { Router } from '@angular/router';
 import { DecimalPipe, CurrencyPipe, PercentPipe, UpperCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
@@ -24,6 +25,7 @@ interface RaceOption {
 })
 export class BetExplorer implements OnInit {
   private readonly api = inject(ApiService);
+  private readonly router = inject(Router);
   private readonly selectionState = inject(SelectionStateService);
 
   // ── Model selection ──
@@ -227,6 +229,15 @@ export class BetExplorer implements OnInit {
   formatRaceTime(isoTimestamp: string): string {
     if (!isoTimestamp) return '';
     return new Date(isoTimestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+
+  navigateToReplay(bet: ExplorerBet): void {
+    const modelId = this.selectedModelId();
+    if (!modelId) return;
+    this.selectionState.selectedModelId.set(modelId);
+    this.selectionState.replayDate.set(bet.date);
+    this.selectionState.replayRaceId.set(bet.race_id);
+    this.router.navigate(['/replay']);
   }
 }
 

@@ -22,6 +22,7 @@
         <span class="score-label">Composite Score</span>
         <span class="score-value">{{ m.composite_score !== null ? (m.composite_score | number:'1.3-3') : '—' }}</span>
       </div>
+      <button class="btn-view-bets" (click)="navigateToBets()" data-testid="view-bets-btn">View Bets</button>
       <button class="btn-delete-model" (click)="promptDelete()" data-testid="delete-model-btn" title="Delete this model">Delete</button>
     }
   </div>

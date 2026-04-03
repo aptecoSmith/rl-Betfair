@@ -209,6 +209,23 @@
   &.lost { border-left: 3px solid #e57373; }
 }
 
+.btn-replay {
+  background: none;
+  border: 1px solid #2196f3;
+  color: #2196f3;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover {
+    background: #2196f3;
+    color: #fff;
+  }
+}
+
 .mono {
   font-family: monospace;
   font-size: 0.8rem;

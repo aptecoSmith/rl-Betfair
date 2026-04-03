@@ -222,6 +222,18 @@ class TestComputeScore:
         assert score.win_rate == 1.0
         assert score.test_days == 1
 
+    def test_early_picks_aggregation(self, store, config):
+        board = Scoreboard(store, config)
+        days = [
+            EvaluationDayRecord("r", "d0", 10.0, 5, 3, 0.6, 2.0, 3, True),
+            EvaluationDayRecord("r", "d1", 5.0, 5, 2, 0.4, 1.0, 1, True),
+            EvaluationDayRecord("r", "d2", -2.0, 5, 1, 0.2, -0.4, 0, False),
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.total_early_picks == 4
+        assert score.early_picks_per_day == pytest.approx(4 / 3)
+
 
 # ── Scoreboard ranking ───────────────────────────────────────────────────────
 
@@ -281,6 +293,37 @@ class TestRankAll:
         board = Scoreboard(store, config)
         rankings = board.rank_all()
         assert len(rankings) == 1
+
+    def test_rank_includes_garaged_active(self, store, config):
+        """Garaged active models appear in rankings."""
+        mid = _insert_model_with_days(store, [10.0, 5.0])
+        store.set_garaged(mid, True)
+
+        board = Scoreboard(store, config)
+        rankings = board.rank_all()
+        assert len(rankings) == 1
+        assert rankings[0].model_id == mid
+
+    def test_rank_includes_garaged_discarded(self, store, config):
+        """Garaged discarded models still appear in rankings."""
+        mid = _insert_model_with_days(store, [10.0, 5.0])
+        store.update_model_status(mid, "discarded")
+        store.set_garaged(mid, True)
+
+        board = Scoreboard(store, config)
+        rankings = board.rank_all()
+        assert len(rankings) == 1
+        assert rankings[0].model_id == mid
+
+    def test_rank_no_duplicates_active_garaged(self, store, config):
+        """A model that is both active and garaged should not appear twice."""
+        mid = _insert_model_with_days(store, [10.0, 5.0])
+        store.set_garaged(mid, True)
+
+        board = Scoreboard(store, config)
+        rankings = board.rank_all()
+        ids = [r.model_id for r in rankings]
+        assert ids.count(mid) == 1
 
 
 class TestUpdateScores:

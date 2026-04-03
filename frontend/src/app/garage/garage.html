@@ -1,0 +1,71 @@
+<div class="garage-container">
+  <h1>Garage</h1>
+  <p class="subtitle">Models saved for future re-evaluation or deployment. Garaged models survive Start Afresh.</p>
+
+  @if (loading()) {
+    <div class="loading">Loading garage...</div>
+  }
+
+  @if (error(); as err) {
+    <div class="error">{{ err }}</div>
+  }
+
+  @if (!loading() && !error()) {
+    @if (rankedModels().length === 0) {
+      <div class="empty-state" data-testid="empty-state">
+        No models in the garage. Click the star on the Scoreboard to garage a model.
+      </div>
+    } @else {
+      <table class="garage-table" data-testid="garage-table">
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Model ID</th>
+            <th>Gen</th>
+            <th>Architecture</th>
+            <th>Status</th>
+            <th>Win Rate</th>
+            <th>Sharpe</th>
+            <th>Mean Daily P&amp;L</th>
+            <th>Efficiency</th>
+            <th>Composite Score</th>
+            <th>Garaged</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (model of rankedModels(); track model.model_id; let i = $index) {
+            <tr
+              class="garage-row"
+              [style.border-left]="'4px solid ' + generationColour(model.generation)"
+              (click)="onRowClick(model)"
+            >
+              <td>{{ i + 1 }}</td>
+              <td class="model-id" [title]="model.model_id">{{ shortId(model.model_id) }}</td>
+              <td>
+                <span class="gen-badge" [style.background-color]="generationColour(model.generation)">
+                  {{ model.generation }}
+                </span>
+              </td>
+              <td>{{ model.architecture_name }}</td>
+              <td>
+                <span class="status-badge" [class.active]="model.status === 'active'" [class.discarded]="model.status === 'discarded'">
+                  {{ model.status }}
+                </span>
+              </td>
+              <td>{{ model.win_rate | percent:'1.0-0' }}</td>
+              <td>{{ model.sharpe | number:'1.2-2' }}</td>
+              <td>{{ model.mean_daily_pnl | currency:'GBP':'symbol':'1.2-2' }}</td>
+              <td>{{ model.efficiency | number:'1.3-3' }}</td>
+              <td class="score">{{ model.composite_score !== null ? (model.composite_score | number:'1.4-4') : '—' }}</td>
+              <td class="garaged-date">{{ model.garaged_at ? (model.garaged_at | slice:0:10) : '—' }}</td>
+              <td>
+                <button class="btn-remove" (click)="onRemoveFromGarage($event, model)" title="Remove from garage">Remove</button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</div>
