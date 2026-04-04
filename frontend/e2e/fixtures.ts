@@ -15,7 +15,7 @@ export const test = base.extend<Fixtures>({
   backendAvailable: async ({}, use) => {
     let available = false;
     try {
-      const resp = await fetch('http://localhost:8000/models');
+      const resp = await fetch('http://localhost:8001/models');
       available = resp.ok;
     } catch {
       available = false;

@@ -1,6 +1,6 @@
 /**
  * Integration tests for ModelDetail component.
- * Run against a real FastAPI backend at localhost:8000.
+ * Run against a real FastAPI backend at localhost:8001.
  * Skipped when the API is not available.
  */
 import { TestBed, ComponentFixture } from '@angular/core/testing';
@@ -13,7 +13,7 @@ import { ModelDetail } from './model-detail';
 import { ApiService } from '../services/api.service';
 import { ScoreboardResponse } from '../models/scoreboard.model';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = 'http://localhost:8001';
 let apiAvailable = false;
 let firstModelId = '';
 

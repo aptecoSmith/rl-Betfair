@@ -1,6 +1,6 @@
 /**
  * Integration tests for the RaceReplay component.
- * These test against the real FastAPI backend at localhost:8000.
+ * These test against the real FastAPI backend at localhost:8001.
  * Skip if the API is not running.
  */
 import { TestBed, ComponentFixture } from '@angular/core/testing';
@@ -19,7 +19,7 @@ import { ReplayDayResponse, ReplayRaceResponse } from '../models/replay.model';
 @Injectable()
 class IntegrationApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = 'http://localhost:8000';
+  private readonly base = 'http://localhost:8001';
 
   getScoreboard(): Observable<ScoreboardResponse> {
     return this.http.get<ScoreboardResponse>(`${this.base}/models`);
@@ -42,7 +42,7 @@ let apiAvailable = false;
 
 beforeAll(async () => {
   try {
-    const resp = await fetch('http://localhost:8000/models');
+    const resp = await fetch('http://localhost:8001/models');
     apiAvailable = resp.ok;
   } catch {
     apiAvailable = false;

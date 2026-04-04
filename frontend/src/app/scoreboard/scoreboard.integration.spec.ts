@@ -1,6 +1,6 @@
 /**
  * Integration tests for the Scoreboard component.
- * These test against the real FastAPI backend at localhost:8000.
+ * These test against the real FastAPI backend at localhost:8001.
  * Skip if the API is not running.
  */
 import { TestBed, ComponentFixture } from '@angular/core/testing';
@@ -19,7 +19,7 @@ class IntegrationApiService {
   private readonly http = inject(HttpClient);
 
   getScoreboard(): Observable<ScoreboardResponse> {
-    return this.http.get<ScoreboardResponse>('http://localhost:8000/models');
+    return this.http.get<ScoreboardResponse>('http://localhost:8001/models');
   }
 }
 
@@ -27,7 +27,7 @@ let apiAvailable = false;
 
 beforeAll(async () => {
   try {
-    const resp = await fetch('http://localhost:8000/models');
+    const resp = await fetch('http://localhost:8001/models');
     apiAvailable = resp.ok;
   } catch {
     apiAvailable = false;

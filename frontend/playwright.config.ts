@@ -10,7 +10,7 @@ export default defineConfig({
   timeout: 30_000,
 
   use: {
-    baseURL: 'http://localhost:4200',
+    baseURL: 'http://localhost:4202',
     trace: 'on-first-retry',
   },
 
@@ -23,7 +23,7 @@ export default defineConfig({
 
   webServer: {
     command: 'npm start',
-    url: 'http://localhost:4200',
+    url: 'http://localhost:4202',
     reuseExistingServer: !process.env['CI'],
     timeout: 120_000,
   },
