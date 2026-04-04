@@ -632,6 +632,11 @@ class DataExtractor:
         runners_path = self._output_dir / f"{date_str}_runners.parquet"
         ticks_df.to_parquet(ticks_path, index=False)
         runners_df.to_parquet(runners_path, index=False)
+        logger.info(
+            "Wrote %s (%.1f KB, %d rows) and %s (%.1f KB, %d rows)",
+            ticks_path.name, ticks_path.stat().st_size / 1024, len(ticks_df),
+            runners_path.name, runners_path.stat().st_size / 1024, len(runners_df),
+        )
 
 
 # ── SnapJson enrichment ───────────────────────────────────────────────────────

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import shutil
+import subprocess
 import uuid
 from datetime import date
 from pathlib import Path
@@ -26,6 +29,10 @@ from api.schemas import (
     ImportRangeResponse,
     ResetRequest,
     ResetResponse,
+    RestoreRequest,
+    RestoreResponse,
+    StreamrecorderBackup,
+    StreamrecorderBackupsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -309,6 +316,7 @@ async def import_range(body: ImportRangeRequest, request: Request):
         import time
 
         training_state["running"] = True
+        logger.info("[import] Job %s started: %d date(s)", job_id, len(all_dates))
         try:
             from data.extractor import DataExtractor
 
@@ -324,9 +332,13 @@ async def import_range(body: ImportRangeRequest, request: Request):
 
             for i, target_date in enumerate(all_dates):
                 try:
-                    extractor.extract_date(target_date)
+                    ok = extractor.extract_date(target_date)
+                    if ok:
+                        logger.info("[import] Extracted %s", target_date)
+                    else:
+                        logger.warning("[import] No tick data for %s", target_date)
                 except Exception:
-                    logger.exception("Failed to extract %s", target_date)
+                    logger.exception("[import] Failed to extract %s", target_date)
 
                 await progress_queue.put({
                     "event": "progress",
@@ -450,3 +462,404 @@ async def reset_system(body: ResetRequest, request: Request):
     )
     logger.info(detail)
     return ResetResponse(reset=True, detail=detail)
+
+
+# ── Streamrecorder restore ──────────────────────────────────────────
+
+
+def _streamrecorder_dir(request: Request) -> Path:
+    return Path(request.app.state.config["paths"]["streamrecorder_backups"])
+
+
+def _mysql_bin(request: Request) -> str:
+    raw = request.app.state.config["paths"]["mysql_bin"]
+    # Convert MSYS/Git-Bash paths (/c/...) to Windows paths (C:\...)
+    if re.match(r"^/[a-zA-Z]/", raw):
+        raw = raw[1].upper() + ":" + raw[2:]
+    resolved = str(Path(raw))
+    logger.debug("[config] mysql_bin resolved: %s → %s", request.app.state.config["paths"]["mysql_bin"], resolved)
+    return resolved
+
+
+# Pattern: coldData-2026-04-02_223000.sql.gz  or  hotData-2026-04-02_223000.sql.gz
+_BACKUP_RE = re.compile(
+    r"^(coldData|hotData)-(\d{4}-\d{2}-\d{2})(?:_(\d{6}))?\.sql\.gz$"
+)
+
+
+def _scan_backups(backup_dir: Path, extracted: set[str]) -> list[StreamrecorderBackup]:
+    """Scan StreamRecorder backup folder and return latest cold+hot pair per date."""
+    if not backup_dir.exists():
+        return []
+
+    # Collect all .sql.gz files grouped by (kind, date) → list of (timestamp, filename)
+    by_date: dict[str, dict[str, list[tuple[str, str]]]] = {}
+    for f in backup_dir.iterdir():
+        m = _BACKUP_RE.match(f.name)
+        if not m:
+            continue
+        kind, date_str, ts = m.group(1), m.group(2), m.group(3) or "000000"
+        by_date.setdefault(date_str, {}).setdefault(kind, []).append((ts, f.name))
+
+    results: list[StreamrecorderBackup] = []
+    for date_str in sorted(by_date.keys()):
+        groups = by_date[date_str]
+        cold_list = groups.get("coldData", [])
+        hot_list = groups.get("hotData", [])
+        if not cold_list or not hot_list:
+            continue  # need both cold + hot
+
+        # Pick latest timestamp for each
+        cold_list.sort(key=lambda x: x[0], reverse=True)
+        hot_list.sort(key=lambda x: x[0], reverse=True)
+
+        cold_ts, cold_file = cold_list[0]
+        hot_ts, hot_file = hot_list[0]
+
+        cold_path = backup_dir / cold_file
+        hot_path = backup_dir / hot_file
+
+        results.append(StreamrecorderBackup(
+            date=date_str,
+            timestamp=max(cold_ts, hot_ts),
+            cold_file=cold_file,
+            hot_file=hot_file,
+            cold_size_bytes=cold_path.stat().st_size,
+            hot_size_bytes=hot_path.stat().st_size,
+            already_extracted=date_str in extracted,
+        ))
+
+    return results
+
+
+@router.get("/streamrecorder-backups", response_model=StreamrecorderBackupsResponse)
+async def list_streamrecorder_backups(request: Request):
+    """Scan StreamRecorder backup folder for available cold+hot pairs."""
+    backup_dir = _streamrecorder_dir(request)
+    processed = _processed_dir(request)
+    extracted = set(_get_extracted_dates(processed))
+    backups = _scan_backups(backup_dir, extracted)
+    return StreamrecorderBackupsResponse(
+        backups=backups,
+        backup_dir=str(backup_dir.resolve()),
+    )
+
+
+def _run_restore(mysql_bin: str, backup_dir: Path, db_name: str, gz_file: str,
+                 user: str, password: str) -> str:
+    """Decompress a .sql.gz and pipe into MySQL. Returns error string or empty on success."""
+    gz_path = backup_dir / gz_file
+    logger.info("[restore] Piping %s into %s (mysql_bin=%s)", gz_file, db_name, mysql_bin)
+
+    # gzip -dc file.sql.gz | mysql -u root -pPASS db_name
+    gzip_cmd = ["gzip", "-dc", str(gz_path)]
+    mysql_cmd = [mysql_bin, "-u", user, f"-p{password}", db_name]
+
+    try:
+        gzip_proc = subprocess.Popen(gzip_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        mysql_proc = subprocess.Popen(
+            mysql_cmd,
+            stdin=gzip_proc.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        gzip_proc.stdout.close()  # allow gzip to receive SIGPIPE
+        _, mysql_err = mysql_proc.communicate(timeout=600)
+        gzip_err = gzip_proc.stderr.read()
+        gzip_proc.wait(timeout=10)
+
+        if gzip_proc.returncode != 0:
+            gzip_msg = gzip_err.decode(errors="replace").strip()
+            logger.error("[restore] gzip failed for %s: %s", gz_file, gzip_msg)
+            return f"gzip error: {gzip_msg}"
+        if mysql_proc.returncode != 0:
+            mysql_msg = mysql_err.decode(errors="replace").strip()
+            logger.error("[restore] mysql import failed for %s: %s", gz_file, mysql_msg)
+            return mysql_msg
+        logger.info("[restore] Successfully restored %s into %s", gz_file, db_name)
+        return ""
+    except subprocess.TimeoutExpired:
+        gzip_proc.kill()
+        mysql_proc.kill()
+        logger.error("[restore] Restore timed out for %s (10 min limit)", gz_file)
+        return "Restore timed out (10 min limit)"
+    except FileNotFoundError as e:
+        logger.error("[restore] Command not found: %s", e)
+        return f"Command not found: {e}"
+
+
+def _drop_and_create_db(mysql_bin: str, db_name: str, user: str, password: str) -> str:
+    """Drop and recreate a MySQL database. Returns error string or empty on success."""
+    sql = f"DROP DATABASE IF EXISTS `{db_name}`; CREATE DATABASE `{db_name}`;"
+    cmd = [mysql_bin, "-u", user, f"-p{password}", "-e", sql]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            msg = result.stderr.decode(errors="replace").strip()
+            logger.error("[restore] Failed to recreate DB %s: %s", db_name, msg)
+            return msg
+        logger.info("[restore] Recreated database %s", db_name)
+        return ""
+    except FileNotFoundError as e:
+        logger.error("[restore] Command not found: %s", e)
+        return f"Command not found: {e}"
+
+
+@router.post("/restore-backups", response_model=RestoreResponse)
+async def restore_backups(body: RestoreRequest, request: Request):
+    """Restore selected dates from StreamRecorder backups into MySQL, then extract Parquet."""
+    if not body.dates:
+        logger.warning("[restore] Rejected: no dates selected")
+        raise HTTPException(status_code=400, detail="No dates selected")
+
+    logger.info("[restore] Request received for dates: %s", body.dates)
+    backup_dir = _streamrecorder_dir(request)
+    processed = _processed_dir(request)
+    extracted = set(_get_extracted_dates(processed))
+    all_backups = _scan_backups(backup_dir, extracted)
+    backup_by_date = {b.date: b for b in all_backups}
+
+    # Validate all requested dates exist
+    missing = [d for d in body.dates if d not in backup_by_date]
+    if missing:
+        logger.warning("[restore] Rejected: missing backups for %s", missing)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No backups found for: {', '.join(missing)}",
+        )
+
+    config = request.app.state.config
+    mysql_bin = _mysql_bin(request)
+    progress_queue = request.app.state.progress_queue
+    training_state = request.app.state.training_state
+
+    # Read credentials from env
+    user = os.environ.get("DB_USER", "root")
+    password = os.environ.get("DB_PASSWORD", "")
+    cold_db = config["database"]["cold_data_db"]
+    hot_db = config["database"]["hot_data_db"]
+
+    job_id = str(uuid.uuid4())
+    dates_to_restore = sorted(body.dates)
+
+    async def _run_restore_job():
+        import time
+
+        async def _with_heartbeat(blocking_fn, detail: str, process_snapshot: dict):
+            """Run *blocking_fn* in a thread while sending heartbeat events every 5 s."""
+            logger.info("[restore] %s", detail)
+            task = asyncio.get_event_loop().run_in_executor(None, blocking_fn)
+            elapsed = 0
+            while True:
+                try:
+                    result = await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                    logger.info("[restore] Done: %s (%.0fs)", detail, elapsed)
+                    return result
+                except asyncio.TimeoutError:
+                    elapsed += 5
+                    logger.info("[restore] Still working: %s (%ds elapsed)", detail, elapsed)
+                    await progress_queue.put({
+                        "event": "progress",
+                        "timestamp": time.time(),
+                        "phase": "restoring",
+                        "process": process_snapshot,
+                        "detail": detail,
+                    })
+
+        training_state["running"] = True
+        total = len(dates_to_restore)
+        logger.info("[restore] Job %s started: %d date(s) — %s", job_id, total, dates_to_restore)
+
+        try:
+            await progress_queue.put({
+                "event": "phase_start",
+                "timestamp": time.time(),
+                "phase": "restoring",
+                "summary": {"job_id": job_id, "total_dates": total},
+            })
+
+            succeeded = []
+            failed = []
+            for i, date_str in enumerate(dates_to_restore):
+                backup = backup_by_date[date_str]
+                steps_per_date = 3  # drop+create+restore cold, hot, extract
+                base_progress = i * steps_per_date
+
+                def _make_process(step_offset: int) -> dict:
+                    completed = base_progress + step_offset
+                    return {
+                        "label": "Restoring backups",
+                        "completed": completed,
+                        "total": total * steps_per_date,
+                        "pct": round(completed / (total * steps_per_date) * 100, 1),
+                        "item_eta_human": "",
+                        "process_eta_human": "",
+                    }
+
+                # Step 1: Restore coldData
+                step1_detail = f"Restoring coldData for {date_str}..."
+                await progress_queue.put({
+                    "event": "progress",
+                    "timestamp": time.time(),
+                    "phase": "restoring",
+                    "process": _make_process(0),
+                    "detail": step1_detail,
+                })
+
+                err = await _with_heartbeat(
+                    lambda: _drop_and_create_db(mysql_bin, cold_db, user, password),
+                    step1_detail, _make_process(0),
+                )
+                if err:
+                    logger.error("Failed to recreate %s: %s", cold_db, err)
+                    failed.append(date_str)
+                    await progress_queue.put({
+                        "event": "progress",
+                        "timestamp": time.time(),
+                        "phase": "restoring",
+                        "detail": f"ERROR recreating {cold_db}: {err}",
+                    })
+                    continue
+
+                err = await _with_heartbeat(
+                    lambda: _run_restore(mysql_bin, backup_dir, cold_db, backup.cold_file, user, password),
+                    step1_detail, _make_process(0),
+                )
+                if err:
+                    logger.error("Failed to restore cold for %s: %s", date_str, err)
+                    failed.append(date_str)
+                    await progress_queue.put({
+                        "event": "progress",
+                        "timestamp": time.time(),
+                        "phase": "restoring",
+                        "detail": f"ERROR restoring coldData for {date_str}: {err}",
+                    })
+                    continue
+
+                # Step 2: Restore hotData
+                step2_detail = f"Restoring hotData for {date_str}..."
+                await progress_queue.put({
+                    "event": "progress",
+                    "timestamp": time.time(),
+                    "phase": "restoring",
+                    "process": _make_process(1),
+                    "detail": step2_detail,
+                })
+
+                err = await _with_heartbeat(
+                    lambda: _drop_and_create_db(mysql_bin, hot_db, user, password),
+                    step2_detail, _make_process(1),
+                )
+                if err:
+                    logger.error("Failed to recreate %s: %s", hot_db, err)
+                    failed.append(date_str)
+                    await progress_queue.put({
+                        "event": "progress",
+                        "timestamp": time.time(),
+                        "phase": "restoring",
+                        "detail": f"ERROR recreating {hot_db}: {err}",
+                    })
+                    continue
+
+                err = await _with_heartbeat(
+                    lambda: _run_restore(mysql_bin, backup_dir, hot_db, backup.hot_file, user, password),
+                    step2_detail, _make_process(1),
+                )
+                if err:
+                    logger.error("Failed to restore hot for %s: %s", date_str, err)
+                    failed.append(date_str)
+                    await progress_queue.put({
+                        "event": "progress",
+                        "timestamp": time.time(),
+                        "phase": "restoring",
+                        "detail": f"ERROR restoring hotData for {date_str}: {err}",
+                    })
+                    continue
+
+                # Step 3: Extract Parquet
+                step3_detail = f"Extracting Parquet for {date_str}..."
+                await progress_queue.put({
+                    "event": "progress",
+                    "timestamp": time.time(),
+                    "phase": "restoring",
+                    "process": _make_process(2),
+                    "detail": step3_detail,
+                })
+
+                try:
+                    from data.extractor import DataExtractor
+
+                    extractor = DataExtractor(config)
+                    target = date.fromisoformat(date_str)
+                    await _with_heartbeat(
+                        lambda: extractor.extract_date(target),
+                        step3_detail, _make_process(2),
+                    )
+                except Exception:
+                    logger.exception("Extraction failed for %s", date_str)
+                    failed.append(date_str)
+                    await progress_queue.put({
+                        "event": "progress",
+                        "timestamp": time.time(),
+                        "phase": "restoring",
+                        "detail": f"ERROR extracting {date_str}",
+                    })
+                    continue
+
+                # Verify parquet file was actually created
+                processed = Path(config["paths"]["processed_data"])
+                parquet_file = processed / f"{date_str}.parquet"
+                if not parquet_file.exists():
+                    logger.error("Parquet file not created for %s", date_str)
+                    failed.append(date_str)
+                    await progress_queue.put({
+                        "event": "progress",
+                        "timestamp": time.time(),
+                        "phase": "restoring",
+                        "detail": f"ERROR: no parquet file produced for {date_str}",
+                    })
+                    continue
+
+                succeeded.append(date_str)
+                logger.info("[restore] %s completed successfully", date_str)
+                await progress_queue.put({
+                    "event": "progress",
+                    "timestamp": time.time(),
+                    "phase": "restoring",
+                    "process": {
+                        "label": "Restoring backups",
+                        "completed": base_progress + 3,
+                        "total": total * steps_per_date,
+                        "pct": round((base_progress + 3) / (total * steps_per_date) * 100, 1),
+                        "item_eta_human": "",
+                        "process_eta_human": "",
+                    },
+                    "detail": f"Completed {date_str}",
+                })
+
+            logger.info(
+                "[restore] Job %s finished: %d succeeded, %d failed%s",
+                job_id, len(succeeded), len(failed),
+                f" (failed: {failed})" if failed else "",
+            )
+            await progress_queue.put({
+                "event": "phase_complete",
+                "timestamp": time.time(),
+                "phase": "restoring",
+                "summary": {
+                    "job_id": job_id,
+                    "dates_restored": len(succeeded),
+                    "dates_failed": len(failed),
+                    "failed_dates": failed,
+                },
+            })
+        finally:
+            training_state["running"] = False
+
+    asyncio.create_task(_run_restore_job())
+
+    return RestoreResponse(
+        job_id=job_id,
+        dates_queued=len(dates_to_restore),
+        detail=f"Queued {len(dates_to_restore)} date(s) for restore + extraction",
+    )

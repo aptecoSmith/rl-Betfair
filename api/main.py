@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Configure app-level logging so our logger.info/error calls reach uvicorn's output
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
 
 from registry.model_store import ModelStore
 from registry.scoreboard import Scoreboard
 
 from api.routers import models, training, replay, system, admin
+
+
+load_dotenv()
 
 
 def _load_config(path: str = "config.yaml") -> dict:

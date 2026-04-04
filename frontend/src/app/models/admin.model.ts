@@ -52,3 +52,24 @@ export interface ResetResponse {
   reset: boolean;
   detail: string;
 }
+
+export interface StreamrecorderBackup {
+  date: string;
+  timestamp: string;
+  cold_file: string;
+  hot_file: string;
+  cold_size_bytes: number;
+  hot_size_bytes: number;
+  already_extracted: boolean;
+}
+
+export interface StreamrecorderBackupsResponse {
+  backups: StreamrecorderBackup[];
+  backup_dir: string;
+}
+
+export interface RestoreResponse {
+  job_id: string;
+  dates_queued: number;
+  detail: string;
+}

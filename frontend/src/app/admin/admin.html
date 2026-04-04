@@ -60,6 +60,177 @@
     }
   </section>
 
+  <!-- ── Restore from StreamRecorder ──────────────────────────── -->
+  <section class="admin-section">
+    <h2>Restore from StreamRecorder</h2>
+    <p class="section-desc">Load backup .sql.gz files into MySQL and generate Parquet files</p>
+    <button class="btn btn-primary" (click)="openRestoreWizard()" [disabled]="wizardStep() > 0"
+      data-testid="open-restore-wizard">
+      Open Restore Wizard
+    </button>
+  </section>
+
+  <!-- Wizard overlay -->
+  @if (wizardStep() > 0) {
+    <div class="dialog-overlay">
+      <div class="dialog wizard-dialog">
+        <!-- Step indicators -->
+        <div class="wizard-steps">
+          <div class="wizard-step" [class.active]="wizardStep() === 1" [class.done]="wizardStep() > 1">
+            <span class="step-num">1</span> Scan
+          </div>
+          <div class="wizard-step-divider"></div>
+          <div class="wizard-step" [class.active]="wizardStep() === 2" [class.done]="wizardStep() > 2">
+            <span class="step-num">2</span> Select
+          </div>
+          <div class="wizard-step-divider"></div>
+          <div class="wizard-step" [class.active]="wizardStep() === 3" [class.done]="wizardStep() > 3">
+            <span class="step-num">3</span> Restore
+          </div>
+          <div class="wizard-step-divider"></div>
+          <div class="wizard-step" [class.active]="wizardStep() === 4">
+            <span class="step-num">4</span> Done
+          </div>
+        </div>
+
+        @if (wizardError()) {
+          <div class="message error">{{ wizardError() }}</div>
+        }
+
+        <!-- Step 1: Scanning -->
+        @if (wizardStep() === 1) {
+          <div class="wizard-content">
+            <p class="scanning-text">Scanning backup folder...</p>
+            <div class="progress-bar-container">
+              <div class="progress-bar scanning-bar"></div>
+            </div>
+          </div>
+        }
+
+        <!-- Step 2: Select dates -->
+        @if (wizardStep() === 2) {
+          <div class="wizard-content">
+            @if (wizardBackups().length === 0 && !wizardError()) {
+              <p class="empty">No backup pairs (cold + hot) found in {{ wizardBackupDir() }}</p>
+            } @else {
+              <p class="wizard-info">
+                Found <strong>{{ wizardBackups().length }}</strong> backup date(s) in
+                <code>{{ wizardBackupDir() }}</code>
+              </p>
+
+              <div class="wizard-select-actions">
+                <button class="btn btn-secondary btn-sm" (click)="selectAllDates()"
+                  [disabled]="wizardSelectableCount() === 0">Select All New</button>
+                <button class="btn btn-secondary btn-sm" (click)="deselectAllDates()">Deselect All</button>
+              </div>
+
+              <div class="wizard-table-container">
+                <table class="admin-table wizard-table">
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Date</th>
+                      <th>Cold Size</th>
+                      <th>Hot Size</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (backup of wizardBackups(); track backup.date) {
+                      <tr [class.already-extracted]="backup.already_extracted"
+                          (click)="!backup.already_extracted && toggleDate(backup.date)">
+                        <td>
+                          <input type="checkbox"
+                            [checked]="wizardSelected().has(backup.date)"
+                            [disabled]="backup.already_extracted"
+                            (click)="$event.stopPropagation()"
+                            (change)="toggleDate(backup.date)"
+                            [attr.data-testid]="'restore-checkbox-' + backup.date" />
+                        </td>
+                        <td>{{ backup.date }}</td>
+                        <td>{{ formatBytes(backup.cold_size_bytes) }}</td>
+                        <td>{{ formatBytes(backup.hot_size_bytes) }}</td>
+                        <td>
+                          @if (backup.already_extracted) {
+                            <span class="status-badge status-active">extracted</span>
+                          } @else {
+                            <span class="status-badge status-new">new</span>
+                          }
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
+          </div>
+
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" (click)="closeWizard()">Cancel</button>
+            <button class="btn btn-primary" (click)="startRestore()"
+              [disabled]="wizardSelected().size === 0"
+              data-testid="start-restore">
+              Restore {{ wizardSelected().size }} Date{{ wizardSelected().size !== 1 ? 's' : '' }}
+            </button>
+          </div>
+        }
+
+        <!-- Step 3: Restoring -->
+        @if (wizardStep() === 3) {
+          <div class="wizard-content">
+            <p class="restore-status">
+              Restoring {{ restoreDatesQueued() }} date(s) — this may take several minutes per date.
+            </p>
+            @if (restoreProgress()) {
+              <div class="progress-bar-container">
+                <div class="progress-bar"
+                  [style.width.%]="(restoreProgress()!.completed / restoreProgress()!.total) * 100">
+                </div>
+                <span class="progress-label">
+                  {{ restoreProgress()!.completed }} / {{ restoreProgress()!.total }}
+                </span>
+              </div>
+              <p class="restore-detail">{{ restoreProgress()!.detail }}</p>
+            } @else {
+              <div class="progress-bar-container">
+                <div class="progress-bar scanning-bar"></div>
+              </div>
+            }
+          </div>
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" (click)="closeWizard()" data-testid="restore-cancel">Cancel</button>
+          </div>
+        }
+
+        <!-- Step 4: Done -->
+        @if (wizardStep() === 4) {
+          <div class="wizard-content">
+            @if (restoreResult(); as result) {
+              @if (result.failed === 0) {
+                <p class="done-text" data-testid="restore-done-text">Restore complete! {{ result.succeeded }} date(s) processed.</p>
+                <p class="done-subtext">Parquet files have been generated in data/processed/.</p>
+              } @else if (result.succeeded === 0) {
+                <p class="done-text error-text" data-testid="restore-done-text">Restore failed for all {{ result.failed }} date(s).</p>
+                <p class="done-subtext">Failed: {{ result.failedDates.join(', ') }}</p>
+                <p class="done-subtext">Check the server logs for details.</p>
+              } @else {
+                <p class="done-text" data-testid="restore-done-text">Restore partially complete: {{ result.succeeded }} succeeded, {{ result.failed }} failed.</p>
+                <p class="done-subtext">Failed: {{ result.failedDates.join(', ') }}</p>
+                <p class="done-subtext">Check the server logs for details on failures.</p>
+              }
+            } @else {
+              <p class="done-text">Restore complete! {{ restoreDatesQueued() }} date(s) processed.</p>
+              <p class="done-subtext">Parquet files have been generated in data/processed/.</p>
+            }
+          </div>
+          <div class="dialog-actions">
+            <button class="btn btn-primary" (click)="closeWizard()">Close</button>
+          </div>
+        }
+      </div>
+    </div>
+  }
+
   <!-- ── Import Days ───────────────────────────────────────────── -->
   <section class="admin-section">
     <h2>Import Days</h2>
@@ -106,16 +277,19 @@
       <div class="range-inputs">
         <label>
           Start:
-          <input type="date" [ngModel]="importRangeStart()" (ngModelChange)="importRangeStart.set($event)" />
+          <input type="date" [ngModel]="importRangeStart()" (ngModelChange)="importRangeStart.set($event)"
+            data-testid="import-range-start" />
         </label>
         <label>
           End:
-          <input type="date" [ngModel]="importRangeEnd()" (ngModelChange)="importRangeEnd.set($event)" />
+          <input type="date" [ngModel]="importRangeEnd()" (ngModelChange)="importRangeEnd.set($event)"
+            data-testid="import-range-end" />
         </label>
         <button
           class="btn btn-primary"
           (click)="importRange()"
-          [disabled]="!importRangeStart() || !importRangeEnd() || importingRange()">
+          [disabled]="!importRangeStart() || !importRangeEnd() || importingRange()"
+          data-testid="import-range-btn">
           {{ importingRange() ? 'Importing...' : 'Import Range' }}
         </button>
       </div>
@@ -182,12 +356,12 @@
     <!-- Delete agent confirmation dialog -->
     @if (confirmDeleteAgent()) {
       <div class="dialog-overlay">
-        <div class="dialog">
+        <div class="dialog" data-testid="delete-agent-dialog">
           <h3>Confirm Delete</h3>
           <p>Delete model <strong>{{ shortId(confirmDeleteAgent()!) }}</strong>? This removes weights, evaluation data, bet logs, and genetic events for this model.</p>
           <div class="dialog-actions">
             <button class="btn btn-secondary" (click)="cancelDeleteAgent()">Cancel</button>
-            <button class="btn btn-danger" (click)="confirmAndDeleteAgent()">Delete</button>
+            <button class="btn btn-danger" (click)="confirmAndDeleteAgent()" data-testid="confirm-delete-agent">Delete</button>
           </div>
         </div>
       </div>

@@ -13,6 +13,8 @@ import {
   ImportRangeResponse,
   AdminDeleteResponse,
   ResetResponse,
+  StreamrecorderBackupsResponse,
+  RestoreResponse,
 } from '../models/admin.model';
 
 @Injectable({ providedIn: 'root' })
@@ -92,6 +94,14 @@ export class ApiService {
 
   purgeDiscarded(): Observable<AdminDeleteResponse> {
     return this.http.post<AdminDeleteResponse>(`${this.baseUrl}/admin/purge-discarded`, {});
+  }
+
+  getStreamrecorderBackups(): Observable<StreamrecorderBackupsResponse> {
+    return this.http.get<StreamrecorderBackupsResponse>(`${this.baseUrl}/admin/streamrecorder-backups`);
+  }
+
+  restoreBackups(dates: string[]): Observable<RestoreResponse> {
+    return this.http.post<RestoreResponse>(`${this.baseUrl}/admin/restore-backups`, { dates });
   }
 
   toggleGarage(modelId: string, garaged: boolean): Observable<{ model_id: string; garaged: boolean }> {

@@ -41,6 +41,8 @@ paths:
   model_weights: registry/weights
   logs: logs
   registry_db: registry/models.db
+  streamrecorder_backups: ../StreamRecorder1/backups
+  mysql_bin: /c/Program Files/MySQL/MySQL Server 9.6/bin/mysql.exe
 
 training:
   architecture: ppo_lstm_v1

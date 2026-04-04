@@ -327,6 +327,34 @@ class ResetResponse(BaseModel):
     detail: str
 
 
+# ── Streamrecorder Restore ─────────────────────────────────────────
+
+
+class StreamrecorderBackup(BaseModel):
+    date: str
+    timestamp: str  # e.g. "223000"
+    cold_file: str
+    hot_file: str
+    cold_size_bytes: int
+    hot_size_bytes: int
+    already_extracted: bool
+
+
+class StreamrecorderBackupsResponse(BaseModel):
+    backups: list[StreamrecorderBackup]
+    backup_dir: str
+
+
+class RestoreRequest(BaseModel):
+    dates: list[str]
+
+
+class RestoreResponse(BaseModel):
+    job_id: str
+    dates_queued: int
+    detail: str
+
+
 # ── Training Control ──────────────────────────────────────────────────
 
 

@@ -1,9 +1,9 @@
-import { Component, OnInit, OnDestroy, inject, signal, effect } from '@angular/core';
+import { Component, OnInit, OnDestroy, inject, signal, computed, effect } from '@angular/core';
 import { DecimalPipe, SlicePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
 import { TrainingService } from '../services/training.service';
-import { ExtractedDay, BackupDay, AdminAgentEntry } from '../models/admin.model';
+import { ExtractedDay, BackupDay, AdminAgentEntry, StreamrecorderBackup } from '../models/admin.model';
 
 @Component({
   selector: 'app-admin',
@@ -47,24 +47,75 @@ export class Admin implements OnInit, OnDestroy {
   readonly importingRange = signal(false);
   readonly importProgress = signal<{ completed: number; total: number } | null>(null);
 
+  // ── Restore wizard state ─────────────────────────────────────
+  // 0 = hidden, 1 = scanning, 2 = select, 3 = restoring, 4 = done
+  readonly wizardStep = signal(0);
+  readonly wizardBackups = signal<StreamrecorderBackup[]>([]);
+  readonly wizardBackupDir = signal('');
+  readonly wizardSelected = signal<Set<string>>(new Set());
+  readonly wizardError = signal<string | null>(null);
+  readonly restoreProgress = signal<{ completed: number; total: number; detail: string } | null>(null);
+  readonly restoreDatesQueued = signal(0);
+  readonly restoreResult = signal<{ succeeded: number; failed: number; failedDates: string[] } | null>(null);
+
+  readonly wizardSelectableCount = computed(() =>
+    this.wizardBackups().filter(b => !b.already_extracted).length
+  );
+
   private readonly progressEffect = effect(() => {
     const event = this.training.latestEvent();
-    if (!event || event.phase !== 'extracting') return;
+    if (!event) return;
 
-    if (event.event === 'progress' && event.process) {
-      this.importProgress.set({
-        completed: event.process.completed,
-        total: event.process.total,
-      });
+    // Handle extracting phase (existing import-range flow)
+    if (event.phase === 'extracting') {
+      if (event.event === 'progress' && event.process) {
+        this.importProgress.set({
+          completed: event.process.completed,
+          total: event.process.total,
+        });
+      }
+      if (event.event === 'phase_complete') {
+        setTimeout(() => {
+          this.importProgress.set(null);
+          this.loadExtractedDays();
+          this.loadBackupDays();
+        }, 1500);
+      }
     }
 
-    if (event.event === 'phase_complete') {
-      // Brief delay so user sees the completed bar before it disappears
-      setTimeout(() => {
-        this.importProgress.set(null);
-        this.loadExtractedDays();
-        this.loadBackupDays();
-      }, 1500);
+    // Handle restoring phase (wizard flow)
+    if (event.phase === 'restoring') {
+      if (event.event === 'progress') {
+        if (event.process) {
+          this.restoreProgress.set({
+            completed: event.process.completed,
+            total: event.process.total,
+            detail: event.detail || '',
+          });
+        } else if (event.detail) {
+          // Error events without process — update detail text while keeping progress bar
+          const current = this.restoreProgress();
+          this.restoreProgress.set({
+            completed: current?.completed ?? 0,
+            total: current?.total ?? 1,
+            detail: event.detail,
+          });
+        }
+      }
+      if (event.event === 'phase_complete') {
+        const summary = event.summary as { dates_restored?: number; dates_failed?: number; failed_dates?: string[] } | undefined;
+        this.restoreResult.set({
+          succeeded: summary?.dates_restored ?? 0,
+          failed: summary?.dates_failed ?? 0,
+          failedDates: summary?.failed_dates ?? [],
+        });
+        setTimeout(() => {
+          this.wizardStep.set(4);  // done
+          this.restoreProgress.set(null);
+          this.loadExtractedDays();
+          this.loadBackupDays();
+        }, 1500);
+      }
     }
   });
 
@@ -300,6 +351,78 @@ export class Admin implements OnInit, OnDestroy {
       error: (err) => {
         this.error.set(err.error?.detail || 'Reset failed');
         this.clearMessageAfterDelay();
+      },
+    });
+  }
+
+  // ── Restore wizard ────────────────────────────────────────────
+
+  openRestoreWizard(): void {
+    this.wizardStep.set(1);  // scanning
+    this.wizardError.set(null);
+    this.wizardSelected.set(new Set());
+    this.restoreProgress.set(null);
+    this.restoreResult.set(null);
+
+    this.api.getStreamrecorderBackups().subscribe({
+      next: (res) => {
+        this.wizardBackups.set(res.backups);
+        this.wizardBackupDir.set(res.backup_dir);
+        this.wizardStep.set(2);  // select
+      },
+      error: (err) => {
+        this.wizardError.set(err.error?.detail || 'Failed to scan backup folder');
+        this.wizardStep.set(2);
+      },
+    });
+  }
+
+  closeWizard(): void {
+    this.wizardStep.set(0);
+    this.wizardBackups.set([]);
+    this.wizardError.set(null);
+    this.restoreProgress.set(null);
+  }
+
+  toggleDate(date: string): void {
+    const current = new Set(this.wizardSelected());
+    if (current.has(date)) {
+      current.delete(date);
+    } else {
+      current.add(date);
+    }
+    this.wizardSelected.set(current);
+  }
+
+  selectAllDates(): void {
+    const dates = new Set(
+      this.wizardBackups()
+        .filter(b => !b.already_extracted)
+        .map(b => b.date)
+    );
+    this.wizardSelected.set(dates);
+  }
+
+  deselectAllDates(): void {
+    this.wizardSelected.set(new Set());
+  }
+
+  startRestore(): void {
+    const dates = Array.from(this.wizardSelected());
+    if (dates.length === 0) return;
+
+    this.wizardStep.set(3);  // restoring
+    this.restoreDatesQueued.set(dates.length);
+
+    this.api.restoreBackups(dates).subscribe({
+      next: (res) => {
+        if (res.dates_queued > 0) {
+          this.restoreProgress.set({ completed: 0, total: res.dates_queued * 3, detail: 'Starting...' });
+        }
+      },
+      error: (err) => {
+        this.wizardError.set(err.error?.detail || 'Restore failed');
+        this.wizardStep.set(2);
       },
     });
   }

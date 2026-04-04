@@ -1,4 +1,12 @@
-import type { ExtractedDaysResponse, BackupDaysResponse, AdminAgentsResponse } from '../../src/app/models/admin.model';
+import type {
+  ExtractedDaysResponse,
+  BackupDaysResponse,
+  AdminAgentsResponse,
+  StreamrecorderBackupsResponse,
+  RestoreResponse,
+  AdminDeleteResponse,
+  ImportRangeResponse,
+} from '../../src/app/models/admin.model';
 
 export function mockExtractedDays(): ExtractedDaysResponse {
   return {
@@ -50,4 +58,67 @@ export function mockEmptyAgents(): AdminAgentsResponse {
 
 export function mockEmptyBackup(): BackupDaysResponse {
   return { days: [] };
+}
+
+export function mockStreamrecorderBackups(): StreamrecorderBackupsResponse {
+  return {
+    backups: [
+      {
+        date: '2026-04-01',
+        timestamp: '223000',
+        cold_file: 'coldData-2026-04-01_223000.sql.gz',
+        hot_file: 'hotData-2026-04-01_223000.sql.gz',
+        cold_size_bytes: 192_134,
+        hot_size_bytes: 31_067_703,
+        already_extracted: true,
+      },
+      {
+        date: '2026-04-02',
+        timestamp: '223000',
+        cold_file: 'coldData-2026-04-02_223000.sql.gz',
+        hot_file: 'hotData-2026-04-02_223000.sql.gz',
+        cold_size_bytes: 240_730,
+        hot_size_bytes: 36_376_514,
+        already_extracted: false,
+      },
+      {
+        date: '2026-04-03',
+        timestamp: '223000',
+        cold_file: 'coldData-2026-04-03_223000.sql.gz',
+        hot_file: 'hotData-2026-04-03_223000.sql.gz',
+        cold_size_bytes: 223_770,
+        hot_size_bytes: 13_652_825,
+        already_extracted: false,
+      },
+    ],
+    backup_dir: 'C:\\StreamRecorder1\\backups',
+  };
+}
+
+export function mockEmptyStreamrecorderBackups(): StreamrecorderBackupsResponse {
+  return { backups: [], backup_dir: 'C:\\StreamRecorder1\\backups' };
+}
+
+export function mockRestoreResponse(): RestoreResponse {
+  return {
+    job_id: 'test-job-id',
+    dates_queued: 1,
+    detail: 'Queued 1 date(s) for restore + extraction',
+  };
+}
+
+export function mockDeleteDayResponse(): AdminDeleteResponse {
+  return { deleted: true, detail: 'Deleted 2026-03-26' };
+}
+
+export function mockDeleteAgentResponse(): AdminDeleteResponse {
+  return { deleted: true, detail: 'Deleted agent aaa11111' };
+}
+
+export function mockImportRangeResponse(): ImportRangeResponse {
+  return { job_id: 'import-job-id', dates_queued: 3, detail: 'Queued 3 date(s)' };
+}
+
+export function mockPurgeResponse(): AdminDeleteResponse {
+  return { deleted: true, detail: 'Purged 1 discarded model(s)' };
 }

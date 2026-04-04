@@ -329,3 +329,152 @@
 .reset-section {
   border: 1px solid rgba(244, 67, 54, 0.3);
 }
+
+// ── Wizard ─────────────────────────────────────────────────────
+
+.wizard-dialog {
+  max-width: 700px;
+  width: 95%;
+}
+
+.wizard-steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #333;
+}
+
+.wizard-step {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: #666;
+  font-weight: 500;
+
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #333;
+    color: #888;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  &.active {
+    color: #fff;
+    .step-num {
+      background: #2196f3;
+      color: #fff;
+    }
+  }
+
+  &.done {
+    color: #81c784;
+    .step-num {
+      background: #4caf50;
+      color: #fff;
+    }
+  }
+}
+
+.wizard-step-divider {
+  width: 24px;
+  height: 2px;
+  background: #333;
+}
+
+.wizard-content {
+  min-height: 120px;
+  margin-bottom: 1rem;
+}
+
+.wizard-info {
+  font-size: 0.85rem;
+  color: #ccc;
+  margin-bottom: 0.75rem;
+}
+
+.wizard-select-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.wizard-table-container {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 4px;
+}
+
+.wizard-table {
+  tr {
+    cursor: pointer;
+  }
+
+  tr.already-extracted {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  input[type="checkbox"] {
+    accent-color: #2196f3;
+    cursor: pointer;
+
+    &:disabled {
+      cursor: default;
+    }
+  }
+}
+
+.status-new {
+  background: rgba(33, 150, 243, 0.2);
+  color: #64b5f6;
+}
+
+.scanning-text, .restore-status {
+  color: #ccc;
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+}
+
+.scanning-bar {
+  width: 100%;
+  animation: scanning-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes scanning-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+.restore-detail {
+  font-size: 0.8rem;
+  color: #aaa;
+  margin-top: 0.5rem;
+  font-family: monospace;
+}
+
+.done-text {
+  font-size: 1.1rem;
+  color: #81c784;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+
+  &.error-text {
+    color: #e57373;
+  }
+}
+
+.done-subtext {
+  font-size: 0.85rem;
+  color: #aaa;
+}
