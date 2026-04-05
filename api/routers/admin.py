@@ -27,6 +27,7 @@ from api.schemas import (
     ImportDayResponse,
     ImportRangeRequest,
     ImportRangeResponse,
+    MysqlDatesResponse,
     ResetRequest,
     ResetResponse,
     RestoreRequest,
@@ -115,6 +116,26 @@ async def list_backup_days(request: Request):
                 backup_dates.append(BackupDay(date=f.stem))
 
     return BackupDaysResponse(days=backup_dates)
+
+
+@router.get("/mysql-dates", response_model=MysqlDatesResponse)
+async def list_mysql_dates(request: Request):
+    """List dates available in MySQL databases (cold + hot).
+
+    Returns available=false gracefully if MySQL is unreachable.
+    """
+    try:
+        from data.extractor import DataExtractor
+
+        extractor = DataExtractor(request.app.state.config)
+        dates = extractor.get_available_dates()
+        return MysqlDatesResponse(
+            dates=[d.isoformat() for d in sorted(dates)],
+            available=True,
+        )
+    except Exception as exc:
+        logger.warning("Could not query MySQL dates: %s", exc)
+        return MysqlDatesResponse(dates=[], available=False)
 
 
 @router.get("/agents", response_model=AdminAgentsResponse)

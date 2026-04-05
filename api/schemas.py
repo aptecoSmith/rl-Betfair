@@ -153,6 +153,23 @@ class GpuMetrics(BaseModel):
     temperature_c: int | None = None
 
 
+class ServiceStatus(BaseModel):
+    name: str
+    port: int
+    running: bool
+
+
+class ServicesResponse(BaseModel):
+    services: list[ServiceStatus]
+
+
+class ServiceActionResponse(BaseModel):
+    service: str
+    action: str
+    success: bool
+    detail: str
+
+
 class SystemMetrics(BaseModel):
     cpu_pct: float
     ram_used_mb: int
@@ -274,6 +291,11 @@ class BackupDay(BaseModel):
 
 class BackupDaysResponse(BaseModel):
     days: list[BackupDay]
+
+
+class MysqlDatesResponse(BaseModel):
+    dates: list[str]
+    available: bool
 
 
 class AdminAgentEntry(BaseModel):

@@ -73,3 +73,25 @@ export interface RestoreResponse {
   dates_queued: number;
   detail: string;
 }
+
+export interface MysqlDatesResponse {
+  dates: string[];
+  available: boolean;
+}
+
+export interface ServiceStatus {
+  name: string;
+  port: number;
+  running: boolean;
+}
+
+export interface ServicesResponse {
+  services: ServiceStatus[];
+}
+
+export interface ServiceActionResponse {
+  service: string;
+  action: string;
+  success: boolean;
+  detail: string;
+}

@@ -15,6 +15,9 @@ import {
   ResetResponse,
   StreamrecorderBackupsResponse,
   RestoreResponse,
+  MysqlDatesResponse,
+  ServicesResponse,
+  ServiceActionResponse,
 } from '../models/admin.model';
 
 @Injectable({ providedIn: 'root' })
@@ -68,6 +71,10 @@ export class ApiService {
     return this.http.get<AdminAgentsResponse>(`${this.baseUrl}/admin/agents`);
   }
 
+  getMysqlDates(): Observable<MysqlDatesResponse> {
+    return this.http.get<MysqlDatesResponse>(`${this.baseUrl}/admin/mysql-dates`);
+  }
+
   deleteDay(date: string): Observable<AdminDeleteResponse> {
     return this.http.delete<AdminDeleteResponse>(`${this.baseUrl}/admin/days/${date}?confirm=true`);
   }
@@ -110,6 +117,20 @@ export class ApiService {
 
   getGarage(): Observable<ScoreboardResponse> {
     return this.http.get<ScoreboardResponse>(`${this.baseUrl}/models/garage`);
+  }
+
+  // ── Service control endpoints ──────────────────────────────────────
+
+  getServices(): Observable<ServicesResponse> {
+    return this.http.get<ServicesResponse>(`${this.baseUrl}/system/services`);
+  }
+
+  controlService(service: string, action: string): Observable<ServiceActionResponse> {
+    return this.http.post<ServiceActionResponse>(`${this.baseUrl}/system/services/${service}/${action}`, {});
+  }
+
+  healthCheck(): Observable<{ status: string }> {
+    return this.http.get<{ status: string }>(`${this.baseUrl}/system/health`);
   }
 
   // ── Training control endpoints ─────────────────────────────────────

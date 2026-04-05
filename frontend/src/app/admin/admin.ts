@@ -1,14 +1,14 @@
 import { Component, OnInit, OnDestroy, inject, signal, computed, effect } from '@angular/core';
-import { DecimalPipe, SlicePipe } from '@angular/common';
+import { DecimalPipe, SlicePipe, TitleCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
 import { TrainingService } from '../services/training.service';
-import { ExtractedDay, BackupDay, AdminAgentEntry, StreamrecorderBackup } from '../models/admin.model';
+import { ExtractedDay, BackupDay, AdminAgentEntry, StreamrecorderBackup, ServiceStatus } from '../models/admin.model';
 
 @Component({
   selector: 'app-admin',
   standalone: true,
-  imports: [DecimalPipe, SlicePipe, FormsModule],
+  imports: [DecimalPipe, SlicePipe, TitleCasePipe, FormsModule],
   templateUrl: './admin.html',
   styleUrl: './admin.scss',
 })
@@ -28,6 +28,14 @@ export class Admin implements OnInit, OnDestroy {
 
   readonly error = signal<string | null>(null);
   readonly successMessage = signal<string | null>(null);
+
+  // ── Service control ──────────────────────────────────────────
+  readonly services = signal<ServiceStatus[]>([]);
+  readonly loadingServices = signal(true);
+  readonly serviceAction = signal<{ service: string; action: string } | null>(null);
+  readonly apiReconnecting = signal(false);
+  private servicesPollTimer: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── Confirm dialogs ───────────────────────────────────────────
 
@@ -62,6 +70,37 @@ export class Admin implements OnInit, OnDestroy {
     this.wizardBackups().filter(b => !b.already_extracted).length
   );
 
+  // ── Manage Days enhancements ─────────────────────────────────
+  readonly daysTableExpanded = signal(true);
+  readonly daySearchFilter = signal('');
+
+  // ── Manage Agents enhancements ──────────────────────────────
+  readonly agentsTableExpanded = signal(true);
+
+  // ── MySQL gap detection ──────────────────────────────────────
+  readonly mysqlDates = signal<string[]>([]);
+  readonly mysqlAvailable = signal(false);
+
+  readonly filteredDays = computed(() => {
+    const filter = this.daySearchFilter().toLowerCase();
+    const days = this.extractedDays();
+    if (!filter) return days;
+    return days.filter(d => d.date.includes(filter));
+  });
+
+  readonly trainTestSplit = computed(() => {
+    const days = this.extractedDays();
+    const count = days.length;
+    if (count === 0) return null;
+    const split = Math.max(1, Math.floor(count / 2));
+    return { total: count, trainCount: split, testCount: count - split, splitIndex: split };
+  });
+
+  readonly missingMysqlDates = computed(() => {
+    const extracted = new Set(this.extractedDays().map(d => d.date));
+    return this.mysqlDates().filter(d => !extracted.has(d));
+  });
+
   private readonly progressEffect = effect(() => {
     const event = this.training.latestEvent();
     if (!event) return;
@@ -79,12 +118,13 @@ export class Admin implements OnInit, OnDestroy {
           this.importProgress.set(null);
           this.loadExtractedDays();
           this.loadBackupDays();
+          this.loadMysqlDates();
         }, 1500);
       }
     }
 
-    // Handle restoring phase (wizard flow)
-    if (event.phase === 'restoring') {
+    // Handle restoring phase (wizard flow) — only when wizard is open
+    if (event.phase === 'restoring' && this.wizardStep() > 0) {
       if (event.event === 'progress') {
         if (event.process) {
           this.restoreProgress.set({
@@ -121,10 +161,14 @@ export class Admin implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadAll();
+    // Poll service status every 5 seconds
+    this.servicesPollTimer = setInterval(() => this.loadServices(), 5000);
   }
 
   ngOnDestroy(): void {
     this.progressEffect.destroy();
+    if (this.servicesPollTimer) clearInterval(this.servicesPollTimer);
+    if (this.reconnectTimer) clearInterval(this.reconnectTimer);
   }
 
   loadAll(): void {
@@ -132,6 +176,8 @@ export class Admin implements OnInit, OnDestroy {
     this.loadBackupDays();
     this.loadAgents();
     this.loadGarageCount();
+    this.loadMysqlDates();
+    this.loadServices();
   }
 
   private loadGarageCount(): void {
@@ -148,6 +194,7 @@ export class Admin implements OnInit, OnDestroy {
       next: (res) => {
         this.extractedDays.set(res.days);
         this.loadingDays.set(false);
+        if (res.days.length > 10) this.daysTableExpanded.set(false);
       },
       error: (err) => {
         this.error.set('Failed to load extracted days');
@@ -175,6 +222,7 @@ export class Admin implements OnInit, OnDestroy {
       next: (res) => {
         this.agents.set(res.agents);
         this.loadingAgents.set(false);
+        if (res.agents.length > 20) this.agentsTableExpanded.set(false);
       },
       error: () => {
         this.error.set('Failed to load agents');
@@ -425,6 +473,118 @@ export class Admin implements OnInit, OnDestroy {
         this.wizardStep.set(2);
       },
     });
+  }
+
+  // ── Service control ───────────────────────────────────────────
+
+  loadServices(): void {
+    this.api.getServices().subscribe({
+      next: (res) => {
+        this.services.set(res.services);
+        this.loadingServices.set(false);
+      },
+      error: () => {
+        this.loadingServices.set(false);
+      },
+    });
+  }
+
+  getService(name: string): ServiceStatus | undefined {
+    return this.services().find(s => s.name === name);
+  }
+
+  promptServiceAction(service: string, action: string): void {
+    this.serviceAction.set({ service, action });
+  }
+
+  cancelServiceAction(): void {
+    this.serviceAction.set(null);
+  }
+
+  confirmServiceAction(): void {
+    const sa = this.serviceAction();
+    if (!sa) return;
+    this.serviceAction.set(null);
+
+    // Warn about frontend stop
+    if (sa.service === 'frontend' && (sa.action === 'stop' || sa.action === 'restart')) {
+      // Frontend will die — just do it
+    }
+
+    this.api.controlService(sa.service, sa.action).subscribe({
+      next: (res) => {
+        this.successMessage.set(res.detail);
+        this.clearMessageAfterDelay();
+
+        if (sa.service === 'api' && (sa.action === 'stop' || sa.action === 'restart')) {
+          this.startReconnectPolling();
+        } else {
+          // Refresh service status after a brief delay
+          setTimeout(() => this.loadServices(), 2000);
+        }
+      },
+      error: (err) => {
+        this.error.set(err.error?.detail || `Failed to ${sa.action} ${sa.service}`);
+        this.clearMessageAfterDelay();
+      },
+    });
+  }
+
+  private startReconnectPolling(): void {
+    this.apiReconnecting.set(true);
+    let attempts = 0;
+    this.reconnectTimer = setInterval(() => {
+      attempts++;
+      this.api.healthCheck().subscribe({
+        next: () => {
+          // API is back!
+          this.apiReconnecting.set(false);
+          if (this.reconnectTimer) clearInterval(this.reconnectTimer);
+          this.reconnectTimer = null;
+          this.loadServices();
+          this.successMessage.set('API reconnected');
+          this.clearMessageAfterDelay();
+        },
+        error: () => {
+          if (attempts > 30) {
+            // Give up after 60 seconds
+            this.apiReconnecting.set(false);
+            if (this.reconnectTimer) clearInterval(this.reconnectTimer);
+            this.reconnectTimer = null;
+            this.error.set('API did not come back after 60 seconds');
+            this.clearMessageAfterDelay();
+          }
+        },
+      });
+    }, 2000);
+  }
+
+  // ── MySQL dates ───────────────────────────────────────────────
+
+  private loadMysqlDates(): void {
+    this.api.getMysqlDates().subscribe({
+      next: (res) => {
+        this.mysqlDates.set(res.dates);
+        this.mysqlAvailable.set(res.available);
+      },
+      error: () => {},
+    });
+  }
+
+  isTrainDay(date: string): boolean {
+    const info = this.trainTestSplit();
+    if (!info) return false;
+    const allDays = this.extractedDays();
+    const index = allDays.findIndex(d => d.date === date);
+    return index >= 0 && index < info.splitIndex;
+  }
+
+  fillMissingRange(): void {
+    const missing = this.missingMysqlDates();
+    if (missing.length === 0) return;
+    const sorted = [...missing].sort();
+    this.importRangeStart.set(sorted[0]);
+    this.importRangeEnd.set(sorted[sorted.length - 1]);
   }
 
   // ── Helpers ───────────────────────────────────────────────────

@@ -9,40 +9,137 @@
     <div class="message error" data-testid="error-message">{{ error() }}</div>
   }
 
+  <!-- ── Service Control ──────────────────────────────────────── -->
+  <section class="admin-section">
+    <h2>Service Control</h2>
+    <p class="section-desc">Manage the training worker, API backend, and Angular frontend.</p>
+
+    <div class="service-cards">
+      @for (svc of [
+        { name: 'worker', label: 'Training Worker', port: 8002 },
+        { name: 'api', label: 'API Backend', port: 8001 },
+        { name: 'frontend', label: 'Frontend', port: 4202 }
+      ]; track svc.name) {
+        <div class="service-card">
+          <div class="service-header">
+            <span class="service-indicator" [class.running]="getService(svc.name)?.running" [class.stopped]="!getService(svc.name)?.running"></span>
+            <span class="service-name">{{ svc.label }}</span>
+            <span class="service-port">:{{ svc.port }}</span>
+          </div>
+          <div class="service-status">
+            {{ getService(svc.name)?.running ? 'Running' : 'Stopped' }}
+          </div>
+          <div class="service-actions">
+            @if (getService(svc.name)?.running) {
+              <button class="btn btn-danger btn-sm" (click)="promptServiceAction(svc.name, 'stop')">Stop</button>
+              <button class="btn btn-secondary btn-sm" (click)="promptServiceAction(svc.name, 'restart')">Restart</button>
+            } @else {
+              @if (svc.name !== 'api') {
+                <button class="btn btn-primary btn-sm" (click)="promptServiceAction(svc.name, 'start')">Start</button>
+              } @else {
+                <span class="service-hint">Use start-ui.bat or start-all.bat to start the API</span>
+              }
+            }
+          </div>
+        </div>
+      }
+    </div>
+
+    <!-- Service action confirmation -->
+    @if (serviceAction(); as sa) {
+      <div class="dialog-overlay">
+        <div class="dialog">
+          <h3>Confirm {{ sa.action | titlecase }}</h3>
+          <p>
+            @if (sa.service === 'api' && (sa.action === 'stop' || sa.action === 'restart')) {
+              {{ sa.action === 'restart' ? 'The API will restart. The page will reconnect automatically.' : 'This will stop the API. You will lose connection to the backend.' }}
+            } @else if (sa.service === 'frontend' && (sa.action === 'stop' || sa.action === 'restart')) {
+              This will {{ sa.action }} the dev server. The page will stop working until it restarts.
+            } @else {
+              {{ sa.action | titlecase }} the <strong>{{ sa.service }}</strong> service?
+            }
+          </p>
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" (click)="cancelServiceAction()">Cancel</button>
+            <button class="btn btn-danger" (click)="confirmServiceAction()">{{ sa.action | titlecase }}</button>
+          </div>
+        </div>
+      </div>
+    }
+  </section>
+
+  <!-- API reconnecting overlay -->
+  @if (apiReconnecting()) {
+    <div class="reconnect-overlay">
+      <div class="reconnect-box">
+        <div class="reconnect-spinner"></div>
+        <p>API restarting...</p>
+        <p class="reconnect-sub">Waiting for the new instance to come online</p>
+      </div>
+    </div>
+  }
+
   <!-- ── Manage Days ───────────────────────────────────────────── -->
   <section class="admin-section">
     <h2>Manage Days</h2>
     <p class="section-desc">Extracted race days in data/processed/</p>
+
+    @if (trainTestSplit(); as split) {
+      <div class="days-summary">
+        <span class="day-count">{{ split.total }} day{{ split.total !== 1 ? 's' : '' }} extracted</span>
+        <p class="split-explanation">
+          Training uses the <strong>{{ split.trainCount }}</strong> earliest day{{ split.trainCount !== 1 ? 's' : '' }},
+          testing uses the <strong>{{ split.testCount }}</strong> latest.
+          Split: <code>len(days) // 2</code> &mdash; test set always &ge; train set.
+        </p>
+      </div>
+    }
 
     @if (loadingDays()) {
       <p class="loading">Loading extracted days...</p>
     } @else if (extractedDays().length === 0) {
       <p class="empty">No extracted days found.</p>
     } @else {
-      <table class="admin-table days-table" data-testid="days-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Ticks</th>
-            <th>Races</th>
-            <th>File Size</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (day of extractedDays(); track day.date) {
+      <div class="days-toolbar">
+        <input type="text" class="day-search" placeholder="Filter by date..."
+          [ngModel]="daySearchFilter()" (ngModelChange)="daySearchFilter.set($event)" />
+        <button class="btn btn-secondary btn-sm" (click)="daysTableExpanded.set(!daysTableExpanded())">
+          {{ daysTableExpanded() ? 'Collapse' : 'Expand' }}
+        </button>
+      </div>
+
+      @if (daysTableExpanded()) {
+        <table class="admin-table days-table" data-testid="days-table">
+          <thead>
             <tr>
-              <td>{{ day.date }}</td>
-              <td>{{ day.tick_count | number }}</td>
-              <td>{{ day.race_count }}</td>
-              <td>{{ formatBytes(day.file_size_bytes) }}</td>
-              <td>
-                <button class="btn btn-danger btn-sm" (click)="promptDeleteDay(day.date)">Delete</button>
-              </td>
+              <th>Split</th>
+              <th>Date</th>
+              <th>Ticks</th>
+              <th>Races</th>
+              <th>File Size</th>
+              <th>Actions</th>
             </tr>
-          }
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            @for (day of filteredDays(); track day.date) {
+              <tr [class.train-day]="isTrainDay(day.date)" [class.test-day]="!isTrainDay(day.date)">
+                <td>
+                  <span class="split-badge" [class.split-train]="isTrainDay(day.date)" [class.split-test]="!isTrainDay(day.date)">
+                    {{ isTrainDay(day.date) ? 'train' : 'test' }}
+                  </span>
+                </td>
+                <td>{{ day.date }}</td>
+                <td>{{ day.tick_count | number }}</td>
+                <td>{{ day.race_count }}</td>
+                <td>{{ formatBytes(day.file_size_bytes) }}</td>
+                <td>
+                  <button class="btn btn-danger btn-sm" (click)="promptDeleteDay(day.date)">Delete</button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
     }
 
     <!-- Delete day confirmation dialog -->
@@ -63,7 +160,7 @@
   <!-- ── Restore from StreamRecorder ──────────────────────────── -->
   <section class="admin-section">
     <h2>Restore from StreamRecorder</h2>
-    <p class="section-desc">Load backup .sql.gz files into MySQL and generate Parquet files</p>
+    <p class="section-desc">Restore MySQL backups (.sql.gz) into the database, then extract Parquet files for training. Use this when you have StreamRecorder backup files that need to be loaded.</p>
     <button class="btn btn-primary" (click)="openRestoreWizard()" [disabled]="wizardStep() > 0"
       data-testid="open-restore-wizard">
       Open Restore Wizard
@@ -234,7 +331,20 @@
   <!-- ── Import Days ───────────────────────────────────────────── -->
   <section class="admin-section">
     <h2>Import Days</h2>
-    <p class="section-desc">Import race data from MySQL database</p>
+    <p class="section-desc">Extract race data from an existing MySQL database into Parquet files. Use this when the database already has data loaded (e.g. from a live StreamRecorder session).</p>
+
+    @if (mysqlAvailable() && missingMysqlDates().length > 0) {
+      <div class="mysql-gap-warning pulse-highlight">
+        <strong>{{ missingMysqlDates().length }} MySQL date{{ missingMysqlDates().length !== 1 ? 's' : '' }} not yet extracted:</strong>
+        <span class="missing-dates">
+          {{ missingMysqlDates().slice(0, 5).join(', ') }}
+          @if (missingMysqlDates().length > 5) {
+            <span> and {{ missingMysqlDates().length - 5 }} more</span>
+          }
+        </span>
+        <button class="btn btn-primary btn-sm" (click)="fillMissingRange()">Auto-fill Import Range</button>
+      </div>
+    }
 
     @if (loadingBackup()) {
       <p class="loading">Loading backup days...</p>
@@ -306,51 +416,60 @@
   <!-- ── Manage Agents ─────────────────────────────────────────── -->
   <section class="admin-section">
     <h2>Manage Agents</h2>
-    <p class="section-desc">All models (active and discarded)</p>
-    <button class="btn btn-warning" (click)="purgeDiscarded()" [disabled]="purging()" data-testid="purge-btn">
-      {{ purging() ? 'Purging...' : 'Purge Discarded' }}
-    </button>
+    <p class="section-desc">Trained models in the registry. Each agent is a neural network with unique hyperparameters, evolved through genetic selection across generations.</p>
 
     @if (loadingAgents()) {
       <p class="loading">Loading agents...</p>
     } @else if (agents().length === 0) {
       <p class="empty">No agents in registry.</p>
     } @else {
-      <table class="admin-table agents-table" data-testid="agents-table">
-        <thead>
-          <tr>
-            <th>Model ID</th>
-            <th>Gen</th>
-            <th>Architecture</th>
-            <th>Status</th>
-            <th>Score</th>
-            <th>Created</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (agent of agents(); track agent.model_id) {
-            <tr [class.discarded]="agent.status === 'discarded'">
-              <td class="model-id" [title]="agent.model_id">{{ shortId(agent.model_id) }}</td>
-              <td>{{ agent.generation }}</td>
-              <td>{{ agent.architecture_name }}</td>
-              <td>
-                <span class="status-badge" [class.status-active]="agent.status === 'active'" [class.status-discarded]="agent.status === 'discarded'">
-                  {{ agent.status }}
-                </span>
-                @if (agent.garaged) {
-                  <span class="garaged-badge" title="Garaged">&#9733;</span>
-                }
-              </td>
-              <td>{{ agent.composite_score != null ? (agent.composite_score | number:'1.3-3') : '—' }}</td>
-              <td>{{ agent.created_at | slice:0:10 }}</td>
-              <td>
-                <button class="btn btn-danger btn-sm" (click)="promptDeleteAgent(agent.model_id)">Delete</button>
-              </td>
+      <div class="days-toolbar">
+        <span class="day-count">{{ agents().length }} agent{{ agents().length !== 1 ? 's' : '' }} in registry</span>
+        <button class="btn btn-warning btn-sm" (click)="purgeDiscarded()" [disabled]="purging()" data-testid="purge-btn">
+          {{ purging() ? 'Purging...' : 'Purge Discarded' }}
+        </button>
+        <button class="btn btn-secondary btn-sm" (click)="agentsTableExpanded.set(!agentsTableExpanded())">
+          {{ agentsTableExpanded() ? 'Collapse' : 'Expand' }}
+        </button>
+      </div>
+
+      @if (agentsTableExpanded()) {
+        <table class="admin-table agents-table" data-testid="agents-table">
+          <thead>
+            <tr>
+              <th>Model ID</th>
+              <th>Gen</th>
+              <th>Architecture</th>
+              <th>Status</th>
+              <th>Score</th>
+              <th>Created</th>
+              <th>Actions</th>
             </tr>
-          }
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            @for (agent of agents(); track agent.model_id) {
+              <tr [class.discarded]="agent.status === 'discarded'">
+                <td class="model-id" [title]="agent.model_id">{{ shortId(agent.model_id) }}</td>
+                <td>{{ agent.generation }}</td>
+                <td>{{ agent.architecture_name }}</td>
+                <td>
+                  <span class="status-badge" [class.status-active]="agent.status === 'active'" [class.status-discarded]="agent.status === 'discarded'">
+                    {{ agent.status }}
+                  </span>
+                  @if (agent.garaged) {
+                    <span class="garaged-badge" title="Garaged">&#9733;</span>
+                  }
+                </td>
+                <td>{{ agent.composite_score != null ? (agent.composite_score | number:'1.3-3') : '—' }}</td>
+                <td>{{ agent.created_at | slice:0:10 }}</td>
+                <td>
+                  <button class="btn btn-danger btn-sm" (click)="promptDeleteAgent(agent.model_id)">Delete</button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
     }
 
     <!-- Delete agent confirmation dialog -->
