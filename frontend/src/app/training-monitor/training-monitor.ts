@@ -203,7 +203,11 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
       next: (info) => {
         this.trainingInfo.set(info);
         this.apiUnavailable.set(false);
-        this.populationSize = info.population_size;
+        // Only use server default if user hasn't saved a preference
+        const saved = this.selectionState.trainingFormValues();
+        if (saved.populationSize === null) {
+          this.populationSize = info.population_size;
+        }
         // Populate date selection defaults
         if (info.dates?.length) {
           this.availableDates = info.dates;

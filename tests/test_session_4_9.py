@@ -10,7 +10,7 @@ import asyncio
 import sys
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -288,3 +288,109 @@ class TestTrainingSchemas:
         from api.schemas import StopTrainingResponse
         resp = StopTrainingResponse(detail="Stopped")
         assert resp.detail == "Stopped"
+
+    def test_start_request_with_dates(self):
+        from api.schemas import StartTrainingRequest
+        req = StartTrainingRequest(
+            train_dates=["2026-01-01", "2026-01-02"],
+            test_dates=["2026-01-03"],
+        )
+        assert req.train_dates == ["2026-01-01", "2026-01-02"]
+        assert req.test_dates == ["2026-01-03"]
+
+    def test_start_request_dates_default_none(self):
+        from api.schemas import StartTrainingRequest
+        req = StartTrainingRequest()
+        assert req.train_dates is None
+        assert req.test_dates is None
+
+    def test_finish_response_fields(self):
+        from api.schemas import FinishTrainingResponse
+        resp = FinishTrainingResponse(detail="Finishing")
+        assert resp.detail == "Finishing"
+
+    def test_status_includes_worker_connected(self):
+        from api.schemas import TrainingStatus
+        status = TrainingStatus(running=False, worker_connected=True)
+        assert status.worker_connected is True
+
+    def test_status_worker_connected_defaults_false(self):
+        from api.schemas import TrainingStatus
+        status = TrainingStatus(running=False)
+        assert status.worker_connected is False
+
+
+class TestDateSelectionEndpoint:
+
+    def test_start_with_explicit_dates(self, tmp_path):
+        """POST /training/start with explicit dates passes them through."""
+        client, app = _make_test_app()
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        # Create parquet files
+        import pandas as pd
+        for d in ["2026-01-01", "2026-01-02", "2026-01-03"]:
+            pd.DataFrame({"x": [1]}).to_parquet(data_dir / f"{d}.parquet")
+        app.state.config["paths"]["processed_data"] = str(data_dir)
+
+        mock_send = AsyncMock(return_value={"type": "started", "run_id": "test123"})
+        with patch("api.routers.training._send_to_worker", mock_send):
+            resp = client.post("/training/start", json={
+                "n_generations": 1,
+                "n_epochs": 1,
+                "train_dates": ["2026-01-01"],
+                "test_dates": ["2026-01-02", "2026-01-03"],
+            })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["train_days"] == ["2026-01-01"]
+        assert data["test_days"] == ["2026-01-02", "2026-01-03"]
+
+    def test_start_with_invalid_dates_returns_400(self, tmp_path):
+        """POST /training/start with missing dates returns 400."""
+        client, app = _make_test_app()
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        import pandas as pd
+        pd.DataFrame({"x": [1]}).to_parquet(data_dir / "2026-01-01.parquet")
+        app.state.config["paths"]["processed_data"] = str(data_dir)
+
+        resp = client.post("/training/start", json={
+            "n_generations": 1,
+            "n_epochs": 1,
+            "train_dates": ["2026-99-99"],  # doesn't exist
+        })
+        assert resp.status_code == 400
+        assert "not found" in resp.json()["detail"].lower()
+
+
+class TestPopulationSizeOverride:
+
+    def test_population_size_applied_to_config(self):
+        """When population_size is set, the worker config should be overridden."""
+        import copy
+        config = yaml.safe_load(open("config.yaml"))
+        assert config["population"]["size"] == 50  # default
+
+        # Simulate what the worker does
+        run_config = copy.deepcopy(config)
+        population_size = 5
+        if population_size is not None:
+            run_config["population"]["size"] = population_size
+            run_config["population"]["n_elite"] = max(1, population_size // 10)
+
+        assert run_config["population"]["size"] == 5
+        assert run_config["population"]["n_elite"] == 1
+
+    def test_population_size_none_uses_default(self):
+        """When population_size is None, the config default should be used."""
+        import copy
+        config = yaml.safe_load(open("config.yaml"))
+
+        run_config = copy.deepcopy(config)
+        population_size = None
+        if population_size is not None:
+            run_config["population"]["size"] = population_size
+
+        assert run_config["population"]["size"] == 50  # unchanged

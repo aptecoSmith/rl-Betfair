@@ -18,6 +18,7 @@ function idleStatus(): TrainingStatus {
     item: null,
     detail: null,
     last_agent_score: null,
+    worker_connected: false,
   };
 }
 
@@ -44,6 +45,7 @@ function runningStatus(): TrainingStatus {
     },
     detail: 'Episode 312 | reward=+1.24 | loss=0.0042',
     last_agent_score: 0.82,
+    worker_connected: true,
   };
 }
 
@@ -71,6 +73,8 @@ describe('TrainingMonitor', () => {
       rewardHistory: rewardSignal,
       lossHistory: lossSignal,
       lastRunCompletedAt: completedAtSignal,
+      lastActivityAt: signal(Date.now()),
+      activityLog: signal([]),
       phase: signal((status ?? idleStatus()).phase),
       connect: vi.fn(),
       clearHistory: vi.fn(),
@@ -344,6 +348,95 @@ describe('TrainingMonitor', () => {
   it('should use default populationSize when service has null', () => {
     setup();
     // populationSize should remain at 50 (default) when service has null
+    expect(component.populationSize).toBe(50);
+  });
+
+  // ── Population size race condition ──
+
+  it('should not overwrite saved populationSize when API info loads', () => {
+    // Simulate: user previously saved populationSize=5 in selection state
+    statusSignal = signal(idleStatus());
+    eventSignal = signal(null);
+    rewardSignal = signal([]);
+    lossSignal = signal([]);
+    completedAtSignal = signal(null);
+    const mockTraining = {
+      status: statusSignal,
+      isRunning: signal(false),
+      latestEvent: eventSignal,
+      rewardHistory: rewardSignal,
+      lossHistory: lossSignal,
+      lastRunCompletedAt: completedAtSignal,
+      lastActivityAt: signal(Date.now()),
+      activityLog: signal([]),
+      phase: signal(null),
+      connect: vi.fn(),
+      clearHistory: vi.fn(),
+    };
+    TestBed.configureTestingModule({
+      imports: [TrainingMonitor],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: TrainingService, useValue: mockTraining },
+      ],
+    });
+    const selectionState = TestBed.inject(SelectionStateService);
+    selectionState.trainingFormValues.set({
+      generations: 3,
+      epochs: 3,
+      populationSize: 5,
+    });
+    fixture = TestBed.createComponent(TrainingMonitor);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    // User saved 5 — this should NOT be overwritten by API's default of 50
+    expect(component.populationSize).toBe(5);
+  });
+
+  it('should use API populationSize when no saved preference', () => {
+    // Simulate: no saved preference (null) — should use whatever default is set
+    statusSignal = signal(idleStatus());
+    eventSignal = signal(null);
+    rewardSignal = signal([]);
+    lossSignal = signal([]);
+    completedAtSignal = signal(null);
+    const mockTraining = {
+      status: statusSignal,
+      isRunning: signal(false),
+      latestEvent: eventSignal,
+      rewardHistory: rewardSignal,
+      lossHistory: lossSignal,
+      lastRunCompletedAt: completedAtSignal,
+      lastActivityAt: signal(Date.now()),
+      activityLog: signal([]),
+      phase: signal(null),
+      connect: vi.fn(),
+      clearHistory: vi.fn(),
+    };
+    TestBed.configureTestingModule({
+      imports: [TrainingMonitor],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: TrainingService, useValue: mockTraining },
+      ],
+    });
+    const selectionState = TestBed.inject(SelectionStateService);
+    // populationSize is null — no saved preference
+    selectionState.trainingFormValues.set({
+      generations: 3,
+      epochs: 3,
+      populationSize: null,
+    });
+    fixture = TestBed.createComponent(TrainingMonitor);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    // Default from the component class (50) should be used
     expect(component.populationSize).toBe(50);
   });
 });
