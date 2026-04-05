@@ -45,6 +45,7 @@ export class TrainingMonitor implements OnDestroy {
   readonly isStopping = signal(false);
   readonly startError = signal<string | null>(null);
   readonly trainingInfo = signal<any>(null);
+  readonly apiUnavailable = signal(false);
   nGenerations = 3;
   nEpochs = 3;
   populationSize = 50;
@@ -171,7 +172,11 @@ export class TrainingMonitor implements OnDestroy {
     this.api.getTrainingInfo().subscribe({
       next: (info) => {
         this.trainingInfo.set(info);
+        this.apiUnavailable.set(false);
         this.populationSize = info.population_size;
+      },
+      error: () => {
+        this.apiUnavailable.set(true);
       },
     });
   }

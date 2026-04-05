@@ -126,6 +126,10 @@
           <div class="recommendation">
             Recommended: 3 generations, 3 epochs to start. Increase generations for better evolution, epochs for deeper learning per day.
           </div>
+        } @else if (apiUnavailable()) {
+          <div class="error-message">
+            API is not available. Start the API backend first using <code>start-ui.bat</code> or <code>start-all.bat</code>.
+          </div>
         } @else {
           <p class="no-run">Loading training configuration...</p>
         }
@@ -135,7 +139,7 @@
         }
         <button class="btn btn-start"
                 (click)="onStartTraining()"
-                [disabled]="isStarting() || !trainingInfo()">
+                [disabled]="isStarting() || !trainingInfo() || apiUnavailable()">
           {{ isStarting() ? 'Starting...' : 'Start Training' }}
         </button>
       </div>
