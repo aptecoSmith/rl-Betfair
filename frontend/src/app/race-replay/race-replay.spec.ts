@@ -1,6 +1,7 @@
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { Injectable } from '@angular/core';
 import { of, throwError, Observable, EMPTY } from 'rxjs';
 import { vi, describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
@@ -10,6 +11,17 @@ import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardResponse, ScoreboardEntry } from '../models/scoreboard.model';
 import { ReplayDayResponse, ReplayRaceResponse, BetEvent } from '../models/replay.model';
 import { ModelDetailResponse } from '../models/model-detail.model';
+
+// Mock uPlot to avoid canvas errors in headless tests
+vi.mock('uplot', () => {
+  class MockUPlot {
+    ctx = null;
+    destroy() {}
+    setData() {}
+    setSize() {}
+  }
+  return { default: MockUPlot };
+});
 
 function makeModel(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
   return {
@@ -141,6 +153,7 @@ describe('RaceReplay', () => {
       providers: [
         provideRouter([]),
         provideHttpClient(),
+        provideHttpClientTesting(),
         { provide: ApiService, useValue: mockApi },
       ],
     });
@@ -151,6 +164,7 @@ describe('RaceReplay', () => {
 
   afterEach(() => {
     component?.ngOnDestroy();
+    fixture?.destroy();
   });
 
   // ── Component creation ──
@@ -888,6 +902,7 @@ describe('RaceReplay', () => {
       providers: [
         provideRouter([]),
         provideHttpClient(),
+        provideHttpClientTesting(),
         { provide: ApiService, useValue: mockApi },
       ],
     });
@@ -906,6 +921,7 @@ describe('RaceReplay', () => {
       providers: [
         provideRouter([]),
         provideHttpClient(),
+        provideHttpClientTesting(),
         { provide: ApiService, useValue: mockApi },
       ],
     });

@@ -53,6 +53,10 @@ class MockApiService {
   getScoreboard() { return of({ models: [] }); }
   getGarage() { return of({ models: [] }); }
   purgeDiscarded() { return this.deleteResponse$; }
+  getMysqlDates() { return of({ dates: [], available: false }); }
+  getServices() { return of({ services: [] }); }
+  healthCheck() { return of({ status: 'ok' }); }
+  controlService(_service: string, _action: string) { return of({ service: _service, action: _action, success: true, detail: 'OK' }); }
 }
 
 describe('Admin', () => {
@@ -139,14 +143,15 @@ describe('Admin', () => {
   it('should show date in days table', () => {
     setup({ days: { days: [makeExtractedDay('2026-03-26')] } });
     const el: HTMLElement = fixture.nativeElement;
-    expect(el.querySelector('.days-table tbody td')?.textContent).toContain('2026-03-26');
+    const cells = el.querySelectorAll('.days-table tbody td');
+    expect(cells[1]?.textContent).toContain('2026-03-26');
   });
 
   it('should show tick count in days table', () => {
     setup({ days: { days: [makeExtractedDay('2026-03-26')] } });
     const el: HTMLElement = fixture.nativeElement;
     const cells = el.querySelectorAll('.days-table tbody td');
-    expect(cells[1]?.textContent).toContain('100');
+    expect(cells[2]?.textContent).toContain('100');
   });
 
   it('should show delete button per day', () => {
@@ -440,10 +445,11 @@ describe('Admin', () => {
 
   // ── Section headers ──────────────────────────────────────────
 
-  it('should have all four section headers', () => {
+  it('should have all section headers', () => {
     setup();
     const el: HTMLElement = fixture.nativeElement;
     const headings = Array.from(el.querySelectorAll('h2')).map(h => h.textContent);
+    expect(headings).toContain('Service Control');
     expect(headings).toContain('Manage Days');
     expect(headings).toContain('Import Days');
     expect(headings).toContain('Manage Agents');
@@ -456,7 +462,7 @@ describe('Admin', () => {
     setup({ days: { days: [makeExtractedDay('2026-03-26')] } });
     const el: HTMLElement = fixture.nativeElement;
     const headers = Array.from(el.querySelectorAll('.days-table th')).map(h => h.textContent?.trim());
-    expect(headers).toEqual(['Date', 'Ticks', 'Races', 'File Size', 'Actions']);
+    expect(headers).toEqual(['Split', 'Date', 'Ticks', 'Races', 'File Size', 'Actions']);
   });
 
   it('should have correct agents table columns', () => {

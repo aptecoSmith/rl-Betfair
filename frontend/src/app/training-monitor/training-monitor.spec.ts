@@ -1,6 +1,7 @@
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { signal } from '@angular/core';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { TrainingMonitor, AgentGridItem } from './training-monitor';
@@ -80,6 +81,7 @@ describe('TrainingMonitor', () => {
       providers: [
         provideRouter([]),
         provideHttpClient(),
+        provideHttpClientTesting(),
         { provide: TrainingService, useValue: mockTraining },
       ],
     });
@@ -308,6 +310,7 @@ describe('TrainingMonitor', () => {
       providers: [
         provideRouter([]),
         provideHttpClient(),
+        provideHttpClientTesting(),
         { provide: TrainingService, useValue: mockTraining },
       ],
     });
