@@ -696,3 +696,19 @@ tr.test-day td:first-child {
   font-size: 0.75rem;
   margin-left: 0.25rem;
 }
+
+// ── Agent selection ─────────────────────────────────────────────
+
+.checkbox-col {
+  width: 30px;
+  text-align: center;
+
+  input[type="checkbox"] {
+    cursor: pointer;
+    accent-color: #2196f3;
+  }
+}
+
+tr.selected-row {
+  background: rgba(33, 150, 243, 0.1);
+}

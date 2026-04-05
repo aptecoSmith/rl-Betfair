@@ -76,6 +76,8 @@ export class Admin implements OnInit, OnDestroy {
 
   // ── Manage Agents enhancements ──────────────────────────────
   readonly agentsTableExpanded = signal(true);
+  readonly selectedAgents = signal<Set<string>>(new Set());
+  readonly deletingSelected = signal(false);
 
   // ── MySQL gap detection ──────────────────────────────────────
   readonly mysqlDates = signal<string[]>([]);
@@ -298,6 +300,65 @@ export class Admin implements OnInit, OnDestroy {
         this.clearMessageAfterDelay();
       },
     });
+  }
+
+  // ── Bulk agent selection ───────────────────────────────────────
+
+  toggleAgentSelection(modelId: string): void {
+    const current = new Set(this.selectedAgents());
+    if (current.has(modelId)) {
+      current.delete(modelId);
+    } else {
+      current.add(modelId);
+    }
+    this.selectedAgents.set(current);
+  }
+
+  selectAllAgents(): void {
+    this.selectedAgents.set(new Set(this.agents().map(a => a.model_id)));
+  }
+
+  deselectAllAgents(): void {
+    this.selectedAgents.set(new Set());
+  }
+
+  deleteSelectedAgents(): void {
+    const ids = Array.from(this.selectedAgents());
+    if (ids.length === 0) return;
+    this.confirmDeleteAgent.set(`BULK:${ids.length}`);
+  }
+
+  confirmAndDeleteSelectedAgents(): void {
+    const ids = Array.from(this.selectedAgents());
+    if (ids.length === 0) return;
+    this.confirmDeleteAgent.set(null);
+    this.deletingSelected.set(true);
+
+    let completed = 0;
+    for (const id of ids) {
+      this.api.deleteAgent(id).subscribe({
+        next: () => {
+          completed++;
+          if (completed === ids.length) {
+            this.deletingSelected.set(false);
+            this.selectedAgents.set(new Set());
+            this.successMessage.set(`Deleted ${ids.length} agent(s)`);
+            this.loadAgents();
+            this.clearMessageAfterDelay();
+          }
+        },
+        error: () => {
+          completed++;
+          if (completed === ids.length) {
+            this.deletingSelected.set(false);
+            this.selectedAgents.set(new Set());
+            this.error.set('Some agents failed to delete');
+            this.loadAgents();
+            this.clearMessageAfterDelay();
+          }
+        },
+      });
+    }
   }
 
   // ── Import single day ─────────────────────────────────────────

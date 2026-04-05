@@ -437,6 +437,11 @@
         <button class="btn btn-warning btn-sm" (click)="purgeDiscarded()" [disabled]="purging()" data-testid="purge-btn">
           {{ purging() ? 'Purging...' : 'Purge Discarded' }}
         </button>
+        @if (selectedAgents().size > 0) {
+          <button class="btn btn-danger btn-sm" (click)="deleteSelectedAgents()" [disabled]="deletingSelected()">
+            {{ deletingSelected() ? 'Deleting...' : 'Delete Selected (' + selectedAgents().size + ')' }}
+          </button>
+        }
         <button class="btn btn-secondary btn-sm" (click)="agentsTableExpanded.set(!agentsTableExpanded())">
           {{ agentsTableExpanded() ? 'Collapse' : 'Expand' }}
         </button>
@@ -446,6 +451,11 @@
         <table class="admin-table agents-table" data-testid="agents-table">
           <thead>
             <tr>
+              <th class="checkbox-col">
+                <input type="checkbox"
+                  [checked]="selectedAgents().size === agents().length && agents().length > 0"
+                  (change)="selectedAgents().size === agents().length ? deselectAllAgents() : selectAllAgents()" />
+              </th>
               <th>Model ID</th>
               <th>Gen</th>
               <th>Architecture</th>
@@ -457,7 +467,12 @@
           </thead>
           <tbody>
             @for (agent of agents(); track agent.model_id) {
-              <tr [class.discarded]="agent.status === 'discarded'">
+              <tr [class.discarded]="agent.status === 'discarded'" [class.selected-row]="selectedAgents().has(agent.model_id)">
+                <td class="checkbox-col">
+                  <input type="checkbox"
+                    [checked]="selectedAgents().has(agent.model_id)"
+                    (change)="toggleAgentSelection(agent.model_id)" />
+                </td>
                 <td class="model-id" [title]="agent.model_id">{{ shortId(agent.model_id) }}</td>
                 <td>{{ agent.generation }}</td>
                 <td>{{ agent.architecture_name }}</td>
@@ -482,15 +497,23 @@
     }
 
     <!-- Delete agent confirmation dialog -->
-    @if (confirmDeleteAgent()) {
+    @if (confirmDeleteAgent(); as deleteId) {
       <div class="dialog-overlay">
         <div class="dialog" data-testid="delete-agent-dialog">
           <h3>Confirm Delete</h3>
-          <p>Delete model <strong>{{ shortId(confirmDeleteAgent()!) }}</strong>? This removes weights, evaluation data, bet logs, and genetic events for this model.</p>
-          <div class="dialog-actions">
-            <button class="btn btn-secondary" (click)="cancelDeleteAgent()">Cancel</button>
-            <button class="btn btn-danger" (click)="confirmAndDeleteAgent()" data-testid="confirm-delete-agent">Delete</button>
-          </div>
+          @if (deleteId.startsWith('BULK:')) {
+            <p>Delete <strong>{{ selectedAgents().size }}</strong> selected agent(s)? This removes weights, evaluation data, bet logs, and genetic events for each model.</p>
+            <div class="dialog-actions">
+              <button class="btn btn-secondary" (click)="cancelDeleteAgent()">Cancel</button>
+              <button class="btn btn-danger" (click)="confirmAndDeleteSelectedAgents()">Delete {{ selectedAgents().size }} Agents</button>
+            </div>
+          } @else {
+            <p>Delete model <strong>{{ shortId(deleteId) }}</strong>? This removes weights, evaluation data, bet logs, and genetic events for this model.</p>
+            <div class="dialog-actions">
+              <button class="btn btn-secondary" (click)="cancelDeleteAgent()">Cancel</button>
+              <button class="btn btn-danger" (click)="confirmAndDeleteAgent()" data-testid="confirm-delete-agent">Delete</button>
+            </div>
+          }
         </div>
       </div>
     }

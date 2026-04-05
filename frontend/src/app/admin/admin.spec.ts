@@ -469,6 +469,6 @@ describe('Admin', () => {
     setup({ agents: { agents: [makeAgent('model-1')] } });
     const el: HTMLElement = fixture.nativeElement;
     const headers = Array.from(el.querySelectorAll('.agents-table th')).map(h => h.textContent?.trim());
-    expect(headers).toEqual(['Model ID', 'Gen', 'Architecture', 'Status', 'Score', 'Created', 'Actions']);
+    expect(headers).toEqual(['', 'Model ID', 'Gen', 'Architecture', 'Status', 'Score', 'Created', 'Actions']);
   });
 });
