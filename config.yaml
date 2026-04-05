@@ -106,3 +106,7 @@ hyperparameters:
     architecture_name:
       type: str_choice
       choices: [ppo_lstm_v1, ppo_time_lstm_v1]
+
+training_worker:
+  host: localhost
+  port: 8002

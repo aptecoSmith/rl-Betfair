@@ -547,31 +547,30 @@ async def list_streamrecorder_backups(request: Request):
 
 def _run_restore(mysql_bin: str, backup_dir: Path, db_name: str, gz_file: str,
                  user: str, password: str) -> str:
-    """Decompress a .sql.gz and pipe into MySQL. Returns error string or empty on success."""
+    """Decompress a .sql.gz via Python gzip and pipe into MySQL. Returns error string or empty."""
+    import gzip as gzip_mod
+
     gz_path = backup_dir / gz_file
     logger.info("[restore] Piping %s into %s (mysql_bin=%s)", gz_file, db_name, mysql_bin)
 
-    # gzip -dc file.sql.gz | mysql -u root -pPASS db_name
-    gzip_cmd = ["gzip", "-dc", str(gz_path)]
     mysql_cmd = [mysql_bin, "-u", user, f"-p{password}", db_name]
 
     try:
-        gzip_proc = subprocess.Popen(gzip_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with gzip_mod.open(gz_path, "rb") as f:
+            sql_data = f.read()
+    except Exception as e:
+        logger.error("[restore] gzip decompression failed for %s: %s", gz_file, e)
+        return f"gzip error: {e}"
+
+    try:
         mysql_proc = subprocess.Popen(
             mysql_cmd,
-            stdin=gzip_proc.stdout,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        gzip_proc.stdout.close()  # allow gzip to receive SIGPIPE
-        _, mysql_err = mysql_proc.communicate(timeout=600)
-        gzip_err = gzip_proc.stderr.read()
-        gzip_proc.wait(timeout=10)
+        _, mysql_err = mysql_proc.communicate(input=sql_data, timeout=600)
 
-        if gzip_proc.returncode != 0:
-            gzip_msg = gzip_err.decode(errors="replace").strip()
-            logger.error("[restore] gzip failed for %s: %s", gz_file, gzip_msg)
-            return f"gzip error: {gzip_msg}"
         if mysql_proc.returncode != 0:
             mysql_msg = mysql_err.decode(errors="replace").strip()
             logger.error("[restore] mysql import failed for %s: %s", gz_file, mysql_msg)
@@ -579,7 +578,6 @@ def _run_restore(mysql_bin: str, backup_dir: Path, db_name: str, gz_file: str,
         logger.info("[restore] Successfully restored %s into %s", gz_file, db_name)
         return ""
     except subprocess.TimeoutExpired:
-        gzip_proc.kill()
         mysql_proc.kill()
         logger.error("[restore] Restore timed out for %s (10 min limit)", gz_file)
         return "Restore timed out (10 min limit)"

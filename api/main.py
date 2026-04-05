@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,11 +15,24 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Configure app-level logging so our logger.info/error calls reach uvicorn's output
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
+logging.getLogger("websockets").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 from registry.model_store import ModelStore
 from registry.scoreboard import Scoreboard
 
 from api.routers import models, training, replay, system, admin
+from training.ipc import (
+    DEFAULT_WORKER_HOST,
+    DEFAULT_WORKER_PORT,
+    EVT_EVENT,
+    EVT_STATUS,
+    EVT_STARTED,
+    EVT_ERROR,
+    make_status_cmd,
+    parse_message,
+)
 
 
 load_dotenv()
@@ -56,8 +69,6 @@ async def lifespan(app: FastAPI):
         "latest_process": None,
         "latest_item": None,
     }
-    app.state.stop_event = threading.Event()
-    app.state.training_task = None
     # Set of connected WebSocket send callbacks for broadcasting
     app.state.ws_clients: set = set()
 
@@ -125,13 +136,103 @@ async def lifespan(app: FastAPI):
 
     consumer_task = asyncio.create_task(_queue_consumer())
 
+    # ── Training worker connection ──────────────────────────────────
+    # Maintain a persistent WebSocket connection to the training worker.
+    # Events received from the worker are pushed into progress_queue so
+    # the existing _queue_consumer + frontend WS broadcast work unchanged.
+
+    worker_cfg = config.get("training_worker", {})
+    worker_host = worker_cfg.get("host", DEFAULT_WORKER_HOST)
+    worker_port = worker_cfg.get("port", DEFAULT_WORKER_PORT)
+
+    # Shared mutable reference so the training router can send commands
+    app.state.worker_ws = None
+    app.state.worker_connected = False
+
+    # When the training router sends a command (start/stop), it sets a
+    # Future here.  The connection loop resolves it with the next
+    # non-event message (status/started/error) from the worker.
+    app.state.worker_pending_response: asyncio.Future | None = None
+
+    async def _worker_connection():
+        import websockets
+
+        url = f"ws://{worker_host}:{worker_port}"
+        while True:
+            try:
+                async with websockets.connect(url) as ws:
+                    app.state.worker_ws = ws
+                    app.state.worker_connected = True
+                    logger.info("Connected to training worker at %s", url)
+
+                    # Request current state to sync up
+                    await ws.send(make_status_cmd())
+
+                    async for raw in ws:
+                        msg = parse_message(raw)
+                        msg_type = msg.get("type")
+
+                        if msg_type == EVT_EVENT:
+                            # Push the training event into our progress_queue
+                            await progress_queue.put(msg["payload"])
+
+                        elif msg_type == EVT_STATUS:
+                            # Sync local training_state from worker
+                            state = app.state.training_state
+                            state["running"] = msg.get("running", False)
+                            if msg.get("latest_event"):
+                                state["latest_event"] = msg["latest_event"]
+                            if msg.get("latest_process"):
+                                state["latest_process"] = msg["latest_process"]
+                            if msg.get("latest_item"):
+                                state["latest_item"] = msg["latest_item"]
+                            # Resolve pending response if any
+                            pending = app.state.worker_pending_response
+                            if pending and not pending.done():
+                                pending.set_result(msg)
+
+                        elif msg_type == EVT_STARTED:
+                            # Resolve pending response
+                            pending = app.state.worker_pending_response
+                            if pending and not pending.done():
+                                pending.set_result(msg)
+
+                        elif msg_type == EVT_ERROR:
+                            logger.warning(
+                                "Training worker error: %s", msg.get("message")
+                            )
+                            # Resolve pending response with the error
+                            pending = app.state.worker_pending_response
+                            if pending and not pending.done():
+                                pending.set_result(msg)
+
+                        # Ignore pings and unknown types
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                app.state.worker_ws = None
+                app.state.worker_connected = False
+                # Cancel any pending response
+                pending = app.state.worker_pending_response
+                if pending and not pending.done():
+                    pending.set_exception(
+                        ConnectionError("Lost connection to training worker")
+                    )
+                # Retry after backoff
+                await asyncio.sleep(3)
+
+    worker_task = asyncio.create_task(_worker_connection())
+
     yield
 
+    worker_task.cancel()
     consumer_task.cancel()
-    try:
-        await consumer_task
-    except asyncio.CancelledError:
-        pass
+    for t in (worker_task, consumer_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 def create_app() -> FastAPI:

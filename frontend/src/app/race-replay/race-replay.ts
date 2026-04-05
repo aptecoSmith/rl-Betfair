@@ -712,8 +712,9 @@ export class RaceReplay implements OnInit, OnDestroy, AfterViewInit {
   }
 
   formatSecondsToOff(seconds: number): string {
-    const mins = Math.floor(Math.abs(seconds) / 60);
-    const secs = Math.abs(seconds) % 60;
+    const abs = Math.round(Math.abs(seconds));
+    const mins = Math.floor(abs / 60);
+    const secs = abs % 60;
     const sign = seconds < 0 ? '+' : '-';
     return `${sign}${mins}:${secs.toString().padStart(2, '0')}`;
   }

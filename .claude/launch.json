@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "api.main:app", "--reload", "--reload-exclude", ".claude", "--reload-exclude", "*.log", "--port", "8001"],
+      "port": 8001
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start"],
+      "cwd": "frontend",
+      "port": 4202
+    }
+  ]
+}

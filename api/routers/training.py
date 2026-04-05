@@ -1,11 +1,15 @@
-"""Training status, start/stop endpoints, and WebSocket for live progress."""
+"""Training status, start/stop endpoints, and WebSocket for live progress.
+
+Training runs in a separate worker process (training/worker.py).  This
+router sends commands to the worker via WebSocket IPC and proxies progress
+events back to the Angular frontend.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -17,6 +21,12 @@ from api.schemas import (
     StopTrainingResponse,
     TrainingStatus,
 )
+from training.ipc import (
+    make_start_cmd,
+    make_stop_cmd,
+    parse_message,
+    EVT_ERROR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +37,57 @@ def _state(request: Request) -> dict:
     return request.app.state.training_state
 
 
+def _worker_ws(request: Request):
+    """Return the live worker WebSocket or None."""
+    return getattr(request.app.state, "worker_ws", None)
+
+
+async def _send_to_worker(request: Request, msg: str, timeout: float = 5.0) -> dict:
+    """Send a command to the worker and wait for the response.
+
+    The response is delivered by the background worker connection task
+    in main.py via ``app.state.worker_pending_response``.
+
+    Raises HTTPException(503) if the worker is unreachable.
+    """
+    ws = _worker_ws(request)
+    if ws is None:
+        raise HTTPException(
+            503,
+            "Training worker is not available. "
+            "Start it with: python -m training.worker",
+        )
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    request.app.state.worker_pending_response = fut
+    try:
+        await ws.send(msg)
+        return await asyncio.wait_for(fut, timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Training worker did not respond in time")
+    except ConnectionError as exc:
+        raise HTTPException(503, f"Lost connection to training worker: {exc}")
+    except Exception as exc:
+        raise HTTPException(503, f"Training worker error: {exc}")
+    finally:
+        request.app.state.worker_pending_response = None
+
+
 @router.get("/training/status")
 def get_training_status(request: Request):
     """Current run snapshot: phase, process ETA, item ETA, generation."""
     state = _state(request)
+
+    # If the worker connection is down and we think we're running,
+    # report that the worker is disconnected.
+    worker_connected = getattr(request.app.state, "worker_connected", False)
+    if state["running"] and not worker_connected:
+        return TrainingStatus(
+            running=True,
+            phase="worker_disconnected",
+            detail="Training worker connection lost — training may still be running in the worker process",
+        )
+
     if not state["running"]:
         return TrainingStatus(running=False)
 
@@ -96,19 +153,18 @@ def get_training_info(request: Request):
 
 @router.post("/training/start", response_model=StartTrainingResponse)
 async def start_training(request: Request, body: StartTrainingRequest):
-    """Start a multi-generation training run in the background.
+    """Start a multi-generation training run via the training worker.
 
-    Returns immediately with the run configuration. Progress is streamed
+    Returns immediately with the run configuration.  Progress is streamed
     via the ``/ws/training`` WebSocket.
     """
     state = _state(request)
     if state["running"]:
         raise HTTPException(409, "A training run is already in progress")
 
+    # Compute train/test split for the response (worker does same split)
     config = request.app.state.config
     data_dir = config["paths"]["processed_data"]
-
-    # Find available dates from Parquet files
     processed = Path(data_dir)
     dates = sorted(
         f.stem
@@ -118,92 +174,25 @@ async def start_training(request: Request, body: StartTrainingRequest):
     if not dates:
         raise HTTPException(400, "No extracted data available — import days first")
 
-    # Chronological train/test split (~50/50)
     split = max(1, len(dates) // 2)
     train_dates = dates[:split]
     test_dates = dates[split:]
 
-    run_id = str(uuid.uuid4())
+    # Send start command to worker
+    cmd = make_start_cmd(
+        n_generations=body.n_generations,
+        n_epochs=body.n_epochs,
+        population_size=body.population_size,
+        seed=body.seed,
+        reevaluate_garaged=body.reevaluate_garaged,
+        reevaluate_min_score=body.reevaluate_min_score,
+    )
+    resp = await _send_to_worker(request, cmd, timeout=30.0)
 
-    # Reset stop event for this run
-    request.app.state.stop_event.clear()
+    if resp.get("type") == EVT_ERROR:
+        raise HTTPException(409, resp.get("message", "Worker rejected start request"))
 
-    # Apply population size override from request
-    import copy
-    run_config = copy.deepcopy(config)
-    if body.population_size is not None:
-        run_config["population"]["size"] = body.population_size
-        # Scale n_elite proportionally (at least 1)
-        run_config["population"]["n_elite"] = max(1, body.population_size // 10)
-
-    async def _run_training():
-        """Background coroutine that runs the orchestrator in a thread."""
-        from data.episode_builder import load_days
-        from training.run_training import TrainingOrchestrator
-
-        state["running"] = True
-        state["latest_event"] = None
-
-        # The orchestrator runs in a thread but asyncio.Queue is NOT
-        # thread-safe. Use a thread-safe queue and a bridge task.
-        import queue as thread_queue
-        thread_q: thread_queue.Queue = thread_queue.Queue()
-        async_q: asyncio.Queue = request.app.state.progress_queue
-        loop = asyncio.get_event_loop()
-
-        # Bridge: move events from thread-safe queue to asyncio queue
-        bridge_running = True
-
-        async def _bridge():
-            while bridge_running or not thread_q.empty():
-                try:
-                    event = await asyncio.to_thread(thread_q.get, timeout=0.5)
-                    await async_q.put(event)
-                except Exception:
-                    await asyncio.sleep(0.2)
-
-        bridge_task = asyncio.create_task(_bridge())
-
-        try:
-            train_days = load_days(train_dates, data_dir=data_dir)
-            test_days = load_days(test_dates, data_dir=data_dir)
-
-            orch = TrainingOrchestrator(
-                config=run_config,
-                model_store=request.app.state.store,
-                progress_queue=thread_q,
-                stop_event=request.app.state.stop_event,
-            )
-
-            # Run in thread — the orchestrator is blocking/CPU-bound
-            await asyncio.to_thread(
-                orch.run,
-                train_days=train_days,
-                test_days=test_days,
-                n_generations=body.n_generations,
-                n_epochs=body.n_epochs,
-                seed=body.seed,
-                reevaluate_garaged=body.reevaluate_garaged,
-                reevaluate_min_score=body.reevaluate_min_score,
-            )
-        except Exception:
-            logger.exception("Training run failed")
-            try:
-                request.app.state.progress_queue.put_nowait({
-                    "event": "phase_complete",
-                    "phase": "run_error",
-                    "summary": {"error": "Training run failed"},
-                })
-            except asyncio.QueueFull:
-                pass
-        finally:
-            bridge_running = False
-            await bridge_task
-            state["running"] = False
-            request.app.state.training_task = None
-
-    task = asyncio.create_task(_run_training())
-    request.app.state.training_task = task
+    run_id = resp.get("run_id", "unknown")
 
     return StartTrainingResponse(
         run_id=run_id,
@@ -215,7 +204,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
 
 
 @router.post("/training/stop", response_model=StopTrainingResponse)
-def stop_training(request: Request):
+async def stop_training(request: Request):
     """Request a graceful stop of the current training run.
 
     The run will halt after the current agent completes its training/evaluation.
@@ -224,7 +213,12 @@ def stop_training(request: Request):
     if not state["running"]:
         raise HTTPException(409, "No training run is in progress")
 
-    request.app.state.stop_event.set()
+    # Send stop command to worker
+    resp = await _send_to_worker(request, make_stop_cmd())
+
+    if resp.get("type") == EVT_ERROR:
+        raise HTTPException(409, resp.get("message", "Worker rejected stop request"))
+
     return StopTrainingResponse(
         detail="Stop requested — training will halt after the current agent completes",
     )
