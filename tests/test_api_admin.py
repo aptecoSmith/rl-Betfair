@@ -839,6 +839,7 @@ class TestBettingConstraints:
             config = _test_config(tmp)
             store = _create_store(tmp)
             client = _make_app(store, config)
+            client.app.state.config_path = str(Path(tmp) / "config.yaml")
 
             resp = client.post("/admin/config/constraints", json={
                 "max_back_price": 100.0,
@@ -891,6 +892,8 @@ class TestBettingConstraints:
             config = _test_config(tmp)
             store = _create_store(tmp)
             client = _make_app(store, config)
+            # Point config_path to temp so we don't corrupt the real config.yaml
+            client.app.state.config_path = str(Path(tmp) / "config.yaml")
 
             client.post("/admin/config/constraints", json={
                 "max_back_price": 42.0,

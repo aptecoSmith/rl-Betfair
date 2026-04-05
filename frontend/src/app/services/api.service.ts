@@ -177,6 +177,7 @@ export class ApiService {
     max_back_price: number | null;
     max_lay_price: number | null;
     min_seconds_before_off: number;
+    reevaluate_garaged_default: boolean;
   }> {
     return this.http.get<any>(`${this.baseUrl}/admin/config/constraints`);
   }
@@ -185,6 +186,7 @@ export class ApiService {
     max_back_price: number | null;
     max_lay_price: number | null;
     min_seconds_before_off: number;
+    reevaluate_garaged_default: boolean;
   }): Observable<any> {
     return this.http.post<any>(`${this.baseUrl}/admin/config/constraints`, constraints);
   }

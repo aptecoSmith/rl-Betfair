@@ -58,7 +58,7 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
   nGenerations = 3;
   nEpochs = 3;
   populationSize = 50;
-  reevaluateGaraged = false;
+  reevaluateGaraged = true;
   reevaluateMinScore: number | null = null;
   useAllData = true;
   availableDates: string[] = [];
@@ -203,10 +203,14 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
       next: (info) => {
         this.trainingInfo.set(info);
         this.apiUnavailable.set(false);
-        // Only use server default if user hasn't saved a preference
+        // Only use server defaults if user hasn't saved a preference
         const saved = this.selectionState.trainingFormValues();
         if (saved.populationSize === null) {
           this.populationSize = info.population_size;
+        }
+        // Apply config default for reevaluate garaged checkbox
+        if (info.reevaluate_garaged_default !== undefined) {
+          this.reevaluateGaraged = info.reevaluate_garaged_default;
         }
         // Populate date selection defaults
         if (info.dates?.length) {

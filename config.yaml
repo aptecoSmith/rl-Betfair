@@ -50,6 +50,7 @@ training:
   max_runners: 14               # observation vector padded to this many runners
   max_bets_per_race: 20         # max bets per race (prevents tick-spamming)
   require_gpu: true             # CUDA-enabled PyTorch installed (cu126, RTX 3090)
+  reevaluate_garaged_default: true  # default checkbox state for re-evaluating garaged models
   betting_constraints:
     max_back_price: null          # null=unlimited, float=max allowed back price
     max_lay_price: null           # null=unlimited, float=max allowed lay price

@@ -152,6 +152,9 @@ def get_training_info(request: Request):
         # Benchmark: ~12s per agent per day (from Session 4.6)
         "seconds_per_agent_per_day": 12.0,
         "garage_count": garage_count,
+        "reevaluate_garaged_default": config.get("training", {}).get(
+            "reevaluate_garaged_default", True,
+        ),
     }
 
 

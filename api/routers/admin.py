@@ -894,10 +894,12 @@ async def get_betting_constraints(request: Request):
     constraints = request.app.state.config.get("training", {}).get(
         "betting_constraints", {}
     )
+    training = request.app.state.config.get("training", {})
     return BettingConstraints(
         max_back_price=constraints.get("max_back_price"),
         max_lay_price=constraints.get("max_lay_price"),
         min_seconds_before_off=constraints.get("min_seconds_before_off", 0),
+        reevaluate_garaged_default=training.get("reevaluate_garaged_default", True),
     )
 
 
@@ -912,6 +914,7 @@ async def update_betting_constraints(body: BettingConstraints, request: Request)
     config["training"]["betting_constraints"]["max_back_price"] = body.max_back_price
     config["training"]["betting_constraints"]["max_lay_price"] = body.max_lay_price
     config["training"]["betting_constraints"]["min_seconds_before_off"] = body.min_seconds_before_off
+    config["training"]["reevaluate_garaged_default"] = body.reevaluate_garaged_default
 
     # Read-modify-write the on-disk config to preserve comments and other keys
     config_path = Path(getattr(request.app.state, "config_path", "config.yaml"))
@@ -925,6 +928,7 @@ async def update_betting_constraints(body: BettingConstraints, request: Request)
         "max_lay_price": body.max_lay_price,
         "min_seconds_before_off": body.min_seconds_before_off,
     }
+    on_disk.setdefault("training", {})["reevaluate_garaged_default"] = body.reevaluate_garaged_default
     with open(config_path, "w") as f:
         yaml.dump(on_disk, f, default_flow_style=False, sort_keys=False)
 

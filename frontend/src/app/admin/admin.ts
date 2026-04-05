@@ -51,6 +51,7 @@ export class Admin implements OnInit, OnDestroy {
   readonly constraintMaxBackPrice = signal<number | null>(null);
   readonly constraintMaxLayPrice = signal<number | null>(null);
   readonly constraintMinSecsBefore = signal<number>(0);
+  readonly reevaluateGaragedDefault = signal<boolean>(true);
   readonly loadingConstraints = signal(true);
   readonly savingConstraints = signal(false);
 
@@ -650,6 +651,7 @@ export class Admin implements OnInit, OnDestroy {
         this.constraintMaxBackPrice.set(res.max_back_price);
         this.constraintMaxLayPrice.set(res.max_lay_price);
         this.constraintMinSecsBefore.set(res.min_seconds_before_off);
+        this.reevaluateGaragedDefault.set(res.reevaluate_garaged_default);
         this.loadingConstraints.set(false);
       },
       error: () => this.loadingConstraints.set(false),
@@ -662,6 +664,7 @@ export class Admin implements OnInit, OnDestroy {
       max_back_price: this.constraintMaxBackPrice(),
       max_lay_price: this.constraintMaxLayPrice(),
       min_seconds_before_off: this.constraintMinSecsBefore(),
+      reevaluate_garaged_default: this.reevaluateGaragedDefault(),
     }).subscribe({
       next: () => {
         this.savingConstraints.set(false);

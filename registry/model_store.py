@@ -31,7 +31,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
-import torch
 
 
 # -- Data classes for API results ---------------------------------------------
@@ -380,6 +379,8 @@ class ModelStore:
 
     def save_weights(self, model_id: str, state_dict: dict) -> str:
         """Save PyTorch state dict to disk.  Returns the file path."""
+        import torch
+
         path = self.weights_dir / f"{model_id}.pt"
         torch.save(state_dict, str(path))
 
@@ -401,6 +402,8 @@ class ModelStore:
             raise ValueError(f"Model {model_id} not found in registry")
         if model.weights_path is None:
             raise ValueError(f"Model {model_id} has no saved weights")
+        import torch
+
         return torch.load(model.weights_path, weights_only=True)
 
     # -- Evaluation runs ------------------------------------------------------

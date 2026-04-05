@@ -568,6 +568,27 @@
     }
   </section>
 
+  <!-- ── Training Defaults ─────────────────────────────────────── -->
+  <section class="admin-section">
+    <h2>Training Defaults</h2>
+    <p class="section-desc">Default settings for the Training Monitor. Users can override these per-run.</p>
+
+    @if (loadingConstraints()) {
+      <p class="loading-text">Loading...</p>
+    } @else {
+      <div class="defaults-form">
+        <label class="form-field checkbox-inline">
+          <input type="checkbox" [ngModel]="reevaluateGaragedDefault()" (ngModelChange)="reevaluateGaragedDefault.set($event)" />
+          <span class="field-label">Re-evaluate garaged models after training</span>
+        </label>
+        <span class="field-help">When on, garaged models are automatically evaluated on the latest test data after each training run completes. This can be overridden per-run on the Training page.</span>
+        <button class="btn btn-primary" (click)="saveConstraints()" [disabled]="savingConstraints()">
+          {{ savingConstraints() ? 'Saving...' : 'Save' }}
+        </button>
+      </div>
+    }
+  </section>
+
   <!-- ── Reset ─────────────────────────────────────────────────── -->
   <section class="admin-section reset-section">
     <h2>Start Afresh</h2>

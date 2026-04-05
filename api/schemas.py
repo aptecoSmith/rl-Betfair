@@ -396,3 +396,4 @@ class BettingConstraints(BaseModel):
     max_back_price: float | None = None
     max_lay_price: float | None = None
     min_seconds_before_off: int = 0
+    reevaluate_garaged_default: bool = True
