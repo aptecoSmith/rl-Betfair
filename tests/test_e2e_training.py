@@ -158,6 +158,11 @@ def e2e_env():
         _write_synthetic_parquets(Path(data_dir))
 
     config_path = _make_test_config(tmp_dir, data_dir)
+    parquet_count = len([f for f in Path(data_dir).glob("*.parquet") if not f.stem.endswith("_runners")])
+    print(f"\n  E2E setup: config={config_path}")
+    print(f"  Data dir: {data_dir} ({parquet_count} days)")
+    print(f"  Using real data: {_has_real_data()}")
+    print(f"  DB: {tmp_dir / 'test_models.db'}")
     yield {"tmp_dir": tmp_dir, "config_path": config_path, "data_dir": data_dir}
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -177,11 +182,13 @@ def worker_proc(e2e_env):
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
     )
 
+    print(f"  Waiting for worker WebSocket on port {WORKER_PORT}...")
     if not _wait_for_ws(WORKER_PORT, timeout=30):
         out = proc.stdout.read(8192).decode("utf-8", errors="replace") if proc.stdout else ""
         proc.kill()
         pytest.fail(f"Worker WebSocket not ready on port {WORKER_PORT} within 30s.\nOutput:\n{out}")
 
+    print(f"  Worker ready (PID {proc.pid})")
     yield proc
 
     if proc.poll() is None:
@@ -203,20 +210,27 @@ def test_full_training_flow(worker_proc, e2e_env):
     avoid connection issues between test methods.
     """
     assert worker_proc.poll() is None, "Worker process is not running"
+    t0 = time.monotonic()
+
+    def _elapsed() -> str:
+        return f"[{time.monotonic() - t0:.1f}s]"
 
     async def _run():
         import websockets
 
+        print(f"\n  {_elapsed()} Connecting to worker on ws://127.0.0.1:{WORKER_PORT}")
         async with websockets.connect(
             f"ws://127.0.0.1:{WORKER_PORT}", open_timeout=10,
         ) as ws:
             # ── Step 1: Verify idle ───────────────────────────────
             raw = await asyncio.wait_for(ws.recv(), timeout=5)
             msg = json.loads(raw)
+            print(f"  {_elapsed()} Initial status: running={msg.get('running')}")
             assert msg["type"] == "status", f"Expected status, got {msg['type']}"
             assert msg["running"] is False, "Worker should be idle before training"
 
             # ── Step 2: Start training ────────────────────────────
+            print(f"  {_elapsed()} Sending start command (1 agent, 1 gen, 1 epoch)")
             await ws.send(json.dumps({
                 "type": "start",
                 "n_generations": 1,
@@ -226,20 +240,23 @@ def test_full_training_flow(worker_proc, e2e_env):
             }))
 
             # Wait for started response — may take time if data loading is slow
-            for _ in range(6):
+            for attempt in range(6):
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=10)
                     msg = json.loads(raw)
+                    print(f"  {_elapsed()} Response: type={msg.get('type')}")
                     if msg.get("type") == "error":
                         pytest.skip(f"Worker could not start: {msg.get('message')}")
                     if msg.get("type") == "started":
                         break
                 except asyncio.TimeoutError:
+                    print(f"  {_elapsed()} Waiting for started (attempt {attempt + 1}/6)...")
                     continue
             else:
                 pytest.fail("Did not receive 'started' response within 60s")
 
             # ── Step 3: Wait for completion (10 min timeout) ──────
+            print(f"  {_elapsed()} Training started, waiting for completion...")
             deadline = time.monotonic() + 600
             completed = False
             event_count = 0
@@ -259,11 +276,17 @@ def test_full_training_flow(worker_proc, e2e_env):
 
                 event_type = payload.get("event")
                 phase = payload.get("phase")
+                detail = str(payload.get("detail", ""))[:60]
+
+                # Log non-progress events and periodic progress
+                if event_type != "progress" or event_count % 5 == 0:
+                    print(f"  {_elapsed()} #{event_count} event={event_type} phase={phase} {detail}")
 
                 if event_type in ("run_complete",) or (
                     event_type == "phase_complete"
                     and phase in ("run_complete", "run_stopped")
                 ):
+                    print(f"  {_elapsed()} Training completed! ({event_count} events)")
                     completed = True
                     break
                 if event_type == "phase_complete" and phase == "run_error":
@@ -271,13 +294,15 @@ def test_full_training_flow(worker_proc, e2e_env):
 
             assert completed, (
                 f"Training did not complete within 10 minutes. "
-                f"Received {event_count} events."
+                f"Received {event_count} events. Worker alive: {worker_proc.poll() is None}"
             )
 
             # ── Step 4: Verify idle again ─────────────────────────
+            print(f"  {_elapsed()} Verifying worker is idle...")
             await ws.send(json.dumps({"type": "status"}))
             raw = await asyncio.wait_for(ws.recv(), timeout=5)
             msg = json.loads(raw)
+            print(f"  {_elapsed()} Post-training status: running={msg.get('running')}")
             assert msg["type"] == "status"
             assert msg["running"] is False, "Worker should be idle after training"
 
@@ -285,10 +310,13 @@ def test_full_training_flow(worker_proc, e2e_env):
 
     # ── Step 5: Verify models in DB ───────────────────────────
     db_path = e2e_env["tmp_dir"] / "test_models.db"
+    print(f"  {_elapsed()} Checking DB: {db_path}")
     assert db_path.exists(), "Registry DB was not created"
 
     conn = sqlite3.connect(str(db_path))
     count = conn.execute("SELECT COUNT(*) FROM models").fetchone()[0]
     conn.close()
 
+    print(f"  {_elapsed()} Models in DB: {count}")
     assert count >= 1, f"Expected at least 1 model in DB, got {count}"
+    print(f"  {_elapsed()} E2E test PASSED")
