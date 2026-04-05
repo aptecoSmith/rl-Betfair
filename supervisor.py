@@ -97,9 +97,28 @@ class ManagedProcess:
             return time.time() - self._started_at
         return None
 
+    def _clear_port(self) -> None:
+        """Kill any stale process holding this service's port."""
+        if sys.platform != "win32":
+            return
+        try:
+            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10)
+            for line in result.stdout.splitlines():
+                if f":{self.port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = int(parts[-1])
+                    if pid > 0:
+                        logger.info("Killing stale process on port %d (PID %d)", self.port, pid)
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=10)
+            time.sleep(0.5)
+        except Exception as exc:
+            logger.warning("Could not clear port %d: %s", self.port, exc)
+
     def start(self) -> bool:
         if self.running:
             return False
+
+        self._clear_port()
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"

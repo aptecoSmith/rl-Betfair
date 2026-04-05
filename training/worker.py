@@ -429,6 +429,26 @@ class TrainingWorker:
 # ── Entry point ─────────────────────────────────────────────────────
 
 
+def _clear_port(port: int) -> None:
+    """Kill any process listening on the given port (stale worker cleanup)."""
+    if sys.platform != "win32":
+        return  # Unix handles this via SO_REUSEADDR or manual kill
+    try:
+        import subprocess as _sp
+        result = _sp.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10)
+        for line in result.stdout.splitlines():
+            if f":{port}" in line and "LISTENING" in line:
+                parts = line.split()
+                pid = int(parts[-1])
+                if pid > 0:
+                    console.print(f"[yellow]Killing stale process on port {port} (PID {pid})[/yellow]")
+                    _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=10)
+        import time as _time
+        _time.sleep(0.5)  # Brief pause to let the OS release the port
+    except Exception as exc:
+        console.print(f"[yellow]Warning: could not clear port {port}: {exc}[/yellow]")
+
+
 def main() -> None:
     load_dotenv()
 
@@ -453,12 +473,21 @@ def main() -> None:
     # Suppress noisy websockets library logging (logs every frame/connection)
     logging.getLogger("websockets").setLevel(logging.WARNING)
 
+    # Kill any stale process holding our port before starting
+    _clear_port(port)
+
     worker = TrainingWorker(config=config, host=host, port=port)
 
     try:
         asyncio.run(worker.serve())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down...[/yellow]")
+    except OSError as exc:
+        if "10048" in str(exc) or "address already in use" in str(exc).lower():
+            console.print(f"[red bold]Port {port} is still in use after cleanup attempt.[/red bold]")
+            console.print(f"[red]Run: stop-training.bat  or manually kill the process on port {port}[/red]")
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":
