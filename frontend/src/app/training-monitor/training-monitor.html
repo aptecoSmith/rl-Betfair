@@ -1,5 +1,10 @@
 <div class="training-monitor">
-  <h1 class="page-title">Training Monitor</h1>
+  <h1 class="page-title">
+    Training Monitor
+    <span class="connection-chip" [class.connected]="workerConnected()" [class.disconnected]="!workerConnected()">
+      {{ workerConnected() ? 'Worker connected' : 'Worker disconnected' }}
+    </span>
+  </h1>
 
   <!-- ── ETA Bars ─────────────────────────────────────────── -->
   @if (isRunning()) {
@@ -42,6 +47,10 @@
         <div class="phase-banner">
           <span class="phase-dot"></span>
           {{ phaseLabel() }}
+          <span class="heartbeat-chip" [class]="heartbeatColor()">
+            <span class="heartbeat-dot"></span>
+            {{ heartbeatAge() }}
+          </span>
         </div>
       }
 
@@ -49,11 +58,34 @@
         <div class="detail-line">{{ status().detail }}</div>
       }
 
+      <!-- Activity log -->
+      <div class="activity-log-section">
+        <button class="btn-toggle-log" (click)="showActivityLog = !showActivityLog">
+          {{ showActivityLog ? 'Hide' : 'Show' }} Activity Log ({{ activityLog().length }})
+        </button>
+        @if (showActivityLog && activityLog().length > 0) {
+          <div class="activity-log" #logContainer>
+            @for (entry of activityLog(); track $index) {
+              <div class="log-entry">
+                <span class="log-time">{{ entry.time }}</span>
+                <span class="log-text">{{ entry.text }}</span>
+              </div>
+            }
+          </div>
+        }
+      </div>
+
       <div class="stop-section">
+        <button class="btn btn-finish"
+                data-testid="finish-btn"
+                (click)="onFinishTraining()"
+                [disabled]="isFinishing() || isStopping()">
+          {{ isFinishing() ? 'Finishing...' : 'Finish Up' }}
+        </button>
         <button class="btn btn-stop"
                 data-testid="stop-btn"
                 (click)="onStopTraining()"
-                [disabled]="isStopping()">
+                [disabled]="isStopping() || isFinishing()">
           {{ isStopping() ? 'Stopping...' : 'Stop Training' }}
         </button>
       </div>
@@ -78,8 +110,60 @@
         @if (trainingInfo(); as info) {
           <div class="data-summary" data-testid="data-summary">
             <span class="data-chip" data-testid="data-chip">{{ info.available_days }} days of data</span>
-            <span class="data-chip">{{ info.train_days }} train / {{ info.test_days }} test</span>
+            @if (useAllData) {
+              <span class="data-chip">{{ info.train_days }} train / {{ info.test_days }} test</span>
+            } @else {
+              <span class="data-chip">{{ datesInRange(trainDateStart, trainDateEnd).length }} train / {{ datesInRange(testDateStart, testDateEnd).length }} test</span>
+            }
           </div>
+
+          <label class="form-field checkbox-field">
+            <input type="checkbox" [(ngModel)]="useAllData" />
+            <span class="field-label">Use all data (auto 50/50 split)</span>
+          </label>
+
+          @if (!useAllData) {
+            <div class="date-selection">
+              <div class="date-range">
+                <span class="date-range-title">Training dates</span>
+                <label class="form-field">
+                  <span class="field-label">Start</span>
+                  <select [(ngModel)]="trainDateStart">
+                    @for (d of availableDates; track d) {
+                      <option [value]="d">{{ d }}</option>
+                    }
+                  </select>
+                </label>
+                <label class="form-field">
+                  <span class="field-label">End</span>
+                  <select [(ngModel)]="trainDateEnd">
+                    @for (d of availableDates; track d) {
+                      <option [value]="d">{{ d }}</option>
+                    }
+                  </select>
+                </label>
+              </div>
+              <div class="date-range">
+                <span class="date-range-title">Test dates</span>
+                <label class="form-field">
+                  <span class="field-label">Start</span>
+                  <select [(ngModel)]="testDateStart">
+                    @for (d of availableDates; track d) {
+                      <option [value]="d">{{ d }}</option>
+                    }
+                  </select>
+                </label>
+                <label class="form-field">
+                  <span class="field-label">End</span>
+                  <select [(ngModel)]="testDateEnd">
+                    @for (d of availableDates; track d) {
+                      <option [value]="d">{{ d }}</option>
+                    }
+                  </select>
+                </label>
+              </div>
+            </div>
+          }
 
           <div class="start-form" data-testid="start-form">
             <label class="form-field">
@@ -116,7 +200,7 @@
           }
 
           <div class="estimate-box">
-            <span class="estimate-label">Estimated duration</span>
+            <span class="estimate-label">Estimated duration (refines once running)</span>
             <span class="estimate-value">{{ estimatedDuration() }}</span>
             <span class="estimate-detail">
               {{ populationSize }} agents x {{ nGenerations }} gen{{ nGenerations > 1 ? 's' : '' }} x {{ info.train_days }} train days x {{ nEpochs }} epoch{{ nEpochs > 1 ? 's' : '' }}

@@ -111,11 +111,13 @@ class TrainingOrchestrator:
         progress_queue: asyncio.Queue | None = None,
         device: str | None = None,
         stop_event: threading.Event | None = None,
+        finish_event: threading.Event | None = None,
     ) -> None:
         self.config = config
         self.model_store = model_store
         self.progress_queue = progress_queue
         self.stop_event = stop_event
+        self.finish_event = finish_event
 
         # GPU auto-detection
         if device is not None:
@@ -167,6 +169,10 @@ class TrainingOrchestrator:
                 self._emit_phase_complete("run_stopped", {})
             return True
         return False
+
+    def _check_finish(self) -> bool:
+        """Return True if an early finish has been requested."""
+        return self.finish_event is not None and self.finish_event.is_set()
 
     def run(
         self,
@@ -227,6 +233,16 @@ class TrainingOrchestrator:
         for gen in range(n_generations):
             if self._check_stop():
                 break
+
+            # Finish requested: skip training, evaluate current pop, then exit
+            finishing = self._check_finish() and gen > 0
+            if finishing:
+                logger.info("Finish requested — evaluating current population (gen %d)", gen)
+                self._emit_phase_start("finishing_early", {
+                    "generation": gen,
+                    "skipped_generations": n_generations - gen,
+                })
+
             logger.info("=== Generation %d ===", gen)
             gen_result = self._run_generation(
                 generation=gen,
@@ -235,9 +251,17 @@ class TrainingOrchestrator:
                 test_days=test_days,
                 train_cutoff=train_cutoff,
                 n_epochs=n_epochs,
-                is_last=(gen == n_generations - 1),
+                is_last=(gen == n_generations - 1) or finishing,
+                skip_training=finishing,
             )
             result.generations.append(gen_result)
+
+            if finishing:
+                if self.scoreboard is not None:
+                    result.final_rankings = self.scoreboard.update_scores()
+                else:
+                    result.final_rankings = gen_result.scores
+                break
 
             # Prepare next generation's agents
             if gen < n_generations - 1:
@@ -339,67 +363,80 @@ class TrainingOrchestrator:
         train_cutoff: str,
         n_epochs: int,
         is_last: bool,
+        skip_training: bool = False,
     ) -> GenerationResult:
-        """Run one full generation: train → evaluate → score → select → breed."""
+        """Run one full generation: train → evaluate → score → select → breed.
 
-        # ── Phase: Training ──────────────────────────────────────────────
-        self._emit_phase_start("training", {
-            "generation": generation,
-            "agent_count": len(agents),
-        })
-
-        outer_tracker = ProgressTracker(
-            total=len(agents),
-            label=f"Generation {generation} — training {len(agents)} agents",
-        )
-        outer_tracker.reset_timer()
+        If *skip_training* is True the training phase is skipped entirely
+        and only evaluation + scoring runs.  Used by the "finish up" flow.
+        """
 
         training_stats: dict[str, TrainingStats] = {}
 
-        for agent in agents:
-            if self._check_stop():
-                break
-            self._publish_progress(
-                "training", outer_tracker,
-                detail=f"Training agent {agent.model_id[:12]} ({agent.architecture_name})",
-            )
+        if skip_training:
+            # Jump straight to evaluation
+            self._emit_phase_complete("training", {
+                "generation": generation,
+                "agents_trained": 0,
+                "skipped": True,
+            })
+        else:
+            # ── Phase: Training ──────────────────────────────────────────────
+            self._emit_phase_start("training", {
+                "generation": generation,
+                "agent_count": len(agents),
+            })
 
-            trainer = PPOTrainer(
-                policy=agent.policy,
-                config=self.config,
-                hyperparams=agent.hyperparameters,
-                progress_queue=self.progress_queue,
-                device=self.device,
-                feature_cache=self.feature_cache,
+            outer_tracker = ProgressTracker(
+                total=len(agents),
+                label=f"Generation {generation} — training {len(agents)} agents",
             )
-            with perf_log(
-                logger,
-                f"Train agent {agent.model_id[:12]}",
-                log_gpu=(self.device == "cuda"),
-            ):
-                stats = trainer.train(train_days, n_epochs=n_epochs)
-            training_stats[agent.model_id] = stats
+            outer_tracker.reset_timer()
 
-            # Save updated weights after training
-            if self.model_store is not None:
-                self.model_store.save_weights(
-                    agent.model_id, agent.policy.state_dict(),
+            for agent in agents:
+                if self._check_stop():
+                    break
+                self._publish_progress(
+                    "training", outer_tracker,
+                    detail=f"Training agent {agent.model_id[:12]} ({agent.architecture_name})",
                 )
 
-            outer_tracker.tick()
-            self._publish_progress(
-                "training", outer_tracker,
-                detail=(
-                    f"Agent {agent.model_id[:12]} done | "
-                    f"mean_reward={stats.mean_reward:+.3f} | "
-                    f"mean_pnl={stats.mean_pnl:+.2f}"
-                ),
-            )
+                trainer = PPOTrainer(
+                    policy=agent.policy,
+                    config=self.config,
+                    hyperparams=agent.hyperparameters,
+                    progress_queue=self.progress_queue,
+                    device=self.device,
+                    feature_cache=self.feature_cache,
+                )
+                with perf_log(
+                    logger,
+                    f"Train agent {agent.model_id[:12]}",
+                    log_gpu=(self.device == "cuda"),
+                ):
+                    stats = trainer.train(train_days, n_epochs=n_epochs)
+                training_stats[agent.model_id] = stats
 
-        self._emit_phase_complete("training", {
-            "generation": generation,
-            "agents_trained": len(agents),
-        })
+                # Save updated weights after training
+                if self.model_store is not None:
+                    self.model_store.save_weights(
+                        agent.model_id, agent.policy.state_dict(),
+                    )
+
+                outer_tracker.tick()
+                self._publish_progress(
+                    "training", outer_tracker,
+                    detail=(
+                        f"Agent {agent.model_id[:12]} done | "
+                        f"mean_reward={stats.mean_reward:+.3f} | "
+                        f"mean_pnl={stats.mean_pnl:+.2f}"
+                    ),
+                )
+
+            self._emit_phase_complete("training", {
+                "generation": generation,
+                "agents_trained": len(agents),
+            })
 
         if self._check_stop():
             return GenerationResult(

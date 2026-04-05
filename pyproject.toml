@@ -2,4 +2,5 @@
 markers = [
     "integration: requires local MySQL on localhost:3306 (deselected by default, run with: pytest -m integration)",
 ]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration' -v --tb=short -o log_cli=true -o log_cli_level=INFO"
+timeout = 60

@@ -47,6 +47,7 @@ def _load_config(path: str = "config.yaml") -> dict:
 async def lifespan(app: FastAPI):
     """Open registry DB on startup, close on shutdown."""
     config = _load_config()
+    app.state.config_path = str(Path("config.yaml").resolve())
     db_path = config["paths"]["registry_db"]
     weights_dir = config["paths"]["model_weights"]
     bet_logs_dir = str(Path(db_path).parent / "bet_logs")

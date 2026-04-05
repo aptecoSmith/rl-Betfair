@@ -21,6 +21,7 @@ from api.schemas import (
     AdminDeleteResponse,
     BackupDay,
     BackupDaysResponse,
+    BettingConstraints,
     ExtractedDay,
     ExtractedDaysResponse,
     ImportDayRequest,
@@ -882,3 +883,49 @@ async def restore_backups(body: RestoreRequest, request: Request):
         dates_queued=len(dates_to_restore),
         detail=f"Queued {len(dates_to_restore)} date(s) for restore + extraction",
     )
+
+
+# ── Betting Constraints ─────────────────────────────────────────────
+
+
+@router.get("/config/constraints", response_model=BettingConstraints)
+async def get_betting_constraints(request: Request):
+    """Return the current betting constraint settings from config."""
+    constraints = request.app.state.config.get("training", {}).get(
+        "betting_constraints", {}
+    )
+    return BettingConstraints(
+        max_back_price=constraints.get("max_back_price"),
+        max_lay_price=constraints.get("max_lay_price"),
+        min_seconds_before_off=constraints.get("min_seconds_before_off", 0),
+    )
+
+
+@router.post("/config/constraints", response_model=BettingConstraints)
+async def update_betting_constraints(body: BettingConstraints, request: Request):
+    """Update betting constraints and persist to config.yaml."""
+    import yaml
+
+    # Update in-memory config
+    config = request.app.state.config
+    config.setdefault("training", {}).setdefault("betting_constraints", {})
+    config["training"]["betting_constraints"]["max_back_price"] = body.max_back_price
+    config["training"]["betting_constraints"]["max_lay_price"] = body.max_lay_price
+    config["training"]["betting_constraints"]["min_seconds_before_off"] = body.min_seconds_before_off
+
+    # Read-modify-write the on-disk config to preserve comments and other keys
+    config_path = Path(getattr(request.app.state, "config_path", "config.yaml"))
+    if config_path.exists():
+        with open(config_path) as f:
+            on_disk = yaml.safe_load(f) or {}
+    else:
+        on_disk = {}
+    on_disk.setdefault("training", {})["betting_constraints"] = {
+        "max_back_price": body.max_back_price,
+        "max_lay_price": body.max_lay_price,
+        "min_seconds_before_off": body.min_seconds_before_off,
+    }
+    with open(config_path, "w") as f:
+        yaml.dump(on_disk, f, default_flow_style=False, sort_keys=False)
+
+    return body

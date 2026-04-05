@@ -146,6 +146,7 @@ export class ApiService {
     n_generations?: number; n_epochs?: number;
     population_size?: number; seed?: number | null;
     reevaluate_garaged?: boolean; reevaluate_min_score?: number | null;
+    train_dates?: string[] | null; test_dates?: string[] | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
@@ -157,10 +158,34 @@ export class ApiService {
       seed: params.seed ?? null,
       reevaluate_garaged: params.reevaluate_garaged ?? false,
       reevaluate_min_score: params.reevaluate_min_score ?? null,
+      train_dates: params.train_dates ?? null,
+      test_dates: params.test_dates ?? null,
     });
   }
 
   stopTraining(): Observable<{ detail: string }> {
     return this.http.post<{ detail: string }>(`${this.baseUrl}/training/stop`, {});
+  }
+
+  finishTraining(): Observable<{ detail: string }> {
+    return this.http.post<{ detail: string }>(`${this.baseUrl}/training/finish`, {});
+  }
+
+  // ── Betting constraints ───────────────────────────────────────────
+
+  getBettingConstraints(): Observable<{
+    max_back_price: number | null;
+    max_lay_price: number | null;
+    min_seconds_before_off: number;
+  }> {
+    return this.http.get<any>(`${this.baseUrl}/admin/config/constraints`);
+  }
+
+  updateBettingConstraints(constraints: {
+    max_back_price: number | null;
+    max_lay_price: number | null;
+    min_seconds_before_off: number;
+  }): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/admin/config/constraints`, constraints);
   }
 }

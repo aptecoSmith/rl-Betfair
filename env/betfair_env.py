@@ -202,6 +202,10 @@ class BetfairEnv(gymnasium.Env):
         self.max_runners: int = config["training"]["max_runners"]
         self.starting_budget: float = config["training"]["starting_budget"]
         self.max_bets_per_race: int = config["training"].get("max_bets_per_race", 20)
+        constraints = config["training"].get("betting_constraints", {})
+        self._max_back_price: float | None = constraints.get("max_back_price")
+        self._max_lay_price: float | None = constraints.get("max_lay_price")
+        self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
         self._total_races = len(day.races)
 
         # Reward parameters
@@ -498,13 +502,23 @@ class BetfairEnv(gymnasium.Env):
 
             time_to_off = (race.market_start_time - tick.timestamp).total_seconds()
 
+            # Constraint: minimum time before off
+            if self._min_seconds_before_off > 0 and time_to_off < self._min_seconds_before_off:
+                continue
+
             if action_signal > _BACK_THRESHOLD and runner.available_to_lay:
+                # Constraint: max back price
+                if self._max_back_price is not None and runner.available_to_lay[0].price > self._max_back_price:
+                    continue
                 bet = bm.place_back(runner, stake, market_id=race.market_id)
                 if bet is not None:
                     bet.tick_index = self._tick_idx
                     self._bet_times[len(bm.bets) - 1] = time_to_off
 
             elif action_signal < _LAY_THRESHOLD and runner.available_to_back:
+                # Constraint: max lay price
+                if self._max_lay_price is not None and runner.available_to_back[0].price > self._max_lay_price:
+                    continue
                 bet = bm.place_lay(runner, stake, market_id=race.market_id)
                 if bet is not None:
                     bet.tick_index = self._tick_idx

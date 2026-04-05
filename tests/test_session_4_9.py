@@ -120,6 +120,64 @@ class TestOrchestratorStopEvent:
         assert len(stopped) == 1
 
 
+class TestOrchestratorFinishEvent:
+
+    def test_finish_event_accepted(self, config):
+        """TrainingOrchestrator accepts a finish_event parameter."""
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        finish = threading.Event()
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+            finish_event=finish,
+        )
+        assert orch.finish_event is finish
+
+    def test_finish_event_none_by_default(self, config):
+        """Without finish_event, it defaults to None."""
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+        )
+        assert orch.finish_event is None
+
+    def test_check_finish_returns_false_when_not_set(self, config):
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        finish = threading.Event()
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+            finish_event=finish,
+        )
+        assert orch._check_finish() is False
+
+    def test_check_finish_returns_true_when_set(self, config):
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        finish = threading.Event()
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+            finish_event=finish,
+        )
+        finish.set()
+        assert orch._check_finish() is True
+
+    def test_check_finish_false_when_none(self, config):
+        """_check_finish should return False when finish_event is None."""
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+        )
+        assert orch._check_finish() is False
+
+
 # ── API endpoint tests ──────────────────────────────────────────────────────
 
 

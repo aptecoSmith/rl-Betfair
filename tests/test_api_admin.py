@@ -794,3 +794,112 @@ class TestAdminIntegration:
             days = resp.json()["days"]
             assert len(days) == 1
             assert days[0]["date"] == "2026-03-26"
+
+
+# ── Betting Constraints Endpoints ──────────────────────────────────────
+
+
+class TestBettingConstraints:
+    def test_get_defaults(self):
+        """GET /admin/config/constraints returns defaults when none configured."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+            client = _make_app(store, config)
+
+            resp = client.get("/admin/config/constraints")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["max_back_price"] is None
+            assert data["max_lay_price"] is None
+            assert data["min_seconds_before_off"] == 0
+
+    def test_get_with_existing_values(self):
+        """GET returns previously configured constraint values."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            config["training"]["betting_constraints"] = {
+                "max_back_price": 50.0,
+                "max_lay_price": 30.0,
+                "min_seconds_before_off": 300,
+            }
+            store = _create_store(tmp)
+            client = _make_app(store, config)
+
+            resp = client.get("/admin/config/constraints")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["max_back_price"] == 50.0
+            assert data["max_lay_price"] == 30.0
+            assert data["min_seconds_before_off"] == 300
+
+    def test_post_updates_config(self):
+        """POST /admin/config/constraints updates in-memory config."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+            client = _make_app(store, config)
+
+            resp = client.post("/admin/config/constraints", json={
+                "max_back_price": 100.0,
+                "max_lay_price": None,
+                "min_seconds_before_off": 600,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["max_back_price"] == 100.0
+            assert data["max_lay_price"] is None
+            assert data["min_seconds_before_off"] == 600
+
+            # Verify the in-memory config was updated
+            assert config["training"]["betting_constraints"]["max_back_price"] == 100.0
+            assert config["training"]["betting_constraints"]["min_seconds_before_off"] == 600
+
+    def test_post_persists_to_yaml(self):
+        """POST writes constraints to config.yaml on disk."""
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+
+            # Write initial config.yaml so the POST can persist to it
+            config_path = Path(tmp) / "config.yaml"
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            client = _make_app(store, config)
+            # Set config_path so the endpoint writes to our temp file
+            client.app.state.config_path = str(config_path)
+
+            client.post("/admin/config/constraints", json={
+                "max_back_price": 75.0,
+                "max_lay_price": 25.0,
+                "min_seconds_before_off": 120,
+            })
+
+            # Re-read from disk
+            with open(config_path) as f:
+                on_disk = yaml.safe_load(f)
+            assert on_disk["training"]["betting_constraints"]["max_back_price"] == 75.0
+            assert on_disk["training"]["betting_constraints"]["max_lay_price"] == 25.0
+            assert on_disk["training"]["betting_constraints"]["min_seconds_before_off"] == 120
+
+    def test_get_reflects_post(self):
+        """GET after POST returns the updated values."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _test_config(tmp)
+            store = _create_store(tmp)
+            client = _make_app(store, config)
+
+            client.post("/admin/config/constraints", json={
+                "max_back_price": 42.0,
+                "max_lay_price": 10.0,
+                "min_seconds_before_off": 900,
+            })
+
+            resp = client.get("/admin/config/constraints")
+            data = resp.json()
+            assert data["max_back_price"] == 42.0
+            assert data["max_lay_price"] == 10.0
+            assert data["min_seconds_before_off"] == 900

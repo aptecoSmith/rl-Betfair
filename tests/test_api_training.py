@@ -250,3 +250,53 @@ class TestTrainingWebSocket:
             ws.receive_json()
 
         assert app.state.training_state["latest_event"]["detail"] == "ep 2"
+
+
+# ── Worker Connected Tests ──────────────────────────────────────────
+
+
+class TestWorkerConnected:
+    def test_status_includes_worker_connected_when_idle(self):
+        """Status response should include worker_connected field."""
+        client, app = _make_app()
+        app.state.worker_connected = True
+        resp = client.get("/training/status")
+        data = resp.json()
+        assert data["worker_connected"] is True
+
+    def test_status_worker_disconnected_default(self):
+        """worker_connected should default to False when not set."""
+        client, _ = _make_app()
+        resp = client.get("/training/status")
+        data = resp.json()
+        assert data["worker_connected"] is False
+
+    def test_status_worker_disconnected_while_running(self):
+        """When running but worker disconnected, phase should be worker_disconnected."""
+        client, app = _make_app({
+            "running": True,
+            "latest_event": None,
+            "latest_process": None,
+            "latest_item": None,
+        })
+        app.state.worker_connected = False
+        resp = client.get("/training/status")
+        data = resp.json()
+        assert data["running"] is True
+        assert data["phase"] == "worker_disconnected"
+        assert data["worker_connected"] is False
+
+    def test_status_worker_connected_while_running(self):
+        """When running and worker connected, worker_connected should be True."""
+        client, app = _make_app({
+            "running": True,
+            "latest_event": {"event": "progress", "phase": "training"},
+            "latest_process": None,
+            "latest_item": None,
+        })
+        app.state.worker_connected = True
+        resp = client.get("/training/status")
+        data = resp.json()
+        assert data["running"] is True
+        assert data["worker_connected"] is True
+        assert data["phase"] == "training"

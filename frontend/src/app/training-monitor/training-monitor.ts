@@ -1,4 +1,4 @@
-import { Component, inject, computed, effect, signal, OnDestroy } from '@angular/core';
+import { Component, inject, computed, effect, signal, OnDestroy, ViewChild, ElementRef, AfterViewChecked } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { JsonPipe } from '@angular/common';
 import { TrainingService } from '../services/training.service';
@@ -16,6 +16,7 @@ const PHASE_LABELS: Record<string, string> = {
   breeding: 'Breeding next generation',
   scoring: 'Updating scoreboard',
   reevaluating_garaged: 'Re-evaluating garaged models on new test data',
+  finishing_early: 'Finishing up — evaluating current population',
 };
 
 /** Status for each agent in the population grid. */
@@ -31,7 +32,8 @@ export interface AgentGridItem {
   templateUrl: './training-monitor.html',
   styleUrl: './training-monitor.scss',
 })
-export class TrainingMonitor implements OnDestroy {
+export class TrainingMonitor implements OnDestroy, AfterViewChecked {
+  @ViewChild('logContainer') logContainer?: ElementRef<HTMLDivElement>;
   private readonly training = inject(TrainingService);
   private readonly api = inject(ApiService);
   private readonly selectionState = inject(SelectionStateService);
@@ -39,10 +41,17 @@ export class TrainingMonitor implements OnDestroy {
 
   readonly status = this.training.status;
   readonly isRunning = this.training.isRunning;
+  readonly activityLog = this.training.activityLog;
+  readonly workerConnected = computed(() => this.status().worker_connected);
+  readonly heartbeatAge = signal('');
+  readonly heartbeatColor = signal<'green' | 'amber' | 'red'>('green');
+  showActivityLog = true;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   // Training control
   readonly isStarting = signal(false);
   readonly isStopping = signal(false);
+  readonly isFinishing = signal(false);
   readonly startError = signal<string | null>(null);
   readonly trainingInfo = signal<any>(null);
   readonly apiUnavailable = signal(false);
@@ -51,6 +60,12 @@ export class TrainingMonitor implements OnDestroy {
   populationSize = 50;
   reevaluateGaraged = false;
   reevaluateMinScore: number | null = null;
+  useAllData = true;
+  availableDates: string[] = [];
+  trainDateStart = '';
+  trainDateEnd = '';
+  testDateStart = '';
+  testDateEnd = '';
   readonly rewardHistory = this.training.rewardHistory;
   readonly lossHistory = this.training.lossHistory;
 
@@ -142,13 +157,28 @@ export class TrainingMonitor implements OnDestroy {
   private stopResetEffect = effect(() => {
     if (!this.isRunning()) {
       this.isStopping.set(false);
+      this.isFinishing.set(false);
     }
   });
 
   constructor() {
     this.tickTimer = setInterval(() => this.now.set(Date.now()), 10_000);
+    this.heartbeatTimer = setInterval(() => this.updateHeartbeat(), 1000);
     this.loadTrainingInfo();
     this.restoreFormValues();
+  }
+
+  private updateHeartbeat(): void {
+    const age = Math.floor((Date.now() - this.training.lastActivityAt()) / 1000);
+    if (age < 2) {
+      this.heartbeatAge.set('just now');
+    } else if (age < 60) {
+      this.heartbeatAge.set(`${age}s ago`);
+    } else {
+      const mins = Math.floor(age / 60);
+      this.heartbeatAge.set(`${mins}m ago`);
+    }
+    this.heartbeatColor.set(age < 10 ? 'green' : age < 30 ? 'amber' : 'red');
   }
 
   private restoreFormValues(): void {
@@ -174,6 +204,15 @@ export class TrainingMonitor implements OnDestroy {
         this.trainingInfo.set(info);
         this.apiUnavailable.set(false);
         this.populationSize = info.population_size;
+        // Populate date selection defaults
+        if (info.dates?.length) {
+          this.availableDates = info.dates;
+          const split = Math.max(1, Math.floor(info.dates.length / 2));
+          this.trainDateStart = info.dates[0];
+          this.trainDateEnd = info.dates[split - 1];
+          this.testDateStart = info.dates[split];
+          this.testDateEnd = info.dates[info.dates.length - 1];
+        }
       },
       error: () => {
         this.apiUnavailable.set(true);
@@ -198,23 +237,34 @@ export class TrainingMonitor implements OnDestroy {
     const perAgentPerGen = trainSecs + evalSecs;
     const totalSecs = perAgentPerGen * pop * gens;
 
-    if (totalSecs < 60) return `~${Math.ceil(totalSecs)}s`;
-    if (totalSecs < 3600) return `~${Math.ceil(totalSecs / 60)} min`;
+    if (totalSecs < 60) return `Roughly ${Math.ceil(totalSecs)}s`;
+    if (totalSecs < 3600) return `Roughly ${Math.ceil(totalSecs / 60)} min`;
     const hours = Math.floor(totalSecs / 3600);
     const mins = Math.ceil((totalSecs % 3600) / 60);
-    return mins > 0 ? `~${hours}h ${mins}m` : `~${hours}h`;
+    return mins > 0 ? `Roughly ${hours}h ${mins}m` : `Roughly ${hours}h`;
+  }
+
+  datesInRange(start: string, end: string): string[] {
+    return this.availableDates.filter(d => d >= start && d <= end);
   }
 
   onStartTraining(): void {
     this.isStarting.set(true);
     this.startError.set(null);
-    this.api.startTraining({
+
+    const params: any = {
       n_generations: this.nGenerations,
       n_epochs: this.nEpochs,
       population_size: this.populationSize,
       reevaluate_garaged: this.reevaluateGaraged,
       reevaluate_min_score: this.reevaluateMinScore,
-    }).subscribe({
+    };
+    if (!this.useAllData) {
+      params.train_dates = this.datesInRange(this.trainDateStart, this.trainDateEnd);
+      params.test_dates = this.datesInRange(this.testDateStart, this.testDateEnd);
+    }
+
+    this.api.startTraining(params).subscribe({
       next: () => {
         this.isStarting.set(false);
         this.training.clearHistory();
@@ -240,10 +290,30 @@ export class TrainingMonitor implements OnDestroy {
     });
   }
 
+  onFinishTraining(): void {
+    this.isFinishing.set(true);
+    this.api.finishTraining().subscribe({
+      next: () => {
+        // Keep isFinishing true until the run completes via WebSocket
+      },
+      error: () => {
+        this.isFinishing.set(false);
+      },
+    });
+  }
+
+  ngAfterViewChecked(): void {
+    if (this.logContainer) {
+      const el = this.logContainer.nativeElement;
+      el.scrollTop = el.scrollHeight;
+    }
+  }
+
   ngOnDestroy(): void {
     this.agentEffect.destroy();
     this.stopResetEffect.destroy();
     if (this.tickTimer) clearInterval(this.tickTimer);
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
   }
 
   private formatElapsed(ms: number): string {

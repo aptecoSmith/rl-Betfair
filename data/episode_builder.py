@@ -643,6 +643,7 @@ def _build_day(
 def load_days(
     date_strs: list[str],
     data_dir: str | Path = "data/processed",
+    progress_queue=None,
 ) -> list[Day]:
     """Load multiple days with :class:`~training.progress_tracker.ProgressTracker`.
 
@@ -652,12 +653,17 @@ def load_days(
         List of ISO date strings to load.
     data_dir:
         Directory containing the Parquet files.
+    progress_queue:
+        Optional queue (asyncio.Queue or queue.Queue) to emit progress events
+        for UI visibility during data loading.
 
     Returns
     -------
     list[Day]
         Successfully loaded days (skips dates whose files are missing).
     """
+    import time as _time
+
     data_dir = Path(data_dir)
     tracker = ProgressTracker(
         total=len(date_strs),
@@ -681,5 +687,16 @@ def load_days(
             ds,
             progress["process_eta_human"],
         )
+        if progress_queue is not None:
+            try:
+                progress_queue.put_nowait({
+                    "event": "progress",
+                    "phase": "building",
+                    "process": progress,
+                    "detail": f"Loaded {ds} ({progress['completed']}/{progress['total']} days)",
+                    "timestamp": _time.time(),
+                })
+            except Exception:
+                pass  # drop if consumer is behind
 
     return days

@@ -7,6 +7,9 @@
 }
 
 .page-title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   font-size: 1.25rem;
   font-weight: 700;
   margin: 0 0 1.25rem;
@@ -96,6 +99,7 @@
   font-size: 0.8125rem;
   font-weight: 600;
   color: #c0c0d8;
+  flex-wrap: wrap;
 }
 
 .phase-dot {
@@ -109,6 +113,99 @@
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+.heartbeat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 400;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+  margin-left: auto;
+
+  .heartbeat-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    animation: pulse 1.5s infinite;
+  }
+
+  &.green {
+    color: #6fcf97;
+    .heartbeat-dot { background: #6fcf97; }
+  }
+  &.amber {
+    color: #f2c94c;
+    .heartbeat-dot { background: #f2c94c; }
+  }
+  &.red {
+    color: #eb5757;
+    .heartbeat-dot { background: #eb5757; }
+  }
+}
+
+.connection-chip {
+  font-size: 0.6875rem;
+  font-weight: 400;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+
+  &.connected {
+    color: #6fcf97;
+  }
+  &.disconnected {
+    color: #eb5757;
+  }
+}
+
+.activity-log-section {
+  margin-top: 0.75rem;
+}
+
+.btn-toggle-log {
+  background: none;
+  border: 1px solid #3a3a5c;
+  color: #808098;
+  font-size: 0.6875rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 0.5rem;
+
+  &:hover {
+    color: #c0c0d8;
+    border-color: #5a5a7c;
+  }
+}
+
+.activity-log {
+  background: #0d0d1a;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 0.5rem;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+
+.log-entry {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.log-time {
+  color: #606080;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.log-text {
+  color: #a0a0b8;
+  word-break: break-word;
 }
 
 .detail-line {
@@ -428,6 +525,15 @@
   }
 }
 
+.btn-finish {
+  background: linear-gradient(135deg, #e6a23c, #f0c674);
+  color: #1a1a2e;
+
+  &:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+}
+
 .btn-stop {
   background: linear-gradient(135deg, #eb5757, #ff7878);
   color: #ffffff;
@@ -438,8 +544,10 @@
 }
 
 .stop-section {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
   margin-top: 0.75rem;
-  text-align: center;
 }
 
 .error-message {
@@ -466,6 +574,61 @@
 
 .field-label {
   font-weight: 600;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-bottom: 1rem;
+
+  input[type="checkbox"] {
+    accent-color: #6c63ff;
+    cursor: pointer;
+  }
+}
+
+.date-selection {
+  display: flex;
+  gap: 1.5rem;
+  justify-content: center;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+
+.date-range {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: center;
+
+  .date-range-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #c0c0d8;
+    margin-bottom: 0.25rem;
+  }
+
+  .form-field {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+
+    .field-label {
+      font-size: 0.75rem;
+      min-width: 2.5rem;
+    }
+
+    select {
+      padding: 0.3rem 0.5rem;
+      border-radius: 4px;
+      border: 1px solid #3a3a5c;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-size: 0.8125rem;
+    }
+  }
 }
 
 .field-help {

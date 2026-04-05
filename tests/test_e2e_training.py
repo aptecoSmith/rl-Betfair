@@ -202,6 +202,7 @@ def worker_proc(e2e_env):
 # ── Tests ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(600)
 def test_full_training_flow(worker_proc, e2e_env):
     """Single end-to-end test: connect, verify idle, start training,
     wait for completion, verify models in DB, verify idle again.

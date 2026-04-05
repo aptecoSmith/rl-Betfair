@@ -49,6 +49,7 @@ from registry.scoreboard import Scoreboard
 from training.ipc import (
     DEFAULT_WORKER_HOST,
     DEFAULT_WORKER_PORT,
+    CMD_FINISH,
     CMD_START,
     CMD_STOP,
     CMD_STATUS,
@@ -87,6 +88,7 @@ class TrainingWorker:
         # Training state
         self.running = False
         self.stop_event = threading.Event()
+        self.finish_event = threading.Event()
         self.progress_queue: thread_queue.Queue = thread_queue.Queue()
         self.training_thread: threading.Thread | None = None
 
@@ -163,6 +165,14 @@ class TrainingWorker:
             # Send status back so the API's pending Future resolves
             await ws.send(self._state_msg())
 
+        elif msg_type == CMD_FINISH:
+            if not self.running:
+                await ws.send(make_error_msg("No training run in progress"))
+                return
+            self.finish_event.set()
+            console.print("[yellow]Finish requested — will evaluate current population then stop[/yellow]")
+            await ws.send(self._state_msg())
+
         else:
             await ws.send(make_error_msg(f"Unknown command: {msg_type}"))
 
@@ -185,10 +195,17 @@ class TrainingWorker:
             await ws.send(make_error_msg("No extracted data available — import days first"))
             return
 
-        # Chronological train/test split (~50/50)
-        split = max(1, len(dates) // 2)
-        train_dates = dates[:split]
-        test_dates = dates[split:]
+        # Chronological train/test split (~50/50), overridden by explicit dates
+        if params.get("train_dates") is not None:
+            train_dates = sorted(params["train_dates"])
+        else:
+            split = max(1, len(dates) // 2)
+            train_dates = dates[:split]
+        if params.get("test_dates") is not None:
+            test_dates = sorted(params["test_dates"])
+        else:
+            split = max(1, len(dates) // 2)
+            test_dates = dates[split:]
 
         run_id = str(uuid.uuid4())
         n_generations = params.get("n_generations", 3)
@@ -206,6 +223,7 @@ class TrainingWorker:
 
         # Reset
         self.stop_event.clear()
+        self.finish_event.clear()
         self.running = True
         self.latest_event = None
         self.latest_process = None
@@ -233,8 +251,8 @@ class TrainingWorker:
 
             try:
                 console.print("[dim]Loading training data...[/dim]")
-                train_days = load_days(train_dates, data_dir=data_dir)
-                test_days_loaded = load_days(test_dates, data_dir=data_dir)
+                train_days = load_days(train_dates, data_dir=data_dir, progress_queue=self.progress_queue)
+                test_days_loaded = load_days(test_dates, data_dir=data_dir, progress_queue=self.progress_queue)
                 console.print(f"[dim]Loaded {len(train_days)} train days, {len(test_days_loaded)} test days[/dim]")
 
                 orch = TrainingOrchestrator(
@@ -242,6 +260,7 @@ class TrainingWorker:
                     model_store=self.store,
                     progress_queue=self.progress_queue,
                     stop_event=self.stop_event,
+                    finish_event=self.finish_event,
                 )
 
                 orch.run(

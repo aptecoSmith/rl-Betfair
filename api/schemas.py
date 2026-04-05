@@ -127,6 +127,7 @@ class TrainingStatus(BaseModel):
     item: ProgressSnapshot | None = None
     detail: str | None = None
     last_agent_score: float | None = None
+    worker_connected: bool = False
 
 
 # ── WebSocket Events ────────────────────────────────────────────────
@@ -371,6 +372,8 @@ class StartTrainingRequest(BaseModel):
     seed: int | None = None
     reevaluate_garaged: bool = False
     reevaluate_min_score: float | None = None
+    train_dates: list[str] | None = None  # explicit YYYY-MM-DD dates; None = auto-split
+    test_dates: list[str] | None = None
 
 
 class StartTrainingResponse(BaseModel):
@@ -383,3 +386,13 @@ class StartTrainingResponse(BaseModel):
 
 class StopTrainingResponse(BaseModel):
     detail: str
+
+
+class FinishTrainingResponse(BaseModel):
+    detail: str
+
+
+class BettingConstraints(BaseModel):
+    max_back_price: float | None = None
+    max_lay_price: float | None = None
+    min_seconds_before_off: int = 0

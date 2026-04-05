@@ -15,6 +15,12 @@ export interface TrainingStatus {
   item: ProgressSnapshot | null;
   detail: string | null;
   last_agent_score: number | null;
+  worker_connected: boolean;
+}
+
+export interface ActivityLogEntry {
+  time: string;
+  text: string;
 }
 
 export interface WSEvent {

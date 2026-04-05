@@ -1,6 +1,6 @@
 import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { TrainingStatus, WSEvent } from '../models/training.model';
+import { ActivityLogEntry, TrainingStatus, WSEvent } from '../models/training.model';
 
 @Injectable({ providedIn: 'root' })
 export class TrainingService implements OnDestroy {
@@ -20,7 +20,15 @@ export class TrainingService implements OnDestroy {
     item: null,
     detail: null,
     last_agent_score: null,
+    worker_connected: false,
   });
+
+  /** Timestamp (epoch ms) of the last non-ping event received. */
+  readonly lastActivityAt = signal<number>(Date.now());
+
+  /** Rolling activity log for the training monitor. */
+  readonly activityLog = signal<ActivityLogEntry[]>([]);
+  private readonly MAX_LOG_ENTRIES = 200;
 
   /** Latest WebSocket event (for training monitor live charts). */
   readonly latestEvent = signal<WSEvent | null>(null);
@@ -105,9 +113,11 @@ export class TrainingService implements OnDestroy {
         const event: WSEvent = JSON.parse(msg.data);
         if (event.event === 'ping') return;
 
+        this.lastActivityAt.set(Date.now());
         this.latestEvent.set(event);
         this.updateStatusFromEvent(event);
         this.extractChartData(event);
+        this.appendActivityLog(event);
       } catch {
         // Ignore malformed messages
       }
@@ -150,6 +160,7 @@ export class TrainingService implements OnDestroy {
         item: null,
         detail: event.phase === 'run_stopped' ? 'Training stopped by user' : (event.detail ?? null),
         last_agent_score: null,
+        worker_connected: this.status().worker_connected,
       });
       return;
     }
@@ -193,5 +204,25 @@ export class TrainingService implements OnDestroy {
   clearHistory(): void {
     this.rewardHistory.set([]);
     this.lossHistory.set([]);
+    this.activityLog.set([]);
+  }
+
+  private appendActivityLog(event: WSEvent): void {
+    let text = '';
+    if (event.event === 'phase_start' && event.phase) {
+      text = `Phase started: ${event.phase}`;
+    } else if (event.event === 'phase_complete' && event.phase) {
+      text = `Phase complete: ${event.phase}`;
+    } else if (event.detail) {
+      text = event.detail;
+    }
+    if (!text) return;
+
+    const now = new Date();
+    const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    this.activityLog.update((prev) => {
+      const next = [...prev, { time, text }];
+      return next.length > this.MAX_LOG_ENTRIES ? next.slice(-this.MAX_LOG_ENTRIES) : next;
+    });
   }
 }

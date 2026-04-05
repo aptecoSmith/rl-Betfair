@@ -1216,3 +1216,115 @@ class TestPositionTracking:
         # so position reflects just this one bet (not accumulated from race 1)
         # The key check is that race 1's positions don't carry over
         assert pos_vec[0] <= 0.1 + 1e-6  # at most one bet worth of exposure (10% of 100 / 100)
+
+
+# ── Betting constraints ──────────────────────────────────────────────────────
+
+
+class TestBettingConstraints:
+    """Verify that betting_constraints in config block disallowed bets."""
+
+    def _config_with_constraints(self, config, **overrides):
+        cfg = {**config, "training": {**config["training"], "betting_constraints": overrides}}
+        return cfg
+
+    def _run_episode(self, env, action):
+        """Step through the full episode and return final info dict."""
+        terminated = False
+        info = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+        return info
+
+    def test_max_back_price_blocks_expensive(self, config):
+        """Back bet at price > max_back_price should be rejected."""
+        cfg = self._config_with_constraints(config, max_back_price=3.0)
+        # Default runner lay price is 4.2 — above the 3.0 cap
+        day = _make_day(n_races=1, n_pre_ticks=3, n_inplay_ticks=1)
+        env = BetfairEnv(day, cfg)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0    # back signal on runner 0
+        action[14] = 1.0   # full stake
+
+        info = self._run_episode(env, action)
+        assert info["bet_count"] == 0
+
+    def test_max_back_price_allows_cheap(self, config):
+        """Back bet at price <= max_back_price should be allowed."""
+        cfg = self._config_with_constraints(config, max_back_price=5.0)
+        # Default runner lay price is 4.2 — below the 5.0 cap
+        day = _make_day(n_races=1, n_pre_ticks=3, n_inplay_ticks=1)
+        env = BetfairEnv(day, cfg)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = 1.0
+
+        info = self._run_episode(env, action)
+        assert info["bet_count"] > 0
+
+    def test_max_lay_price_blocks_expensive(self, config):
+        """Lay bet at price > max_lay_price should be rejected."""
+        cfg = self._config_with_constraints(config, max_lay_price=3.0)
+        # Default runner back price is 4.0 — above the 3.0 cap
+        day = _make_day(n_races=1, n_pre_ticks=3, n_inplay_ticks=1)
+        env = BetfairEnv(day, cfg)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = -1.0   # lay signal
+        action[14] = 1.0
+
+        info = self._run_episode(env, action)
+        assert info["bet_count"] == 0
+
+    def test_min_seconds_before_off_blocks_late_bets(self, config):
+        """Bets placed within min_seconds_before_off should be rejected."""
+        # Default ticks are 600s before off, stepping by 5s:
+        # seq=0 → 600s, seq=1 → 595s, seq=2 → 590s, seq=3 → 585s, seq=4 → 580s
+        # With min 605s, ALL pre-race ticks should be blocked
+        cfg = self._config_with_constraints(config, min_seconds_before_off=605)
+        day = _make_day(n_races=1, n_pre_ticks=5, n_inplay_ticks=2)
+        env = BetfairEnv(day, cfg)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = 1.0
+
+        info = self._run_episode(env, action)
+        assert info["bet_count"] == 0
+
+    def test_min_seconds_allows_early_bets(self, config):
+        """Bets placed before min_seconds_before_off should be allowed."""
+        # With min 590s, ticks at 600s and 595s are allowed (seq 0 and 1)
+        cfg = self._config_with_constraints(config, min_seconds_before_off=590)
+        day = _make_day(n_races=1, n_pre_ticks=5, n_inplay_ticks=2)
+        env = BetfairEnv(day, cfg)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = 1.0
+
+        info = self._run_episode(env, action)
+        assert info["bet_count"] > 0
+
+    def test_null_constraints_unlimited(self, config):
+        """With null/default constraints, all bets should be allowed."""
+        cfg = self._config_with_constraints(
+            config, max_back_price=None, max_lay_price=None, min_seconds_before_off=0,
+        )
+        day = _make_day(n_races=1, n_pre_ticks=3, n_inplay_ticks=1)
+        env = BetfairEnv(day, cfg)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = 1.0
+
+        info = self._run_episode(env, action)
+        assert info["bet_count"] > 0

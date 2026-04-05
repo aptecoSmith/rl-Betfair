@@ -17,6 +17,7 @@ DEFAULT_WORKER_PORT = 8002
 # Commands (API → Worker)
 CMD_START = "start"
 CMD_STOP = "stop"
+CMD_FINISH = "finish"
 CMD_STATUS = "status"
 
 # Events (Worker → API)
@@ -36,6 +37,8 @@ def make_start_cmd(
     seed: int | None = None,
     reevaluate_garaged: bool = False,
     reevaluate_min_score: float | None = None,
+    train_dates: list[str] | None = None,
+    test_dates: list[str] | None = None,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -45,11 +48,17 @@ def make_start_cmd(
         "seed": seed,
         "reevaluate_garaged": reevaluate_garaged,
         "reevaluate_min_score": reevaluate_min_score,
+        "train_dates": train_dates,
+        "test_dates": test_dates,
     })
 
 
 def make_stop_cmd() -> str:
     return json.dumps({"type": CMD_STOP})
+
+
+def make_finish_cmd() -> str:
+    return json.dumps({"type": CMD_FINISH})
 
 
 def make_status_cmd() -> str:

@@ -47,6 +47,13 @@ export class Admin implements OnInit, OnDestroy {
   readonly garageCount = signal(0);
   readonly purging = signal(false);
 
+  // ── Betting constraints ───────────────────────────────────────
+  readonly constraintMaxBackPrice = signal<number | null>(null);
+  readonly constraintMaxLayPrice = signal<number | null>(null);
+  readonly constraintMinSecsBefore = signal<number>(0);
+  readonly loadingConstraints = signal(true);
+  readonly savingConstraints = signal(false);
+
   // ── Import state ──────────────────────────────────────────────
 
   readonly importingDay = signal<string | null>(null);
@@ -192,6 +199,7 @@ export class Admin implements OnInit, OnDestroy {
     this.loadGarageCount();
     this.loadMysqlDates();
     this.loadProcesses();
+    this.loadConstraints();
   }
 
   private loadGarageCount(): void {
@@ -631,6 +639,41 @@ export class Admin implements OnInit, OnDestroy {
     const sorted = [...missing].sort();
     this.importRangeStart.set(sorted[0]);
     this.importRangeEnd.set(sorted[sorted.length - 1]);
+  }
+
+  // ── Betting constraints ───────────────────────────────────────
+
+  loadConstraints(): void {
+    this.loadingConstraints.set(true);
+    this.api.getBettingConstraints().subscribe({
+      next: (res) => {
+        this.constraintMaxBackPrice.set(res.max_back_price);
+        this.constraintMaxLayPrice.set(res.max_lay_price);
+        this.constraintMinSecsBefore.set(res.min_seconds_before_off);
+        this.loadingConstraints.set(false);
+      },
+      error: () => this.loadingConstraints.set(false),
+    });
+  }
+
+  saveConstraints(): void {
+    this.savingConstraints.set(true);
+    this.api.updateBettingConstraints({
+      max_back_price: this.constraintMaxBackPrice(),
+      max_lay_price: this.constraintMaxLayPrice(),
+      min_seconds_before_off: this.constraintMinSecsBefore(),
+    }).subscribe({
+      next: () => {
+        this.savingConstraints.set(false);
+        this.successMessage.set('Betting constraints saved');
+        this.clearMessageAfterDelay();
+      },
+      error: () => {
+        this.savingConstraints.set(false);
+        this.error.set('Failed to save constraints');
+        this.clearMessageAfterDelay();
+      },
+    });
   }
 
   // ── Helpers ───────────────────────────────────────────────────

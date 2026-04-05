@@ -15,6 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from api.schemas import (
+    FinishTrainingResponse,
     ProgressSnapshot,
     StartTrainingRequest,
     StartTrainingResponse,
@@ -22,6 +23,7 @@ from api.schemas import (
     TrainingStatus,
 )
 from training.ipc import (
+    make_finish_cmd,
     make_start_cmd,
     make_stop_cmd,
     parse_message,
@@ -86,14 +88,15 @@ def get_training_status(request: Request):
             running=True,
             phase="worker_disconnected",
             detail="Training worker connection lost — training may still be running in the worker process",
+            worker_connected=False,
         )
 
     if not state["running"]:
-        return TrainingStatus(running=False)
+        return TrainingStatus(running=False, worker_connected=worker_connected)
 
     latest = state.get("latest_event")
     if not latest:
-        return TrainingStatus(running=True)
+        return TrainingStatus(running=True, worker_connected=worker_connected)
 
     def _snap(d: dict | None) -> ProgressSnapshot | None:
         if not d:
@@ -121,6 +124,7 @@ def get_training_status(request: Request):
         item=item,
         detail=latest.get("detail"),
         last_agent_score=latest.get("last_agent_score"),
+        worker_connected=worker_connected,
     )
 
 
@@ -174,9 +178,22 @@ async def start_training(request: Request, body: StartTrainingRequest):
     if not dates:
         raise HTTPException(400, "No extracted data available — import days first")
 
+    # Default: chronological 50/50 split
     split = max(1, len(dates) // 2)
     train_dates = dates[:split]
     test_dates = dates[split:]
+
+    # Override with user-supplied dates if provided
+    if body.train_dates is not None:
+        missing = [d for d in body.train_dates if d not in dates]
+        if missing:
+            raise HTTPException(400, f"Train dates not found in data: {missing}")
+        train_dates = sorted(body.train_dates)
+    if body.test_dates is not None:
+        missing = [d for d in body.test_dates if d not in dates]
+        if missing:
+            raise HTTPException(400, f"Test dates not found in data: {missing}")
+        test_dates = sorted(body.test_dates)
 
     # Send start command to worker
     cmd = make_start_cmd(
@@ -186,6 +203,8 @@ async def start_training(request: Request, body: StartTrainingRequest):
         seed=body.seed,
         reevaluate_garaged=body.reevaluate_garaged,
         reevaluate_min_score=body.reevaluate_min_score,
+        train_dates=train_dates if body.train_dates is not None else None,
+        test_dates=test_dates if body.test_dates is not None else None,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 
@@ -221,6 +240,27 @@ async def stop_training(request: Request):
 
     return StopTrainingResponse(
         detail="Stop requested — training will halt after the current agent completes",
+    )
+
+
+@router.post("/training/finish", response_model=FinishTrainingResponse)
+async def finish_training(request: Request):
+    """Request early finish: evaluate current population, then complete normally.
+
+    Unlike stop, this still runs evaluation and scoring on the current
+    population so the run produces usable results.
+    """
+    state = _state(request)
+    if not state["running"]:
+        raise HTTPException(409, "No training run is in progress")
+
+    resp = await _send_to_worker(request, make_finish_cmd())
+
+    if resp.get("type") == EVT_ERROR:
+        raise HTTPException(409, resp.get("message", "Worker rejected finish request"))
+
+    return FinishTrainingResponse(
+        detail="Finish requested — will evaluate current population then complete",
     )
 
 
