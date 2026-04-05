@@ -16,8 +16,9 @@ import {
   StreamrecorderBackupsResponse,
   RestoreResponse,
   MysqlDatesResponse,
-  ServicesResponse,
-  ServiceActionResponse,
+  ProcessStatus,
+  ProcessActionResponse,
+  ProcessLogsResponse,
 } from '../models/admin.model';
 
 @Injectable({ providedIn: 'root' })
@@ -119,18 +120,20 @@ export class ApiService {
     return this.http.get<ScoreboardResponse>(`${this.baseUrl}/models/garage`);
   }
 
-  // ── Service control endpoints ──────────────────────────────────────
+  // ── Supervisor endpoints (process management via supervisor.py :9000) ──
 
-  getServices(): Observable<ServicesResponse> {
-    return this.http.get<ServicesResponse>(`${this.baseUrl}/system/services`);
+  private readonly supervisorUrl = '/supervisor';
+
+  getSupervisorProcesses(): Observable<Record<string, ProcessStatus>> {
+    return this.http.get<Record<string, ProcessStatus>>(`${this.supervisorUrl}/processes`);
   }
 
-  controlService(service: string, action: string): Observable<ServiceActionResponse> {
-    return this.http.post<ServiceActionResponse>(`${this.baseUrl}/system/services/${service}/${action}`, {});
+  supervisorControl(name: string, action: string): Observable<ProcessActionResponse> {
+    return this.http.post<ProcessActionResponse>(`${this.supervisorUrl}/processes/${name}/${action}`, {});
   }
 
-  healthCheck(): Observable<{ status: string }> {
-    return this.http.get<{ status: string }>(`${this.baseUrl}/system/health`);
+  getSupervisorLogs(name: string, lines: number = 50): Observable<ProcessLogsResponse> {
+    return this.http.get<ProcessLogsResponse>(`${this.supervisorUrl}/processes/${name}/logs?lines=${lines}`);
   }
 
   // ── Training control endpoints ─────────────────────────────────────

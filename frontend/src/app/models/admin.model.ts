@@ -79,19 +79,26 @@ export interface MysqlDatesResponse {
   available: boolean;
 }
 
-export interface ServiceStatus {
+export interface ProcessStatus {
   name: string;
+  label: string;
+  status: 'running' | 'stopped';
+  pid: number | null;
   port: number;
-  running: boolean;
+  uptime_seconds: number | null;
 }
 
-export interface ServicesResponse {
-  services: ServiceStatus[];
+export interface ProcessActionResponse {
+  name: string;
+  label: string;
+  status: string;
+  pid: number | null;
+  port: number;
+  uptime_seconds: number | null;
+  error?: string;
 }
 
-export interface ServiceActionResponse {
-  service: string;
-  action: string;
-  success: boolean;
-  detail: string;
+export interface ProcessLogsResponse {
+  name: string;
+  logs: string[];
 }

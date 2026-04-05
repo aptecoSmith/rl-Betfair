@@ -12,36 +12,42 @@
   <!-- ── Service Control ──────────────────────────────────────── -->
   <section class="admin-section">
     <h2>Service Control</h2>
-    <p class="section-desc">Manage the training worker, API backend, and Angular frontend.</p>
+    <p class="section-desc">Managed by the supervisor process on port 9000. Start/stop/restart services and view their logs.</p>
 
     <div class="service-cards">
-      @for (svc of [
-        { name: 'worker', label: 'Training Worker', port: 8002 },
-        { name: 'api', label: 'API Backend', port: 8001 },
-        { name: 'frontend', label: 'Frontend', port: 4202 }
-      ]; track svc.name) {
-        <div class="service-card">
-          <div class="service-header">
-            <span class="service-indicator" [class.running]="getService(svc.name)?.running" [class.stopped]="!getService(svc.name)?.running"></span>
-            <span class="service-name">{{ svc.label }}</span>
-            <span class="service-port">:{{ svc.port }}</span>
-          </div>
-          <div class="service-status">
-            {{ getService(svc.name)?.running ? 'Running' : 'Stopped' }}
-          </div>
-          <div class="service-actions">
-            @if (getService(svc.name)?.running) {
-              <button class="btn btn-danger btn-sm" (click)="promptServiceAction(svc.name, 'stop')">Stop</button>
-              <button class="btn btn-secondary btn-sm" (click)="promptServiceAction(svc.name, 'restart')">Restart</button>
-            } @else {
-              @if (svc.name !== 'api') {
-                <button class="btn btn-primary btn-sm" (click)="promptServiceAction(svc.name, 'start')">Start</button>
-              } @else {
-                <span class="service-hint">Use start-ui.bat or start-all.bat to start the API</span>
+      @for (name of ['worker', 'api', 'frontend']; track name) {
+        @if (getProcess(name); as proc) {
+          <div class="service-card">
+            <div class="service-header">
+              <span class="service-indicator" [class.running]="proc.status === 'running'" [class.stopped]="proc.status !== 'running'"></span>
+              <span class="service-name">{{ proc.label }}</span>
+              <span class="service-port">:{{ proc.port }}</span>
+            </div>
+            <div class="service-status">
+              {{ proc.status === 'running' ? 'Running' : 'Stopped' }}
+              @if (proc.uptime_seconds; as up) {
+                <span class="service-uptime">({{ formatUptime(up) }})</span>
               }
-            }
+            </div>
+            <div class="service-actions">
+              @if (proc.status === 'running') {
+                <button class="btn btn-danger btn-sm" (click)="promptServiceAction(name, 'stop')">Stop</button>
+                <button class="btn btn-secondary btn-sm" (click)="promptServiceAction(name, 'restart')">Restart</button>
+              } @else {
+                <button class="btn btn-primary btn-sm" (click)="promptServiceAction(name, 'start')">Start</button>
+              }
+              <button class="btn btn-secondary btn-sm" (click)="showLogs(name)">Logs</button>
+            </div>
           </div>
-        </div>
+        } @else {
+          <div class="service-card">
+            <div class="service-header">
+              <span class="service-indicator stopped"></span>
+              <span class="service-name">{{ name }}</span>
+            </div>
+            <div class="service-status">Supervisor not connected</div>
+          </div>
+        }
       }
     </div>
 
@@ -50,15 +56,7 @@
       <div class="dialog-overlay">
         <div class="dialog">
           <h3>Confirm {{ sa.action | titlecase }}</h3>
-          <p>
-            @if (sa.service === 'api' && (sa.action === 'stop' || sa.action === 'restart')) {
-              {{ sa.action === 'restart' ? 'The API will restart. The page will reconnect automatically.' : 'This will stop the API. You will lose connection to the backend.' }}
-            } @else if (sa.service === 'frontend' && (sa.action === 'stop' || sa.action === 'restart')) {
-              This will {{ sa.action }} the dev server. The page will stop working until it restarts.
-            } @else {
-              {{ sa.action | titlecase }} the <strong>{{ sa.service }}</strong> service?
-            }
-          </p>
+          <p>{{ sa.action | titlecase }} the <strong>{{ sa.service }}</strong> service?</p>
           <div class="dialog-actions">
             <button class="btn btn-secondary" (click)="cancelServiceAction()">Cancel</button>
             <button class="btn btn-danger" (click)="confirmServiceAction()">{{ sa.action | titlecase }}</button>
@@ -66,18 +64,29 @@
         </div>
       </div>
     }
-  </section>
 
-  <!-- API reconnecting overlay -->
-  @if (apiReconnecting()) {
-    <div class="reconnect-overlay">
-      <div class="reconnect-box">
-        <div class="reconnect-spinner"></div>
-        <p>API restarting...</p>
-        <p class="reconnect-sub">Waiting for the new instance to come online</p>
+    <!-- Log viewer -->
+    @if (viewingLogs(); as logData) {
+      <div class="dialog-overlay">
+        <div class="dialog log-dialog">
+          <h3>Logs: {{ logData.name }}</h3>
+          <div class="log-viewer">
+            @if (logData.logs.length === 0) {
+              <p class="log-empty">No log output yet.</p>
+            } @else {
+              @for (line of logData.logs; track $index) {
+                <div class="log-line">{{ line }}</div>
+              }
+            }
+          </div>
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" (click)="showLogs(logData.name)">Refresh</button>
+            <button class="btn btn-primary" (click)="closeLogs()">Close</button>
+          </div>
+        </div>
       </div>
-    </div>
-  }
+    }
+  </section>
 
   <!-- ── Manage Days ───────────────────────────────────────────── -->
   <section class="admin-section">

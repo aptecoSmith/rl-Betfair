@@ -3,7 +3,7 @@ import { DecimalPipe, SlicePipe, TitleCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
 import { TrainingService } from '../services/training.service';
-import { ExtractedDay, BackupDay, AdminAgentEntry, StreamrecorderBackup, ServiceStatus } from '../models/admin.model';
+import { ExtractedDay, BackupDay, AdminAgentEntry, StreamrecorderBackup, ProcessStatus } from '../models/admin.model';
 
 @Component({
   selector: 'app-admin',
@@ -29,13 +29,13 @@ export class Admin implements OnInit, OnDestroy {
   readonly error = signal<string | null>(null);
   readonly successMessage = signal<string | null>(null);
 
-  // ── Service control ──────────────────────────────────────────
-  readonly services = signal<ServiceStatus[]>([]);
-  readonly loadingServices = signal(true);
+  // ── Service control (via supervisor on :9000) ─────────────────
+  readonly processes = signal<Record<string, ProcessStatus>>({});
+  readonly loadingProcesses = signal(true);
+  readonly supervisorConnected = signal(false);
   readonly serviceAction = signal<{ service: string; action: string } | null>(null);
-  readonly apiReconnecting = signal(false);
+  readonly viewingLogs = signal<{ name: string; logs: string[] } | null>(null);
   private servicesPollTimer: ReturnType<typeof setInterval> | null = null;
-  private reconnectTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── Confirm dialogs ───────────────────────────────────────────
 
@@ -161,14 +161,26 @@ export class Admin implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadAll();
-    // Poll service status every 5 seconds
-    this.servicesPollTimer = setInterval(() => this.loadServices(), 5000);
+    this.scheduleSupervisorPoll();
+  }
+
+  private scheduleSupervisorPoll(): void {
+    // Poll every 5s when connected, every 30s when not (avoids proxy error spam)
+    const interval = this.supervisorConnected() ? 5000 : 30000;
+    this.servicesPollTimer = setInterval(() => {
+      this.loadProcesses();
+      // Re-schedule if connection state changed
+      const newInterval = this.supervisorConnected() ? 5000 : 30000;
+      if (newInterval !== interval) {
+        if (this.servicesPollTimer) clearInterval(this.servicesPollTimer);
+        this.scheduleSupervisorPoll();
+      }
+    }, interval);
   }
 
   ngOnDestroy(): void {
     this.progressEffect.destroy();
     if (this.servicesPollTimer) clearInterval(this.servicesPollTimer);
-    if (this.reconnectTimer) clearInterval(this.reconnectTimer);
   }
 
   loadAll(): void {
@@ -177,7 +189,7 @@ export class Admin implements OnInit, OnDestroy {
     this.loadAgents();
     this.loadGarageCount();
     this.loadMysqlDates();
-    this.loadServices();
+    this.loadProcesses();
   }
 
   private loadGarageCount(): void {
@@ -475,22 +487,24 @@ export class Admin implements OnInit, OnDestroy {
     });
   }
 
-  // ── Service control ───────────────────────────────────────────
+  // ── Service control (supervisor) ──────────────────────────────
 
-  loadServices(): void {
-    this.api.getServices().subscribe({
+  loadProcesses(): void {
+    this.api.getSupervisorProcesses().subscribe({
       next: (res) => {
-        this.services.set(res.services);
-        this.loadingServices.set(false);
+        this.processes.set(res);
+        this.loadingProcesses.set(false);
+        this.supervisorConnected.set(true);
       },
       error: () => {
-        this.loadingServices.set(false);
+        this.loadingProcesses.set(false);
+        this.supervisorConnected.set(false);
       },
     });
   }
 
-  getService(name: string): ServiceStatus | undefined {
-    return this.services().find(s => s.name === name);
+  getProcess(name: string): ProcessStatus | undefined {
+    return this.processes()[name];
   }
 
   promptServiceAction(service: string, action: string): void {
@@ -506,22 +520,11 @@ export class Admin implements OnInit, OnDestroy {
     if (!sa) return;
     this.serviceAction.set(null);
 
-    // Warn about frontend stop
-    if (sa.service === 'frontend' && (sa.action === 'stop' || sa.action === 'restart')) {
-      // Frontend will die — just do it
-    }
-
-    this.api.controlService(sa.service, sa.action).subscribe({
+    this.api.supervisorControl(sa.service, sa.action).subscribe({
       next: (res) => {
-        this.successMessage.set(res.detail);
+        this.successMessage.set(`${sa.service}: ${res.status}`);
         this.clearMessageAfterDelay();
-
-        if (sa.service === 'api' && (sa.action === 'stop' || sa.action === 'restart')) {
-          this.startReconnectPolling();
-        } else {
-          // Refresh service status after a brief delay
-          setTimeout(() => this.loadServices(), 2000);
-        }
+        setTimeout(() => this.loadProcesses(), 1000);
       },
       error: (err) => {
         this.error.set(err.error?.detail || `Failed to ${sa.action} ${sa.service}`);
@@ -530,33 +533,15 @@ export class Admin implements OnInit, OnDestroy {
     });
   }
 
-  private startReconnectPolling(): void {
-    this.apiReconnecting.set(true);
-    let attempts = 0;
-    this.reconnectTimer = setInterval(() => {
-      attempts++;
-      this.api.healthCheck().subscribe({
-        next: () => {
-          // API is back!
-          this.apiReconnecting.set(false);
-          if (this.reconnectTimer) clearInterval(this.reconnectTimer);
-          this.reconnectTimer = null;
-          this.loadServices();
-          this.successMessage.set('API reconnected');
-          this.clearMessageAfterDelay();
-        },
-        error: () => {
-          if (attempts > 30) {
-            // Give up after 60 seconds
-            this.apiReconnecting.set(false);
-            if (this.reconnectTimer) clearInterval(this.reconnectTimer);
-            this.reconnectTimer = null;
-            this.error.set('API did not come back after 60 seconds');
-            this.clearMessageAfterDelay();
-          }
-        },
-      });
-    }, 2000);
+  showLogs(name: string): void {
+    this.api.getSupervisorLogs(name, 50).subscribe({
+      next: (res) => this.viewingLogs.set(res),
+      error: () => this.error.set(`Failed to load logs for ${name}`),
+    });
+  }
+
+  closeLogs(): void {
+    this.viewingLogs.set(null);
   }
 
   // ── MySQL dates ───────────────────────────────────────────────
@@ -593,6 +578,14 @@ export class Admin implements OnInit, OnDestroy {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  formatUptime(seconds: number): string {
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
   }
 
   shortId(id: string): string {

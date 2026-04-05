@@ -1,18 +1,14 @@
 @echo off
-REM Start all rl-betfair services: training worker, API backend, and Angular frontend.
-REM Run from the repo root.  Press Ctrl+C in any window to stop that service.
+REM Start all rl-betfair services via the supervisor.
+REM The supervisor manages the training worker, API, and frontend.
+REM Run from the repo root.
 
-echo Starting training worker on ws://localhost:8002 ...
-start "rl-betfair Training" cmd /k ".venv\Scripts\activate && python -m training.worker"
-
-echo Starting API backend on http://localhost:8001 ...
-start "rl-betfair API" cmd /k ".venv\Scripts\activate && uvicorn api.main:app --reload --reload-exclude .claude --reload-exclude *.log --port 8001"
-
-echo Starting Angular frontend on http://localhost:4202 ...
-start "rl-betfair UI" cmd /k "cd frontend && npm start"
+echo Starting rl-betfair supervisor on http://localhost:9000 ...
+start "rl-betfair Supervisor" cmd /k ".venv\Scripts\activate && python supervisor.py"
 
 echo.
-echo All services launching in separate windows.
-echo   Training worker:  ws://localhost:8002
-echo   API:              http://localhost:8001
-echo   UI:               http://localhost:4202
+echo Supervisor launching in a separate window.
+echo   Supervisor:  http://localhost:9000
+echo   Worker:      ws://localhost:8002
+echo   API:         http://localhost:8001
+echo   UI:          http://localhost:4202

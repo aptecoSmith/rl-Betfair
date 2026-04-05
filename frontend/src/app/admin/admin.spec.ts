@@ -54,9 +54,9 @@ class MockApiService {
   getGarage() { return of({ models: [] }); }
   purgeDiscarded() { return this.deleteResponse$; }
   getMysqlDates() { return of({ dates: [], available: false }); }
-  getServices() { return of({ services: [] }); }
-  healthCheck() { return of({ status: 'ok' }); }
-  controlService(_service: string, _action: string) { return of({ service: _service, action: _action, success: true, detail: 'OK' }); }
+  getSupervisorProcesses() { return of({}); }
+  supervisorControl(_name: string, _action: string) { return of({ name: _name, label: _name, status: 'started', pid: 1, port: 8001, uptime_seconds: null }); }
+  getSupervisorLogs(_name: string, _lines?: number) { return of({ name: _name, logs: [] }); }
 }
 
 describe('Admin', () => {
