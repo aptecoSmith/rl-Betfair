@@ -27,14 +27,20 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+ROOT = Path(__file__).parent.resolve()
+_log_dir = ROOT / "logs"
+_log_dir.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)-20s %(levelname)-5s %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(_log_dir / "supervisor.log", encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("supervisor")
-
-ROOT = Path(__file__).parent.resolve()
 
 # ── Process definitions ──────────────────────────────────────────────────
 
@@ -48,8 +54,13 @@ PROCESS_DEFS = {
     "api": {
         "cmd": [
             sys.executable, "-m", "uvicorn", "api.main:app",
-            "--reload", "--reload-exclude", ".claude",
-            "--reload-exclude", "*.log", "--port", "8001",
+            "--reload",
+            "--reload-exclude", ".claude",
+            "--reload-exclude", "tests",
+            "--reload-exclude", "frontend",
+            "--reload-exclude", "registry",
+            "--reload-exclude", "logs",
+            "--port", "8001",
         ],
         "cwd": str(ROOT),
         "port": 8001,
@@ -69,6 +80,10 @@ MAX_LOG_LINES = 200
 
 # ── Managed process ─────────────────────────────────────────────────────
 
+LOG_DIR = ROOT / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+
 class ManagedProcess:
     """Wraps a subprocess with log capture and lifecycle management."""
 
@@ -82,6 +97,7 @@ class ManagedProcess:
         self._started_at: float | None = None
         self._log_buffer: collections.deque[str] = collections.deque(maxlen=MAX_LOG_LINES)
         self._reader_thread: threading.Thread | None = None
+        self._log_file: open | None = None
 
     @property
     def running(self) -> bool:
@@ -133,6 +149,15 @@ class ManagedProcess:
         )
         self._started_at = time.time()
         self._log_buffer.clear()
+
+        # Open persistent log file (append mode, rotates by name)
+        log_path = LOG_DIR / f"{self.name}.log"
+        self._log_file = open(log_path, "a", encoding="utf-8")
+        self._log_file.write(f"\n{'='*60}\n")
+        self._log_file.write(f"  {self.label} started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        self._log_file.write(f"  PID {self._proc.pid} | Port {self.port}\n")
+        self._log_file.write(f"{'='*60}\n")
+        self._log_file.flush()
 
         self._reader_thread = threading.Thread(
             target=self._read_output, daemon=True, name=f"log-{self.name}",
@@ -192,8 +217,51 @@ class ManagedProcess:
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
                     self._log_buffer.append(text)
+                    if self._log_file:
+                        try:
+                            self._log_file.write(text + "\n")
+                            self._log_file.flush()
+                        except Exception:
+                            pass
         except Exception:
             pass
+        finally:
+            # Process exited — log the exit code
+            exit_code = None
+            if self._proc is not None:
+                try:
+                    exit_code = self._proc.wait(timeout=5)
+                except Exception:
+                    pass
+            if exit_code is not None and exit_code != 0:
+                msg = f"CRASHED: {self.label} exited with code {exit_code} after {self._uptime_str()}"
+                logger.error(msg)
+                self._log_buffer.append(msg)
+                if self._log_file:
+                    try:
+                        self._log_file.write(f"\n*** {msg} ***\n")
+                    except Exception:
+                        pass
+            elif exit_code == 0:
+                msg = f"{self.label} exited cleanly (code 0) after {self._uptime_str()}"
+                logger.info(msg)
+            if self._log_file:
+                try:
+                    self._log_file.close()
+                except Exception:
+                    pass
+                self._log_file = None
+
+    def _uptime_str(self) -> str:
+        if self._started_at is None:
+            return "unknown duration"
+        secs = time.time() - self._started_at
+        if secs < 60:
+            return f"{secs:.0f}s"
+        mins = secs / 60
+        if mins < 60:
+            return f"{mins:.0f}m"
+        return f"{mins / 60:.1f}h"
 
 
 # ── FastAPI app ──────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@
     {
       "name": "api",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "api.main:app", "--reload", "--reload-exclude", ".claude", "--reload-exclude", "*.log", "--port", "8001"],
+      "runtimeArgs": ["-m", "uvicorn", "api.main:app", "--reload", "--reload-exclude", ".claude", "--reload-exclude", "tests", "--reload-exclude", "frontend", "--reload-exclude", "registry", "--reload-exclude", "logs", "--port", "8001"],
       "port": 8001
     },
     {

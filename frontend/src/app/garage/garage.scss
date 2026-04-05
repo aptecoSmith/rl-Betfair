@@ -13,9 +13,17 @@
   }
 
   .subtitle {
-    margin: 0 0 1.25rem;
+    margin: 0 0 0.5rem;
     font-size: 0.85rem;
     color: #808098;
+  }
+
+  .garage-info {
+    margin: 0 0 1.25rem;
+    font-size: 0.8rem;
+    color: #606080;
+    line-height: 1.5;
+    max-width: 700px;
   }
 }
 

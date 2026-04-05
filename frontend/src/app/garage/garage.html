@@ -1,6 +1,7 @@
 <div class="garage-container">
   <h1>Garage</h1>
   <p class="subtitle">Models saved for future re-evaluation or deployment. Garaged models survive Start Afresh.</p>
+  <p class="garage-info">Garaged models are <strong>not</strong> included in the training population. They sit out of evolution entirely. When a training run finishes, you can optionally re-evaluate garaged models on the latest test data using the "Re-evaluate garaged models" checkbox on the Training page. This lets you compare your saved favourites against newly evolved agents without retraining them.</p>
 
   @if (loading()) {
     <div class="loading">Loading garage...</div>

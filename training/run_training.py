@@ -234,10 +234,10 @@ class TrainingOrchestrator:
             if self._check_stop():
                 break
 
-            # Finish requested: skip training, evaluate current pop, then exit
-            finishing = self._check_finish() and gen > 0
-            if finishing:
-                logger.info("Finish requested — evaluating current population (gen %d)", gen)
+            # Finish requested between generations: skip remaining, evaluate, exit
+            finishing_between_gens = self._check_finish() and gen > 0
+            if finishing_between_gens:
+                logger.info("Finish requested — skipping to final evaluation (gen %d)", gen)
                 self._emit_phase_start("finishing_early", {
                     "generation": gen,
                     "skipped_generations": n_generations - gen,
@@ -251,12 +251,14 @@ class TrainingOrchestrator:
                 test_days=test_days,
                 train_cutoff=train_cutoff,
                 n_epochs=n_epochs,
-                is_last=(gen == n_generations - 1) or finishing,
-                skip_training=finishing,
+                is_last=(gen == n_generations - 1) or finishing_between_gens,
+                skip_training=finishing_between_gens,
             )
             result.generations.append(gen_result)
 
-            if finishing:
+            # If finish was requested (either between gens or mid-training),
+            # evaluate what we have and exit
+            if finishing_between_gens or self._check_finish():
                 if self.scoreboard is not None:
                     result.final_rankings = self.scoreboard.update_scores()
                 else:
@@ -394,7 +396,7 @@ class TrainingOrchestrator:
             outer_tracker.reset_timer()
 
             for agent in agents:
-                if self._check_stop():
+                if self._check_stop() or self._check_finish():
                     break
                 self._publish_progress(
                     "training", outer_tracker,
