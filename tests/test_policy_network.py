@@ -87,7 +87,7 @@ class TestArchitectureRegistry:
 
 class TestObsDimConstants:
     def test_market_dim(self):
-        assert MARKET_DIM == 31  # 25 base + 6 race status one-hot
+        assert MARKET_DIM == 37  # 25 base + 6 race status + 6 market type/each-way
 
     def test_velocity_dim(self):
         assert VELOCITY_DIM == 11  # 6 base + 1 time_since_status_change + 4 market velocity (Session 2.8)
@@ -102,12 +102,12 @@ class TestObsDimConstants:
         assert POSITION_DIM == 3  # back_exposure, lay_exposure, bet_count per runner
 
     def test_market_total_dim(self):
-        assert MARKET_TOTAL_DIM == 48  # 31 + 11 + 6
+        assert MARKET_TOTAL_DIM == 54  # 37 + 11 + 6
 
     def test_obs_dim_matches_env(self):
         expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM + (POSITION_DIM * MAX_RUNNERS)
-        assert expected == 1630  # was 1587 (Session 4.10: +1 agent state + 42 position)
-        assert OBS_DIM == 1630
+        assert expected == 1636  # +6 market type / each-way features
+        assert OBS_DIM == 1636
 
 
 # ── PPOLSTMPolicy architecture ──────────────────────────────────────────────

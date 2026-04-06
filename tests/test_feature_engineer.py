@@ -562,6 +562,53 @@ class TestMarketTickFeatures:
         assert feats["overround"] == pytest.approx(0.5)  # only active runner
         assert feats["n_priced_runners"] == 1.0
 
+    def test_market_type_and_ew_defaults_without_race(self):
+        """Without a Race, market-type and EW keys exist but are neutral."""
+        t = _tick()
+        feats = market_tick_features(t)
+        # Keys are always present for stable observation shape
+        assert feats["market_type_win"] == 0.0
+        assert feats["market_type_each_way"] == 0.0
+        assert feats["has_each_way_terms"] == 0.0
+        assert math.isnan(feats["each_way_divisor"])
+        assert math.isnan(feats["place_odds_fraction"])
+        assert math.isnan(feats["number_of_each_way_places"])
+
+    def test_market_type_win_one_hot(self):
+        t = _tick()
+        race = _race(ticks=[t])
+        race.market_type = "WIN"
+        feats = market_tick_features(t, race)
+        assert feats["market_type_win"] == 1.0
+        assert feats["market_type_each_way"] == 0.0
+        # WIN markets carry no EW terms
+        assert feats["has_each_way_terms"] == 0.0
+        assert math.isnan(feats["each_way_divisor"])
+
+    def test_each_way_terms_populated(self):
+        t = _tick()
+        race = _race(ticks=[t])
+        race.market_type = "EACH_WAY"
+        race.each_way_divisor = 5.0  # 1/5 odds
+        race.number_of_each_way_places = 3
+        feats = market_tick_features(t, race)
+        assert feats["market_type_each_way"] == 1.0
+        assert feats["market_type_win"] == 0.0
+        assert feats["has_each_way_terms"] == 1.0
+        assert feats["each_way_divisor"] == 5.0
+        assert feats["place_odds_fraction"] == pytest.approx(0.2)
+        assert feats["number_of_each_way_places"] == 3.0
+
+    def test_each_way_divisor_quarter(self):
+        t = _tick()
+        race = _race(ticks=[t])
+        race.market_type = "EACH_WAY"
+        race.each_way_divisor = 4.0  # 1/4 odds
+        race.number_of_each_way_places = 4
+        feats = market_tick_features(t, race)
+        assert feats["place_odds_fraction"] == pytest.approx(0.25)
+        assert feats["number_of_each_way_places"] == 4.0
+
 
 # ── Tests: cross_runner_features ─────────────────────────────────────────────
 

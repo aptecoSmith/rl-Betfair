@@ -282,7 +282,7 @@ class TestEnvTimeDeltaDims:
         assert VELOCITY_DIM == 11
 
     def test_market_dim_unchanged(self):
-        assert MARKET_DIM == 31
+        assert MARKET_DIM == 37
 
     def test_runner_dim_unchanged(self):
         assert RUNNER_DIM == 110
@@ -293,14 +293,14 @@ class TestEnvTimeDeltaDims:
             assert key in MARKET_VELOCITY_KEYS, f"Missing key: {key}"
 
     def test_obs_dim_correct(self):
-        """obs_dim = 31 + 11 + (110 × 14) + 6 + (3 × 14) = 1630."""
+        """obs_dim = 37 + 11 + (110 × 14) + 6 + (3 × 14) = 1636."""
         from env.betfair_env import POSITION_DIM
         expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
-        assert expected == 1630
+        assert expected == 1636
 
     def test_market_total_dim_correct(self):
-        """MARKET_TOTAL_DIM = 31 + 11 + 6 = 48."""
-        assert MARKET_TOTAL_DIM == 48
+        """MARKET_TOTAL_DIM = 37 + 11 + 6 = 54."""
+        assert MARKET_TOTAL_DIM == 54
 
     def test_no_duplicate_velocity_keys(self):
         assert len(MARKET_VELOCITY_KEYS) == len(set(MARKET_VELOCITY_KEYS))

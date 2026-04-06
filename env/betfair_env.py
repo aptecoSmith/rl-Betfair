@@ -64,6 +64,10 @@ MARKET_KEYS: list[str] = [
     "race_status_parading", "race_status_going_down",
     "race_status_going_behind", "race_status_under_orders",
     "race_status_at_the_post", "race_status_off",
+    # Market type + each-way terms — 6 dims
+    "market_type_win", "market_type_each_way",
+    "each_way_divisor", "place_odds_fraction",
+    "has_each_way_terms", "number_of_each_way_places",
 ]
 
 MARKET_VELOCITY_KEYS: list[str] = [
@@ -130,7 +134,7 @@ AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, rac
 POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 
 # Derived constants
-MARKET_DIM = len(MARKET_KEYS)            # 31 (25 + 6 race status one-hot)
+MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
 RUNNER_DIM = len(RUNNER_KEYS)             # 110 (was 93, +17 past race features)
 

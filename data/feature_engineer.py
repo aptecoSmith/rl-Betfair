@@ -45,6 +45,12 @@ RACE_STATUSES: list[str] = [
     "under orders", "at the post", "off",
 ]
 
+#: Known Betfair market types we expose as one-hot features.  "WIN" and
+#: "EACH_WAY" cover the horse racing cases we extract; any other value
+#: (e.g. PLACE, FORECAST) shows up as all-zero so the agent can still tell
+#: it apart from a known market type.
+MARKET_TYPES: list[str] = ["WIN", "EACH_WAY"]
+
 
 # ── Numeric parsing helpers ──────────────────────────────────────────────────
 
@@ -450,11 +456,16 @@ def runner_tick_features(snap: RunnerSnap) -> dict[str, float]:
 # ── Market-level features (per tick) ─────────────────────────────────────────
 
 
-def market_tick_features(tick: Tick) -> dict[str, float]:
+def market_tick_features(
+    tick: Tick,
+    race: Race | None = None,
+) -> dict[str, float]:
     """Derive market-level features from a single tick.
 
     Covers overround, total volume, runner count, weather, and
-    time-to-off calculations.
+    time-to-off calculations.  When a :class:`Race` is supplied, also
+    emits market-type and each-way terms features so the agent can
+    distinguish WIN from EACH_WAY markets and reason about place payouts.
     """
     feats: dict[str, float] = {}
 
@@ -547,6 +558,30 @@ def market_tick_features(tick: Tick) -> dict[str, float]:
     status = tick.race_status.lower() if tick.race_status else ""
     for s in RACE_STATUSES:
         feats[f"race_status_{s.replace(' ', '_')}"] = 1.0 if status == s else 0.0
+
+    # Market type + each-way terms features.
+    # Always emit the full set of keys so the observation vector has a
+    # stable shape regardless of whether ``race`` was supplied.
+    market_type = (race.market_type or "").upper() if race is not None else ""
+    for mt in MARKET_TYPES:
+        feats[f"market_type_{mt.lower()}"] = 1.0 if market_type == mt else 0.0
+
+    if race is not None and race.each_way_divisor:
+        divisor = float(race.each_way_divisor)
+        feats["each_way_divisor"] = divisor
+        # Place odds as a fraction of win odds (1/4 = 0.25, 1/5 = 0.20).
+        # Betfair EACH_WAY markets already quote the place-adjusted price,
+        # so this is informational for the agent rather than used in
+        # settlement — but it lets the policy reason about relative value.
+        feats["place_odds_fraction"] = 1.0 / divisor
+        feats["has_each_way_terms"] = 1.0
+    else:
+        feats["each_way_divisor"] = NaN
+        feats["place_odds_fraction"] = NaN
+        feats["has_each_way_terms"] = 0.0
+
+    places = race.number_of_each_way_places if race is not None else None
+    feats["number_of_each_way_places"] = float(places) if places else NaN
 
     return feats
 
@@ -832,7 +867,7 @@ def engineer_tick(
     This function also updates ``tick_history`` with the current tick.
     """
     # Market features
-    mkt = market_tick_features(tick)
+    mkt = market_tick_features(tick, race)
 
     # Cross-runner features
     cross = cross_runner_features(tick, race.runner_metadata)

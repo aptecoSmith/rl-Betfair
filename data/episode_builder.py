@@ -185,6 +185,14 @@ class Race:
     market_name: str = ""
     market_type: str = ""  # "WIN", "EACH_WAY", etc.
     n_runners: int = 0     # total runners including removed
+    # Each-way terms, locked at market open.  NULL for WIN markets and for
+    # markets with <=4 runners where EW betting is unavailable.
+    # ``each_way_divisor`` is Betfair's odds fraction (e.g. 4.0 = 1/4,
+    # 5.0 = 1/5); ``number_of_each_way_places`` is 2, 3, or 4 and is derived
+    # from the divisor and active runner count — see StreamRecorder1's
+    # EachWayHelper for the rules.
+    each_way_divisor: float | None = None
+    number_of_each_way_places: int | None = None
     # Set of selection IDs that won the market.  For WIN markets this is
     # just {winner_selection_id}.  For EACH_WAY (place) markets this
     # includes WINNER + PLACED runners — all of them pay out on a back bet.
@@ -631,6 +639,8 @@ def _build_day(
                     market_type=str(first_row.get("market_type") or ""),
                     n_runners=len(runner_meta),
                     winning_selection_ids=winning_ids,
+                    each_way_divisor=_opt_float(first_row.get("each_way_divisor")),
+                    number_of_each_way_places=_opt_int(first_row.get("number_of_each_way_places")),
                 )
             )
 

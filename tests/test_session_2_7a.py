@@ -570,7 +570,7 @@ class TestTimeSinceStatusChange:
 
 class TestEnvDimensions:
     def test_market_dim_includes_race_status(self):
-        assert MARKET_DIM == 31  # 25 + 6 race status one-hot
+        assert MARKET_DIM == 37  # 25 + 6 race status + 6 market type/each-way
 
     def test_velocity_dim_includes_time_since_change(self):
         assert VELOCITY_DIM == 11  # 6 + 1 time_since_status_change + 4 market velocity (Session 2.8)
@@ -586,7 +586,7 @@ class TestEnvDimensions:
     def test_obs_dim_correct(self):
         from env.betfair_env import POSITION_DIM
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
-        assert obs_dim == 1630  # was 1587 (Session 4.10: +1 agent state + 42 position)
+        assert obs_dim == 1636  # +6 market type / each-way features
 
     def test_env_backward_compat_with_none_race_status(self):
         """Env should handle ticks with race_status=None gracefully."""
@@ -610,7 +610,7 @@ class TestEnvDimensions:
         }
         env = BetfairEnv(day, config)
         obs, info = env.reset()
-        assert obs.shape == (1630,)  # was 1587 (Session 4.10: +1 agent state + 42 position)
+        assert obs.shape == (1636,)  # +6 market type / each-way features
         # Race status features should all be 0
         # Market features start at index 0, race status at indices 25-30
         for i in range(25, 31):
@@ -625,4 +625,5 @@ class TestTicksColumnsUpdated:
         assert "race_status" in TICKS_COLUMNS
 
     def test_ticks_columns_count(self):
-        assert len(TICKS_COLUMNS) == 19  # 18 original + race_status
+        # 19 prior + each_way_divisor + number_of_each_way_places
+        assert len(TICKS_COLUMNS) == 21

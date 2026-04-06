@@ -57,6 +57,8 @@ def _make_ticks_df(n: int = 3, winner_id: int | None = 12345678901) -> pd.DataFr
         "in_play": [0] * n,           # MySQL TINYINT — cast to bool
         "snap_json": ['{"runners":[]}'] * n,
         "winner_selection_id": [winner_id] * n,
+        "each_way_divisor": [None] * n,
+        "number_of_each_way_places": [None] * n,
         "temperature": [12.5] * n,
         "precipitation": [0.0] * n,
         "wind_speed": [3.2] * n,
@@ -184,6 +186,7 @@ class TestColumnSchemas:
             "market_start_time", "market_type", "market_name",
             "number_of_active_runners", "traded_volume",
             "in_play", "snap_json", "winner_selection_id",
+            "each_way_divisor", "number_of_each_way_places",
             "race_status",
             "temperature", "precipitation", "wind_speed", "wind_direction",
             "humidity", "weather_code",

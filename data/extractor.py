@@ -66,6 +66,8 @@ TICKS_COLUMNS: list[str] = [
     "in_play",
     "snap_json",
     "winner_selection_id",
+    "each_way_divisor",
+    "number_of_each_way_places",
     "race_status",
     "temperature",
     "precipitation",
@@ -155,6 +157,8 @@ SQL_TICKS = text("""
         rms.SequenceNumber         AS sequence_number,
         rms.SnapJson               AS snap_json,
         CAST(mr.WinnerSelectionId AS SIGNED) AS winner_selection_id,
+        ew.EachWayDivisor          AS each_way_divisor,
+        ew.NumberOfEachWayPlaces   AS number_of_each_way_places,
         wo.Temperature             AS temperature,
         wo.Precipitation           AS precipitation,
         wo.WindSpeed               AS wind_speed,
@@ -168,6 +172,15 @@ SQL_TICKS = text("""
         FROM coldData.marketResults
         GROUP BY MarketId
     ) mr ON mr.MarketId = rms.MarketId
+    LEFT JOIN (
+        -- EW terms are locked at market open and don't change within a market,
+        -- so MAX() collapses the per-tick rows to a single value per market.
+        SELECT MarketId,
+               MAX(EachWayDivisor) AS EachWayDivisor,
+               MAX(NumberOfEachWayPlaces) AS NumberOfEachWayPlaces
+        FROM updates
+        GROUP BY MarketId
+    ) ew ON ew.MarketId = rms.MarketId
     LEFT JOIN coldData.WeatherObservations wo
         ON wo.MarketId = rms.MarketId
        AND wo.ObservationType = 'PRE_RACE'
@@ -213,6 +226,8 @@ SQL_POLLED_TICKS = text("""
         pms.InPlay                 AS in_play,
         pms.TotalMatched           AS traded_volume,
         pms.NumberOfActiveRunners  AS number_of_active_runners,
+        pms.EachWayDivisor         AS each_way_divisor,
+        pms.NumberOfEachWayPlaces  AS number_of_each_way_places,
         CAST(mr.WinnerSelectionId AS SIGNED) AS winner_selection_id,
         wo.Temperature             AS temperature,
         wo.Precipitation           AS precipitation,
@@ -709,6 +724,7 @@ def _cast_ticks(df: pd.DataFrame) -> pd.DataFrame:
         ("winner_selection_id", pd.Int64Dtype()),
         ("sequence_number", pd.Int64Dtype()),
         ("number_of_active_runners", pd.Int32Dtype()),
+        ("number_of_each_way_places", pd.Int32Dtype()),
         ("weather_code", pd.Int32Dtype()),
     ]:
         if col in df.columns:

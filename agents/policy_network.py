@@ -42,7 +42,7 @@ from env.betfair_env import (
 
 # ── Observation layout constants ────────────────────────────────────────────
 
-MARKET_TOTAL_DIM = MARKET_DIM + VELOCITY_DIM + AGENT_STATE_DIM  # 31 + 11 + 6 = 48
+MARKET_TOTAL_DIM = MARKET_DIM + VELOCITY_DIM + AGENT_STATE_DIM  # 37 + 11 + 6 = 54
 RUNNER_INPUT_DIM = RUNNER_DIM + POSITION_DIM  # 110 + 3 = 113 (per-runner features + position)
 
 
