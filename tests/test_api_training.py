@@ -431,3 +431,82 @@ class TestStartWithOverrides:
                 "architectures": [],
             })
             assert resp.status_code == 400
+
+    def test_start_accepts_valid_architectures_without_torch(self):
+        """Regression: validation must accept architecture names listed in the
+        config choices, without requiring agents.policy_network (and torch) to
+        have been imported in the API process.
+
+        Previously the validation imported REGISTRY from architecture_registry,
+        which is only populated when policy_network is imported — and the API
+        deliberately avoids importing torch.  The result was that every
+        architecture name was rejected as "unknown", breaking the training
+        wizard on the final step.
+        """
+        import tempfile
+        from pathlib import Path
+        import pandas as pd
+
+        client, app = _make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            pd.DataFrame({"x": [1]}).to_parquet(data_dir / "2026-01-01.parquet")
+            app.state.config = {
+                "paths": {"processed_data": str(data_dir)},
+                "population": {"size": 2},
+                "training": {},
+                "hyperparameters": {
+                    "search_ranges": {
+                        "architecture_name": {
+                            "choices": ["ppo_lstm_v1", "ppo_time_lstm_v1"],
+                        }
+                    }
+                },
+            }
+            # No worker_ws set — _send_to_worker will raise 503.  We only care
+            # that validation passes, i.e. the response is NOT a 400.
+            app.state.worker_ws = None
+
+            resp = client.post("/training/start", json={
+                "n_generations": 1,
+                "n_epochs": 1,
+                "architectures": ["ppo_lstm_v1", "ppo_time_lstm_v1"],
+            })
+            assert resp.status_code != 400, (
+                f"Expected validation to pass, got 400: {resp.json()}"
+            )
+            assert resp.status_code == 503  # worker not available — validation passed
+
+    def test_start_validates_against_config_not_registry(self):
+        """An architecture that exists in the runtime REGISTRY but not in
+        config.choices must be rejected, and vice-versa — validation is
+        driven by config, not by the runtime registry."""
+        import tempfile
+        from pathlib import Path
+        import pandas as pd
+
+        client, app = _make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            pd.DataFrame({"x": [1]}).to_parquet(data_dir / "2026-01-01.parquet")
+            app.state.config = {
+                "paths": {"processed_data": str(data_dir)},
+                "population": {"size": 2},
+                "training": {},
+                "hyperparameters": {
+                    "search_ranges": {
+                        "architecture_name": {"choices": ["only_this_one"]}
+                    }
+                },
+            }
+            app.state.worker_ws = None
+
+            # "ppo_lstm_v1" is a real registered arch but not in this config's
+            # choices → must be rejected.
+            resp = client.post("/training/start", json={
+                "n_generations": 1,
+                "n_epochs": 1,
+                "architectures": ["ppo_lstm_v1"],
+            })
+            assert resp.status_code == 400
+            assert "ppo_lstm_v1" in resp.json()["detail"]

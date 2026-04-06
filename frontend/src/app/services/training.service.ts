@@ -11,6 +11,14 @@ export class TrainingService implements OnDestroy {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** Epoch ms until which a poll saying running=false should be ignored.
+   * Set by setRunning(true) to protect the optimistic running state from
+   * being clobbered by a stale poll before the worker has flipped its
+   * state or emitted phase_start. Cleared when a WS event confirms the
+   * run, when the window expires, or when setRunning(false) is called. */
+  private optimisticRunningUntil = 0;
+  private readonly OPTIMISTIC_GRACE_MS = 15000;
+
   /** Latest training status from WebSocket or polling. */
   readonly status = signal<TrainingStatus>({
     running: false,
@@ -60,8 +68,24 @@ export class TrainingService implements OnDestroy {
   private pollStatus(): void {
     this.http.get<TrainingStatus>(`${this.baseUrl}/training/status`).subscribe({
       next: (s) => {
-        // Always sync the full status from poll — this is the source of truth
-        this.status.set(s);
+        // Protect optimistic running state from a stale poll during the
+        // grace window right after the user clicked Start. Without this,
+        // the UI bounces between the progress screen and the wizard:
+        // start → setRunning(true) → poll returns running=false (worker
+        // hasn't updated yet) → wizard reappears → WS phase_start → back
+        // to progress screen.
+        if (
+          !s.running &&
+          this.status().running &&
+          Date.now() < this.optimisticRunningUntil
+        ) {
+          // Merge non-running fields but keep running=true
+          this.status.update((prev) => ({ ...prev, ...s, running: true }));
+        } else {
+          this.status.set(s);
+          // Real transition to not-running — drop the guard.
+          if (!s.running) this.optimisticRunningUntil = 0;
+        }
         if (s.detail) {
           this.extractChartDataFromDetail(s.detail);
         }
@@ -92,6 +116,11 @@ export class TrainingService implements OnDestroy {
 
   /** Manually set running state (called from UI after start/stop). */
   setRunning(running: boolean, detail?: string): void {
+    if (running) {
+      this.optimisticRunningUntil = Date.now() + this.OPTIMISTIC_GRACE_MS;
+    } else {
+      this.optimisticRunningUntil = 0;
+    }
     this.status.update((prev) => ({
       ...prev,
       running,
@@ -152,6 +181,7 @@ export class TrainingService implements OnDestroy {
       this.lastRunCompletedAt.set(
         event.timestamp ? event.timestamp * 1000 : Date.now()
       );
+      this.optimisticRunningUntil = 0;
       this.status.set({
         running: false,
         phase: null,
@@ -165,6 +195,9 @@ export class TrainingService implements OnDestroy {
       return;
     }
 
+    // WS has confirmed the run is live — the optimistic guard is no
+    // longer needed.
+    this.optimisticRunningUntil = 0;
     this.status.update((prev) => ({
       ...prev,
       running: true,

@@ -248,14 +248,22 @@ async def start_training(request: Request, body: StartTrainingRequest):
             raise HTTPException(400, f"Test dates not found in data: {missing}")
         test_dates = sorted(body.test_dates)
 
-    # Validate architecture names if provided
+    # Validate architecture names if provided.  We validate against the
+    # config choices (not the runtime REGISTRY) because architecture_registry
+    # is only populated when agents.policy_network is imported, and that
+    # pulls in torch — which we deliberately avoid in the API process.
     if body.architectures is not None:
-        from agents.architecture_registry import REGISTRY
-        unknown = [a for a in body.architectures if a not in REGISTRY]
-        if unknown:
-            raise HTTPException(400, f"Unknown architectures: {unknown}")
         if not body.architectures:
             raise HTTPException(400, "At least one architecture must be selected")
+        valid_choices = (
+            config.get("hyperparameters", {})
+            .get("search_ranges", {})
+            .get("architecture_name", {})
+            .get("choices", [])
+        )
+        unknown = [a for a in body.architectures if a not in valid_choices]
+        if unknown:
+            raise HTTPException(400, f"Unknown architectures: {unknown}")
 
     # Send start command to worker
     cmd = make_start_cmd(
