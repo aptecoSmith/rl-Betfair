@@ -204,11 +204,24 @@ class BetfairEnv(gymnasium.Env):
 
     metadata: dict = {"render_modes": []}
 
+    #: Keys accepted in ``reward_overrides``. Any other key is silently
+    #: ignored after a one-time debug log so a typoed gene name doesn't
+    #: crash a multi-day training run.
+    _REWARD_OVERRIDE_KEYS: frozenset[str] = frozenset({
+        "early_pick_bonus_min",
+        "early_pick_bonus_max",
+        "early_pick_min_seconds",
+        "efficiency_penalty",
+        "precision_bonus",
+        "commission",
+    })
+
     def __init__(
         self,
         day: Day,
         config: dict,
         feature_cache: dict[str, list] | None = None,
+        reward_overrides: dict | None = None,
     ) -> None:
         super().__init__()
         self.day = day
@@ -222,8 +235,22 @@ class BetfairEnv(gymnasium.Env):
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
         self._total_races = len(day.races)
 
-        # Reward parameters
-        reward_cfg = config["reward"]
+        # Reward parameters — start from shared config, then overlay any
+        # per-agent overrides passed in by the trainer. The shared config
+        # dict is NEVER mutated: each BetfairEnv instance reads its own
+        # merged reward block.
+        reward_cfg = dict(config["reward"])
+        if reward_overrides:
+            unknown = set(reward_overrides) - self._REWARD_OVERRIDE_KEYS
+            if unknown:
+                logger.debug(
+                    "BetfairEnv: ignoring unknown reward_overrides keys: %s",
+                    sorted(unknown),
+                )
+            for key in self._REWARD_OVERRIDE_KEYS:
+                if key in reward_overrides:
+                    reward_cfg[key] = reward_overrides[key]
+
         self._early_pick_min = reward_cfg["early_pick_bonus_min"]
         self._early_pick_max = reward_cfg["early_pick_bonus_max"]
         self._early_pick_seconds = reward_cfg["early_pick_min_seconds"]

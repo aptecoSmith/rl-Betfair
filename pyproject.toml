@@ -1,6 +1,8 @@
 [tool.pytest.ini_options]
 markers = [
     "integration: requires local MySQL on localhost:3306 (deselected by default, run with: pytest -m integration)",
+    "gpu: requires CUDA (deselected by default, run with: pytest -m gpu)",
+    "slow: slow / end-to-end test (deselected by default, run with: pytest -m slow)",
 ]
-addopts = "-m 'not integration' -v --tb=short -o log_cli=true -o log_cli_level=INFO"
+addopts = "-m 'not integration and not gpu and not slow' -v --tb=short -o log_cli=true -o log_cli_level=INFO"
 timeout = 60

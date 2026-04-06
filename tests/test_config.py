@@ -91,7 +91,6 @@ def test_hyperparameter_search_ranges_present(config):
         "lstm_hidden_size",
         "mlp_hidden_size",
         "mlp_layers",
-        "observation_window_ticks",
         "reward_early_pick_bonus",
         "reward_efficiency_penalty",
         "reward_precision_bonus",

@@ -45,6 +45,43 @@ from training.progress_tracker import ProgressTracker
 logger = logging.getLogger(__name__)
 
 
+# -- Gene → env reward override mapping ---------------------------------------
+
+#: Maps a hyperparameter (gene) name to the key(s) it overrides inside
+#: ``config["reward"]``. Kept here (not in env) because the env doesn't
+#: know about the genetic schema — it only speaks "reward config keys".
+#:
+#: ``reward_early_pick_bonus`` is a single scalar gene in the current
+#: schema, so it pins BOTH ends of the early-pick multiplier interval to
+#: the same value (min == max → constant multiplier, bypassing the
+#: time-interpolation without changing the reward *formula*). Session 3
+#: will split this into proper ``early_pick_bonus_min`` / ``_max`` genes.
+_REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
+    "reward_early_pick_bonus": ("early_pick_bonus_min", "early_pick_bonus_max"),
+    "reward_efficiency_penalty": ("efficiency_penalty",),
+    "reward_precision_bonus": ("precision_bonus",),
+}
+
+
+def _reward_overrides_from_hp(hp: dict) -> dict:
+    """Extract reward-config overrides from a hyperparameter dict.
+
+    Returns a dict keyed by ``config["reward"]`` key names (not gene
+    names). Unknown genes are ignored here — they belong to other
+    subsystems. Genes whose values are ``None`` are dropped.
+    """
+    overrides: dict = {}
+    for gene, cfg_keys in _REWARD_GENE_MAP.items():
+        if gene not in hp:
+            continue
+        value = hp[gene]
+        if value is None:
+            continue
+        for cfg_key in cfg_keys:
+            overrides[cfg_key] = value
+    return overrides
+
+
 # -- Transition storage -------------------------------------------------------
 
 
@@ -148,6 +185,7 @@ class PPOTrainer:
         self.feature_cache = feature_cache
 
         hp = hyperparams or {}
+        self.hyperparams = hp
         self.lr = hp.get("learning_rate", 3e-4)
         self.gamma = hp.get("gamma", 0.99)
         self.gae_lambda = hp.get("gae_lambda", 0.95)
@@ -157,6 +195,12 @@ class PPOTrainer:
         self.max_grad_norm = hp.get("max_grad_norm", 0.5)
         self.ppo_epochs = hp.get("ppo_epochs", 4)
         self.mini_batch_size = hp.get("mini_batch_size", 64)
+
+        # Build per-agent reward overrides from the sampled genes. This is
+        # how reward-shaping hyperparameters reach BetfairEnv — previously
+        # these genes were sampled but silently dropped here, so every
+        # agent trained with identical reward shaping.
+        self.reward_overrides = _reward_overrides_from_hp(hp)
 
         self.optimiser = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
 
@@ -245,7 +289,12 @@ class PPOTrainer:
         keeps action log_std on GPU, and minimises per-step Python overhead.
         """
         rollout_start = time.perf_counter()
-        env = BetfairEnv(day, self.config, feature_cache=self.feature_cache)
+        env = BetfairEnv(
+            day,
+            self.config,
+            feature_cache=self.feature_cache,
+            reward_overrides=self.reward_overrides,
+        )
         obs, info = env.reset()
 
         rollout = Rollout()
