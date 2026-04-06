@@ -261,3 +261,131 @@ Don't use this file for running thoughts — that's what
   session plan's "Do not" list).
 
 **Next:** Session 4 — training plan / Gen-0 coverage tracker.
+
+---
+
+## Session 4 — Training plan / Gen-0 coverage tracker (2026-04-06)
+
+**Shipped:**
+- New module `training/training_plan.py` containing the full Session 4
+  surface area:
+  - `TrainingPlan` dataclass (plan_id, name, created_at, population_size,
+    architectures, hp_ranges, seed, arch_mix, min_arch_samples, notes,
+    outcomes) with `to_dict` / `from_dict` / `new` helpers.
+  - `GenerationOutcome` dataclass — appended to a plan after each
+    generation completes (best/mean fitness, alive/died architectures,
+    n_agents, recorded_at, notes).
+  - `PlanRegistry` — JSON-on-disk store at
+    `registry/training_plans/{plan_id}.json`. Save / load / list /
+    delete / `record_outcome`. `_path_for` blocks `..`/slashes so a
+    malicious POST can't escape `self.root`.
+  - `validate_plan` returning a list of `ValidationIssue`s; the
+    pre-flight check refuses pop_size < `min_arch_samples × n_arch`
+    (default 5 per arch). `is_launchable(issues)` is the bool helper.
+  - `compute_coverage` — per-arch counts + per-gene decile bucket
+    counts. Numeric genes only; `float_log` is bucketed in log space.
+    Out-of-range historical samples are clamped, not dropped (so an
+    old agent surviving a range tightening still counts).
+  - `bias_sampler` — returns `BiasedSpec` wrappers attaching
+    bucket-weight nudges to poorly-covered numeric genes (empty
+    buckets get `1.5×` weight, populated buckets `1.0×`).
+  - `sample_with_bias` — opt-in helper that picks a bucket by weight
+    then uniform-samples within it. Mirrors `sample_hyperparams`'
+    branching for unbiased specs.
+  - `historical_agents_from_model_store` — adapter that reads every
+    model record (active *and* discarded — coverage is about "did we
+    sample this corner", not "did we like the result") and projects to
+    `HistoricalAgent`.
+- `agents/population_manager.py::initialise_population` now accepts an
+  optional `plan: TrainingPlan | None = None`. When supplied the plan
+  overrides `population_size`, parses its own `hp_ranges` to specs
+  (when non-empty), restricts the architecture choice list, and -- if
+  `arch_mix` is set -- builds a deterministic per-slot architecture
+  assignment by shuffling the expanded mix. Default `plan=None` keeps
+  the legacy `config.yaml`-driven path bit-identical so
+  `start_training.sh` / `start_training.bat` keep working unchanged
+  (Session 4 invariant).
+- `training/run_training.py::TrainingOrchestrator` accepts new optional
+  `training_plan` and `plan_registry` constructor kwargs, threads the
+  plan into `initialise_population`, tracks the architectures present
+  on Gen 0, and at the end of every `_run_generation` calls a new
+  `_record_plan_outcome` helper that appends a `GenerationOutcome` to
+  the plan. The helper is a silent no-op when either dependency is
+  None, so config-only launches are unaffected.
+- New router `api/routers/training_plans.py` with the four endpoints
+  the session plan calls for:
+  - `GET /api/training-plans` — list all plans (sorted desc).
+  - `GET /api/training-plans/coverage` — coverage stats + biased gene
+    list. Reads history from `app.state.store` (production) or
+    `app.state.coverage_history` (test seam).
+  - `GET /api/training-plans/{id}` — full plan + validation issues.
+  - `POST /api/training-plans` — create + validate (does NOT launch).
+    Returns 422 with the issue list if any error-severity issues are
+    present, and the plan is *not* persisted in that case.
+- `api/main.py` lifespan now constructs a `PlanRegistry` rooted at
+  `config.paths.training_plans` (defaulting to
+  `<registry_db_dir>/training_plans/`) and stashes it on
+  `app.state.plan_registry`. The new router is mounted alongside the
+  existing routers.
+- New test file `tests/arch_exploration/test_training_plan.py` with
+  10 CPU-only tests (covers all 7 items from the session plan):
+  1. Plan round-trip via `PlanRegistry.save`/`load`/`list`.
+  2. Validate rejects pop=6 with 3 architectures + min=5.
+  2b. Validate accepts pop=15 (just-right floor case).
+  3. Coverage with empty history flags every numeric gene as
+     poorly-covered and both architectures as under-covered.
+  4. Coverage with synthetic 50-agent history matches hand-counted
+     bucket assignments and arch counts.
+  5. `bias_sampler` nudges empty `gamma` buckets — populated bucket
+     weight is strictly less than the empty buckets, every empty
+     bucket is at least as heavy as the populated one, and at least
+     one empty bucket is strictly heavier.
+  6. Outcome round-trip via `record_outcome` → `load`.
+  7. API: POST happy path → list → get → coverage all 200; POST with
+     undersized plan → 422 with `population_too_small` in issues; GET
+     unknown id → 404.
+- Smoke-checked `api/main.create_app()` builds with all 4 new routes.
+
+**Files changed:**
+- `training/training_plan.py` — new (~500 lines).
+- `agents/population_manager.py` — `initialise_population` accepts
+  `plan`; new `TYPE_CHECKING` import for `TrainingPlan`.
+- `training/run_training.py` — `TrainingOrchestrator.__init__` gains
+  `training_plan` / `plan_registry`; `initialise_population` call
+  threads `plan=`; new `_record_plan_outcome` helper called at the
+  end of `_run_generation`; `datetime`/`timezone` imports added.
+- `api/routers/training_plans.py` — new (~150 lines).
+- `api/main.py` — imports the new router + `PlanRegistry`, builds the
+  registry in `lifespan`, stashes it on `app.state.plan_registry`,
+  mounts the router.
+- `tests/arch_exploration/test_training_plan.py` — new 10-test file.
+- `plans/arch-exploration/progress.md`, `lessons_learnt.md`,
+  `ui_additions.md` — session notes.
+
+**Tests:**
+- `pytest tests/arch_exploration/test_training_plan.py` → 10 passed
+  (~3.6 s).
+- `pytest tests/arch_exploration/ tests/test_population_manager.py
+  tests/test_orchestrator.py tests/test_genetic_operators.py
+  tests/test_genetic_selection.py tests/test_config.py` → 188 passed,
+  1 skipped, 1 pre-existing failure (`test_obs_dim_matches_env`,
+  documented as stale on plain `master` in Session 1 progress).
+- `tests/test_api_training.py` had 2 pre-existing
+  `worker_disconnected` failures — confirmed via `git stash` they
+  exist on plain `master`, unrelated to this session.
+
+**Not shipped:**
+- No UI work — Session 8 consumes `ui_additions.md`. The new backend
+  fields are appended there.
+- No actual Gen-0 training run under the planner — that's Session 9.
+- `ppo_transformer_v1` is not yet in the architecture registry, so
+  the planner only knows about `ppo_lstm_v1` and `ppo_time_lstm_v1`
+  in practice. Session 6 will add the third arch as a schema
+  extension; the planner already accepts it as a string, no rewrite
+  needed.
+- Bias sampler is intentionally simple: empty-bucket × 1.5 weight,
+  populated × 1.0. Latin hypercube / Bayesian bandit deferred per
+  the session plan; documented in `lessons_learnt.md`.
+
+**Next:** Session 5 — LSTM structural knobs.
+

@@ -41,8 +41,11 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import torch
+
+from typing import TYPE_CHECKING
 
 from agents.population_manager import (
     AgentRecord,
@@ -57,6 +60,9 @@ from registry.scoreboard import ModelScore, Scoreboard
 from training.evaluator import Evaluator
 from training.perf_log import gpu_memory_summary, perf_log
 from training.progress_tracker import ProgressTracker
+
+if TYPE_CHECKING:
+    from training.training_plan import PlanRegistry, TrainingPlan
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +118,18 @@ class TrainingOrchestrator:
         device: str | None = None,
         stop_event: threading.Event | None = None,
         finish_event: threading.Event | None = None,
+        training_plan: "TrainingPlan | None" = None,
+        plan_registry: "PlanRegistry | None" = None,
     ) -> None:
         self.config = config
         self.model_store = model_store
         self.progress_queue = progress_queue
         self.stop_event = stop_event
         self.finish_event = finish_event
+        # Optional Session-4 planner integration.  Both default to None
+        # so config.yaml-based launches keep working unchanged.
+        self.training_plan = training_plan
+        self.plan_registry = plan_registry
 
         # GPU auto-detection
         if device is not None:
@@ -267,7 +279,17 @@ class TrainingOrchestrator:
             "test_days": len(test_days),
         })
 
-        agents = self.pop_manager.initialise_population(generation=0, seed=seed)
+        agents = self.pop_manager.initialise_population(
+            generation=0, seed=seed, plan=self.training_plan,
+        )
+
+        # Track which architectures the plan ever saw, so we can flag
+        # any that die out across generations in the outcome record.
+        self._planner_known_architectures: set[str] = (
+            {a.architecture_name for a in agents}
+            if self.training_plan is not None
+            else set()
+        )
 
         for gen in range(n_generations):
             if self._check_stop():
@@ -644,6 +666,11 @@ class TrainingOrchestrator:
             logger.info("Generation %d complete | %s", generation, mem)
             torch.cuda.reset_peak_memory_stats()
 
+        # Session-4 planner outcome callback.  Records best/mean fitness
+        # and any architectures that have died out so the UI can show a
+        # post-hoc summary alongside the original plan configuration.
+        self._record_plan_outcome(generation, agents, scores)
+
         return GenerationResult(
             generation=generation,
             training_stats=training_stats,
@@ -653,6 +680,58 @@ class TrainingOrchestrator:
             children=children,
             breeding_records=breeding_records,
         )
+
+    # -- Session-4 planner outcome callback ------------------------------------
+
+    def _record_plan_outcome(
+        self,
+        generation: int,
+        agents: list[AgentRecord],
+        scores: list[ModelScore],
+    ) -> None:
+        """Append a :class:`GenerationOutcome` to the plan, if one is set.
+
+        Silent no-op when ``training_plan`` or ``plan_registry`` is None
+        so the legacy ``config.yaml``-only launch path is unaffected.
+        """
+        if self.training_plan is None or self.plan_registry is None:
+            return
+
+        # Lazy import to avoid a hard dependency at module load time --
+        # the planner module is optional from this orchestrator's POV.
+        from training.training_plan import GenerationOutcome
+
+        composite_scores = [
+            s.composite_score for s in scores
+            if s.composite_score is not None
+        ]
+        best = max(composite_scores) if composite_scores else 0.0
+        mean = (
+            sum(composite_scores) / len(composite_scores)
+            if composite_scores else 0.0
+        )
+
+        alive = sorted({a.architecture_name for a in agents})
+        if not self._planner_known_architectures:
+            self._planner_known_architectures = set(alive)
+        died = sorted(self._planner_known_architectures - set(alive))
+
+        outcome = GenerationOutcome(
+            generation=generation,
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            best_fitness=float(best),
+            mean_fitness=float(mean),
+            architectures_alive=alive,
+            architectures_died=died,
+            n_agents=len(agents),
+        )
+        try:
+            self.plan_registry.record_outcome(self.training_plan.plan_id, outcome)
+        except Exception:
+            logger.exception(
+                "Failed to record planner outcome for plan %s gen %d",
+                self.training_plan.plan_id, generation,
+            )
 
     # -- Progress event helpers ------------------------------------------------
 

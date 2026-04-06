@@ -111,6 +111,63 @@ provisional to belong there yet.
   branch. Recording the technique because the same trick will be
   useful for Session 7's drawdown tests.
 
+## 2026-04-06 — Session 4 (training plan / coverage tracker)
+
+- **Coverage history must include discarded models.** The first draft
+  of `historical_agents_from_model_store` filtered to `status='active'`
+  on the (reasonable-sounding) basis that "discarded models are bad
+  examples". That's the wrong framing for a *coverage* metric: the
+  question is "did we ever sample this corner of the search space?",
+  not "did we like the result?". A discarded ppo_lstm_v1 with
+  `gamma=0.998` is still evidence that we explored that bucket. Fixed
+  to read every record. The same logic applies to garaged models.
+
+- **`float_log` genes need log-space buckets.** First draft used linear
+  deciles for every numeric gene, which made the bottom decile of
+  `learning_rate` cover [1e-5, 5e-5] and the top decile cover
+  [4.5e-4, 5e-4] — i.e. 99 % of plausible historical samples landed
+  in the bottom bucket regardless of how well-explored the range
+  actually was. The hand-counted coverage test caught this immediately.
+  `_bucket_edges_for` now switches to log-space edges when
+  `spec.type == "float_log"`, matching how `sample_hyperparams`
+  actually generates values.
+
+- **Out-of-range historical samples are clamped, not dropped.** When a
+  range is tightened in `config.yaml` (Session 1 did this for
+  `early_pick_bonus_max`), old agents persisted with values outside
+  the new bounds. Dropping them silently would understate coverage in
+  exactly the buckets that *did* historically have samples. The
+  clamp-to-end-bucket behaviour is documented inline in
+  `_assign_bucket` so a future tightening doesn't get re-litigated.
+
+- **Path-traversal guard on `plan_id`.** The POST endpoint takes a
+  client-supplied payload but `plan_id` is generated server-side via
+  `uuid.uuid4()`, so in practice traversal is impossible — *unless* a
+  future endpoint accepts a raw plan_id from the client. The
+  `_path_for` guard (rejects `..`, `/`, `\`) is cheap belt-and-braces
+  so this can't regress later.
+
+- **Bias-sampler integration is opt-in, not auto.** I deliberately did
+  *not* call `bias_sampler` from `population_manager.initialise_population`
+  even when a plan is supplied. Reason: the session plan says "Keep
+  the bias gentle — it should tilt, not override", and silently
+  altering Gen 0 sampling distributions whenever a plan exists would
+  violate the principle of least surprise for anyone running
+  `start_training.sh`. The plan author can apply `bias_sampler` to
+  produce a modified `hp_ranges` block before calling `TrainingPlan.new`
+  — making the bias visible in the plan file rather than implicit in
+  the runtime. Session 8's UI will surface a "Bias toward uncovered"
+  toggle that does exactly this.
+
+- **`PopulationManager.initialise_population(plan=...)` is small but
+  load-bearing.** The plan-aware branch is only ~15 lines but it
+  changes four things at once (pop size, hp specs, arch choices, arch
+  mix). I kept the legacy code path bit-identical (`plan=None`) and
+  put all overrides behind the `if plan is not None` block so the
+  diff is reviewable and the regression risk to existing config-only
+  users is zero. Tests that already exercised the legacy path
+  (`test_population_manager.py`, 188 passed) confirm this.
+
 - **`reward_early_pick_bonus` was easy to remove cleanly.** Same
   reasoning as Session 1's `observation_window_ticks` retirement: the
   sampler iterates over whatever's in `search_ranges`, removing the

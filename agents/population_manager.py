@@ -32,11 +32,15 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agents.architecture_registry import REGISTRY, create_policy
 from agents.policy_network import BasePolicy
 from registry.model_store import GeneticEventRecord
 from registry.scoreboard import ModelScore
+
+if TYPE_CHECKING:
+    from training.training_plan import TrainingPlan
 
 
 # -- Hyperparameter sampling --------------------------------------------------
@@ -219,6 +223,7 @@ class PopulationManager:
         self,
         generation: int = 0,
         seed: int | None = None,
+        plan: "TrainingPlan | None" = None,
     ) -> list[AgentRecord]:
         """Create N agents with randomised hyperparameters.
 
@@ -228,6 +233,14 @@ class PopulationManager:
             Generation number for the new agents.
         seed:
             Optional RNG seed for reproducibility.
+        plan:
+            Optional :class:`training.training_plan.TrainingPlan` that
+            overrides ``population_size``, ``hp_specs`` (when
+            ``plan.hp_ranges`` is non-empty), the architecture choice
+            list, and -- if ``plan.arch_mix`` is set -- the per-architecture
+            counts.  Passing ``plan=None`` keeps the legacy
+            ``config.yaml``-driven path so ``start_training.sh`` still
+            works unchanged (Session 4 invariant).
 
         Returns
         -------
@@ -236,10 +249,41 @@ class PopulationManager:
         rng = random.Random(seed)
         agents: list[AgentRecord] = []
 
-        for _ in range(self.population_size):
-            hp = sample_hyperparams(self.hp_specs, rng)
-            # Use sampled architecture_name if present (str_choice), else default
-            arch_name = hp.pop("architecture_name", self.default_architecture)
+        # Resolve plan overrides (or fall back to instance defaults).
+        if plan is not None:
+            pop_size = int(plan.population_size)
+            if plan.hp_ranges:
+                hp_specs_for_run = parse_search_ranges(plan.hp_ranges)
+            else:
+                hp_specs_for_run = self.hp_specs
+            arch_choices = list(plan.architectures) if plan.architectures else None
+            # Build a per-slot architecture list when arch_mix is set so
+            # the mix is deterministic, not stochastic.  Otherwise leave
+            # the slot list as None and let the sampler / plan choices
+            # decide per agent.
+            if plan.arch_mix:
+                arch_slots: list[str] | None = []
+                for arch, count in plan.arch_mix.items():
+                    arch_slots.extend([arch] * int(count))
+                rng.shuffle(arch_slots)
+            else:
+                arch_slots = None
+        else:
+            pop_size = self.population_size
+            hp_specs_for_run = self.hp_specs
+            arch_choices = None
+            arch_slots = None
+
+        for slot_idx in range(pop_size):
+            hp = sample_hyperparams(hp_specs_for_run, rng)
+            # Resolve architecture: arch_mix > sampled gene > plan choices > default.
+            if arch_slots is not None:
+                arch_name = arch_slots[slot_idx]
+            else:
+                sampled_arch = hp.pop("architecture_name", None)
+                if arch_choices and (sampled_arch is None or sampled_arch not in arch_choices):
+                    sampled_arch = rng.choice(arch_choices)
+                arch_name = sampled_arch or self.default_architecture
             hp["architecture_name"] = arch_name
 
             # Create the policy network

@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 from registry.model_store import ModelStore
 from registry.scoreboard import Scoreboard
 
-from api.routers import models, training, replay, system, admin
+from api.routers import models, training, replay, system, admin, training_plans
+from training.training_plan import PlanRegistry
 from training.ipc import (
     DEFAULT_WORKER_HOST,
     DEFAULT_WORKER_PORT,
@@ -58,11 +59,20 @@ async def lifespan(app: FastAPI):
         bet_logs_dir=bet_logs_dir,
     )
     scoreboard = Scoreboard(store=store, config=config)
+    # Session-4 plan registry: same registry/ root as model_store, new
+    # subfolder.  Path is overrideable via config so deployments can
+    # relocate it without code changes.
+    plan_root = (
+        config.get("paths", {}).get("training_plans")
+        or str(Path(db_path).parent / "training_plans")
+    )
+    plan_registry = PlanRegistry(plan_root)
     progress_queue: asyncio.Queue = asyncio.Queue()
 
     app.state.config = config
     app.state.store = store
     app.state.scoreboard = scoreboard
+    app.state.plan_registry = plan_registry
     app.state.progress_queue = progress_queue
     app.state.training_state = {
         "running": False,
@@ -252,6 +262,7 @@ def create_app() -> FastAPI:
     app.include_router(replay.router)
     app.include_router(system.router)
     app.include_router(admin.router)
+    app.include_router(training_plans.router)
 
     return app
 

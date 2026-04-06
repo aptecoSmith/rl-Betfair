@@ -55,17 +55,58 @@ This is the biggest UI piece. New page(s) needed:
 
 - [ ] **Training-plan page.** Show a history of Gen-0 runs: date,
       population size, architecture mix, hyperparam ranges used,
-      seed, outcome summary.
-- [ ] **Plan editor.** Compose a new Gen-0 run: pick population size,
-      target architecture mix (e.g. "7/7/7"), hyperparameter ranges
-      (may differ from `config.yaml` defaults), seed.
-- [ ] **Coverage warning widget.** If the selected population size is
-      too small to guarantee each architecture gets at least N agents,
-      warn inline before the user can launch.
-- [ ] **"Bias toward uncovered"** toggle: when enabled, the UI hints
-      the planner to weight sampling toward configurations not yet
-      well-represented in history.
-- [ ] Backend endpoints (list plans, create plan, get coverage stats).
+      seed, outcome summary. Backed by `GET /api/training-plans`.
+      Each plan card should show:
+      - `plan.name`, `plan.created_at`, `plan.population_size`
+      - `plan.architectures` (and `plan.arch_mix` when present)
+      - `plan.seed`, `plan.min_arch_samples`, `plan.notes`
+      - All `plan.outcomes` rows: `generation`, `recorded_at`,
+        `best_fitness`, `mean_fitness`, `architectures_alive`,
+        `architectures_died`, `n_agents`.
+      - Validation status from `validation` field on the GET-by-id
+        response (warnings shown as a yellow badge, errors as red).
+- [ ] **Plan editor.** Compose a new Gen-0 run via `POST
+      /api/training-plans`. Form fields, all 1:1 with the request
+      payload:
+      - `name` (text, required)
+      - `population_size` (int, required)
+      - `architectures` (multi-select from the architecture registry)
+      - `arch_mix` (optional dict; collapse/expand panel)
+      - `hp_ranges` (range editors keyed by gene name; can start from
+        `config.yaml` defaults or be cleared to fall back to them)
+      - `seed` (int, optional)
+      - `min_arch_samples` (int, default 5)
+      - `notes` (textarea, optional)
+      - 422 responses must surface the per-issue `code` + `message`
+        list inline so the user knows which field is wrong.
+- [ ] **Coverage warning widget.** If the selected `population_size <
+      min_arch_samples × len(architectures)`, warn inline before the
+      user can submit. Server-side `validate_plan` is the source of
+      truth — but the widget mirrors the math so the user sees the
+      error before round-tripping.
+- [ ] **Coverage page / panel.** Backed by `GET
+      /api/training-plans/coverage`. Show:
+      - `report.total_agents`, `report.arch_counts`, list of
+        `arch_undercovered`.
+      - Per-gene bar chart of `bucket_counts` (one chart per entry in
+        `report.gene_coverage`), with the well-covered/poorly-covered
+        flag visible.
+      - The `biased_genes` list (returned alongside the report) so the
+        user knows which genes the planner would currently nudge.
+- [ ] **"Bias toward uncovered"** toggle on the plan editor: when
+      enabled, the UI calls the coverage endpoint, applies the
+      returned bias to the editable `hp_ranges` *before* POST so the
+      user can review and tweak the nudge before saving. The bias
+      itself is opt-in on the backend — `population_manager` does NOT
+      apply it automatically (Session 4 lessons).
+- [x] Backend endpoints (list plans, create plan, get coverage stats)
+      — landed in Session 4 (`api/routers/training_plans.py`).
+- [ ] Outcome history rendering: each plan card should show the per-
+      generation outcome timeline once `record_outcome` populates it
+      from a real run (Session 9).
+- [ ] Path-traversal note: `plan_id` is server-generated; the UI
+      should treat it as opaque and never let the user edit it
+      directly.
 
 ## Session 5 — LSTM structural knobs
 
