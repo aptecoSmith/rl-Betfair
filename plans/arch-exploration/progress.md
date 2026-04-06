@@ -165,3 +165,99 @@ Don't use this file for running thoughts — that's what
 - Nothing touched in the UI; Session 8 consumes `ui_additions.md`.
 
 **Next:** Session 3 — expand reward hyperparameter schema.
+
+---
+
+## Session 3 — Expand reward hyperparameter schema (2026-04-06)
+
+**Shipped:**
+- Added the four reward genes called for by the session plan to
+  `config.yaml` `hyperparameters.search_ranges`:
+  - `early_pick_bonus_min`: float [1.0, 1.3]
+  - `early_pick_bonus_max`: float [1.1, 1.8]
+  - `early_pick_min_seconds`: int [120, 900]
+  - `terminal_bonus_weight`: float [0.5, 3.0]
+- Removed the Session 1 stopgap `reward_early_pick_bonus` scalar gene
+  (and the `("early_pick_bonus_min", "early_pick_bonus_max")` fan-out
+  in `_REWARD_GENE_MAP`). The new genes use 1:1 passthrough mappings
+  so the trainer's reward-overrides path stays mechanical.
+- Added `reward.terminal_bonus_weight: 1.0` to the `config.yaml`
+  reward block as the new default. The env reads it via
+  `reward_cfg.get("terminal_bonus_weight", 1.0)` so existing
+  test-config fixtures (which don't set it) keep working unchanged.
+- Plumbed `terminal_bonus_weight` into `BetfairEnv` and applied the
+  multiplier inside `step()` exactly where the existing terminal
+  bonus is computed:
+  `terminal_bonus = self._terminal_bonus_weight * day_pnl / starting_budget`.
+  The result still lands in `_cum_raw_reward` because `day_pnl` is
+  real cash, so scaling it does NOT break the zero-mean shaping
+  invariant.
+- Repair step (swap, not reject): if
+  `early_pick_bonus_max < early_pick_bonus_min` after sampling /
+  mutation / direct env construction, the two values are swapped.
+  Implemented in **two** places (belt-and-braces):
+  1. `agents/population_manager.py::_repair_reward_gene_pairs`,
+     called at the end of `sample_hyperparams()` and `mutate()`. This
+     ensures every persisted/logged genome shows the repaired values.
+  2. `BetfairEnv.__init__` immediately after merging overrides, so a
+     directly-constructed env with bad overrides still works.
+- New test file `tests/arch_exploration/test_reward_schema.py` with
+  6 CPU-only tests covering all six items from the session plan:
+  1. Sampler emits all four genes within range AND post-sample
+     repair holds (`max >= min`, int seconds stays int).
+  2. Env picks up extreme overrides (env attrs match).
+  3. Inverted interval is repaired (swap), env attrs reflect the
+     swapped order.
+  4. Symmetry: equal-magnitude winning + losing back bets at the
+     same placement time produce zero net early-pick bonus, even
+     with the widened multiplier range.
+  5. `terminal_bonus_weight=2.0` lands in `info["raw_pnl_reward"]`
+     (not `shaped_bonus`), and `raw + shaped ≈ total` still holds.
+     Uses `unittest.mock.patch.object(BetManager, "settle_race", ...)`
+     to inject a known race P&L so the weight has a non-zero base.
+  6. 200 seeded mutations: every gene stays in range AND
+     `early_pick_bonus_max >= early_pick_bonus_min` after each round.
+- Updated existing tests that referenced the now-removed
+  `reward_early_pick_bonus` gene (`test_config.py`,
+  `test_reward_plumbing.py`).
+
+**Files changed:**
+- `config.yaml` — new reward gene under `reward.`, four new
+  `search_ranges` entries, removed `reward_early_pick_bonus`.
+- `agents/population_manager.py` — added `_repair_reward_gene_pairs`
+  helper, called from end of `sample_hyperparams()` and end of
+  `mutate()`.
+- `agents/ppo_trainer.py` — `_REWARD_GENE_MAP` now contains the four
+  new 1:1 passthrough entries; the `reward_early_pick_bonus` entry
+  is gone.
+- `env/betfair_env.py` — `_REWARD_OVERRIDE_KEYS` gains
+  `terminal_bonus_weight`, `__init__` performs the repair swap and
+  reads `_terminal_bonus_weight`, `step()` applies the weight to the
+  terminal bonus.
+- `tests/test_config.py` — expected-params list updated.
+- `tests/arch_exploration/test_reward_plumbing.py` — three tests
+  updated to drop the removed `reward_early_pick_bonus` references.
+- `tests/arch_exploration/test_reward_schema.py` — new 6-test file.
+- `plans/arch-exploration/progress.md`, `lessons_learnt.md` — this
+  entry and a note on the patched-`settle_race` testing technique.
+
+**Tests:**
+- `pytest tests/arch_exploration/ tests/test_config.py` →
+  31 passed (~14 s).
+- `pytest tests/test_betfair_env.py tests/test_population_manager.py
+  tests/test_genetic_operators.py` → 138 passed, 1 pre-existing
+  failure (`test_obs_dim_matches_env` stale `1630` vs actual `1636`,
+  documented in Session 1 progress as unrelated).
+
+**Not shipped:**
+- No new reward formulas. The `terminal_bonus_weight` change is a
+  *coefficient* on an existing raw term, not a new shaping term.
+  Drawdown / hold-cost / other new terms land in Session 7 after a
+  design pass, per the plan.
+- No UI work. `ui_additions.md` Session 3 already lists the four
+  new range editors and the `max >= min` validator widget; Session 8
+  will consume them.
+- `commission` was deliberately NOT promoted to a gene (per the
+  session plan's "Do not" list).
+
+**Next:** Session 4 — training plan / Gen-0 coverage tracker.

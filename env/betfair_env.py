@@ -211,6 +211,7 @@ class BetfairEnv(gymnasium.Env):
         "early_pick_bonus_min",
         "early_pick_bonus_max",
         "early_pick_min_seconds",
+        "terminal_bonus_weight",
         "efficiency_penalty",
         "precision_bonus",
         "commission",
@@ -251,9 +252,22 @@ class BetfairEnv(gymnasium.Env):
                 if key in reward_overrides:
                     reward_cfg[key] = reward_overrides[key]
 
+        # Repair: independent sampling/mutation of the early-pick interval
+        # ends can produce ``min > max``. Per the Session 3 plan we *swap*
+        # rather than reject the genome — the population_manager helper
+        # does the same so survivors / breeding records show repaired
+        # values, but doing it here too means a directly-constructed env
+        # with bad overrides also works correctly.
+        if reward_cfg["early_pick_bonus_max"] < reward_cfg["early_pick_bonus_min"]:
+            reward_cfg["early_pick_bonus_min"], reward_cfg["early_pick_bonus_max"] = (
+                reward_cfg["early_pick_bonus_max"],
+                reward_cfg["early_pick_bonus_min"],
+            )
+
         self._early_pick_min = reward_cfg["early_pick_bonus_min"]
         self._early_pick_max = reward_cfg["early_pick_bonus_max"]
         self._early_pick_seconds = reward_cfg["early_pick_min_seconds"]
+        self._terminal_bonus_weight = reward_cfg.get("terminal_bonus_weight", 1.0)
         self._efficiency_penalty = reward_cfg["efficiency_penalty"]
         self._precision_bonus = reward_cfg.get("precision_bonus", 0.0)
         self._commission = reward_cfg.get("commission", 0.05)
@@ -521,7 +535,13 @@ class BetfairEnv(gymnasium.Env):
             day_pnl = self._day_pnl
             # Small bonus proportional to day P&L (normalised by budget).
             # This is tied to real money, so it counts as raw reward.
-            terminal_bonus = day_pnl / self.starting_budget
+            # ``terminal_bonus_weight`` (Session 3 gene) scales how much
+            # the agent cares about end-of-day vs per-race settlement;
+            # because ``day_pnl`` is real cash, scaling it does NOT break
+            # the zero-mean shaping invariant.
+            terminal_bonus = (
+                self._terminal_bonus_weight * day_pnl / self.starting_budget
+            )
             reward += terminal_bonus
             self._cum_raw_reward += terminal_bonus
 

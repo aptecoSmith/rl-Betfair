@@ -70,24 +70,23 @@ def real_search_ranges() -> dict:
 
 
 def test_sampler_produces_reward_genes_in_range(real_search_ranges):
-    """Sanity: the three reward genes are still sampled and within range.
+    """Sanity: the Session 1 reward genes are sampled and within range.
 
-    This is the "does the sampler know about them at all" half of the
-    plumbing. Test 4 covers the "does the trainer act on them" half.
+    Session 3 split the original ``reward_early_pick_bonus`` scalar into
+    proper min/max/seconds genes — those are exercised by
+    ``test_reward_schema.py``. This test continues to guard the two
+    Session 1 genes that were never replaced.
     """
     specs = parse_search_ranges(real_search_ranges)
     rng = random.Random(0)
 
     for _ in range(20):
         hp = sample_hyperparams(specs, rng)
-        assert "reward_early_pick_bonus" in hp
         assert "reward_efficiency_penalty" in hp
         assert "reward_precision_bonus" in hp
 
-        epb_spec = real_search_ranges["reward_early_pick_bonus"]
         eff_spec = real_search_ranges["reward_efficiency_penalty"]
         prc_spec = real_search_ranges["reward_precision_bonus"]
-        assert epb_spec["min"] <= hp["reward_early_pick_bonus"] <= epb_spec["max"]
         assert eff_spec["min"] <= hp["reward_efficiency_penalty"] <= eff_spec["max"]
         assert prc_spec["min"] <= hp["reward_precision_bonus"] <= prc_spec["max"]
 
@@ -160,7 +159,6 @@ def test_reward_overrides_from_hp_maps_gene_names():
     """Direct unit test of the gene-name → reward-config-key mapping."""
     hp = {
         "learning_rate": 1e-4,          # not a reward gene — must be ignored
-        "reward_early_pick_bonus": 1.42,
         "reward_efficiency_penalty": 0.037,
         "reward_precision_bonus": 2.1,
         "architecture_name": "ppo_lstm_v1",  # must be ignored
@@ -168,8 +166,6 @@ def test_reward_overrides_from_hp_maps_gene_names():
     overrides = _reward_overrides_from_hp(hp)
 
     assert overrides == {
-        "early_pick_bonus_min": 1.42,
-        "early_pick_bonus_max": 1.42,
         "efficiency_penalty": 0.037,
         "precision_bonus": 2.1,
     }
@@ -200,7 +196,6 @@ def test_trainer_passes_reward_overrides_to_env(monkeypatch, reward_config):
     policy = nn.Linear(1, 1)
     hp = {
         "learning_rate": 3e-4,
-        "reward_early_pick_bonus": 1.33,
         "reward_efficiency_penalty": 0.02,
         "reward_precision_bonus": 0.5,
     }
@@ -213,8 +208,6 @@ def test_trainer_passes_reward_overrides_to_env(monkeypatch, reward_config):
 
     # Construction-time check: the trainer cached the derived overrides.
     assert trainer.reward_overrides == {
-        "early_pick_bonus_min": 1.33,
-        "early_pick_bonus_max": 1.33,
         "efficiency_penalty": 0.02,
         "precision_bonus": 0.5,
     }

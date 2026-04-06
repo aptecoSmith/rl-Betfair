@@ -76,3 +76,46 @@ provisional to belong there yet.
   plain `master` via `git stash`. Left alone — fixing drive-by failures
   is exactly the "while I'm here" scope creep Session 1's plan warns
   against. Flag for a future cleanup pass.
+
+## 2026-04-06 — Session 3 (reward schema expansion)
+
+- **Repair the genome at TWO layers, not one.** The Session 3 plan
+  said "after sampling or mutation, swap inverted intervals", which
+  reads as a single fix in the population manager. But a directly
+  constructed `BetfairEnv(reward_overrides={...})` (e.g. from a unit
+  test, or from an as-yet-unwritten live-inference call site) would
+  bypass the population manager entirely. Putting the swap in BOTH
+  places — `population_manager._repair_reward_gene_pairs` AND
+  `BetfairEnv.__init__` — is cheap and means there is no path that
+  can produce an inverted interval at training time. Tests 3 and 6
+  cover the env-level and sampler-level paths respectively.
+
+- **The terminal bonus lives in `step()`, not `_settle_current_race`.**
+  The session plan wording said "apply the multiplier inside
+  `_settle_current_race` exactly where the existing terminal bonus is
+  computed" — but the terminal bonus is actually computed in
+  `step()`, in the `if terminated:` branch, *after* the per-race
+  settlement returns. `_settle_current_race` only computes the
+  per-race shaping/raw split. I applied the multiplier where the code
+  actually lives. Worth noting because anyone reading the plan in
+  isolation will look in the wrong function.
+
+- **Patching `BetManager.settle_race` is the cheapest way to inject a
+  known race P&L into a synthetic env.** The terminal-bonus test
+  needed `_day_pnl != 0` to verify the weight is applied to the raw
+  bucket. Engineering a real winning bet from `_make_day` synthetic
+  data is fiddly (action thresholds, stake fractions, ladder
+  filtering). `unittest.mock.patch.object(BetManager, "settle_race",
+  return_value=10.0)` short-circuits the entire match-and-settle
+  pipeline and lets the test focus purely on the `step()` terminal
+  branch. Recording the technique because the same trick will be
+  useful for Session 7's drawdown tests.
+
+- **`reward_early_pick_bonus` was easy to remove cleanly.** Same
+  reasoning as Session 1's `observation_window_ticks` retirement: the
+  sampler iterates over whatever's in `search_ranges`, removing the
+  entry just removes the gene from new genomes. Old checkpoints still
+  have the stale key, but with the entry gone from `_REWARD_GENE_MAP`
+  the trainer's extractor silently drops it — no crash path. Three
+  test files referenced the gene and were updated; no production code
+  did.

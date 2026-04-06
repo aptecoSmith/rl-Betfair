@@ -53,6 +53,25 @@ class HyperparamSpec:
     choices: list | None = None  # int values (int_choice) or str values (str_choice)
 
 
+def _repair_reward_gene_pairs(hp: dict) -> None:
+    """Repair paired reward genes that must satisfy ``max >= min``.
+
+    Some reward genes form an interval (currently
+    ``early_pick_bonus_min`` / ``early_pick_bonus_max``). Independent
+    sampling and per-gene mutation can produce ``min > max`` — Session 3
+    explicitly opts to **repair (swap)** the genome rather than reject
+    it, so the genetic search never throws away a candidate just for
+    nudging the wrong end of an interval. The env applies the same swap
+    defensively (see ``BetfairEnv.__init__``); doing it here too keeps
+    every downstream consumer (logs, breeding records, UI) seeing the
+    repaired values.
+    """
+    lo = hp.get("early_pick_bonus_min")
+    hi = hp.get("early_pick_bonus_max")
+    if lo is not None and hi is not None and hi < lo:
+        hp["early_pick_bonus_min"], hp["early_pick_bonus_max"] = hi, lo
+
+
 def parse_search_ranges(raw: dict[str, dict]) -> list[HyperparamSpec]:
     """Parse the ``hyperparameters.search_ranges`` section of config.yaml."""
     specs = []
@@ -99,6 +118,7 @@ def sample_hyperparams(
             params[spec.name] = rng.choice(spec.choices)
         else:
             raise ValueError(f"Unknown hyperparameter type: {spec.type!r}")
+    _repair_reward_gene_pairs(params)
     return params
 
 
@@ -508,6 +528,7 @@ class PopulationManager:
                 deltas[name] = None  # no numeric delta for str choices
                 hp[name] = new_val
 
+        _repair_reward_gene_pairs(hp)
         return hp, deltas
 
     def breed(

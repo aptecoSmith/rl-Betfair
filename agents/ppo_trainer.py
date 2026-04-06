@@ -51,13 +51,17 @@ logger = logging.getLogger(__name__)
 #: ``config["reward"]``. Kept here (not in env) because the env doesn't
 #: know about the genetic schema — it only speaks "reward config keys".
 #:
-#: ``reward_early_pick_bonus`` is a single scalar gene in the current
-#: schema, so it pins BOTH ends of the early-pick multiplier interval to
-#: the same value (min == max → constant multiplier, bypassing the
-#: time-interpolation without changing the reward *formula*). Session 3
-#: will split this into proper ``early_pick_bonus_min`` / ``_max`` genes.
+#: Session 3 split the original ``reward_early_pick_bonus`` scalar into
+#: two independent genes (``early_pick_bonus_min`` / ``_max``) plus
+#: ``early_pick_min_seconds`` and ``terminal_bonus_weight``. Each new
+#: gene is a 1:1 passthrough — its hyperparameter name matches the env
+#: reward-config key it overrides, so the map entry below collapses to
+#: a single-key tuple.
 _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
-    "reward_early_pick_bonus": ("early_pick_bonus_min", "early_pick_bonus_max"),
+    "early_pick_bonus_min": ("early_pick_bonus_min",),
+    "early_pick_bonus_max": ("early_pick_bonus_max",),
+    "early_pick_min_seconds": ("early_pick_min_seconds",),
+    "terminal_bonus_weight": ("terminal_bonus_weight",),
     "reward_efficiency_penalty": ("efficiency_penalty",),
     "reward_precision_bonus": ("precision_bonus",),
 }
