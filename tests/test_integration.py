@@ -25,7 +25,7 @@ from data.extractor import DataExtractor
 from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
 from env.betfair_env import BetfairEnv, RaceRecord
-from env.order_book import match_back, match_lay
+from env.exchange_matcher import DEFAULT_MATCHER
 
 pytestmark = pytest.mark.integration
 
@@ -256,16 +256,25 @@ class TestOrderBookReal:
 
     def test_back_match_against_real_book(self, day):
         race, tick, runner = self._find_runner_with_liquidity(day)
-        result = match_back(runner.available_to_lay, stake=2.0)
-
+        result = DEFAULT_MATCHER.match_back(
+            runner.available_to_lay,
+            stake=2.0,
+            reference_price=runner.last_traded_price,
+        )
+        # A £2 stake on real pre-race liquidity should match in full at a
+        # sensible price — the junk filter won't fire on realistic tops
+        # of book.
         assert result.matched_stake > 0
         assert result.average_price > 0
         assert result.matched_stake <= 2.0
 
     def test_lay_match_against_real_book(self, day):
         race, tick, runner = self._find_runner_with_liquidity(day)
-        result = match_lay(runner.available_to_back, stake=2.0)
-
+        result = DEFAULT_MATCHER.match_lay(
+            runner.available_to_back,
+            stake=2.0,
+            reference_price=runner.last_traded_price,
+        )
         assert result.matched_stake > 0
         assert result.average_price > 0
         assert result.matched_stake <= 2.0
@@ -477,7 +486,13 @@ class TestBetfairEnvReal:
             assert records[0].budget_after > 0
 
     def test_final_pnl_matches_race_sum(self, day, config):
-        """Final realised P&L should equal sum of per-race P&Ls."""
+        """Final day P&L should equal sum of per-race P&Ls.
+
+        Uses ``info["day_pnl"]`` rather than ``info["realised_pnl"]``:
+        the latter only reflects the current (last) BetManager because
+        the env recreates a fresh BetManager per race, so it is not
+        a faithful day-level total.
+        """
         env = BetfairEnv(day, config)
         env.reset()
 
@@ -490,4 +505,4 @@ class TestBetfairEnvReal:
             _, _, terminated, _, info = env.step(action)
 
         race_pnl_sum = sum(r.pnl for r in info["race_records"])
-        assert info["realised_pnl"] == pytest.approx(race_pnl_sum, abs=0.01)
+        assert info["day_pnl"] == pytest.approx(race_pnl_sum, abs=0.01)

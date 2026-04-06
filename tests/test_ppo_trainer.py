@@ -653,10 +653,15 @@ class TestLogging:
 
         expected_keys = {
             "episode", "day_date", "total_reward", "total_pnl",
+            "raw_pnl_reward", "shaped_bonus",
             "bet_count", "winning_bets", "races_completed", "final_budget",
             "n_steps", "policy_loss", "value_loss", "entropy", "timestamp",
         }
         assert expected_keys <= set(record.keys())
+        # Raw + shaped split must approximately reconstruct total_reward.
+        assert record["raw_pnl_reward"] + record["shaped_bonus"] == pytest.approx(
+            record["total_reward"], abs=1e-3,
+        )
 
 
 class TestProgressQueue:

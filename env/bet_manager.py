@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from data.episode_builder import PriceSize, RunnerSnap
-from env.order_book import MatchResult, match_back, match_lay
+from env.exchange_matcher import DEFAULT_MATCHER, ExchangeMatcher, MatchResult
 
 
 class BetSide(str, Enum):
@@ -75,6 +75,11 @@ class BetManager:
 
     Args:
         starting_budget: Initial budget in £ for the episode.
+        matcher: Optional :class:`ExchangeMatcher` instance. Defaults to
+            the module-level ``DEFAULT_MATCHER`` which filters junk
+            ladder levels more than 50 % from LTP and matches only at
+            the best post-filter price (no ladder walking). Pass a
+            custom instance to tighten/loosen the junk filter.
     """
 
     starting_budget: float
@@ -82,6 +87,7 @@ class BetManager:
     realised_pnl: float = 0.0
     bets: list[Bet] = field(default_factory=list)
     _open_liability: float = 0.0
+    matcher: ExchangeMatcher = field(default=DEFAULT_MATCHER)
 
     def __post_init__(self) -> None:
         self.budget = self.starting_budget
@@ -113,17 +119,31 @@ class BetManager:
         runner: RunnerSnap,
         stake: float,
         market_id: str = "",
+        max_price: float | None = None,
     ) -> Bet | None:
-        """Place a back bet, matching against available-to-lay volume.
+        """Place a back bet via the :class:`ExchangeMatcher`.
 
-        The stake is capped to available budget.  Returns ``None`` if no
-        volume can be matched or the budget is exhausted.
+        The matcher filters out stale parked ladder levels (anything
+        more than ``max_price_deviation_pct`` from the runner's LTP),
+        then matches at the best single remaining lay price — no ladder
+        walking. If ``max_price`` is set and the best filtered price
+        still exceeds it, the bet is refused entirely (implements
+        ``betting_constraints.max_back_price``).
+
+        Returns ``None`` if nothing could be matched, the budget is
+        exhausted, the bet is refused by the price cap, or the runner
+        has no LTP.
         """
         capped = min(stake, self.available_budget)
         if capped <= 0.0:
             return None
 
-        result: MatchResult = match_back(runner.available_to_lay, capped)
+        result: MatchResult = self.matcher.match_back(
+            runner.available_to_lay,
+            stake=capped,
+            reference_price=runner.last_traded_price,
+            max_price=max_price,
+        )
         if result.matched_stake <= 0.0:
             return None
 
@@ -145,32 +165,52 @@ class BetManager:
         runner: RunnerSnap,
         stake: float,
         market_id: str = "",
+        max_price: float | None = None,
     ) -> Bet | None:
-        """Place a lay bet, matching against available-to-back volume.
+        """Place a lay bet via the :class:`ExchangeMatcher`.
 
-        The effective cost is the *liability* = stake × (price − 1).  The
-        stake is capped so that the liability doesn't exceed the available
-        budget.  Returns ``None`` if nothing can be matched.
+        The matcher filters stale parked ladder levels and matches at
+        the best single remaining back price. If ``max_price`` is set
+        and the best filtered back price exceeds it, the bet is refused
+        — this prevents the layer from being matched into catastrophic
+        liabilities (implements ``betting_constraints.max_lay_price``).
+
+        Because lay bets reserve liability (``stake × (price − 1)``)
+        rather than stake itself, this method may shrink the requested
+        stake so the resulting liability fits inside ``available_budget``.
+        Returns ``None`` if nothing could be matched, the liability
+        cannot be reserved, the bet is refused by the price cap, or
+        the runner has no LTP.
         """
         if stake <= 0.0:
             return None
 
-        # First, try to match to find out the average price.
-        result: MatchResult = match_lay(runner.available_to_back, stake)
+        # First pass: probe the top-of-book price at the requested stake.
+        result: MatchResult = self.matcher.match_lay(
+            runner.available_to_back,
+            stake=stake,
+            reference_price=runner.last_traded_price,
+            max_price=max_price,
+        )
         if result.matched_stake <= 0.0:
             return None
 
         liability = result.matched_stake * (result.average_price - 1.0)
 
-        # If the liability exceeds available budget, scale down the stake.
+        # If the liability exceeds available budget, scale the requested
+        # stake down so the liability fits and re-match.
         if liability > self.available_budget:
             if result.average_price <= 1.0:
                 return None
             max_stake = self.available_budget / (result.average_price - 1.0)
             if max_stake <= 0.0:
                 return None
-            # Re-match with the reduced stake.
-            result = match_lay(runner.available_to_back, max_stake)
+            result = self.matcher.match_lay(
+                runner.available_to_back,
+                stake=max_stake,
+                reference_price=runner.last_traded_price,
+                max_price=max_price,
+            )
             if result.matched_stake <= 0.0:
                 return None
             liability = result.matched_stake * (result.average_price - 1.0)

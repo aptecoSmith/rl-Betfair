@@ -514,7 +514,11 @@ class TestReward:
         assert record.reward > record.pnl  # bonus pushes reward above raw P&L
 
     def test_precision_bonus_applied(self, config):
-        """High bet win rate should earn a precision bonus in reward."""
+        """Bet win rate above 50% should earn a positive precision bonus.
+
+        Precision is now centred at 0.5 so random betting is zero-reward,
+        better-than-random is positive, and worse-than-random is negative.
+        """
         config_with_precision = {
             **config,
             "reward": {**config["reward"], "precision_bonus": 2.0},
@@ -553,9 +557,11 @@ class TestReward:
         bet_count = record.bet_count
         winning = record.winning_bets
         assert bet_count > 0
-        # Precision bonus = (winning/bet_count) * precision_bonus_value
+        # Precision bonus = (precision − 0.5) × precision_bonus_value
+        # → rewards better-than-random, punishes worse-than-random,
+        #   zero for random betting.
         precision = winning / bet_count
-        expected_bonus = precision * 2.0
+        expected_bonus = (precision - 0.5) * 2.0
         penalty = bet_count * config["reward"]["efficiency_penalty"]
         assert record.reward == pytest.approx(record.pnl + expected_bonus - penalty)
 
@@ -596,6 +602,149 @@ class TestReward:
         penalty = bet_count * config["reward"]["efficiency_penalty"]
         # No precision bonus → reward = pnl - penalty
         assert record.reward == pytest.approx(record.pnl - penalty)
+
+    def test_precision_bonus_negative_when_all_bets_lose(self, config):
+        """Precision 0 (all bets lose) → bonus = (0 − 0.5) × magnitude < 0.
+
+        Verifies the asymmetry is gone: placing only losing bets must
+        produce a *negative* shaped contribution, not zero.
+        """
+        config_with_precision = {
+            **config,
+            "reward": {**config["reward"], "precision_bonus": 2.0},
+        }
+        start = datetime(2026, 3, 26, 14, 0, 0)
+        runners = [_make_runner_snap(101), _make_runner_snap(102)]
+        meta = {101: _make_runner_meta(101), 102: _make_runner_meta(102)}
+        tick_pre = _make_tick(
+            "1.222", seq=0, runners=runners,
+            start_time=start, timestamp=start - timedelta(seconds=60),
+            in_play=False, winner=101,
+        )
+        tick_ip = _make_tick(
+            "1.222", seq=1, runners=runners,
+            start_time=start, timestamp=start + timedelta(seconds=5),
+            in_play=True, winner=101,
+        )
+        race = Race("1.222", "Test", start, 101, [tick_pre, tick_ip], meta)
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config_with_precision)
+        env.reset()
+
+        # Back the LOSER (runner 102, winner is 101). Stake, any action signal
+        # > 0.33 → back. Fraction 0.1 of budget.
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[1] = 1.0    # back runner index 1 (= selection 102)
+        action[15] = -0.8  # small stake
+        for _ in range(2):
+            _, _, _, _, info = env.step(action)
+        record = info["race_records"][0]
+        assert record.bet_count >= 1
+        assert record.winning_bets == 0
+        # precision = 0 → bonus = (0 − 0.5) × 2.0 = −1.0
+        expected_precision_reward = -1.0
+        efficiency = record.bet_count * config["reward"]["efficiency_penalty"]
+        # Shaped reward contribution (precision + efficiency penalty) must be
+        # strictly negative — no early-pick contribution because the bet was
+        # only 60s before off (< 300s threshold).
+        assert record.reward == pytest.approx(
+            record.pnl + expected_precision_reward - efficiency,
+        )
+
+    def test_early_pick_bonus_symmetric_punishes_early_losers(self, config):
+        """An early back bet on a LOSER must reduce reward, not leave it flat.
+
+        This is the core fix for the "random policies earn free reward"
+        loophole. The previous asymmetric formula only amplified winners,
+        so betting early on losers incurred only race_pnl (−stake) but
+        no additional penalty; a random policy could therefore earn
+        positive expected shaped reward.
+        """
+        start = datetime(2026, 3, 26, 14, 0, 0)
+        runners = [_make_runner_snap(101), _make_runner_snap(102)]
+        meta = {101: _make_runner_meta(101), 102: _make_runner_meta(102)}
+        # One pre-race tick ≥300s before the off so the bet qualifies as "early"
+        tick_pre = _make_tick(
+            "1.333", seq=0, runners=runners,
+            start_time=start, timestamp=start - timedelta(seconds=600),
+            in_play=False, winner=101,
+        )
+        tick_ip = _make_tick(
+            "1.333", seq=1, runners=runners,
+            start_time=start, timestamp=start + timedelta(seconds=5),
+            in_play=True, winner=101,
+        )
+        race = Race("1.333", "Test", start, 101, [tick_pre, tick_ip], meta)
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        # Back the LOSER early (runner 102). Bet.pnl will be negative.
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[1] = 1.0    # back runner 102
+        action[15] = -0.8
+        for _ in range(2):
+            _, _, _, _, info = env.step(action)
+        record = info["race_records"][0]
+        assert record.bet_count == 1
+        assert record.early_picks == 1  # the early losing bet still counts
+        # With symmetric bonus, a losing early back bet has negative bonus
+        # contribution, so record.reward < record.pnl (pnl already includes
+        # the stake loss, reward subtracts an additional shaping term).
+        efficiency = record.bet_count * config["reward"]["efficiency_penalty"]
+        assert record.reward < record.pnl - efficiency
+
+    def test_raw_and_shaped_sum_to_total_reward(self, config):
+        """Diagnostic invariant: raw_pnl_reward + shaped_bonus ≈ total_reward.
+
+        This is the whole point of the split — if these ever diverge, a
+        reward term has been added without being accounted for in either
+        bucket, and the operator's diagnosis dashboard will mislead.
+        """
+        config_with_precision = {
+            **config,
+            "reward": {**config["reward"], "precision_bonus": 1.0},
+        }
+        day = _make_day(n_races=3)
+        env = BetfairEnv(day, config_with_precision)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.5
+
+        total_reward = 0.0
+        terminated = False
+        info: dict = {}
+        while not terminated:
+            _, reward, terminated, _, info = env.step(action)
+            total_reward += reward
+
+        # raw + shaped should reproduce total_reward (within float noise).
+        assert info["raw_pnl_reward"] + info["shaped_bonus"] == pytest.approx(
+            total_reward, abs=1e-6,
+        )
+
+    def test_day_pnl_in_info_is_full_day_not_last_race(self, config):
+        """Regression for the logging bug: info["day_pnl"] must accumulate
+        across ALL races, not be reset by the per-race BetManager.
+        """
+        day = _make_day(n_races=3)
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * 2, dtype=np.float32)
+        action[0] = 1.0
+        action[14] = -0.5
+
+        terminated = False
+        info: dict = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(action)
+
+        # day_pnl should equal the sum of per-race pnls from race_records.
+        expected = sum(r.pnl for r in info["race_records"])
+        assert info["day_pnl"] == pytest.approx(expected, abs=1e-6)
 
 
 # ── Episode lifecycle ───────────────────────────────────────────────────────
@@ -886,8 +1035,9 @@ class TestInfoDict:
         _, info = env.reset()
         required = [
             "race_idx", "tick_idx", "budget", "available_budget",
-            "open_liability", "realised_pnl", "day_pnl", "bet_count",
-            "winning_bets", "races_completed", "race_records",
+            "open_liability", "realised_pnl", "day_pnl",
+            "raw_pnl_reward", "shaped_bonus",
+            "bet_count", "winning_bets", "races_completed", "race_records",
         ]
         for key in required:
             assert key in info, f"Missing key: {key}"

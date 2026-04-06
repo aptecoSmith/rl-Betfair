@@ -188,8 +188,18 @@ class BetfairEnv(gymnasium.Env):
     Sparse — emitted at race settlement:
     ``race_pnl + early_pick_bonus + precision_bonus − (bet_count × efficiency_penalty)``
 
+    - ``race_pnl`` is the real cash P&L of the race (raw reward).
+    - ``early_pick_bonus`` amplifies *both* winning and losing early back
+      bets by ``(multiplier − 1.0)`` so random policies have zero expected
+      shaped reward.
+    - ``precision_bonus`` is ``(precision − 0.5) × precision_bonus_value``
+      — centred at 0.5 so only better-than-random bet selection is rewarded.
+    - ``efficiency_penalty`` is a small per-bet friction term.
+
     An end-of-day bonus proportional to total day P&L is added on the final
-    step.
+    step.  ``info["day_pnl"]`` exposes the true day-level P&L; the trainer
+    also reads ``info["raw_pnl_reward"]`` and ``info["shaped_bonus"]`` for
+    diagnostic logging.
     """
 
     metadata: dict = {"render_modes": []}
@@ -382,7 +392,16 @@ class BetfairEnv(gymnasium.Env):
         return np.zeros(self.observation_space.shape, dtype=np.float32)
 
     def _get_info(self) -> dict:
-        """Build the info dict returned alongside observations."""
+        """Build the info dict returned alongside observations.
+
+        ``realised_pnl`` is retained for backward compatibility but only
+        reflects the *current race's* BetManager (which is recreated between
+        races). Use ``day_pnl`` for the true accumulated day-level P&L.
+        ``raw_pnl_reward`` and ``shaped_bonus`` break the total episode
+        reward into its actual-money component and its shaping component
+        so the trainer can log them separately and diagnose whether the
+        shaping terms are drowning out the profit signal.
+        """
         bm = self.bet_manager
         assert bm is not None
         # Sum completed race metrics from records
@@ -401,6 +420,8 @@ class BetfairEnv(gymnasium.Env):
             "open_liability": bm.open_liability,
             "realised_pnl": bm.realised_pnl,
             "day_pnl": self._day_pnl,
+            "raw_pnl_reward": self._cum_raw_reward,
+            "shaped_bonus": self._cum_shaped_reward,
             "bet_count": total_bets,
             "winning_bets": total_winning,
             "races_completed": self._races_completed,
@@ -423,6 +444,11 @@ class BetfairEnv(gymnasium.Env):
         self._day_pnl = 0.0
         self._race_records = []
         self._bet_times = {}
+        # Split episode reward into "raw" (tied to real money — race_pnl +
+        # terminal day_pnl/budget bonus) and "shaped" (bonuses & penalties
+        # that don't affect real P&L). Summing both reproduces total_reward.
+        self._cum_raw_reward = 0.0
+        self._cum_shaped_reward = 0.0
 
         if self._total_races == 0:
             return self._terminal_obs(), self._get_info()
@@ -466,8 +492,11 @@ class BetfairEnv(gymnasium.Env):
         if terminated:
             # Day P&L = sum of race P&Ls (true accounting)
             day_pnl = self._day_pnl
-            # Small bonus proportional to day P&L (normalised by budget)
-            reward += day_pnl / self.starting_budget
+            # Small bonus proportional to day P&L (normalised by budget).
+            # This is tied to real money, so it counts as raw reward.
+            terminal_bonus = day_pnl / self.starting_budget
+            reward += terminal_bonus
+            self._cum_raw_reward += terminal_bonus
 
         obs = self._get_obs() if not terminated else self._terminal_obs()
         info = self._get_info()
@@ -511,19 +540,26 @@ class BetfairEnv(gymnasium.Env):
                 continue
 
             if action_signal > _BACK_THRESHOLD and runner.available_to_lay:
-                # Constraint: max back price
-                if self._max_back_price is not None and runner.available_to_lay[0].price > self._max_back_price:
-                    continue
-                bet = bm.place_back(runner, stake, market_id=race.market_id)
+                # ``max_back_price`` is now enforced inside the matcher,
+                # which filters junk ladder levels BEFORE the cap check,
+                # so we pass it through instead of gating on
+                # available_to_lay[0].price (which can be the *junk*
+                # top-of-book when the real market is elsewhere).
+                bet = bm.place_back(
+                    runner, stake, market_id=race.market_id,
+                    max_price=self._max_back_price,
+                )
                 if bet is not None:
                     bet.tick_index = self._tick_idx
                     self._bet_times[len(bm.bets) - 1] = time_to_off
 
             elif action_signal < _LAY_THRESHOLD and runner.available_to_back:
-                # Constraint: max lay price
-                if self._max_lay_price is not None and runner.available_to_back[0].price > self._max_lay_price:
-                    continue
-                bet = bm.place_lay(runner, stake, market_id=race.market_id)
+                # See comment above — ``max_lay_price`` is enforced
+                # inside the matcher after junk filtering.
+                bet = bm.place_lay(
+                    runner, stake, market_id=race.market_id,
+                    max_price=self._max_lay_price,
+                )
                 if bet is not None:
                     bet.tick_index = self._tick_idx
                     self._bet_times[len(bm.bets) - 1] = time_to_off
@@ -531,7 +567,19 @@ class BetfairEnv(gymnasium.Env):
     # ── Settlement & reward ───────────────────────────────────────────────
 
     def _settle_current_race(self, race: Race) -> float:
-        """Settle the race, compute reward, record metrics."""
+        """Settle the race, compute reward, record metrics.
+
+        Reward components
+        -----------------
+        - **Raw** (tracks real money):
+          ``race_pnl`` — actual net P&L of bets in this race.
+        - **Shaped** (training signal only, zero-mean in expectation):
+          ``early_pick_bonus`` (symmetric: rewards early winners,
+          penalises early losers proportionally) +
+          ``precision_bonus`` (centred at 0.5: rewards better-than-random
+          bet selection, punishes worse-than-random) −
+          ``efficiency_cost`` (small per-bet friction term).
+        """
         bm = self.bet_manager
         assert bm is not None
         budget_before = bm.starting_budget  # each race starts with fresh budget
@@ -559,7 +607,10 @@ class BetfairEnv(gymnasium.Env):
         race_bets = bm.race_bets(race.market_id)
         race_bet_count = len(race_bets)
 
-        # Early pick bonus
+        # Early pick bonus — symmetric: applies to all settled back bets
+        # regardless of outcome, so losing bets punish the shaped reward
+        # exactly as much as winning bets reward it. This removes the
+        # "random-bet policies earn free positive reward" loophole.
         early_pick_bonus, early_pick_count = self._compute_early_pick_bonus(
             race, race_bets,
         )
@@ -567,15 +618,24 @@ class BetfairEnv(gymnasium.Env):
         # Efficiency penalty
         efficiency_cost = race_bet_count * self._efficiency_penalty
 
-        # Precision bonus: reward high win rate on bets (does not affect P&L)
+        # Precision bonus — centred at 0.5 so random betting is neutral,
+        # better-than-random is positive, worse-than-random is negative.
+        # (Previously ``precision * precision_bonus`` gave strictly
+        # non-negative reward, creating a free "participation trophy" for
+        # any policy that placed bets.)
         winning = sum(1 for b in race_bets if b.outcome is BetOutcome.WON)
         if race_bet_count > 0 and self._precision_bonus > 0:
             precision = winning / race_bet_count
-            precision_reward = precision * self._precision_bonus
+            precision_reward = (precision - 0.5) * self._precision_bonus
         else:
             precision_reward = 0.0
 
-        reward = race_pnl + early_pick_bonus + precision_reward - efficiency_cost
+        shaped = early_pick_bonus + precision_reward - efficiency_cost
+        reward = race_pnl + shaped
+
+        # Track raw vs shaped for diagnostic logging.
+        self._cum_raw_reward += race_pnl
+        self._cum_shaped_reward += shaped
 
         self._race_records.append(RaceRecord(
             market_id=race.market_id,
@@ -595,13 +655,30 @@ class BetfairEnv(gymnasium.Env):
         race: Race,
         race_bets: list,
     ) -> tuple[float, int]:
-        """Compute early-pick reward bonus for correct early backing.
+        """Compute the early-pick shaped reward for this race.
 
-        Returns (bonus_value, count_of_early_picks).
+        Symmetric version: any *settled* back bet placed at least
+        ``early_pick_min_seconds`` before the off contributes
+        ``bet.pnl * (multiplier - 1.0)`` to the bonus — winning bets
+        amplify positive P&L, losing bets amplify negative P&L with the
+        same multiplier. This keeps the "reward early conviction more
+        than late conviction" intent while removing the loophole where
+        random back-betting produced positive expected shaped reward
+        even at zero cash P&L.
+
+        Void (e.g. missing-result) races return a zero bonus regardless
+        of when bets were placed — there's no outcome to amplify.
+
+        Returns
+        -------
+        (bonus_value, count_of_early_picks)
+            ``bonus_value`` may be negative. ``count`` is the number of
+            early back bets that contributed (winning or losing).
         """
         winning_ids = race.winning_selection_ids
         if not winning_ids and race.winner_selection_id:
             winning_ids = {race.winner_selection_id}
+        # Void race: no signed outcome to amplify.
         if not winning_ids:
             return 0.0, 0
 
@@ -613,11 +690,10 @@ class BetfairEnv(gymnasium.Env):
         for bet_idx, bet in enumerate(bm.bets):
             if bet.market_id != race.market_id:
                 continue
-            if bet.selection_id not in winning_ids:
-                continue
             if bet.side is not BetSide.BACK:
                 continue
-            if bet.outcome is not BetOutcome.WON:
+            # Include both winners AND losers; skip void / unsettled.
+            if bet.outcome not in (BetOutcome.WON, BetOutcome.LOST):
                 continue
 
             time_to_off = self._bet_times.get(bet_idx, 0.0)

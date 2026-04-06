@@ -75,7 +75,15 @@ class Rollout:
 
 @dataclass
 class EpisodeStats:
-    """Summary statistics for one completed episode (one day)."""
+    """Summary statistics for one completed episode (one day).
+
+    ``total_reward`` is the full PPO training signal (raw + shaped).
+    ``raw_pnl_reward`` is the component tied to actual money (race_pnl
+    summed across the day plus the terminal day_pnl/budget bonus).
+    ``shaped_bonus`` is everything else (early_pick_bonus, precision,
+    efficiency penalty). They should sum to approximately
+    ``total_reward`` — divergence indicates a reward-tracking bug.
+    """
 
     day_date: str
     total_reward: float
@@ -85,6 +93,8 @@ class EpisodeStats:
     races_completed: int
     final_budget: float
     n_steps: int
+    raw_pnl_reward: float = 0.0
+    shaped_bonus: float = 0.0
 
 
 @dataclass
@@ -305,12 +315,17 @@ class PPOTrainer:
         ep_stats = EpisodeStats(
             day_date=day.date,
             total_reward=total_reward,
-            total_pnl=info.get("realised_pnl", 0.0),
+            # Use ``day_pnl`` (accumulated across all races in the episode),
+            # not ``realised_pnl`` (which is only the LAST race because the
+            # env recreates a fresh BetManager per race).
+            total_pnl=info.get("day_pnl", 0.0),
             bet_count=info.get("bet_count", 0),
             winning_bets=info.get("winning_bets", 0),
             races_completed=info.get("races_completed", 0),
             final_budget=info.get("budget", 0.0),
             n_steps=n_steps,
+            raw_pnl_reward=info.get("raw_pnl_reward", 0.0),
+            shaped_bonus=info.get("shaped_bonus", 0.0),
         )
 
         return rollout, ep_stats
@@ -475,6 +490,8 @@ class PPOTrainer:
             "episode": tracker.completed,
             "day_date": ep.day_date,
             "total_reward": round(ep.total_reward, 4),
+            "raw_pnl_reward": round(ep.raw_pnl_reward, 4),
+            "shaped_bonus": round(ep.shaped_bonus, 4),
             "total_pnl": round(ep.total_pnl, 4),
             "bet_count": ep.bet_count,
             "winning_bets": ep.winning_bets,
@@ -492,11 +509,13 @@ class PPOTrainer:
             f.write(json.dumps(record) + "\n")
 
         logger.info(
-            "Episode %d/%d [%s] reward=%.3f pnl=%.2f bets=%d loss=%.4f",
+            "Episode %d/%d [%s] reward=%.3f (raw=%.3f shaped=%+.3f) pnl=%.2f bets=%d loss=%.4f",
             tracker.completed,
             tracker.total,
             ep.day_date,
             ep.total_reward,
+            ep.raw_pnl_reward,
+            ep.shaped_bonus,
             ep.total_pnl,
             ep.bet_count,
             loss_info["policy_loss"],

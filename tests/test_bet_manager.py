@@ -15,19 +15,36 @@ def _runner(
     selection_id: int = 1001,
     back_levels: list[tuple[float, float]] | None = None,
     lay_levels: list[tuple[float, float]] | None = None,
+    ltp: float | None = None,
 ) -> RunnerSnap:
     """Create a RunnerSnap with specified order book levels.
 
     Args:
         back_levels: (price, size) tuples for available_to_back.
         lay_levels: (price, size) tuples for available_to_lay.
+        ltp: Last-traded price used as the ExchangeMatcher reference.
+            Defaults to the average of the first back/lay level so every
+            level in the book lies inside the matcher's junk-filter
+            window by default — tests that want to exercise the junk
+            filter should pass ``ltp`` explicitly.
     """
     atb = [PriceSize(p, s) for p, s in (back_levels or [])]
     atl = [PriceSize(p, s) for p, s in (lay_levels or [])]
+
+    if ltp is None:
+        # Default to the midpoint of whichever side(s) are populated so
+        # all provided levels sit safely inside ±50 % of LTP.
+        sample_prices: list[float] = []
+        if atb:
+            sample_prices.append(atb[0].price)
+        if atl:
+            sample_prices.append(atl[0].price)
+        ltp = sum(sample_prices) / len(sample_prices) if sample_prices else 3.0
+
     return RunnerSnap(
         selection_id=selection_id,
         status="ACTIVE",
-        last_traded_price=3.0,
+        last_traded_price=ltp,
         total_matched=1000.0,
         starting_price_near=0.0,
         starting_price_far=0.0,
@@ -117,15 +134,26 @@ class TestPlaceBack:
 
         assert bet is None
 
-    def test_back_multi_level_fill(self):
+    def test_back_single_price_only_no_walking(self):
+        """Regression: place_back must match ONLY at the best lay level.
+
+        Previously the matcher walked the ladder consuming stake across
+        multiple price levels — that's not how Betfair works, and it
+        allowed phantom fills at extreme parked-order prices. The new
+        contract: any stake beyond the top-of-book level's size is
+        left unmatched (conceptually cancelled).
+        """
         mgr = BetManager(starting_budget=100.0)
         runner = _runner(lay_levels=[(3.0, 5.0), (3.5, 10.0), (4.0, 20.0)])
 
         bet = mgr.place_back(runner, stake=12.0)
 
         assert bet is not None
-        assert bet.matched_stake == 12.0
-        assert mgr.budget == pytest.approx(88.0)
+        # Only the top-of-book level (3.0 @ 5.0) matches; the remaining
+        # 7.0 of stake is unmatched (no walking to 3.5 or 4.0).
+        assert bet.matched_stake == 5.0
+        assert bet.average_price == 3.0
+        assert mgr.budget == pytest.approx(95.0)
 
     def test_back_with_market_id(self):
         mgr = BetManager(starting_budget=100.0)
