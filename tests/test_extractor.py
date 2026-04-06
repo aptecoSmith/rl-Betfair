@@ -17,11 +17,16 @@ import pytest
 
 from data.extractor import (
     RUNNERS_COLUMNS,
+    SQL_EW_SUBQUERY_FULL,
+    SQL_EW_SUBQUERY_NULL,
+    SQL_POLLED_TICKS_TEMPLATE,
     SQL_RUNNERS,
-    SQL_TICKS,
+    SQL_TICKS_TEMPLATE,
     TICKS_COLUMNS,
     DataExtractor,
     _cast_ticks,
+    _column_exists,
+    _optional_column_expr,
 )
 
 
@@ -126,40 +131,40 @@ def _make_extractor(config, ticks_df=None, runners_df=None, polled=False) -> Dat
 class TestSqlContent:
     def test_ticks_query_uses_resolved_market_snaps_as_driver(self):
         """InPlay filtering is now done in Python after parsing SnapJson."""
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert "FROM ResolvedMarketSnaps rms" in sql
 
     def test_ticks_query_joins_resolved_market_snaps(self):
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert "ResolvedMarketSnaps" in sql
 
     def test_ticks_query_selects_snap_json(self):
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert "SnapJson" in sql
         assert "snap_json" in sql
 
     def test_ticks_query_casts_winner_selection_id(self):
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert "CAST" in sql
         assert "WinnerSelectionId" in sql
         assert "SIGNED" in sql
 
     def test_ticks_query_filters_pre_race_weather(self):
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert "PRE_RACE" in sql
         assert "WeatherObservations" in sql
 
     def test_ticks_query_uses_date_parameter(self):
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert ":target_date" in sql
 
     def test_ticks_query_orders_by_sequence(self):
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert "SequenceNumber" in sql
         assert "ORDER BY" in sql.upper()
 
     def test_ticks_query_references_cold_data_db(self):
-        sql = str(SQL_TICKS)
+        sql = SQL_TICKS_TEMPLATE
         assert "coldData." in sql
 
     def test_runners_query_joins_runner_metadata(self):
@@ -581,3 +586,199 @@ class TestParquetRoundTrip:
         out = Path(minimal_config["paths"]["processed_data"])
         df = pd.read_parquet(out / "2026-03-01_runners.parquet")
         assert df["DAYS_SINCE_LAST_RUN"].iloc[0] == ""
+
+
+# ── Schema-tolerant query tests ──────────────────────────────────────────────
+
+def _make_column_exists_conn(existing: set[tuple[str, str]]) -> MagicMock:
+    """Build a mock sa.Connection whose execute() simulates
+    ``information_schema.COLUMNS`` lookups.
+
+    *existing* is a set of ``(table_name, column_name)`` tuples that should
+    be reported as present. Everything else returns no rows.
+    """
+    conn = MagicMock()
+
+    def _execute(stmt, params=None):
+        result = MagicMock()
+        if params and "table_name" in params and "column_name" in params:
+            key = (params["table_name"], params["column_name"])
+            result.fetchone.return_value = (1,) if key in existing else None
+        else:
+            result.fetchone.return_value = None
+        return result
+
+    conn.execute.side_effect = _execute
+    return conn
+
+
+class TestColumnExists:
+    def test_returns_true_when_column_present(self):
+        conn = _make_column_exists_conn({("PolledMarketSnapshots", "EachWayDivisor")})
+        assert _column_exists(conn, "PolledMarketSnapshots", "EachWayDivisor") is True
+
+    def test_returns_false_when_column_missing(self):
+        conn = _make_column_exists_conn(set())
+        assert _column_exists(conn, "PolledMarketSnapshots", "EachWayDivisor") is False
+
+    def test_returns_false_when_table_missing(self):
+        conn = _make_column_exists_conn({("OtherTable", "EachWayDivisor")})
+        assert _column_exists(conn, "PolledMarketSnapshots", "EachWayDivisor") is False
+
+    def test_returns_false_on_execute_error(self):
+        """If information_schema lookup itself errors, treat as missing rather than crash."""
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("information_schema unavailable")
+        assert _column_exists(conn, "PolledMarketSnapshots", "EachWayDivisor") is False
+
+
+class TestOptionalColumnExpr:
+    def test_returns_real_column_when_present(self):
+        conn = _make_column_exists_conn({("PolledMarketSnapshots", "EachWayDivisor")})
+        expr = _optional_column_expr(
+            conn, "PolledMarketSnapshots", "pms", "EachWayDivisor", "each_way_divisor",
+        )
+        assert expr == "pms.EachWayDivisor AS each_way_divisor"
+
+    def test_returns_null_placeholder_when_missing(self):
+        conn = _make_column_exists_conn(set())
+        expr = _optional_column_expr(
+            conn, "PolledMarketSnapshots", "pms", "EachWayDivisor", "each_way_divisor",
+        )
+        assert expr == "NULL AS each_way_divisor"
+
+    def test_alias_preserved_in_both_branches(self):
+        """Alias must match regardless of whether column exists — downstream DataFrame
+        schema must stay stable."""
+        present_conn = _make_column_exists_conn(
+            {("updates", "NumberOfEachWayPlaces")},
+        )
+        missing_conn = _make_column_exists_conn(set())
+        present = _optional_column_expr(
+            present_conn, "updates", "u", "NumberOfEachWayPlaces", "number_of_each_way_places",
+        )
+        missing = _optional_column_expr(
+            missing_conn, "updates", "u", "NumberOfEachWayPlaces", "number_of_each_way_places",
+        )
+        assert present.endswith("AS number_of_each_way_places")
+        assert missing.endswith("AS number_of_each_way_places")
+
+
+class TestSqlTemplatePlaceholders:
+    """The template constants must declare placeholders that the query methods
+    substitute at runtime. If these names drift, _query_ticks /
+    _query_polled_ticks will raise KeyError."""
+
+    def test_ticks_template_has_ew_subquery_placeholder(self):
+        assert "{ew_subquery}" in SQL_TICKS_TEMPLATE
+
+    def test_polled_template_has_each_way_placeholders(self):
+        assert "{each_way_divisor_expr}" in SQL_POLLED_TICKS_TEMPLATE
+        assert "{number_of_each_way_places_expr}" in SQL_POLLED_TICKS_TEMPLATE
+
+    def test_ew_subquery_full_matches_original_semantics(self):
+        """The 'full' variant must still MAX() the two columns grouped by MarketId,
+        preserving the original pre-refactor behaviour."""
+        assert "MAX(EachWayDivisor)" in SQL_EW_SUBQUERY_FULL
+        assert "MAX(NumberOfEachWayPlaces)" in SQL_EW_SUBQUERY_FULL
+        assert "GROUP BY MarketId" in SQL_EW_SUBQUERY_FULL
+        assert "FROM updates" in SQL_EW_SUBQUERY_FULL
+
+    def test_ew_subquery_null_emits_null_columns(self):
+        """The fallback variant must emit NULL columns with the expected aliases."""
+        assert "NULL" in SQL_EW_SUBQUERY_NULL
+        assert "AS EachWayDivisor" in SQL_EW_SUBQUERY_NULL
+        assert "AS NumberOfEachWayPlaces" in SQL_EW_SUBQUERY_NULL
+        assert "FROM updates" in SQL_EW_SUBQUERY_NULL
+
+    def test_polled_template_formats_successfully_with_optional_exprs(self):
+        """Sanity check: the polled template must format without error when
+        substituted with either real columns or NULL placeholders."""
+        sql = SQL_POLLED_TICKS_TEMPLATE.format(
+            each_way_divisor_expr="NULL AS each_way_divisor",
+            number_of_each_way_places_expr="NULL AS number_of_each_way_places",
+        )
+        assert "NULL AS each_way_divisor" in sql
+        assert "NULL AS number_of_each_way_places" in sql
+        # Unsubstituted placeholders would leave {curly braces} in the output.
+        assert "{" not in sql and "}" not in sql
+
+
+# ── Extract_date progress callback tests ─────────────────────────────────────
+
+class TestExtractDateProgressCallback:
+    """DataExtractor.extract_date must invoke on_progress at each sub-step so
+    the admin restore wizard can render live sub-progress and log messages."""
+
+    def test_on_progress_called_in_order_for_happy_path(self, minimal_config):
+        ticks = _make_ticks_df(n=3)
+        runners = _make_runners_df(["1.0", "1.1", "1.2"])
+        extractor = _make_extractor(minimal_config, ticks_df=ticks, runners_df=runners)
+        extractor._engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        extractor._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        events: list[tuple[int, int, str]] = []
+        extractor.extract_date(
+            date(2026, 3, 1),
+            on_progress=lambda step, total, msg: events.append((step, total, msg)),
+        )
+
+        # Steps must be 1-indexed and strictly monotonic.
+        steps = [e[0] for e in events]
+        assert steps == sorted(steps)
+        assert steps[0] >= 1
+        # Total must be consistent across all reports.
+        totals = {e[1] for e in events}
+        assert len(totals) == 1
+        # Final step should equal total (i.e. "writing parquet" fires).
+        assert steps[-1] == events[-1][1]
+        # Messages must be non-empty strings.
+        assert all(isinstance(e[2], str) and e[2] for e in events)
+
+    def test_on_progress_reports_short_circuit_for_empty_ticks(self, minimal_config):
+        """When no ticks are found the extractor should still report *some*
+        progress (the user needs to know the short-circuit happened), and it
+        must not raise when on_progress is passed."""
+        empty_ticks = _make_ticks_df(n=0)
+        extractor = _make_extractor(minimal_config, ticks_df=empty_ticks)
+        extractor._engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        extractor._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        events: list[tuple[int, int, str]] = []
+        result = extractor.extract_date(
+            date(2026, 3, 1),
+            on_progress=lambda step, total, msg: events.append((step, total, msg)),
+        )
+        assert result is False
+        assert len(events) >= 1
+
+    def test_on_progress_exception_does_not_break_extraction(self, minimal_config):
+        """A misbehaving callback must not prevent the extract from completing
+        (the admin.py callback runs on a thread boundary and any raise would
+        otherwise surface as a thread crash)."""
+        ticks = _make_ticks_df(n=1)
+        runners = _make_runners_df(["1.0"])
+        extractor = _make_extractor(minimal_config, ticks_df=ticks, runners_df=runners)
+        extractor._engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        extractor._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        def _boom(step: int, total: int, msg: str) -> None:
+            raise RuntimeError("callback exploded")
+
+        # Must NOT raise
+        result = extractor.extract_date(date(2026, 3, 1), on_progress=_boom)
+        assert result is True
+        out = Path(minimal_config["paths"]["processed_data"])
+        assert (out / "2026-03-01.parquet").exists()
+
+    def test_on_progress_optional(self, minimal_config):
+        """Backwards compatibility: calling extract_date without on_progress
+        must still work (CLI / tests that don't care about progress)."""
+        ticks = _make_ticks_df(n=1)
+        runners = _make_runners_df(["1.0"])
+        extractor = _make_extractor(minimal_config, ticks_df=ticks, runners_df=runners)
+        extractor._engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        extractor._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = extractor.extract_date(date(2026, 3, 1))  # no callback
+        assert result is True

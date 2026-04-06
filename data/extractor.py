@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
@@ -150,7 +151,12 @@ SQL_AVAILABLE_DATES = text("""
 #:
 #: We filter by MarketId IN (markets that start on target_date) using a
 #: subquery against ``updates`` which has ``MarketStartTime`` as a column.
-SQL_TICKS = text("""
+#:
+#: ``{ew_subquery}`` is substituted at query time by
+#: :meth:`DataExtractor._query_ticks` so that older backups missing
+#: ``updates.EachWayDivisor`` / ``updates.NumberOfEachWayPlaces`` still extract
+#: successfully (the join becomes a two-column ``NULL`` scalar).
+SQL_TICKS_TEMPLATE = """
     SELECT
         rms.MarketId               AS market_id,
         rms.Timestamp              AS timestamp,
@@ -172,15 +178,7 @@ SQL_TICKS = text("""
         FROM coldData.marketResults
         GROUP BY MarketId
     ) mr ON mr.MarketId = rms.MarketId
-    LEFT JOIN (
-        -- EW terms are locked at market open and don't change within a market,
-        -- so MAX() collapses the per-tick rows to a single value per market.
-        SELECT MarketId,
-               MAX(EachWayDivisor) AS EachWayDivisor,
-               MAX(NumberOfEachWayPlaces) AS NumberOfEachWayPlaces
-        FROM updates
-        GROUP BY MarketId
-    ) ew ON ew.MarketId = rms.MarketId
+    LEFT JOIN ({ew_subquery}) ew ON ew.MarketId = rms.MarketId
     LEFT JOIN coldData.WeatherObservations wo
         ON wo.MarketId = rms.MarketId
        AND wo.ObservationType = 'PRE_RACE'
@@ -190,7 +188,26 @@ SQL_TICKS = text("""
         WHERE DATE(MarketStartTime) = :target_date
     )
     ORDER BY rms.MarketId, rms.SequenceNumber
-""")
+"""
+
+#: Per-market each-way terms from ``updates``. EW terms are locked at market
+#: open and don't change within a market, so MAX() collapses per-tick rows.
+SQL_EW_SUBQUERY_FULL = """
+        SELECT MarketId,
+               MAX(EachWayDivisor) AS EachWayDivisor,
+               MAX(NumberOfEachWayPlaces) AS NumberOfEachWayPlaces
+        FROM updates
+        GROUP BY MarketId
+"""
+
+#: Fallback EW subquery for backups that pre-date the each-way columns on
+#: ``updates``. Returns ``NULL`` for both fields across all known MarketIds.
+SQL_EW_SUBQUERY_NULL = """
+        SELECT DISTINCT MarketId,
+               CAST(NULL AS DECIMAL(10,4)) AS EachWayDivisor,
+               CAST(NULL AS UNSIGNED)      AS NumberOfEachWayPlaces
+        FROM updates
+"""
 
 #: Runner metadata for a set of market IDs.
 #:
@@ -216,7 +233,12 @@ SQL_POLLED_HAS_DATE = text("""
 
 #: All polled ticks for one day.
 #: Joined with results and weather just like the legacy path.
-SQL_POLLED_TICKS = text("""
+#:
+#: ``{each_way_divisor_expr}`` / ``{number_of_each_way_places_expr}`` are
+#: substituted at query time by :meth:`DataExtractor._query_polled_ticks` to
+#: tolerate older backups that pre-date the each-way columns on
+#: ``PolledMarketSnapshots``. See :func:`_optional_column_expr`.
+SQL_POLLED_TICKS_TEMPLATE = """
     SELECT
         pms.MarketId               AS market_id,
         pms.Timestamp              AS timestamp,
@@ -226,8 +248,8 @@ SQL_POLLED_TICKS = text("""
         pms.InPlay                 AS in_play,
         pms.TotalMatched           AS traded_volume,
         pms.NumberOfActiveRunners  AS number_of_active_runners,
-        pms.EachWayDivisor         AS each_way_divisor,
-        pms.NumberOfEachWayPlaces  AS number_of_each_way_places,
+        {each_way_divisor_expr},
+        {number_of_each_way_places_expr},
         CAST(mr.WinnerSelectionId AS SIGNED) AS winner_selection_id,
         wo.Temperature             AS temperature,
         wo.Precipitation           AS precipitation,
@@ -247,7 +269,7 @@ SQL_POLLED_TICKS = text("""
        AND wo.ObservationType = 'PRE_RACE'
     WHERE DATE(pms.Timestamp) = :target_date
     ORDER BY pms.MarketId, pms.Timestamp
-""")
+"""
 
 #: Dates that have polled data.
 SQL_POLLED_AVAILABLE_DATES = text("""
@@ -342,6 +364,60 @@ _RACECARD_OVERRIDES: dict[str, str] = {
 }
 
 
+# ── Schema helpers ───────────────────────────────────────────────────────────
+
+SQL_COLUMN_EXISTS = text("""
+    SELECT 1
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = :table_name
+      AND COLUMN_NAME = :column_name
+    LIMIT 1
+""")
+
+
+def _column_exists(conn: sa.Connection, table_name: str, column_name: str) -> bool:
+    """Return True if *column_name* exists on *table_name* in the active DB.
+
+    Used to build schema-tolerant queries so that older StreamRecorder backups
+    (which pre-date newly-added columns like ``EachWayDivisor``) can still be
+    extracted without a SQL error.
+    """
+    try:
+        result = conn.execute(
+            SQL_COLUMN_EXISTS,
+            {"table_name": table_name, "column_name": column_name},
+        )
+        return result.fetchone() is not None
+    except Exception:
+        logger.exception(
+            "information_schema lookup failed for %s.%s — assuming column is missing",
+            table_name, column_name,
+        )
+        return False
+
+
+def _optional_column_expr(
+    conn: sa.Connection,
+    table_name: str,
+    qualifier: str,
+    column_name: str,
+    alias: str,
+) -> str:
+    """Build a SELECT fragment for a column that may or may not exist.
+
+    If the column exists → ``{qualifier}.{column_name} AS {alias}``.
+    Otherwise → ``NULL AS {alias}`` (logged as a warning).
+    """
+    if _column_exists(conn, table_name, column_name):
+        return f"{qualifier}.{column_name} AS {alias}"
+    logger.warning(
+        "%s.%s missing — substituting NULL (older schema?)",
+        table_name, column_name,
+    )
+    return f"NULL AS {alias}"
+
+
 # ── Engine factory ────────────────────────────────────────────────────────────
 
 def _build_engine(config: dict) -> sa.Engine:
@@ -407,7 +483,11 @@ class DataExtractor:
         with self._engine.connect() as conn:
             return self._has_polled_date(target_date, conn)
 
-    def extract_date(self, target_date: date) -> bool:
+    def extract_date(
+        self,
+        target_date: date,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> bool:
         """Extract one day to Parquet.
 
         Auto-detects the best source:
@@ -418,15 +498,37 @@ class DataExtractor:
         - ``YYYY-MM-DD.parquet``          — tick-level data
         - ``YYYY-MM-DD_runners.parquet``  — runner metadata
 
+        Parameters
+        ----------
+        target_date
+            The date to extract.
+        on_progress
+            Optional callback ``(step, total_steps, message)`` invoked as each
+            sub-step of the extraction begins/completes. ``step`` is 1-indexed.
+            Used by the admin restore wizard to surface live progress in the UI.
+
         Returns
         -------
         bool
             ``True`` if ticks were found and files written; ``False`` if no
             tick data exists for *target_date* (files are not written).
         """
+        total_steps = 6
+
+        def _report(step: int, message: str) -> None:
+            if on_progress is not None:
+                try:
+                    on_progress(step, total_steps, message)
+                except Exception:  # pragma: no cover — callback must never break extraction
+                    logger.exception("on_progress callback raised")
+
         self._output_dir.mkdir(parents=True, exist_ok=True)
         with self._engine.connect() as conn:
+            _report(1, "Detecting tick data source")
             use_polled = self._has_polled_date(target_date, conn)
+            source = "polled" if use_polled else "legacy"
+
+            _report(2, f"Loading ticks from MySQL ({source} source)")
             if use_polled:
                 logger.info("Using PolledMarketSnapshots for %s", target_date)
                 ticks_df = self._query_polled_ticks(target_date, conn)
@@ -436,10 +538,19 @@ class DataExtractor:
 
             if ticks_df.empty:
                 logger.warning("No ticks found for %s — skipping", target_date)
+                _report(total_steps, "No ticks found — skipping")
                 return False
 
             market_ids = list(ticks_df["market_id"].unique())
+            _report(
+                3,
+                f"Loaded {len(ticks_df):,} ticks across {len(market_ids)} markets",
+            )
+
+            _report(4, f"Loading runner metadata for {len(market_ids)} markets")
             runners_df = self._query_runners(market_ids, conn)
+
+            _report(5, "Loading market names")
             names_df = self._query_market_names(market_ids, conn)
 
         # Merge market_name into ticks (left join — some markets may not have names)
@@ -453,7 +564,10 @@ class DataExtractor:
         if "race_status" not in ticks_df.columns:
             ticks_df["race_status"] = None
 
-        source = "polled" if use_polled else "legacy"
+        _report(
+            6,
+            f"Writing Parquet ({len(ticks_df):,} ticks, {len(runners_df)} runners)",
+        )
         self._save_day(target_date, ticks_df, runners_df)
         logger.info(
             "Extracted %s (%s) — %d ticks across %d markets, %d runners",
@@ -529,8 +643,23 @@ class DataExtractor:
         :func:`_enrich_from_snap_json` because the ``updates`` and
         ``ResolvedMarketSnaps`` tables record timestamps independently and an
         exact join produces zero rows.
+
+        The each-way subquery is swapped out for a ``NULL``-returning variant
+        if the restored ``updates`` table pre-dates the each-way columns.
         """
-        result = conn.execute(SQL_TICKS, {"target_date": target_date.isoformat()})
+        has_ew_divisor = _column_exists(conn, "updates", "EachWayDivisor")
+        has_ew_places = _column_exists(conn, "updates", "NumberOfEachWayPlaces")
+        if has_ew_divisor and has_ew_places:
+            ew_subquery = SQL_EW_SUBQUERY_FULL
+        else:
+            logger.warning(
+                "updates.EachWayDivisor/NumberOfEachWayPlaces missing "
+                "(%s, %s) — extracting with NULL each-way fields",
+                has_ew_divisor, has_ew_places,
+            )
+            ew_subquery = SQL_EW_SUBQUERY_NULL
+        sql = text(SQL_TICKS_TEMPLATE.format(ew_subquery=ew_subquery))
+        result = conn.execute(sql, {"target_date": target_date.isoformat()})
         rows = result.fetchall()
         if not rows:
             return pd.DataFrame(columns=TICKS_COLUMNS)
@@ -611,8 +740,22 @@ class DataExtractor:
         This method converts RunnersJson into the SnapJson format expected by
         ``parse_snap_json`` so all downstream code works unchanged.  It also
         joins ``RaceStatusEvents`` to add a ``race_status`` column.
+
+        The each-way columns (``EachWayDivisor``, ``NumberOfEachWayPlaces``)
+        are substituted with ``NULL`` if the restored table pre-dates their
+        addition, so old backups remain extractable.
         """
-        result = conn.execute(SQL_POLLED_TICKS, {"target_date": target_date.isoformat()})
+        sql = text(SQL_POLLED_TICKS_TEMPLATE.format(
+            each_way_divisor_expr=_optional_column_expr(
+                conn, "PolledMarketSnapshots", "pms",
+                "EachWayDivisor", "each_way_divisor",
+            ),
+            number_of_each_way_places_expr=_optional_column_expr(
+                conn, "PolledMarketSnapshots", "pms",
+                "NumberOfEachWayPlaces", "number_of_each_way_places",
+            ),
+        ))
+        result = conn.execute(sql, {"target_date": target_date.isoformat()})
         rows = result.fetchall()
         if not rows:
             return pd.DataFrame(columns=TICKS_COLUMNS)

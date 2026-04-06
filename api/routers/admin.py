@@ -804,6 +804,11 @@ async def restore_backups(body: RestoreRequest, request: Request):
                     "phase": "restoring",
                     "process": _make_process(2),
                     "detail": step3_detail,
+                    "sub_process": {
+                        "label": f"Extracting Parquet for {date_str}",
+                        "completed": 0,
+                        "total": 6,
+                    },
                 })
 
                 try:
@@ -811,8 +816,34 @@ async def restore_backups(body: RestoreRequest, request: Request):
 
                     extractor = DataExtractor(config)
                     target = date.fromisoformat(date_str)
+
+                    # Thread-safe progress callback — DataExtractor runs in an
+                    # executor thread, so we hop back onto the event loop to
+                    # push onto the asyncio queue.
+                    loop = asyncio.get_running_loop()
+                    captured_date = date_str
+
+                    def _on_extract_progress(
+                        step: int, total: int, message: str,
+                    ) -> None:
+                        event = {
+                            "event": "progress",
+                            "timestamp": time.time(),
+                            "phase": "restoring",
+                            "process": _make_process(2),
+                            "detail": f"[{captured_date}] {message}",
+                            "sub_process": {
+                                "label": f"Extracting Parquet for {captured_date}",
+                                "completed": step,
+                                "total": total,
+                            },
+                        }
+                        loop.call_soon_threadsafe(progress_queue.put_nowait, event)
+
                     await _with_heartbeat(
-                        lambda: extractor.extract_date(target),
+                        lambda: extractor.extract_date(
+                            target, on_progress=_on_extract_progress,
+                        ),
                         step3_detail, _make_process(2),
                     )
                 except Exception:

@@ -1,11 +1,13 @@
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
-import { Injectable } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Admin } from './admin';
 import { ApiService } from '../services/api.service';
+import { TrainingService } from '../services/training.service';
+import { WSEvent } from '../models/training.model';
 import {
   ExtractedDaysResponse,
   BackupDaysResponse,
@@ -14,6 +16,8 @@ import {
   ImportDayResponse,
   ImportRangeResponse,
   ResetResponse,
+  StreamrecorderBackupsResponse,
+  RestoreResponse,
 } from '../models/admin.model';
 
 function makeExtractedDay(date: string) {
@@ -57,12 +61,57 @@ class MockApiService {
   getSupervisorProcesses() { return of({}); }
   supervisorControl(_name: string, _action: string) { return of({ name: _name, label: _name, status: 'started', pid: 1, port: 8001, uptime_seconds: null }); }
   getSupervisorLogs(_name: string, _lines?: number) { return of({ name: _name, logs: [] }); }
+
+  // ── Restore wizard ────────────────────────────────────────────
+  streamrecorderBackupsResponse$: Observable<StreamrecorderBackupsResponse> = of({
+    backup_dir: '/tmp/backups',
+    backups: [],
+  });
+  restoreResponse$: Observable<RestoreResponse> = of({
+    job_id: 'job-restore-1',
+    dates_queued: 1,
+    detail: 'Queued',
+  });
+  getStreamrecorderBackups() { return this.streamrecorderBackupsResponse$; }
+  restoreBackups(_dates: string[]) { return this.restoreResponse$; }
+}
+
+/**
+ * Mock TrainingService: exposes a writable `latestEvent` signal so tests can
+ * simulate WebSocket events flowing into the admin component's effect.
+ *
+ * Everything else is a no-op/empty signal — the admin restore flow only
+ * touches `latestEvent`, so that's all we need.
+ */
+@Injectable()
+class MockTrainingService {
+  readonly latestEvent = signal<WSEvent | null>(null);
+  readonly status = signal({
+    running: false,
+    phase: null,
+    generation: null,
+    process: null,
+    item: null,
+    detail: null,
+    last_agent_score: null,
+    worker_connected: false,
+  });
+  readonly lastActivityAt = signal(Date.now());
+  readonly activityLog = signal([]);
+  readonly lastRunCompletedAt = signal<number | null>(null);
+  readonly rewardHistory = signal([]);
+  readonly lossHistory = signal([]);
+  readonly isRunning = signal(false);
+  readonly phase = signal(null);
+  connect() { /* no-op */ }
+  ngOnDestroy() { /* no-op */ }
 }
 
 describe('Admin', () => {
   let fixture: ComponentFixture<Admin>;
   let component: Admin;
   let mockApi: MockApiService;
+  let mockTraining: MockTrainingService;
 
   function setup(opts: {
     days?: ExtractedDaysResponse;
@@ -70,6 +119,7 @@ describe('Admin', () => {
     agents?: AdminAgentsResponse;
   } = {}) {
     mockApi = new MockApiService();
+    mockTraining = new MockTrainingService();
     if (opts.days) mockApi.daysResponse$ = of(opts.days);
     if (opts.backup) mockApi.backupResponse$ = of(opts.backup);
     if (opts.agents) mockApi.agentsResponse$ = of(opts.agents);
@@ -80,6 +130,7 @@ describe('Admin', () => {
         provideRouter([]),
         provideHttpClient(),
         { provide: ApiService, useValue: mockApi },
+        { provide: TrainingService, useValue: mockTraining },
       ],
     });
 
@@ -470,5 +521,213 @@ describe('Admin', () => {
     const el: HTMLElement = fixture.nativeElement;
     const headers = Array.from(el.querySelectorAll('.agents-table th')).map(h => h.textContent?.trim());
     expect(headers).toEqual(['', 'Model ID', 'Gen', 'Architecture', 'Status', 'Score', 'Created', 'Actions']);
+  });
+
+  // ── Restore wizard: progress / log / effect guards ──────────────
+
+  function progressEvent(
+    partial: Partial<WSEvent> & { process?: WSEvent['process']; sub_process?: WSEvent['sub_process'] },
+  ): WSEvent {
+    return {
+      event: 'progress',
+      phase: 'restoring',
+      timestamp: Date.now(),
+      ...partial,
+    } as WSEvent;
+  }
+
+  it('appendRestoreLog dedupes consecutive identical messages', () => {
+    setup();
+    const anyComp = component as any;
+    anyComp.appendRestoreLog('Restoring coldData for 2026-04-05...');
+    anyComp.appendRestoreLog('Restoring coldData for 2026-04-05...');
+    anyComp.appendRestoreLog('Restoring coldData for 2026-04-05...');
+    expect(component.restoreLog().length).toBe(1);
+  });
+
+  it('appendRestoreLog keeps distinct consecutive messages', () => {
+    setup();
+    const anyComp = component as any;
+    anyComp.appendRestoreLog('step 1');
+    anyComp.appendRestoreLog('step 2');
+    anyComp.appendRestoreLog('step 3');
+    expect(component.restoreLog()).toEqual(['step 1', 'step 2', 'step 3']);
+  });
+
+  it('appendRestoreLog trims to RESTORE_LOG_MAX when exceeded', () => {
+    setup();
+    const anyComp = component as any;
+    const max: number = anyComp.RESTORE_LOG_MAX;
+    for (let i = 0; i < max + 5; i++) {
+      anyComp.appendRestoreLog(`msg ${i}`);
+    }
+    const log = component.restoreLog();
+    expect(log.length).toBe(max);
+    // Newest messages must be preserved; oldest dropped.
+    expect(log[log.length - 1]).toBe(`msg ${max + 4}`);
+    expect(log[0]).toBe(`msg ${5}`);
+  });
+
+  it('openRestoreWizard primes lastHandledEvent so stale phase_complete is ignored', () => {
+    setup();
+    // Simulate a stale phase_complete left over from a prior failed restore
+    const stalePhaseComplete: WSEvent = {
+      event: 'phase_complete',
+      phase: 'restoring',
+      timestamp: Date.now() - 60000,
+      summary: { dates_restored: 0, dates_failed: 1, failed_dates: ['2026-04-05'] },
+    };
+    mockTraining.latestEvent.set(stalePhaseComplete);
+    TestBed.flushEffects();
+
+    component.openRestoreWizard();
+    TestBed.flushEffects();
+
+    // Must not have jumped to step 4; openRestoreWizard only sets step 1 (scanning)
+    // and — because the scan API resolves synchronously — advances to step 2.
+    expect(component.wizardStep()).toBeLessThan(3);
+    expect(component.restoreResult()).toBeNull();
+  });
+
+  it('does not process progress events when wizardStep !== 3', () => {
+    setup();
+    // Wizard is closed (step 0). A restoring progress event should be ignored.
+    mockTraining.latestEvent.set(progressEvent({
+      process: { label: 'Restoring backups', completed: 1, total: 3, pct: 33.3, item_eta_human: '', process_eta_human: '' },
+      detail: 'Restoring coldData for 2026-04-05...',
+    }));
+    TestBed.flushEffects();
+    expect(component.restoreProgress()).toBeNull();
+    expect(component.restoreLog()).toEqual([]);
+  });
+
+  it('processes progress events when wizardStep === 3', () => {
+    setup();
+    // Simulate entering the restoring step directly.
+    component.wizardStep.set(3);
+    TestBed.flushEffects();
+
+    mockTraining.latestEvent.set(progressEvent({
+      process: { label: 'Restoring backups', completed: 2, total: 3, pct: 66.6, item_eta_human: '', process_eta_human: '' },
+      detail: '[2026-04-05] Loading ticks from MySQL (polled source)',
+      sub_process: { label: 'Extracting Parquet for 2026-04-05', completed: 2, total: 6 },
+    }));
+    TestBed.flushEffects();
+
+    expect(component.restoreProgress()).toEqual({
+      completed: 2,
+      total: 3,
+      detail: '[2026-04-05] Loading ticks from MySQL (polled source)',
+    });
+    expect(component.restoreSubProgress()).toEqual({
+      label: 'Extracting Parquet for 2026-04-05',
+      completed: 2,
+      total: 6,
+    });
+    expect(component.restoreLog()).toContain('[2026-04-05] Loading ticks from MySQL (polled source)');
+  });
+
+  it('does not re-process the same event reference twice on subsequent effect runs', () => {
+    setup();
+    component.wizardStep.set(3);
+    TestBed.flushEffects();
+
+    const evt = progressEvent({
+      process: { label: 'Restoring backups', completed: 1, total: 3, pct: 33.3, item_eta_human: '', process_eta_human: '' },
+      detail: 'Step A',
+    });
+    mockTraining.latestEvent.set(evt);
+    TestBed.flushEffects();
+
+    // Trigger an unrelated signal change that causes the effect to re-run
+    // (wizardStep is tracked). Re-writing wizardStep to the same value is a
+    // no-op for signals, so we bump to another step and back.
+    component.wizardStep.set(2);
+    TestBed.flushEffects();
+    component.wizardStep.set(3);
+    TestBed.flushEffects();
+
+    // Log must still contain exactly one entry — not three.
+    expect(component.restoreLog().filter(m => m === 'Step A').length).toBe(1);
+  });
+
+  it('clears sub-progress when the top-level step advances without a new sub_process', () => {
+    setup();
+    component.wizardStep.set(3);
+    TestBed.flushEffects();
+
+    // First event — populates sub-progress
+    mockTraining.latestEvent.set(progressEvent({
+      process: { label: 'Restoring backups', completed: 2, total: 3, pct: 66.6, item_eta_human: '', process_eta_human: '' },
+      detail: '[2026-04-05] Extract step 3/6',
+      sub_process: { label: 'Extracting Parquet', completed: 3, total: 6 },
+    }));
+    TestBed.flushEffects();
+    expect(component.restoreSubProgress()).not.toBeNull();
+
+    // Next event — top-level step advances (completed changes), no sub_process
+    mockTraining.latestEvent.set(progressEvent({
+      process: { label: 'Restoring backups', completed: 3, total: 3, pct: 100, item_eta_human: '', process_eta_human: '' },
+      detail: 'Completed 2026-04-05',
+    }));
+    TestBed.flushEffects();
+    expect(component.restoreSubProgress()).toBeNull();
+  });
+
+  it('phase_complete while in step 3 transitions to step 4 after delay', () => {
+    vi.useFakeTimers();
+    try {
+      setup();
+      component.wizardStep.set(3);
+      TestBed.flushEffects();
+
+      mockTraining.latestEvent.set({
+        event: 'phase_complete',
+        phase: 'restoring',
+        timestamp: Date.now(),
+        summary: { dates_restored: 1, dates_failed: 0, failed_dates: [] },
+      } as WSEvent);
+      TestBed.flushEffects();
+
+      // Still on step 3 — transition is deferred by setTimeout(..., 1500)
+      expect(component.wizardStep()).toBe(3);
+      expect(component.restoreResult()?.succeeded).toBe(1);
+
+      vi.advanceTimersByTime(1500);
+      expect(component.wizardStep()).toBe(4);
+      expect(component.restoreProgress()).toBeNull();
+      expect(component.restoreSubProgress()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('startRestore seeds progress and log synchronously', () => {
+    setup({
+      backup: { days: [] },
+    });
+    component.wizardSelected.set(new Set(['2026-04-05']));
+    component.startRestore();
+
+    // Seeded immediately, not waiting for the POST response or any WS event.
+    expect(component.restoreProgress()).not.toBeNull();
+    expect(component.restoreProgress()?.detail).toContain('Starting restore job');
+    expect(component.restoreLog().length).toBeGreaterThan(0);
+    expect(component.wizardStep()).toBe(3);
+  });
+
+  it('closeWizard clears restore state', () => {
+    setup();
+    component.wizardStep.set(3);
+    (component as any).appendRestoreLog('msg 1');
+    component.restoreProgress.set({ completed: 1, total: 3, detail: 'x' });
+    component.restoreSubProgress.set({ label: 'sub', completed: 1, total: 6 });
+
+    component.closeWizard();
+
+    expect(component.wizardStep()).toBe(0);
+    expect(component.restoreProgress()).toBeNull();
+    expect(component.restoreSubProgress()).toBeNull();
+    expect(component.restoreLog()).toEqual([]);
   });
 });

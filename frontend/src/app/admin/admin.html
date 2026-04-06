@@ -297,9 +297,27 @@
                 </span>
               </div>
               <p class="restore-detail">{{ restoreProgress()!.detail }}</p>
+              @if (restoreSubProgress(); as sub) {
+                <p class="restore-sub-label">{{ sub.label }}</p>
+                <div class="progress-bar-container progress-bar-container--sub">
+                  <div class="progress-bar progress-bar--sub"
+                    [style.width.%]="(sub.completed / sub.total) * 100">
+                  </div>
+                  <span class="progress-label">
+                    {{ sub.completed }} / {{ sub.total }}
+                  </span>
+                </div>
+              }
             } @else {
               <div class="progress-bar-container">
                 <div class="progress-bar scanning-bar"></div>
+              </div>
+            }
+            @if (restoreLog().length > 0) {
+              <div class="restore-log" data-testid="restore-log">
+                @for (line of restoreLog(); track $index) {
+                  <div class="restore-log-line">{{ line }}</div>
+                }
               </div>
             }
           </div>

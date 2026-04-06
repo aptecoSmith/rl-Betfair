@@ -463,6 +463,53 @@
   font-family: monospace;
 }
 
+.restore-sub-label {
+  font-size: 0.75rem;
+  color: #888;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+  font-family: monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.progress-bar-container--sub {
+  height: 16px;
+  margin-top: 0;
+}
+
+.progress-bar--sub {
+  background: linear-gradient(90deg, #00bfa5, #26c6da);
+}
+
+.restore-log {
+  margin-top: 1rem;
+  background: #12121c;
+  border: 1px solid #2a2a3a;
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  max-height: 180px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.restore-log-line {
+  color: #bfc7d5;
+  white-space: pre-wrap;
+  word-break: break-word;
+
+  &:first-child {  // oldest entry, dimmed
+    color: #6b7280;
+  }
+
+  &:last-child {   // newest entry, highlighted
+    color: #e5e7eb;
+    font-weight: 500;
+  }
+}
+
 .done-text {
   font-size: 1.1rem;
   color: #81c784;

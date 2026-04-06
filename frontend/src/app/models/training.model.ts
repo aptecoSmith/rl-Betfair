@@ -23,12 +23,19 @@ export interface ActivityLogEntry {
   text: string;
 }
 
+export interface SubProgressSnapshot {
+  label: string;
+  completed: number;
+  total: number;
+}
+
 export interface WSEvent {
   event: string;
   timestamp?: number;
   phase?: string;
   process?: ProgressSnapshot;
   item?: ProgressSnapshot;
+  sub_process?: SubProgressSnapshot;
   detail?: string;
   summary?: Record<string, unknown>;
   generation?: number;

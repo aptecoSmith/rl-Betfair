@@ -1,4 +1,4 @@
-import { Component, OnInit, OnDestroy, inject, signal, computed, effect } from '@angular/core';
+import { Component, OnInit, OnDestroy, inject, signal, computed, effect, untracked } from '@angular/core';
 import { DecimalPipe, SlicePipe, TitleCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
@@ -71,8 +71,17 @@ export class Admin implements OnInit, OnDestroy {
   readonly wizardSelected = signal<Set<string>>(new Set());
   readonly wizardError = signal<string | null>(null);
   readonly restoreProgress = signal<{ completed: number; total: number; detail: string } | null>(null);
+  readonly restoreSubProgress = signal<{ label: string; completed: number; total: number } | null>(null);
+  readonly restoreLog = signal<string[]>([]);
   readonly restoreDatesQueued = signal(0);
   readonly restoreResult = signal<{ succeeded: number; failed: number; failedDates: string[] } | null>(null);
+
+  private readonly RESTORE_LOG_MAX = 12;
+  // Reference to the last restore/training event we've already handled.
+  // Used so the effect, which re-runs whenever ANY of its tracked signals
+  // change (including wizardStep), doesn't re-process a stale latestEvent
+  // cached from a previous restore job when the wizard is re-opened.
+  private lastHandledEvent: unknown = null;
 
   readonly wizardSelectableCount = computed(() =>
     this.wizardBackups().filter(b => !b.already_extracted).length
@@ -133,23 +142,53 @@ export class Admin implements OnInit, OnDestroy {
       }
     }
 
-    // Handle restoring phase (wizard flow) — only when wizard is open
-    if (event.phase === 'restoring' && this.wizardStep() > 0) {
+    // Handle restoring phase (wizard flow) — only when the wizard is on the
+    // restoring step and the event hasn't already been handled. The effect
+    // re-runs whenever any tracked signal changes (including wizardStep), so
+    // without this de-dup guard we would re-process the stale latestEvent
+    // cached from a previous restore job as soon as the wizard re-opens.
+    // All reads of restoreProgress/restoreSubProgress/restoreLog inside this
+    // effect are wrapped in untracked() to avoid creating a dependency that
+    // would cause the effect to re-run every time we also write to them
+    // (infinite loop).
+    const alreadyHandled = event === this.lastHandledEvent;
+    this.lastHandledEvent = event;
+    if (!alreadyHandled && event.phase === 'restoring' && this.wizardStep() === 3) {
       if (event.event === 'progress') {
         if (event.process) {
+          const prev = untracked(() => this.restoreProgress());
           this.restoreProgress.set({
             completed: event.process.completed,
             total: event.process.total,
             detail: event.detail || '',
           });
+          // Clear the sub-progress bar when the top-level step advances
+          // (unless this very event brings a new sub_process snapshot).
+          if (
+            !event.sub_process &&
+            prev &&
+            prev.completed !== event.process.completed
+          ) {
+            this.restoreSubProgress.set(null);
+          }
         } else if (event.detail) {
           // Error events without process — update detail text while keeping progress bar
-          const current = this.restoreProgress();
+          const current = untracked(() => this.restoreProgress());
           this.restoreProgress.set({
             completed: current?.completed ?? 0,
             total: current?.total ?? 1,
             detail: event.detail,
           });
+        }
+        if (event.sub_process) {
+          this.restoreSubProgress.set({
+            label: event.sub_process.label,
+            completed: event.sub_process.completed,
+            total: event.sub_process.total,
+          });
+        }
+        if (event.detail) {
+          this.appendRestoreLog(event.detail);
         }
       }
       if (event.event === 'phase_complete') {
@@ -162,6 +201,7 @@ export class Admin implements OnInit, OnDestroy {
         setTimeout(() => {
           this.wizardStep.set(4);  // done
           this.restoreProgress.set(null);
+          this.restoreSubProgress.set(null);
           this.loadExtractedDays();
           this.loadBackupDays();
         }, 1500);
@@ -488,10 +528,16 @@ export class Admin implements OnInit, OnDestroy {
   // ── Restore wizard ────────────────────────────────────────────
 
   openRestoreWizard(): void {
+    // Mark whatever event is currently cached as already-handled so the
+    // effect doesn't re-process a stale phase_complete from a previous job
+    // the moment wizardStep changes and the effect re-runs.
+    this.lastHandledEvent = this.training.latestEvent();
     this.wizardStep.set(1);  // scanning
     this.wizardError.set(null);
     this.wizardSelected.set(new Set());
     this.restoreProgress.set(null);
+    this.restoreSubProgress.set(null);
+    this.restoreLog.set([]);
     this.restoreResult.set(null);
 
     this.api.getStreamrecorderBackups().subscribe({
@@ -512,6 +558,8 @@ export class Admin implements OnInit, OnDestroy {
     this.wizardBackups.set([]);
     this.wizardError.set(null);
     this.restoreProgress.set(null);
+    this.restoreSubProgress.set(null);
+    this.restoreLog.set([]);
   }
 
   toggleDate(date: string): void {
@@ -537,16 +585,42 @@ export class Admin implements OnInit, OnDestroy {
     this.wizardSelected.set(new Set());
   }
 
+  private appendRestoreLog(message: string): void {
+    // Use signal.update() instead of .set() to avoid creating a tracked read
+    // of restoreLog in the caller effect — reading + writing the same signal
+    // inside an effect creates an infinite loop.
+    this.restoreLog.update(current => {
+      // De-dupe consecutive identical messages (heartbeats repeat the same detail)
+      if (current.length > 0 && current[current.length - 1] === message) {
+        return current;
+      }
+      const next = [...current, message];
+      if (next.length > this.RESTORE_LOG_MAX) {
+        return next.slice(next.length - this.RESTORE_LOG_MAX);
+      }
+      return next;
+    });
+  }
+
   startRestore(): void {
     const dates = Array.from(this.wizardSelected());
     if (dates.length === 0) return;
 
     this.wizardStep.set(3);  // restoring
     this.restoreDatesQueued.set(dates.length);
+    this.restoreSubProgress.set(null);
+    // Seed progress synchronously so the user never sees an empty scanning
+    // bar between entering step 3 and the first WebSocket event arriving.
+    this.restoreProgress.set({
+      completed: 0,
+      total: dates.length * 3,
+      detail: 'Starting restore job...',
+    });
+    this.restoreLog.set(['Starting restore job...']);
 
     this.api.restoreBackups(dates).subscribe({
       next: (res) => {
-        if (res.dates_queued > 0) {
+        if (res.dates_queued > 0 && !this.restoreProgress()?.detail) {
           this.restoreProgress.set({ completed: 0, total: res.dates_queued * 3, detail: 'Starting...' });
         }
       },
