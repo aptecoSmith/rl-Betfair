@@ -300,3 +300,134 @@ class TestWorkerConnected:
         assert data["running"] is True
         assert data["worker_connected"] is True
         assert data["phase"] == "training"
+
+
+# ── Architectures and Genetics Endpoints ─────────────────────────────
+
+
+class TestArchitecturesEndpoint:
+    def test_returns_list_of_architectures(self):
+        """GET /training/architectures returns all registered architectures."""
+        # Import policy_network to populate the registry (decorator side effects)
+        import agents.policy_network  # noqa: F401
+
+        client, app = _make_app()
+        app.state.config = {
+            "hyperparameters": {
+                "search_ranges": {
+                    "architecture_name": {"choices": ["ppo_lstm_v1"]}
+                }
+            }
+        }
+        resp = client.get("/training/architectures")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) > 0
+        # Each entry has name + description
+        for item in data:
+            assert "name" in item
+            assert "description" in item
+            assert item["description"]  # non-empty
+        # Known architectures are present
+        names = [a["name"] for a in data]
+        assert "ppo_lstm_v1" in names
+
+    def test_architecture_defaults_endpoint(self):
+        """GET /training/architectures/defaults returns config choices."""
+        client, app = _make_app()
+        app.state.config = {
+            "hyperparameters": {
+                "search_ranges": {
+                    "architecture_name": {
+                        "choices": ["ppo_lstm_v1", "ppo_time_lstm_v1"]
+                    }
+                }
+            }
+        }
+        resp = client.get("/training/architectures/defaults")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["defaults"] == ["ppo_lstm_v1", "ppo_time_lstm_v1"]
+
+
+class TestGeneticsEndpoint:
+    def test_returns_genetics_info(self):
+        """GET /training/genetics returns population config."""
+        client, app = _make_app()
+        app.state.config = {
+            "population": {
+                "size": 50,
+                "n_elite": 5,
+                "selection_top_pct": 0.5,
+                "mutation_rate": 0.3,
+            }
+        }
+        resp = client.get("/training/genetics")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["population_size"] == 50
+        assert data["n_elite"] == 5
+        assert data["selection_top_pct"] == 0.5
+        assert data["mutation_rate"] == 0.3
+
+    def test_returns_defaults_when_config_missing(self):
+        """Missing population config returns sensible defaults."""
+        client, app = _make_app()
+        app.state.config = {}
+        resp = client.get("/training/genetics")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["population_size"] == 50
+        assert data["n_elite"] == 5
+
+
+class TestStartWithOverrides:
+    def test_start_rejects_unknown_architecture(self):
+        """POST /training/start with unknown architecture returns 400."""
+        import tempfile
+        from pathlib import Path
+        import pandas as pd
+
+        client, app = _make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            pd.DataFrame({"x": [1]}).to_parquet(data_dir / "2026-01-01.parquet")
+            app.state.config = {
+                "paths": {"processed_data": str(data_dir)},
+                "population": {"size": 2},
+                "training": {},
+                "hyperparameters": {"search_ranges": {"architecture_name": {"choices": []}}},
+            }
+
+            resp = client.post("/training/start", json={
+                "n_generations": 1,
+                "n_epochs": 1,
+                "architectures": ["nonexistent_arch_xyz"],
+            })
+            assert resp.status_code == 400
+            assert "unknown" in resp.json()["detail"].lower() or "architectures" in resp.json()["detail"].lower()
+
+    def test_start_rejects_empty_architectures(self):
+        """POST /training/start with empty architectures list returns 400."""
+        import tempfile
+        from pathlib import Path
+        import pandas as pd
+
+        client, app = _make_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            pd.DataFrame({"x": [1]}).to_parquet(data_dir / "2026-01-01.parquet")
+            app.state.config = {
+                "paths": {"processed_data": str(data_dir)},
+                "population": {"size": 2},
+                "training": {},
+                "hyperparameters": {"search_ranges": {"architecture_name": {"choices": []}}},
+            }
+
+            resp = client.post("/training/start", json={
+                "n_generations": 1,
+                "n_epochs": 1,
+                "architectures": [],
+            })
+            assert resp.status_code == 400

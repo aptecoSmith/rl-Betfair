@@ -147,6 +147,10 @@ export class ApiService {
     population_size?: number; seed?: number | null;
     reevaluate_garaged?: boolean; reevaluate_min_score?: number | null;
     train_dates?: string[] | null; test_dates?: string[] | null;
+    architectures?: string[] | null;
+    max_back_price?: number | null;
+    max_lay_price?: number | null;
+    min_seconds_before_off?: number | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
@@ -160,7 +164,28 @@ export class ApiService {
       reevaluate_min_score: params.reevaluate_min_score ?? null,
       train_dates: params.train_dates ?? null,
       test_dates: params.test_dates ?? null,
+      architectures: params.architectures ?? null,
+      max_back_price: params.max_back_price ?? null,
+      max_lay_price: params.max_lay_price ?? null,
+      min_seconds_before_off: params.min_seconds_before_off ?? null,
     });
+  }
+
+  getArchitectures(): Observable<{ name: string; description: string }[]> {
+    return this.http.get<{ name: string; description: string }[]>(`${this.baseUrl}/training/architectures`);
+  }
+
+  getArchitectureDefaults(): Observable<{ defaults: string[] }> {
+    return this.http.get<{ defaults: string[] }>(`${this.baseUrl}/training/architectures/defaults`);
+  }
+
+  getGenetics(): Observable<{
+    population_size: number;
+    n_elite: number;
+    selection_top_pct: number;
+    mutation_rate: number;
+  }> {
+    return this.http.get<any>(`${this.baseUrl}/training/genetics`);
   }
 
   stopTraining(): Observable<{ detail: string }> {

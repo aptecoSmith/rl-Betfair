@@ -52,6 +52,27 @@ class TestMakeStartCmd:
         assert msg["train_dates"] == ["2026-03-01"]
         assert msg["test_dates"] == ["2026-03-02"]
 
+    def test_architectures_and_constraints_included(self):
+        raw = make_start_cmd(
+            architectures=["ppo_lstm_v1", "ppo_time_lstm_v1"],
+            max_back_price=100.0,
+            max_lay_price=50.0,
+            min_seconds_before_off=300,
+        )
+        msg = json.loads(raw)
+        assert msg["architectures"] == ["ppo_lstm_v1", "ppo_time_lstm_v1"]
+        assert msg["max_back_price"] == 100.0
+        assert msg["max_lay_price"] == 50.0
+        assert msg["min_seconds_before_off"] == 300
+
+    def test_architectures_default_none(self):
+        raw = make_start_cmd()
+        msg = json.loads(raw)
+        assert msg["architectures"] is None
+        assert msg["max_back_price"] is None
+        assert msg["max_lay_price"] is None
+        assert msg["min_seconds_before_off"] is None
+
 
 class TestMakeFinishCmd:
     def test_finish_cmd_type(self):

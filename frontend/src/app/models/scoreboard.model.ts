@@ -14,6 +14,8 @@ export interface ScoreboardEntry {
   early_picks: number;
   garaged: boolean;
   garaged_at: string | null;
+  created_at: string | null;
+  last_evaluated_at: string | null;
 }
 
 export interface ScoreboardResponse {

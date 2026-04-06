@@ -70,10 +70,11 @@ console = Console()
 class TrainingWorker:
     """WebSocket server that manages training runs."""
 
-    def __init__(self, config: dict, host: str, port: int) -> None:
+    def __init__(self, config: dict, host: str, port: int, config_path: str = "config.yaml") -> None:
         self.config = config
         self.host = host
         self.port = port
+        self.config_path = config_path
 
         # ModelStore (shared DB via WAL)
         db_path = config["paths"]["registry_db"]
@@ -107,6 +108,72 @@ class TrainingWorker:
         self._live: Live | None = None
 
     # ── State snapshot ──────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_run_overrides(base_config: dict, params: dict) -> dict:
+        """Return a deep-copied config with per-run overrides applied.
+
+        Handles:
+        - population_size override (and auto-scaled n_elite)
+        - architectures override (restricts the architecture_name choice set)
+        - betting_constraints overrides (max_back_price, max_lay_price,
+          min_seconds_before_off)
+
+        Fields in *params* that are None or missing fall through to the
+        base config values.
+        """
+        run_config = copy.deepcopy(base_config)
+
+        # Population size
+        population_size = params.get("population_size")
+        if population_size is not None:
+            run_config.setdefault("population", {})["size"] = population_size
+            run_config["population"]["n_elite"] = max(1, population_size // 10)
+
+        # Architecture selection
+        architectures = params.get("architectures")
+        if architectures is not None and len(architectures) > 0:
+            run_config.setdefault("hyperparameters", {}).setdefault("search_ranges", {})
+            arch_spec = run_config["hyperparameters"]["search_ranges"].get("architecture_name", {})
+            arch_spec["type"] = "str_choice"
+            arch_spec["choices"] = list(architectures)
+            run_config["hyperparameters"]["search_ranges"]["architecture_name"] = arch_spec
+            if len(architectures) == 1:
+                run_config.setdefault("training", {})["architecture"] = architectures[0]
+
+        # Betting constraints
+        bc_cfg = run_config.setdefault("training", {}).setdefault("betting_constraints", {})
+        if params.get("max_back_price") is not None:
+            bc_cfg["max_back_price"] = params["max_back_price"]
+        if params.get("max_lay_price") is not None:
+            bc_cfg["max_lay_price"] = params["max_lay_price"]
+        if params.get("min_seconds_before_off") is not None:
+            bc_cfg["min_seconds_before_off"] = params["min_seconds_before_off"]
+
+        return run_config
+
+    def _reload_config_from_disk(self) -> bool:
+        """Reload config.yaml from disk into self.config.
+
+        Called at the start of each training run so changes made via the
+        Admin UI (e.g. betting constraints) take effect without requiring
+        a worker restart.
+
+        Returns True on success, False on any error (in which case
+        self.config is left unchanged).
+        """
+        try:
+            with open(self.config_path) as f:
+                fresh_config = yaml.safe_load(f)
+            if fresh_config is None:
+                console.print(f"[yellow]config.yaml is empty — keeping in-memory config[/yellow]")
+                return False
+            self.config = fresh_config
+            console.print("[dim]Reloaded config.yaml from disk[/dim]")
+            return True
+        except Exception as e:
+            console.print(f"[yellow]Could not reload config.yaml: {e} — using in-memory config[/yellow]")
+            return False
 
     def _state_msg(self) -> str:
         return make_status_msg(
@@ -215,11 +282,16 @@ class TrainingWorker:
         reevaluate_garaged = params.get("reevaluate_garaged", False)
         reevaluate_min_score = params.get("reevaluate_min_score")
 
-        # Apply population size override
-        run_config = copy.deepcopy(self.config)
-        if population_size is not None:
-            run_config["population"]["size"] = population_size
-            run_config["population"]["n_elite"] = max(1, population_size // 10)
+        # Reload config from disk so changes made via the Admin UI
+        # (e.g. betting constraints, reevaluate_garaged_default) take
+        # effect on the next run without needing to restart the worker.
+        self._reload_config_from_disk()
+
+        # Re-resolve data dir from (possibly) updated config
+        data_dir = self.config["paths"]["processed_data"]
+
+        # Build run config with all per-run overrides applied
+        run_config = self._apply_run_overrides(self.config, params)
 
         # Reset
         self.stop_event.clear()

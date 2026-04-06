@@ -15,7 +15,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from api.schemas import (
+    ArchitectureInfo,
     FinishTrainingResponse,
+    GeneticsInfo,
     ProgressSnapshot,
     StartTrainingRequest,
     StartTrainingResponse,
@@ -158,6 +160,54 @@ def get_training_info(request: Request):
     }
 
 
+@router.get("/training/architectures", response_model=list[ArchitectureInfo])
+def get_architectures(request: Request):
+    """Return the list of available policy architectures with descriptions."""
+    from agents.architecture_registry import REGISTRY
+
+    # Which architectures are currently selected by default (from config hyperparameter choices)
+    config = request.app.state.config
+    default_choices = (
+        config.get("hyperparameters", {})
+        .get("search_ranges", {})
+        .get("architecture_name", {})
+        .get("choices", [])
+    )
+    result = []
+    for name, cls in REGISTRY.items():
+        result.append(ArchitectureInfo(
+            name=name,
+            description=cls.description,
+        ))
+    return result
+
+
+@router.get("/training/genetics", response_model=GeneticsInfo)
+def get_genetics(request: Request):
+    """Return genetic algorithm configuration (read-only)."""
+    config = request.app.state.config
+    pop_cfg = config.get("population", {})
+    return GeneticsInfo(
+        population_size=pop_cfg.get("size", 50),
+        n_elite=pop_cfg.get("n_elite", 5),
+        selection_top_pct=pop_cfg.get("selection_top_pct", 0.5),
+        mutation_rate=pop_cfg.get("mutation_rate", 0.3),
+    )
+
+
+@router.get("/training/architectures/defaults")
+def get_architecture_defaults(request: Request):
+    """Return the list of architectures currently used by default."""
+    config = request.app.state.config
+    choices = (
+        config.get("hyperparameters", {})
+        .get("search_ranges", {})
+        .get("architecture_name", {})
+        .get("choices", [])
+    )
+    return {"defaults": choices}
+
+
 @router.post("/training/start", response_model=StartTrainingResponse)
 async def start_training(request: Request, body: StartTrainingRequest):
     """Start a multi-generation training run via the training worker.
@@ -198,6 +248,15 @@ async def start_training(request: Request, body: StartTrainingRequest):
             raise HTTPException(400, f"Test dates not found in data: {missing}")
         test_dates = sorted(body.test_dates)
 
+    # Validate architecture names if provided
+    if body.architectures is not None:
+        from agents.architecture_registry import REGISTRY
+        unknown = [a for a in body.architectures if a not in REGISTRY]
+        if unknown:
+            raise HTTPException(400, f"Unknown architectures: {unknown}")
+        if not body.architectures:
+            raise HTTPException(400, "At least one architecture must be selected")
+
     # Send start command to worker
     cmd = make_start_cmd(
         n_generations=body.n_generations,
@@ -208,6 +267,10 @@ async def start_training(request: Request, body: StartTrainingRequest):
         reevaluate_min_score=body.reevaluate_min_score,
         train_dates=train_dates if body.train_dates is not None else None,
         test_dates=test_dates if body.test_dates is not None else None,
+        architectures=body.architectures,
+        max_back_price=body.max_back_price,
+        max_lay_price=body.max_lay_price,
+        min_seconds_before_off=body.min_seconds_before_off,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

@@ -178,6 +178,59 @@ class TestOrchestratorFinishEvent:
         assert orch._check_finish() is False
 
 
+class TestEmitInfo:
+
+    def test_emit_info_puts_progress_event_on_queue(self, config):
+        """_emit_info should push a progress event with phase='info' and detail."""
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        queue = asyncio.Queue()
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+            progress_queue=queue,
+        )
+        orch._emit_info("test message")
+
+        assert queue.qsize() == 1
+        event = queue.get_nowait()
+        assert event["event"] == "progress"
+        assert event["phase"] == "info"
+        assert event["detail"] == "test message"
+        assert "timestamp" in event
+
+    def test_emit_info_without_queue_does_not_crash(self, config):
+        """_emit_info should be a no-op when progress_queue is None."""
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+        )
+        # Should not raise
+        orch._emit_info("test message")
+
+    def test_multiple_info_events_all_queued(self, config):
+        """Multiple _emit_info calls should all end up on the queue in order."""
+        from training.run_training import TrainingOrchestrator
+
+        config["training"]["require_gpu"] = False
+        queue = asyncio.Queue()
+        orch = TrainingOrchestrator(
+            config=config, model_store=None, device="cpu",
+            progress_queue=queue,
+        )
+        orch._emit_info("message 1")
+        orch._emit_info("message 2")
+        orch._emit_info("message 3")
+
+        messages = []
+        while not queue.empty():
+            ev = queue.get_nowait()
+            messages.append(ev["detail"])
+        assert messages == ["message 1", "message 2", "message 3"]
+
+
 # ── API endpoint tests ──────────────────────────────────────────────────────
 
 

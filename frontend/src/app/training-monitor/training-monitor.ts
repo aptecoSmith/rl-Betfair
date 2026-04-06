@@ -1,6 +1,6 @@
 import { Component, inject, computed, effect, signal, OnDestroy, ViewChild, ElementRef, AfterViewChecked } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { JsonPipe } from '@angular/common';
+import { DecimalPipe, JsonPipe } from '@angular/common';
 import { TrainingService } from '../services/training.service';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
@@ -28,7 +28,7 @@ export interface AgentGridItem {
 @Component({
   selector: 'app-training-monitor',
   standalone: true,
-  imports: [JsonPipe, FormsModule],
+  imports: [JsonPipe, DecimalPipe, FormsModule],
   templateUrl: './training-monitor.html',
   styleUrl: './training-monitor.scss',
 })
@@ -66,6 +66,37 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
   trainDateEnd = '';
   testDateStart = '';
   testDateEnd = '';
+
+  // ── Wizard state ─────────────────────────────────────────────
+  readonly wizardStep = signal(1);
+  readonly WIZARD_STEPS = [
+    { n: 1, label: 'Data' },
+    { n: 2, label: 'Architecture' },
+    { n: 3, label: 'Constraints' },
+    { n: 4, label: 'Genetics' },
+    { n: 5, label: 'Population' },
+    { n: 6, label: 'Training' },
+    { n: 7, label: 'Review' },
+  ];
+  readonly architectures = signal<{ name: string; description: string }[]>([]);
+  readonly genetics = signal<{
+    population_size: number;
+    n_elite: number;
+    selection_top_pct: number;
+    mutation_rate: number;
+  } | null>(null);
+  readonly constraintDefaults = signal<{
+    max_back_price: number | null;
+    max_lay_price: number | null;
+    min_seconds_before_off: number;
+  } | null>(null);
+  // User selections
+  selectedArchitectures = new Set<string>();
+  // Constraint overrides — null means "use admin default"
+  overrideMaxBackPrice: number | null = null;
+  overrideMaxLayPrice: number | null = null;
+  overrideMinSecondsBeforeOff: number | null = null;
+
   readonly rewardHistory = this.training.rewardHistory;
   readonly lossHistory = this.training.lossHistory;
 
@@ -226,6 +257,76 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
         this.apiUnavailable.set(true);
       },
     });
+
+    // Load architectures and defaults
+    this.api.getArchitectures().subscribe({
+      next: (archs) => this.architectures.set(archs),
+      error: () => {},
+    });
+    this.api.getArchitectureDefaults().subscribe({
+      next: (res) => {
+        // Default-select architectures from config
+        this.selectedArchitectures = new Set(res.defaults);
+      },
+      error: () => {},
+    });
+    this.api.getGenetics().subscribe({
+      next: (g) => this.genetics.set(g),
+      error: () => {},
+    });
+    this.api.getBettingConstraints().subscribe({
+      next: (c) => this.constraintDefaults.set({
+        max_back_price: c.max_back_price,
+        max_lay_price: c.max_lay_price,
+        min_seconds_before_off: c.min_seconds_before_off,
+      }),
+      error: () => {},
+    });
+  }
+
+  // ── Wizard navigation ─────────────────────────────────────────
+
+  nextStep(): void {
+    const current = this.wizardStep();
+    if (current < 7) this.wizardStep.set(current + 1);
+  }
+
+  prevStep(): void {
+    const current = this.wizardStep();
+    if (current > 1) this.wizardStep.set(current - 1);
+  }
+
+  goToStep(n: number): void {
+    if (n >= 1 && n <= 7) this.wizardStep.set(n);
+  }
+
+  toggleArchitecture(name: string): void {
+    const next = new Set(this.selectedArchitectures);
+    if (next.has(name)) {
+      next.delete(name);
+    } else {
+      next.add(name);
+    }
+    this.selectedArchitectures = next;
+  }
+
+  isArchitectureSelected(name: string): boolean {
+    return this.selectedArchitectures.has(name);
+  }
+
+  selectedArchitecturesArray(): string[] {
+    return Array.from(this.selectedArchitectures);
+  }
+
+  canProceedFromArch(): boolean {
+    return this.selectedArchitectures.size > 0;
+  }
+
+  stepStatus(n: number): 'current' | 'done' | 'future' {
+    const current = this.wizardStep();
+    if (n === current) return 'current';
+    if (n < current) return 'done';
+    return 'future';
   }
 
   estimatedDuration(): string {
@@ -266,6 +367,10 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
       population_size: this.populationSize,
       reevaluate_garaged: this.reevaluateGaraged,
       reevaluate_min_score: this.reevaluateMinScore,
+      architectures: Array.from(this.selectedArchitectures),
+      max_back_price: this.overrideMaxBackPrice,
+      max_lay_price: this.overrideMaxLayPrice,
+      min_seconds_before_off: this.overrideMinSecondsBeforeOff,
     };
     if (!this.useAllData) {
       params.train_dates = this.datesInRange(this.trainDateStart, this.trainDateEnd);

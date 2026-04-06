@@ -48,6 +48,8 @@ def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
         early_picks=model.total_early_picks,
         garaged=rec.garaged if rec else False,
         garaged_at=rec.garaged_at if rec else None,
+        created_at=rec.created_at if rec else None,
+        last_evaluated_at=rec.last_evaluated_at if rec else None,
     )
 
 

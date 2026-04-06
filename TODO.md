@@ -920,3 +920,25 @@ These are documented here so they are not forgotten. Assign to a session when re
   doing nothing. Validate the low-level policy first, then add the explicit
   hierarchy. When the time comes, implement as `hierarchical_ppo_v1` in the
   architecture registry — no other code changes needed.
+
+---
+
+## Tech Debt
+
+### Wire up Angular component tests
+`frontend/src/app/**/*.spec.ts` files exist (e.g. `training-monitor.spec.ts`,
+`scoreboard.spec.ts`) but no test runner is configured to execute them:
+- `package.json` references `vitest` but there's no `vite.config.ts` or
+  `vitest.config.ts` with the Angular testing platform set up
+- `angular.json` has no `test` architect target
+- Running `ng test` fails with "Need to call TestBed.initTestEnvironment() first"
+
+The spec files are currently dead code. To wire them up, either:
+1. Configure vitest with `@angular/compiler`, `zone.js`, and a setup file
+   that calls `TestBed.initTestEnvironment()`
+2. Or switch to Karma/Jasmine (older but standard for Angular)
+
+Tests covering the training wizard race conditions (population size
+override), activity log entries, and scoreboard column rendering should
+all be added once the runner is working. The test logic is already written
+in the spec files — they just need a working runner.

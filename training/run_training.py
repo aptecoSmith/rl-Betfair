@@ -220,6 +220,45 @@ class TrainingOrchestrator:
 
         train_cutoff = train_days[-1].date
 
+        # Emit informational events so the UI activity log shows the
+        # effective configuration for this run.
+        self._emit_info(f"Run {run_id[:8]} starting")
+        self._emit_info(
+            f"Data: {len(train_days)} train days, {len(test_days)} test days"
+        )
+        pop_cfg = self.config.get("population", {})
+        self._emit_info(
+            f"Population: {pop_cfg.get('size', '?')} agents, "
+            f"{pop_cfg.get('n_elite', '?')} elite, "
+            f"{int(pop_cfg.get('selection_top_pct', 0) * 100)}% survival, "
+            f"{int(pop_cfg.get('mutation_rate', 0) * 100)}% mutation"
+        )
+        self._emit_info(
+            f"Training: {n_generations} generation(s), {n_epochs} epoch(s) per day"
+        )
+        arch_choices = (
+            self.config.get("hyperparameters", {})
+            .get("search_ranges", {})
+            .get("architecture_name", {})
+            .get("choices", [])
+        )
+        if arch_choices:
+            self._emit_info(f"Architectures: {', '.join(arch_choices)}")
+        # Betting constraints — the whole point of surfacing these
+        constraints = self.config.get("training", {}).get("betting_constraints", {})
+        max_back = constraints.get("max_back_price")
+        max_lay = constraints.get("max_lay_price")
+        min_secs = constraints.get("min_seconds_before_off", 0)
+        self._emit_info(
+            f"Constraints: max_back={max_back if max_back is not None else 'unlimited'}, "
+            f"max_lay={max_lay if max_lay is not None else 'unlimited'}, "
+            f"min_seconds_before_off={min_secs}"
+        )
+        self._emit_info(
+            f"Budget: \u00a3{self.config.get('training', {}).get('starting_budget', 100.0)} per race, "
+            f"max {self.config.get('training', {}).get('max_bets_per_race', 20)} bets/race"
+        )
+
         # -- Generation 0: initialise population --
         self._emit_phase_start("training", {
             "run_id": run_id,
@@ -616,6 +655,19 @@ class TrainingOrchestrator:
         )
 
     # -- Progress event helpers ------------------------------------------------
+
+    def _emit_info(self, message: str) -> None:
+        """Emit a lightweight progress event purely to log an info message
+        in the frontend activity log and stdout. Used for run-start config
+        summaries and other informational breadcrumbs."""
+        event = {
+            "event": "progress",
+            "phase": "info",
+            "detail": message,
+            "timestamp": time.time(),
+        }
+        logger.info(message)
+        self._put_event(event)
 
     def _emit_phase_start(self, phase: str, summary: dict) -> None:
         """Emit a phase_start event."""

@@ -681,3 +681,356 @@
   margin-left: auto;
   margin-right: auto;
 }
+
+/* ── Wizard ────────────────────────────────────────────────── */
+
+.wizard-container {
+  max-width: 720px;
+  margin: 1rem auto 0;
+}
+
+.wizard-stepper {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.25rem;
+  margin-bottom: 1.5rem;
+  position: relative;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 13px;
+    left: 5%;
+    right: 5%;
+    height: 1px;
+    background: #2a2a4a;
+    z-index: 0;
+  }
+}
+
+.wizard-step-indicator {
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  z-index: 1;
+  font-family: inherit;
+
+  .step-number {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    border: 2px solid #2a2a4a;
+    background: #12122a;
+    color: #606080;
+    transition: all 0.2s;
+  }
+
+  .step-label {
+    font-size: 0.6875rem;
+    color: #606080;
+    font-weight: 500;
+  }
+
+  &.current {
+    .step-number {
+      border-color: #6c63ff;
+      background: #6c63ff;
+      color: #fff;
+    }
+    .step-label {
+      color: #c0c0d8;
+      font-weight: 700;
+    }
+  }
+
+  &.done {
+    cursor: pointer;
+    .step-number {
+      border-color: #6fcf97;
+      background: #12122a;
+      color: #6fcf97;
+    }
+    .step-label {
+      color: #808098;
+    }
+    &:hover .step-number {
+      background: #1e3a2e;
+    }
+  }
+
+  &.future {
+    cursor: default;
+    pointer-events: none;
+  }
+}
+
+.wizard-step {
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 1.5rem;
+  min-height: 300px;
+}
+
+.wizard-title {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin: 0 0 0.75rem;
+}
+
+.help-text {
+  font-size: 0.8125rem;
+  color: #a0a0b8;
+  line-height: 1.6;
+  margin: 0 0 1rem;
+
+  strong {
+    color: #c0c0d8;
+    font-weight: 600;
+  }
+
+  code {
+    background: #12122a;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    color: #6c63ff;
+  }
+}
+
+.wizard-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1rem;
+
+  .form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    max-width: 400px;
+
+    .field-label {
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: #c0c0d8;
+    }
+
+    input[type="number"],
+    select {
+      padding: 0.45rem 0.7rem;
+      border-radius: 4px;
+      border: 1px solid #3a3a5c;
+      background: #12122a;
+      color: #e0e0e0;
+      font-size: 0.875rem;
+      width: 100%;
+      max-width: 280px;
+    }
+
+    .current-default {
+      font-size: 0.6875rem;
+      color: #808098;
+      font-style: italic;
+    }
+
+    .field-help {
+      font-size: 0.6875rem;
+      color: #606080;
+    }
+  }
+}
+
+.warning-text {
+  color: #f2c94c;
+  font-size: 0.8125rem;
+  margin-top: 0.75rem;
+}
+
+.sub-title {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: #c0c0d8;
+  margin: 1.25rem 0 0.5rem;
+}
+
+/* Architecture cards */
+.arch-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.arch-card {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  background: #12122a;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+
+  &:hover {
+    border-color: #3a3a5c;
+    background: #1a1a2e;
+  }
+
+  &.selected {
+    border-color: #6c63ff;
+    background: rgba(108, 99, 255, 0.08);
+  }
+
+  input[type="checkbox"] {
+    margin-top: 0.15rem;
+    accent-color: #6c63ff;
+    cursor: pointer;
+  }
+
+  .arch-content {
+    flex: 1;
+  }
+
+  .arch-name {
+    font-family: 'Consolas', monospace;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    color: #e0e0e0;
+    margin-bottom: 0.25rem;
+  }
+
+  .arch-desc {
+    font-size: 0.75rem;
+    color: #808098;
+    line-height: 1.5;
+  }
+}
+
+/* Genetics chips */
+.genetics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.info-chip-large {
+  background: #12122a;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 1rem;
+
+  .chip-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #6c63ff;
+    line-height: 1;
+  }
+
+  .chip-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #c0c0d8;
+    margin-top: 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .chip-help {
+    font-size: 0.6875rem;
+    color: #606080;
+    line-height: 1.4;
+    margin-top: 0.4rem;
+  }
+}
+
+/* Review */
+.review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.review-card {
+  background: #12122a;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+
+  h4 {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    color: #808098;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0 0 0.4rem;
+  }
+
+  p {
+    font-size: 0.8125rem;
+    color: #c0c0d8;
+    margin: 0.15rem 0;
+    line-height: 1.4;
+  }
+}
+
+/* Wizard navigation */
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+
+  .btn {
+    min-width: 110px;
+    font-size: 0.875rem;
+    padding: 0.6rem 1.25rem;
+  }
+}
+
+.btn-secondary {
+  background: #2a2a4a;
+  color: #c0c0d8;
+  border: 1px solid #3a3a5c;
+
+  &:hover:not(:disabled) {
+    background: #3a3a5c;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #6c63ff, #a78bfa);
+  color: #ffffff;
+  border: none;
+
+  &:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}

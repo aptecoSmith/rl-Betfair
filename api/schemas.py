@@ -35,6 +35,8 @@ class ScoreboardEntry(BaseModel):
     early_picks: int = 0
     garaged: bool = False
     garaged_at: str | None = None
+    created_at: str | None = None
+    last_evaluated_at: str | None = None
 
 
 class ScoreboardResponse(BaseModel):
@@ -374,6 +376,24 @@ class StartTrainingRequest(BaseModel):
     reevaluate_min_score: float | None = None
     train_dates: list[str] | None = None  # explicit YYYY-MM-DD dates; None = auto-split
     test_dates: list[str] | None = None
+    # Per-run architecture selection — None = use config defaults
+    architectures: list[str] | None = None
+    # Per-run constraint overrides — None = use admin defaults from config
+    max_back_price: float | None = None
+    max_lay_price: float | None = None
+    min_seconds_before_off: int | None = None
+
+
+class ArchitectureInfo(BaseModel):
+    name: str
+    description: str
+
+
+class GeneticsInfo(BaseModel):
+    population_size: int
+    n_elite: int
+    selection_top_pct: float
+    mutation_rate: float
 
 
 class StartTrainingResponse(BaseModel):

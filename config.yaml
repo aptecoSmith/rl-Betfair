@@ -1,40 +1,25 @@
-# rl-betfair configuration
-# Credentials (DB_USER, DB_PASSWORD) are read from .env - never put them here.
-
 database:
   host: localhost
   port: 3306
   cold_data_db: coldData
   hot_data_db: hotDataRefactored
-
 population:
-  size: 50                        # larger population = more diversity, less premature convergence
-  n_elite: 5                      # top 5 always survive (scaled from 3 at pop=20)
-  selection_top_pct: 0.5        # top 50% survive each generation
-  mutation_rate: 0.3            # probability of mutating each hyperparameter in bred children
-
+  size: 50
+  n_elite: 5
+  selection_top_pct: 0.5
+  mutation_rate: 0.3
 reward:
-  # Multiplier applied to P&L when agent correctly backed the winner ≥ 5 min before off
   early_pick_bonus_min: 1.2
   early_pick_bonus_max: 1.5
-  early_pick_min_seconds: 300   # 5 minutes before scheduled off
-
-  # Betfair commission on net profit (5% default, varies by market)
+  early_pick_min_seconds: 300
   commission: 0.05
-
-  # Small cost per bet to discourage low-conviction churn
   efficiency_penalty: 0.01
-
-  # Flat bonus scaled by bet win rate per race (does not affect P&L)
   precision_bonus: 1.0
-
-  # Composite scoreboard weights — must sum to 1.0
   coefficients:
     win_rate: 0.35
-    sharpe: 0.30
+    sharpe: 0.3
     mean_daily_pnl: 0.15
-    efficiency: 0.20
-
+    efficiency: 0.2
 paths:
   processed_data: data/processed
   backup_data: data/backup
@@ -43,34 +28,29 @@ paths:
   registry_db: registry/models.db
   streamrecorder_backups: ../StreamRecorder1/backups
   mysql_bin: /c/Program Files/MySQL/MySQL Server 9.6/bin/mysql.exe
-
 training:
   architecture: ppo_lstm_v1
-  starting_budget: 100.0        # £ per race (budget resets each race)
-  max_runners: 14               # observation vector padded to this many runners
-  max_bets_per_race: 20         # max bets per race (prevents tick-spamming)
-  require_gpu: true             # CUDA-enabled PyTorch installed (cu126, RTX 3090)
-  reevaluate_garaged_default: true  # default checkbox state for re-evaluating garaged models
+  starting_budget: 100.0
+  max_runners: 14
+  max_bets_per_race: 20
+  require_gpu: true
+  reevaluate_garaged_default: true
   betting_constraints:
-    max_back_price: null          # null=unlimited, float=max allowed back price
-    max_lay_price: null           # null=unlimited, float=max allowed lay price
-    min_seconds_before_off: 0     # 0=no restriction, int=min seconds before race start
+    max_back_price: 100.0
+    max_lay_price: null
+    min_seconds_before_off: 0
   retraining:
-    min_days: 30                # trigger threshold for automatic retraining
-
+    min_days: 30
 discard_policy:
-  min_win_rate: 0.35            # below this AND ...
-  min_mean_pnl: 0.0             # below this AND ...
-  min_sharpe: -0.5              # below this → candidate for discard
-
-# Hyperparameter search ranges - signed off in Session 0.1.
-# Used to seed the first population (Session 2.1).
+  min_win_rate: 0.35
+  min_mean_pnl: 0.0
+  min_sharpe: -0.5
 hyperparameters:
   search_ranges:
     learning_rate:
-      type: float_log           # sampled on log scale
-      min: 1.0e-5
-      max: 5.0e-4               # tightened from 1e-3; higher LRs destabilise PPO+LSTM
+      type: float_log
+      min: 1.0e-05
+      max: 0.0005
     ppo_clip_epsilon:
       type: float
       min: 0.1
@@ -81,25 +61,31 @@ hyperparameters:
       max: 0.05
     lstm_hidden_size:
       type: int_choice
-      # Range includes 2048 - RTX 3090 (24 GB) can support it.
-      # Larger sizes matter here: a 30-min race at 5-sec ticks = 360 steps,
-      # and the LSTM carries context across races for the full day episode.
-      choices: [64, 128, 256, 512, 1024, 2048]
+      choices:
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
     mlp_hidden_size:
       type: int_choice
-      choices: [64, 128, 256]
+      choices:
+      - 64
+      - 128
+      - 256
     mlp_layers:
       type: int
       min: 1
-      max: 3                    # 4 layers rarely helps a small per-runner encoder
+      max: 3
     observation_window_ticks:
       type: int
       min: 3
-      max: 360                  # full 30-min pre-race window at 5-sec ticks (30*60/5)
+      max: 360
     reward_early_pick_bonus:
       type: float
       min: 1.0
-      max: 1.5                  # capped at 1.5x; 2.0 risks overriding genuine P&L signal
+      max: 1.5
     reward_efficiency_penalty:
       type: float
       min: 0.001
@@ -110,8 +96,9 @@ hyperparameters:
       max: 3.0
     architecture_name:
       type: str_choice
-      choices: [ppo_lstm_v1, ppo_time_lstm_v1]
-
+      choices:
+      - ppo_lstm_v1
+      - ppo_time_lstm_v1
 training_worker:
   host: localhost
   port: 8002

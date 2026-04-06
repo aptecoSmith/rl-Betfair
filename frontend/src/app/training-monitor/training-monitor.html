@@ -91,7 +91,7 @@
       </div>
     </div>
   } @else {
-    <!-- ── Idle State ─────────────────────────────────────── -->
+    <!-- ── Idle State: Wizard ─────────────────────────────── -->
     <div class="idle-state" data-testid="idle-state">
       @if (lastRunSummary()) {
         <div class="last-run">
@@ -104,129 +104,328 @@
         </div>
       }
 
-      <div class="start-section">
-        <h3 class="section-title">Start Training</h3>
-
-        @if (trainingInfo(); as info) {
-          <div class="data-summary" data-testid="data-summary">
-            <span class="data-chip" data-testid="data-chip">{{ info.available_days }} days of data</span>
-            @if (useAllData) {
-              <span class="data-chip">{{ info.train_days }} train / {{ info.test_days }} test</span>
-            } @else {
-              <span class="data-chip">{{ datesInRange(trainDateStart, trainDateEnd).length }} train / {{ datesInRange(testDateStart, testDateEnd).length }} test</span>
+      @if (apiUnavailable()) {
+        <div class="error-message">
+          API is not available. Start the API backend first using <code>start-all.bat</code>.
+        </div>
+      } @else if (!trainingInfo()) {
+        <p class="no-run">Loading training configuration...</p>
+      } @else if (trainingInfo(); as info) {
+        <div class="wizard-container">
+          <!-- ── Step Indicator ─────────────────────────── -->
+          <div class="wizard-stepper">
+            @for (step of WIZARD_STEPS; track step.n) {
+              <button type="button"
+                      class="wizard-step-indicator"
+                      [class.current]="stepStatus(step.n) === 'current'"
+                      [class.done]="stepStatus(step.n) === 'done'"
+                      [class.future]="stepStatus(step.n) === 'future'"
+                      (click)="goToStep(step.n)">
+                <span class="step-number">{{ step.n }}</span>
+                <span class="step-label">{{ step.label }}</span>
+              </button>
             }
           </div>
 
-          <label class="form-field checkbox-field">
-            <input type="checkbox" [(ngModel)]="useAllData" />
-            <span class="field-label">Use all data (auto 50/50 split)</span>
-          </label>
+          <!-- ── Step Content ───────────────────────────── -->
+          <div class="wizard-step">
+            @switch (wizardStep()) {
 
-          @if (!useAllData) {
-            <div class="date-selection">
-              <div class="date-range">
-                <span class="date-range-title">Training dates</span>
-                <label class="form-field">
-                  <span class="field-label">Start</span>
-                  <select [(ngModel)]="trainDateStart">
-                    @for (d of availableDates; track d) {
-                      <option [value]="d">{{ d }}</option>
+              <!-- STEP 1: Data Selection -->
+              @case (1) {
+                <h3 class="wizard-title">Training Data</h3>
+                <p class="help-text">
+                  Training data teaches the model patterns from past races. Test data measures whether it learned general rules or just memorised specific races ("overfitting"). A good split uses recent days for testing — if the model only does well on old data, it hasn't learned anything useful.
+                </p>
+                <div class="wizard-form">
+                  <div class="data-summary" data-testid="data-summary">
+                    <span class="data-chip">{{ info.available_days }} days available</span>
+                    @if (useAllData) {
+                      <span class="data-chip">{{ info.train_days }} train / {{ info.test_days }} test (auto 50/50)</span>
+                    } @else {
+                      <span class="data-chip">{{ datesInRange(trainDateStart, trainDateEnd).length }} train / {{ datesInRange(testDateStart, testDateEnd).length }} test</span>
                     }
-                  </select>
-                </label>
-                <label class="form-field">
-                  <span class="field-label">End</span>
-                  <select [(ngModel)]="trainDateEnd">
-                    @for (d of availableDates; track d) {
-                      <option [value]="d">{{ d }}</option>
-                    }
-                  </select>
-                </label>
-              </div>
-              <div class="date-range">
-                <span class="date-range-title">Test dates</span>
-                <label class="form-field">
-                  <span class="field-label">Start</span>
-                  <select [(ngModel)]="testDateStart">
-                    @for (d of availableDates; track d) {
-                      <option [value]="d">{{ d }}</option>
-                    }
-                  </select>
-                </label>
-                <label class="form-field">
-                  <span class="field-label">End</span>
-                  <select [(ngModel)]="testDateEnd">
-                    @for (d of availableDates; track d) {
-                      <option [value]="d">{{ d }}</option>
-                    }
-                  </select>
-                </label>
-              </div>
-            </div>
-          }
-
-          <div class="start-form" data-testid="start-form">
-            <label class="form-field">
-              <span class="field-label">Population size</span>
-              <input type="number" [(ngModel)]="populationSize" min="2" max="200" (ngModelChange)="syncFormValues()" data-testid="input-population" />
-              <span class="field-help">Number of agents competing. More = better diversity but slower.</span>
-            </label>
-            <label class="form-field">
-              <span class="field-label">Generations</span>
-              <input type="number" [(ngModel)]="nGenerations" min="1" max="50" (ngModelChange)="syncFormValues()" data-testid="input-generations" />
-              <span class="field-help">Rounds of evolution. Each generation trains all agents, evaluates them, then breeds the best into the next generation.</span>
-            </label>
-            <label class="form-field">
-              <span class="field-label">Epochs per day</span>
-              <input type="number" [(ngModel)]="nEpochs" min="1" max="20" (ngModelChange)="syncFormValues()" data-testid="input-epochs" />
-              <span class="field-help">Passes over each training day. More passes = agents learn more from each day but takes longer.</span>
-            </label>
-          </div>
-
-          @if (trainingInfo()?.garage_count > 0) {
-            <div class="garage-options" data-testid="garage-options">
-              <label class="form-field checkbox-field">
-                <input type="checkbox" [(ngModel)]="reevaluateGaraged" />
-                <span class="field-label">Re-evaluate garaged models ({{ trainingInfo().garage_count }} in garage)</span>
-              </label>
-              @if (reevaluateGaraged) {
-                <label class="form-field">
-                  <span class="field-label">Minimum composite score (optional)</span>
-                  <input type="number" [(ngModel)]="reevaluateMinScore" min="0" max="1" step="0.01" placeholder="No threshold" data-testid="input-min-score" />
-                  <span class="field-help">Only re-evaluate garaged models with a composite score at or above this value. Leave empty for all.</span>
-                </label>
+                  </div>
+                  <label class="form-field checkbox-field">
+                    <input type="checkbox" [(ngModel)]="useAllData" />
+                    <span class="field-label">Use all data (auto 50/50 split)</span>
+                  </label>
+                  @if (!useAllData) {
+                    <div class="date-selection">
+                      <div class="date-range">
+                        <span class="date-range-title">Training dates</span>
+                        <label class="form-field">
+                          <span class="field-label">Start</span>
+                          <select [(ngModel)]="trainDateStart">
+                            @for (d of availableDates; track d) {
+                              <option [value]="d">{{ d }}</option>
+                            }
+                          </select>
+                        </label>
+                        <label class="form-field">
+                          <span class="field-label">End</span>
+                          <select [(ngModel)]="trainDateEnd">
+                            @for (d of availableDates; track d) {
+                              <option [value]="d">{{ d }}</option>
+                            }
+                          </select>
+                        </label>
+                      </div>
+                      <div class="date-range">
+                        <span class="date-range-title">Test dates</span>
+                        <label class="form-field">
+                          <span class="field-label">Start</span>
+                          <select [(ngModel)]="testDateStart">
+                            @for (d of availableDates; track d) {
+                              <option [value]="d">{{ d }}</option>
+                            }
+                          </select>
+                        </label>
+                        <label class="form-field">
+                          <span class="field-label">End</span>
+                          <select [(ngModel)]="testDateEnd">
+                            @for (d of availableDates; track d) {
+                              <option [value]="d">{{ d }}</option>
+                            }
+                          </select>
+                        </label>
+                      </div>
+                    </div>
+                  }
+                </div>
               }
-            </div>
-          }
 
-          <div class="estimate-box">
-            <span class="estimate-label">Estimated duration (refines once running)</span>
-            <span class="estimate-value">{{ estimatedDuration() }}</span>
-            <span class="estimate-detail">
-              {{ populationSize }} agents x {{ nGenerations }} gen{{ nGenerations > 1 ? 's' : '' }} x {{ info.train_days }} train days x {{ nEpochs }} epoch{{ nEpochs > 1 ? 's' : '' }}
-            </span>
+              <!-- STEP 2: Architecture -->
+              @case (2) {
+                <h3 class="wizard-title">Neural Network Architecture</h3>
+                <p class="help-text">
+                  The architecture is the model's "brain shape". We use <strong>PPO</strong> (Proximal Policy Optimisation) — a reinforcement learning algorithm that learns by trial and error, adjusting its strategy gradually so it doesn't overshoot. PPO is wrapped around an <strong>LSTM</strong> (Long Short-Term Memory) network, which gives the model a sense of recent history — essential for betting where the market moves second by second.
+                </p>
+                <p class="help-text">
+                  Select which architectures should compete in the population. Agents are randomly assigned one of the selected architectures. If you select multiple, agents with different architectures will breed together — this explores more strategies but makes comparison harder.
+                </p>
+                <div class="arch-cards">
+                  @for (arch of architectures(); track arch.name) {
+                    <label class="arch-card" [class.selected]="isArchitectureSelected(arch.name)">
+                      <input type="checkbox"
+                             [checked]="isArchitectureSelected(arch.name)"
+                             (change)="toggleArchitecture(arch.name)" />
+                      <div class="arch-content">
+                        <div class="arch-name">{{ arch.name }}</div>
+                        <div class="arch-desc">{{ arch.description }}</div>
+                      </div>
+                    </label>
+                  }
+                </div>
+                @if (!canProceedFromArch()) {
+                  <p class="warning-text">Select at least one architecture to continue.</p>
+                }
+              }
+
+              <!-- STEP 3: Constraints -->
+              @case (3) {
+                <h3 class="wizard-title">Betting Constraints</h3>
+                <p class="help-text">
+                  Constraints stop the model from learning degenerate strategies. Without a max price, a model might chase huge longshots because a rare hit looks like a "win" during training. Without a time restriction, it might bet in the final seconds where prices are noisy.
+                </p>
+                <p class="help-text">
+                  Each field below shows the current admin default. Edit to override for this run only — the admin default stays unchanged. Clear a field to restore the default.
+                </p>
+                @if (constraintDefaults(); as cd) {
+                  <div class="wizard-form">
+                    <label class="form-field">
+                      <span class="field-label">Max back price</span>
+                      <input type="number" step="0.1"
+                             [(ngModel)]="overrideMaxBackPrice"
+                             [placeholder]="cd.max_back_price !== null ? ('Default: ' + cd.max_back_price) : 'Default: unlimited'" />
+                      <span class="current-default">
+                        Admin default: <strong>{{ cd.max_back_price ?? 'unlimited' }}</strong>
+                      </span>
+                      <span class="field-help">Skip back bets where best available price exceeds this</span>
+                    </label>
+                    <label class="form-field">
+                      <span class="field-label">Max lay price</span>
+                      <input type="number" step="0.1"
+                             [(ngModel)]="overrideMaxLayPrice"
+                             [placeholder]="cd.max_lay_price !== null ? ('Default: ' + cd.max_lay_price) : 'Default: unlimited'" />
+                      <span class="current-default">
+                        Admin default: <strong>{{ cd.max_lay_price ?? 'unlimited' }}</strong>
+                      </span>
+                      <span class="field-help">Skip lay bets where best available price exceeds this</span>
+                    </label>
+                    <label class="form-field">
+                      <span class="field-label">Min seconds before off</span>
+                      <input type="number" step="1" min="0"
+                             [(ngModel)]="overrideMinSecondsBeforeOff"
+                             [placeholder]="'Default: ' + cd.min_seconds_before_off" />
+                      <span class="current-default">
+                        Admin default: <strong>{{ cd.min_seconds_before_off }}</strong>
+                        {{ cd.min_seconds_before_off === 0 ? '(no restriction)' : '' }}
+                      </span>
+                      <span class="field-help">Skip bets closer than this to the race start</span>
+                    </label>
+                  </div>
+                } @else {
+                  <p class="help-text">Loading admin defaults...</p>
+                }
+              }
+
+              <!-- STEP 4: Genetics -->
+              @case (4) {
+                <h3 class="wizard-title">Genetic Algorithm</h3>
+                <p class="help-text">
+                  We don't train one model — we train a <strong>population</strong> of models with randomly-sampled hyperparameters (learning rate, network size, etc). After each generation, the best are kept and "bred" to create the next generation, similar to natural selection. Over time, good hyperparameter combinations win out.
+                </p>
+                @if (genetics(); as g) {
+                  <div class="genetics-grid">
+                    <div class="info-chip-large">
+                      <div class="chip-value">{{ g.n_elite }}</div>
+                      <div class="chip-label">Elite survivors</div>
+                      <div class="chip-help">Top {{ g.n_elite }} always carry forward unchanged — prevents losing good models to bad luck</div>
+                    </div>
+                    <div class="info-chip-large">
+                      <div class="chip-value">{{ (g.selection_top_pct * 100) | number:'1.0-0' }}%</div>
+                      <div class="chip-label">Selection rate</div>
+                      <div class="chip-help">Top {{ (g.selection_top_pct * 100) | number:'1.0-0' }}% of each generation survive; the rest are culled</div>
+                    </div>
+                    <div class="info-chip-large">
+                      <div class="chip-value">{{ (g.mutation_rate * 100) | number:'1.0-0' }}%</div>
+                      <div class="chip-label">Mutation rate</div>
+                      <div class="chip-help">Each hyperparameter has this chance of mutating when breeding — more mutation = more exploration</div>
+                    </div>
+                  </div>
+                }
+                <p class="help-text">
+                  These settings are fixed via <code>config.yaml</code> for now. Making them configurable in the UI is planned for a future release.
+                </p>
+              }
+
+              <!-- STEP 5: Population -->
+              @case (5) {
+                <h3 class="wizard-title">Population Size</h3>
+                <p class="help-text">
+                  Population size is how many agents train simultaneously per generation. Each has different random hyperparameters, so they explore different strategies. Larger populations find better solutions but multiply training time linearly — double the population, double the time.
+                </p>
+                <p class="help-text">
+                  For getting started or testing changes, <strong>5-10 agents</strong> is enough. For serious runs, <strong>30-50 agents</strong> is the sweet spot. Above 50 shows diminishing returns.
+                </p>
+                <div class="wizard-form">
+                  <label class="form-field">
+                    <span class="field-label">Population size</span>
+                    <input type="number" [(ngModel)]="populationSize" min="2" max="200" (ngModelChange)="syncFormValues()" data-testid="input-population" />
+                    <span class="field-help">Number of competing agents (2-200)</span>
+                  </label>
+                </div>
+              }
+
+              <!-- STEP 6: Training Parameters -->
+              @case (6) {
+                <h3 class="wizard-title">Training Parameters</h3>
+                <p class="help-text">
+                  <strong>Generations</strong> = how many evolutionary cycles to run. Each generation trains every agent, evaluates them, breeds the best, and repeats. More generations = more refinement but more time.
+                </p>
+                <p class="help-text">
+                  <strong>Epochs per day</strong> = how many times each agent processes each training day. More epochs means deeper learning from the same data, but too many cause "overfitting" — memorising specific races instead of learning general patterns. Start with 3 epochs.
+                </p>
+                <div class="wizard-form">
+                  <label class="form-field">
+                    <span class="field-label">Generations</span>
+                    <input type="number" [(ngModel)]="nGenerations" min="1" max="50" (ngModelChange)="syncFormValues()" data-testid="input-generations" />
+                    <span class="field-help">Evolution rounds (1-50)</span>
+                  </label>
+                  <label class="form-field">
+                    <span class="field-label">Epochs per day</span>
+                    <input type="number" [(ngModel)]="nEpochs" min="1" max="20" (ngModelChange)="syncFormValues()" data-testid="input-epochs" />
+                    <span class="field-help">Passes over each training day (1-20)</span>
+                  </label>
+                </div>
+                @if (info.garage_count > 0) {
+                  <div class="garage-options" data-testid="garage-options">
+                    <h4 class="sub-title">Garaged Models</h4>
+                    <p class="help-text">
+                      Garaged models are saved favourites from previous runs. Re-evaluating them on the latest test data lets you compare them against the new generation without retraining.
+                    </p>
+                    <label class="form-field checkbox-field">
+                      <input type="checkbox" [(ngModel)]="reevaluateGaraged" />
+                      <span class="field-label">Re-evaluate garaged models ({{ info.garage_count }} in garage)</span>
+                    </label>
+                    @if (reevaluateGaraged) {
+                      <label class="form-field">
+                        <span class="field-label">Minimum composite score (optional)</span>
+                        <input type="number" [(ngModel)]="reevaluateMinScore" min="0" max="1" step="0.01" placeholder="No threshold" data-testid="input-min-score" />
+                        <span class="field-help">Only re-evaluate garaged models with a composite score at or above this value</span>
+                      </label>
+                    }
+                  </div>
+                }
+              }
+
+              <!-- STEP 7: Review -->
+              @case (7) {
+                <h3 class="wizard-title">Review &amp; Start</h3>
+                <p class="help-text">Review your selections below. Click Start Training to begin.</p>
+                <div class="review-grid">
+                  <div class="review-card">
+                    <h4>Data</h4>
+                    @if (useAllData) {
+                      <p>{{ info.train_days }} train / {{ info.test_days }} test days (auto 50/50)</p>
+                    } @else {
+                      <p>{{ datesInRange(trainDateStart, trainDateEnd).length }} train days ({{ trainDateStart }} to {{ trainDateEnd }})</p>
+                      <p>{{ datesInRange(testDateStart, testDateEnd).length }} test days ({{ testDateStart }} to {{ testDateEnd }})</p>
+                    }
+                  </div>
+                  <div class="review-card">
+                    <h4>Architectures</h4>
+                    <p>{{ selectedArchitecturesArray().join(', ') || 'none' }}</p>
+                  </div>
+                  <div class="review-card">
+                    <h4>Constraints</h4>
+                    <p>Max back: {{ overrideMaxBackPrice ?? (constraintDefaults()?.max_back_price ?? 'unlimited') }}</p>
+                    <p>Max lay: {{ overrideMaxLayPrice ?? (constraintDefaults()?.max_lay_price ?? 'unlimited') }}</p>
+                    <p>Min seconds before off: {{ overrideMinSecondsBeforeOff ?? (constraintDefaults()?.min_seconds_before_off ?? 0) }}</p>
+                  </div>
+                  <div class="review-card">
+                    <h4>Training</h4>
+                    <p>{{ populationSize }} agents × {{ nGenerations }} gen{{ nGenerations > 1 ? 's' : '' }} × {{ nEpochs }} epoch{{ nEpochs > 1 ? 's' : '' }}</p>
+                    @if (reevaluateGaraged && info.garage_count > 0) {
+                      <p>+ re-evaluate {{ info.garage_count }} garaged model{{ info.garage_count > 1 ? 's' : '' }}</p>
+                    }
+                  </div>
+                </div>
+                <div class="estimate-box">
+                  <span class="estimate-label">Estimated duration (refines once running)</span>
+                  <span class="estimate-value">{{ estimatedDuration() }}</span>
+                </div>
+                @if (startError()) {
+                  <div class="error-message">{{ startError() }}</div>
+                }
+              }
+            }
           </div>
 
-          <div class="recommendation">
-            Recommended: 3 generations, 3 epochs to start. Increase generations for better evolution, epochs for deeper learning per day.
+          <!-- ── Navigation ─────────────────────────────── -->
+          <div class="wizard-nav">
+            <button type="button" class="btn btn-secondary"
+                    (click)="prevStep()"
+                    [disabled]="wizardStep() === 1">
+              ← Back
+            </button>
+            @if (wizardStep() < 7) {
+              <button type="button" class="btn btn-primary"
+                      (click)="nextStep()"
+                      [disabled]="wizardStep() === 2 && !canProceedFromArch()">
+                Next →
+              </button>
+            } @else {
+              <button type="button" class="btn btn-start"
+                      (click)="onStartTraining()"
+                      [disabled]="isStarting()">
+                {{ isStarting() ? 'Starting...' : 'Start Training' }}
+              </button>
+            }
           </div>
-        } @else if (apiUnavailable()) {
-          <div class="error-message">
-            API is not available. Start the API backend first using <code>start-ui.bat</code> or <code>start-all.bat</code>.
-          </div>
-        } @else {
-          <p class="no-run">Loading training configuration...</p>
-        }
-
-        @if (startError()) {
-          <div class="error-message">{{ startError() }}</div>
-        }
-        <button class="btn btn-start"
-                (click)="onStartTraining()"
-                [disabled]="isStarting() || !trainingInfo() || apiUnavailable()">
-          {{ isStarting() ? 'Starting...' : 'Start Training' }}
-        </button>
-      </div>
+        </div>
+      }
     </div>
   }
 

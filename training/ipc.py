@@ -39,6 +39,10 @@ def make_start_cmd(
     reevaluate_min_score: float | None = None,
     train_dates: list[str] | None = None,
     test_dates: list[str] | None = None,
+    architectures: list[str] | None = None,
+    max_back_price: float | None = None,
+    max_lay_price: float | None = None,
+    min_seconds_before_off: int | None = None,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -50,6 +54,10 @@ def make_start_cmd(
         "reevaluate_min_score": reevaluate_min_score,
         "train_dates": train_dates,
         "test_dates": test_dates,
+        "architectures": architectures,
+        "max_back_price": max_back_price,
+        "max_lay_price": max_lay_price,
+        "min_seconds_before_off": min_seconds_before_off,
     })
 
 

@@ -181,6 +181,72 @@ class TestScoreboard:
             # Seed data has early_picks=2 + early_picks=1 = 3
             assert m["early_picks"] == 3
 
+    def test_scoreboard_includes_created_at(self):
+        """created_at should be present on every entry (set when model is created)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            gp_id, _, _ = _seed_models(store)
+            _seed_evaluation(store, gp_id)
+
+            client = _make_app(store, _test_config())
+            resp = client.get("/models")
+            models = resp.json()["models"]
+            assert len(models) >= 1
+            for m in models:
+                assert "created_at" in m
+                assert m["created_at"] is not None
+                # Should be an ISO timestamp
+                assert "T" in m["created_at"]
+
+    def test_scoreboard_last_evaluated_at_populated_after_scoring(self):
+        """last_evaluated_at should be populated after Scoreboard.update_scores() runs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            gp_id, _, _ = _seed_models(store)
+            _seed_evaluation(store, gp_id)
+
+            # Explicitly run update_scores() which persists scores and sets last_evaluated_at
+            # (simulates what the training orchestrator does at the end of each generation)
+            scoreboard = Scoreboard(store=store, config=_test_config())
+            scoreboard.update_scores()
+
+            client = _make_app(store, _test_config())
+            resp = client.get("/models")
+            models = resp.json()["models"]
+
+            evaluated = [m for m in models if m["model_id"] == gp_id]
+            assert len(evaluated) == 1
+            assert evaluated[0]["last_evaluated_at"] is not None
+            assert "T" in evaluated[0]["last_evaluated_at"]
+
+    def test_scoreboard_last_evaluated_at_null_for_new_model(self):
+        """last_evaluated_at should be null for a model that has never been evaluated."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            # Create a model but don't evaluate it
+            mid = store.create_model(
+                generation=0,
+                architecture_name="ppo_lstm_v1",
+                architecture_description="Test",
+                hyperparameters={},
+            )
+            # Also seed one with evaluation so scoreboard has something to rank
+            _, _, _ = _seed_models(store)
+            gp_id, _, _ = _seed_models(store)
+            _seed_evaluation(store, gp_id)
+
+            client = _make_app(store, _test_config())
+            resp = client.get("/models")
+            models = resp.json()["models"]
+
+            # Find the never-evaluated model
+            unevaluated = [m for m in models if m["model_id"] == mid]
+            if unevaluated:
+                # If included in scoreboard, last_evaluated_at should be None
+                assert unevaluated[0]["last_evaluated_at"] is None
+                # created_at should still be set
+                assert unevaluated[0]["created_at"] is not None
+
 
 # ── Model Detail Tests ───────────────────────────────────────────────
 

@@ -24,6 +24,8 @@
           <th>Mean Daily P&amp;L</th>
           <th>Early Picks</th>
           <th>Efficiency</th>
+          <th>Trained</th>
+          <th>Last Eval</th>
           <th>Composite Score</th>
         </tr>
       </thead>
@@ -54,12 +56,14 @@
             <td>{{ model.mean_daily_pnl | currency:'GBP':'symbol':'1.2-2' }}</td>
             <td>{{ model.early_picks }}</td>
             <td>{{ model.efficiency | number:'1.3-3' }}</td>
+            <td class="timestamp-col" [title]="model.created_at ?? ''">{{ formatTimestamp(model.created_at) }}</td>
+            <td class="timestamp-col" [title]="model.last_evaluated_at ?? ''">{{ formatTimestamp(model.last_evaluated_at) }}</td>
             <td class="score">{{ model.composite_score !== null ? (model.composite_score | number:'1.4-4') : '—' }}</td>
           </tr>
         }
         @empty {
           <tr>
-            <td colspan="12" class="empty-state" data-testid="empty-state">No models found</td>
+            <td colspan="14" class="empty-state" data-testid="empty-state">No models found</td>
           </tr>
         }
       </tbody>
