@@ -59,6 +59,18 @@ hyperparameters:
       type: float
       min: 0.001
       max: 0.05
+    gamma:
+      type: float
+      min: 0.95
+      max: 0.999
+    gae_lambda:
+      type: float
+      min: 0.9
+      max: 0.98
+    value_loss_coeff:
+      type: float
+      min: 0.25
+      max: 1.0
     lstm_hidden_size:
       type: int_choice
       choices:
