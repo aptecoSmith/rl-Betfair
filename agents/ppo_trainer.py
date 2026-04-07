@@ -182,12 +182,20 @@ class PPOTrainer:
         progress_queue: asyncio.Queue | None = None,
         device: str = "cpu",
         feature_cache: dict[str, list] | None = None,
+        model_id: str | None = None,
+        architecture_name: str | None = None,
     ) -> None:
         self.policy = policy.to(device)
         self.config = config
         self.device = device
         self.progress_queue = progress_queue
         self.feature_cache = feature_cache
+        # Session 9: tag each episode record so a post-run analysis can
+        # partition episodes.jsonl by agent and architecture without a
+        # separate join. Both default to None so legacy call sites
+        # (tests, direct instantiation) stay unchanged.
+        self.model_id = model_id
+        self.architecture_name = architecture_name
 
         hp = hyperparams or {}
         self.hyperparams = hp
@@ -542,6 +550,8 @@ class PPOTrainer:
         """Write per-episode metrics to a JSON-lines log file."""
         record = {
             "episode": tracker.completed,
+            "model_id": self.model_id,
+            "architecture_name": self.architecture_name,
             "day_date": ep.day_date,
             "total_reward": round(ep.total_reward, 4),
             "raw_pnl_reward": round(ep.raw_pnl_reward, 4),

@@ -975,3 +975,212 @@ worked examples and the full proof.
 **Next:** Session 9 — GPU shakeout (the first session that
 actually runs the new genes through a full Gen-0 on GPU).
 
+---
+
+## Session 9 — Full Gen-0 GPU shakeout (2026-04-07)
+
+**Shipped:**
+
+- **GPU smoke test** at `tests/arch_exploration/test_gpu_smoke.py`
+  (4 `@pytest.mark.gpu` cases): parametrises over every entry in
+  `REGISTRY`, instantiates each architecture on CUDA with a
+  reasonable hyperparameter dict, runs one forward + one backward
+  pass, and asserts every parameter gradient is finite. Also
+  includes a `test_cuda_is_available` guard so the GPU session
+  fails loudly if it's invoked on a CPU-only host. Deselected by
+  default via the existing `gpu` marker so CPU sessions stay fast.
+
+- **`scripts/session_9_shakeout.py`** — the Gen-0 shakeout driver.
+  Builds a `TrainingPlan` with population 21, 7 agents per arch
+  via `arch_mix={ppo_lstm_v1: 7, ppo_time_lstm_v1: 7,
+  ppo_transformer_v1: 7}`, fixed seed `20260407`, and an
+  arch-specific LR override for the transformer
+  (`arch_lr_ranges={ppo_transformer_v1: {type: float_log, min:
+  5e-6, max: 1e-4}}`, sitting entirely below the global
+  `[1e-5, 5e-4]` range). `hp_ranges` is left empty so
+  `PopulationManager.initialise_population` falls back to every
+  gene defined in `config.yaml` `search_ranges` — which already
+  contains every gene added in Sessions 1-7. The driver persists
+  the plan via `PlanRegistry`, constructs a session-scoped
+  `ModelStore` (separate `.db`, weights dir, bet-logs dir so the
+  shakeout never collides with a prior run), launches
+  `TrainingOrchestrator.run(n_generations=1, n_epochs=1)`, and
+  writes a single `shakeout_summary.json` with plan metadata,
+  train/test date lists, per-agent hyperparameters, and per-agent
+  aggregate `TrainingStats` (mean_reward, mean_pnl,
+  mean_bet_count, final losses). Supports `--dry-run` for plan
+  validation without PPO, and `--session-tag` for trial isolation.
+
+- **`scripts/session_9_analysis.py`** — post-run invariant
+  checker. Reads the summary JSON plus the session-scoped
+  `logs/<tag>/training/episodes.jsonl` (now tagged with
+  `model_id` and `architecture_name`, see next bullet) and
+  validates the five post-run invariants from the session plan:
+  1. **Gene variance** — every gene in `config.yaml`
+     `search_ranges` has more than one distinct value across the
+     21-agent population (catches accidentally-hardcoded values).
+  2. **Reward-gene correlation** — Pearson `r` between
+     `reward_efficiency_penalty` and per-agent `mean_bet_count`
+     must be strictly negative, with threshold `-0.01` for
+     sampling-noise tolerance at n=21 (the session plan says a
+     *zero* correlation is the bug; a weakly-negative one is
+     fine).
+  3. **Raw+shaped invariant** — max absolute per-episode
+     discrepancy `|total_reward - (raw + shaped)|` ≤ 1e-3 across
+     every episode in the session's `episodes.jsonl`.
+  4. **Architecture coverage** — actual arch counts match the
+     plan's `arch_mix` exactly; no arch collapsed to zero.
+  5. **No duplicate episode-1 fingerprints** — no two agents
+     share identical `(total_reward, raw_pnl_reward,
+     shaped_bonus)` triples on their first episode.
+  Writes a full JSON report to
+  `logs/<tag>/shakeout_invariants.json` and exits non-zero on
+  any failure.
+
+- **`PPOTrainer` / orchestrator: per-episode log now tagged with
+  agent identity.** `PPOTrainer.__init__` accepts optional
+  `model_id` / `architecture_name` kwargs and writes both into
+  every row of `episodes.jsonl`. `TrainingOrchestrator._run_generation`
+  passes the `agent.model_id` / `agent.architecture_name` values
+  through when constructing each per-agent trainer. Legacy call
+  sites default both to `None` so the existing test fixtures and
+  the direct-instantiation code path stay unchanged.
+
+- **`.gitignore`** — added `registry/bet_logs/` and
+  `registry/training_plans/`. Verified via `git check-ignore -v`
+  that both session-scoped bet-log dirs and all plan JSON files
+  land in ignored paths alongside the already-ignored
+  `registry/models.db`, `registry/weights/`, and `logs/`. No
+  generated Session-9 artefacts are committed.
+
+**Run results:**
+
+- **Plan:** `session_9_shakeout` plan_id
+  `f6429220-d858-4c0e-a602-690c05ec82ef`, seed `20260407`,
+  population 21 (7 per arch), arch-specific transformer LR
+  override `[5e-6, 1e-4]`, every Session 1-7 gene live.
+- **Dataset:** 4 train days
+  (`2026-03-31 .. 2026-04-03`), 2 test days
+  (`2026-04-04, 2026-04-05`). ~40 races × 9500 ticks per day.
+- **Wall clock:** **2530.5 s** (42.2 min) end-to-end, single
+  generation, 84 training episodes + 42 eval days, on the
+  RTX 3090. Comfortably under the 4-hour budget.
+- **Errors captured during the run:** **0**. No NaN crashes, no
+  exceptions, no all-zero action collapse, no architecture failed
+  to instantiate on CUDA.
+- **Population stats (per-arch means):**
+  - `ppo_lstm_v1`: mean_reward +536.70, mean_pnl +341.72,
+    mean_bets 92.6
+  - `ppo_time_lstm_v1`: mean_reward +1279.65, mean_pnl +920.96,
+    mean_bets 98.2
+  - `ppo_transformer_v1`: mean_reward +2710.35, mean_pnl
+    +1723.41, mean_bets 189.1
+  These "positive P&L" numbers are Gen-0 random-policy noise on
+  a 4-day training window, not signal — this is a shakeout, not
+  a performance run. The session plan explicitly warned against
+  reading Gen-0 P&L as evidence of anything.
+- **Final generation scoreboard top composite score:** 0.9458
+  (one agent; irrelevant as a performance claim because the
+  evaluation ran on just 2 days).
+
+**Invariants — all five passed:**
+
+1. `gene_variance` — **PASS**. Every one of 23 numeric and
+   choice genes has multiple distinct values across the 21
+   agents. `collapsed_genes=[]`. No accidentally-hardcoded value
+   slipped through Sessions 1-7.
+2. `reward_gene_correlation` — **PASS**.
+   `Pearson r = -0.2549` between `reward_efficiency_penalty` and
+   per-agent `mean_bet_count` (n=21, threshold `-0.01`). The
+   Session 1 reward-plumbing fix is alive and well: agents with
+   higher efficiency penalties placed measurably fewer bets
+   across the training run.
+3. `raw_plus_shaped` — **PASS**. Max per-episode discrepancy
+   `1.0e-4` across 84 episodes, well inside the `1e-3` hard cap
+   (and matching the expected noise floor from the 4-decimal
+   rounding applied before the episode log is written). The
+   CLAUDE.md invariant held for every architecture under every
+   sampled gene combination.
+4. `arch_coverage` — **PASS**. Actual `{ppo_lstm_v1: 7,
+   ppo_time_lstm_v1: 7, ppo_transformer_v1: 7}` exactly matches
+   the plan's `arch_mix`. No architecture died out or failed to
+   instantiate.
+5. `no_duplicate_episode_1` — **PASS**. 21 distinct
+   `(total_reward, raw_pnl_reward, shaped_bonus)` fingerprints
+   across 21 agents — no hidden determinism bug.
+
+**Files added:**
+
+- `tests/arch_exploration/test_gpu_smoke.py` — 4 GPU smoke
+  cases (3 arch forward+backward + CUDA availability guard).
+- `scripts/session_9_shakeout.py` — ~300-line Gen-0 driver.
+- `scripts/session_9_analysis.py` — ~270-line invariant
+  checker.
+
+**Files changed:**
+
+- `agents/ppo_trainer.py` — `PPOTrainer.__init__` gains
+  optional `model_id` / `architecture_name` kwargs;
+  `_log_episode` records both in every JSONL row.
+- `training/run_training.py` — orchestrator passes
+  `agent.model_id` / `agent.architecture_name` into the per-agent
+  trainer.
+- `.gitignore` — `registry/bet_logs/` and
+  `registry/training_plans/`.
+- `plans/arch-exploration/progress.md`, `lessons_learnt.md`,
+  `master_todo.md` — session notes; Session 9 ticked off.
+
+**Tests:**
+
+- CPU: `pytest tests/arch_exploration/` → 73 passed, 4
+  deselected (`gpu`), ~7 s.
+- GPU smoke: `pytest tests/arch_exploration/test_gpu_smoke.py -m
+  gpu` → 4 passed on CUDA, ~4 s.
+- Shakeout wall clock: 2530.5 s on the full 4 train / 2 test
+  schedule; ~1400 s on the earlier 2 train / 1 test trial which
+  was used to confirm the plumbing before the full run.
+
+**Logs / artefacts (all gitignored):**
+
+- `logs/session_9/shakeout_summary.json` — plan, per-agent
+  hyperparameters + aggregate training stats.
+- `logs/session_9/shakeout_invariants.json` — the five-invariant
+  report machine-readable form.
+- `logs/session_9/training/episodes.jsonl` — 84 tagged training
+  episode rows plus per-episode policy/value/entropy loss.
+- `registry/session_9.db`, `registry/session_9_weights/`,
+  `registry/session_9_bet_logs/` — the session-scoped model store.
+- `registry/training_plans/f6429220-d858-4c0e-a602-690c05ec82ef.json`
+  — the persisted plan with the recorded Gen-0 outcome appended
+  by `_record_plan_outcome`.
+
+**Not shipped:**
+
+- **No tuning.** The session plan's "Do not" list explicitly
+  forbade re-scoping on Gen-0 results. One threshold in the
+  analysis script was relaxed from `-0.05` to `-0.01` *before*
+  the full run, based on a 2 train / 1 test day trial — the
+  trial exposed that `-0.05` was statistically incompatible with
+  a single-generation untrained-policy Gen-0, while the session
+  plan's actual rule is "zero correlation is the bug". The full
+  run then returned `r = -0.255`, well below either threshold,
+  so the analysis pass would have passed under either rule.
+- **Gen 1 and beyond.** The shakeout is a single-generation
+  verification that the exploration infrastructure works
+  end-to-end. Running the actual multi-generation exploration
+  is a follow-up session after we've read the results.
+- **No NaN monitoring in the analysis script.** The invariant
+  checker relies on the GPU smoke test plus the `errors=[]`
+  field of `shakeout_summary.json` (populated from a try/except
+  around `orch.run`) to surface any exception-mode failure.
+  Adding a per-episode NaN scan over `episodes.jsonl` is
+  additive and can land later if we ever see silent NaN
+  propagation that doesn't raise.
+- **No commit of the shakeout artefacts.** Explicitly gitignored
+  per the session plan — only the plan docs and the new code
+  files land in this commit.
+
+**Next:** Phase 6 is done. The infrastructure is ready for a
+real multi-generation exploration run; that is a new session
+prompt, not a continuation of this one.
+

@@ -471,6 +471,8 @@ class TrainingOrchestrator:
                     progress_queue=self.progress_queue,
                     device=self.device,
                     feature_cache=self.feature_cache,
+                    model_id=agent.model_id,
+                    architecture_name=agent.architecture_name,
                 )
                 with perf_log(
                     logger,

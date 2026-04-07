@@ -108,10 +108,17 @@ Goal: wider search space over model shape.
 
 ## Phase 6 — Final verification
 
-- [ ] **Session 9 — Full Gen-0 GPU training run**
+- [x] **Session 9 — Full Gen-0 GPU training run**
   (`session_9_gpu_shakeout.md`)
   - This is the one session where GPU tests are allowed. All prior
     sessions use CPU-only tests for fast feedback (see `testing.md`).
   - Run a full Gen-0 with the new planner, verify coverage, inspect
     logged episode stats for sanity.
   - Update `lessons_learnt.md` with anything surprising.
+  - **Done (2026-04-07):** 21-agent, single-generation shakeout on
+    4 train + 2 test days completed in 2530.5 s on an RTX 3090 with
+    zero errors. All five post-run invariants held (gene variance,
+    reward-gene → bet-count correlation `r = -0.255`, raw+shaped
+    discrepancy ≤ 1e-4, arch coverage 7/7/7 exact, no duplicate
+    episode-1 fingerprints). Infrastructure ready for the actual
+    multi-generation exploration run (new session).

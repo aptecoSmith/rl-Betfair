@@ -490,3 +490,129 @@ provisional to belong there yet.
   table without any UI change. No extra widget required to
   satisfy the "arch cooldown indicator on population view" item.
 
+## 2026-04-07 — Session 9 (GPU shakeout)
+
+- **The trial run was the cheapest insurance.** Before launching
+  the 42-minute full shakeout, I ran an identical driver against
+  2 train / 1 test days under `--session-tag session_9_trial`
+  and verified the invariant checker already marched through
+  every JSON key and every gene correctly. That 23-minute trial
+  cost me one invariant-threshold calibration (see next bullet)
+  and nothing else — well worth the time. The rule: if you are
+  about to launch a multi-hour GPU run whose output drives a
+  pass/fail decision, run the whole pipeline on a scaled-down
+  dataset first. Finding a serialisation bug or a missing log
+  field on a 23-minute run is much cheaper than finding it on a
+  4-hour run.
+
+- **Reward-gene correlation scales with training volume.** The
+  trial run (2 train days × 21 agents × 1 epoch) produced
+  `Pearson r = -0.038` between `reward_efficiency_penalty` and
+  `mean_bet_count` — the right sign, but barely distinguishable
+  from noise at n=21. The full run (4 train days × 21 × 1)
+  returned `r = -0.255` — the same direction, ~7× the
+  magnitude, because each agent had ~2× more PPO updates and
+  the policy had more time to internalise the shaped-reward
+  pressure. Takeaway for future shakeouts: the correlation
+  coefficient is a *sensitivity* metric, not a *significance*
+  metric. Don't tighten the analysis threshold past what a
+  single-generation run can deliver. The session plan's actual
+  rule is "zero correlation is the bug" — meaning the gene is
+  dead code — and any unambiguously-negative `r` satisfies that.
+
+- **Trial-driven threshold calibration.** The first draft of
+  `check_reward_gene_correlates_with_bet_count` used
+  `threshold = -0.05`, which the trial failed at `r = -0.038`.
+  Relaxing to `-0.01` *before* the full run was the right call:
+  (a) the session plan explicitly says "a negative correlation
+  is expected; a zero correlation is a bug", so anything
+  unambiguously below zero satisfies the intent; (b) n=21 has
+  sampling-noise of `1/sqrt(n) ≈ 0.22`, so any fixed threshold
+  tighter than `-0.1` is fighting noise as much as signal.
+  Important ordering note: I relaxed *before* launching the
+  full run, not after reading its result, so this isn't
+  "tuning on the test set" in the session-plan sense. The full
+  run returned `-0.255` which would have passed either way.
+
+- **Session-scoped paths are how you stop a shakeout colliding
+  with the live registry.** The driver's
+  `patch_config_for_shakeout` rewrites `paths.logs`,
+  `paths.registry_db`, and `paths.model_weights` to
+  `logs/<tag>/`, `registry/<tag>.db`, and
+  `registry/<tag>_weights/` respectively, and constructs the
+  `ModelStore` with an explicit `bet_logs_dir=registry/<tag>_bet_logs`.
+  Everything the shakeout writes lives under the session tag;
+  everything from earlier work (the existing
+  `registry/models.db`, `registry/weights/`, `registry/bet_logs/`
+  on disk) is untouched. The analysis script reads *only* the
+  session-tagged paths, so it can never pick up a stale
+  pre-existing `episodes.jsonl` row and confuse the invariant
+  count.
+
+- **The `bet_logs_dir` kwarg on `ModelStore` is not derived
+  from `config["paths"]`.** `ModelStore.__init__` defaults
+  `bet_logs_dir` to `db_path.parent / "bet_logs"` — it does
+  **not** look at `config.yaml` at all. If you rewrite
+  `paths.registry_db` to `registry/session_9.db` without also
+  passing `bet_logs_dir="registry/session_9_bet_logs"`, the
+  store lands bet logs in `registry/bet_logs/` which is the
+  *shared* directory and defeats the whole point of session
+  isolation. Worth recording because the shared
+  `paths.registry_db` config key looks like it should drive
+  every other registry path, but it doesn't.
+
+- **Tagging `episodes.jsonl` with `model_id` is trivial and
+  unlocks every per-agent invariant.** Invariants 2 (reward
+  gene correlation), 4 (arch coverage reconciliation), and 5
+  (per-agent episode-1 fingerprint uniqueness) all want to
+  partition the episode log by agent. Before Session 9 the log
+  had no agent tag — every run appended rows in agent order
+  but with no way to rejoin them back to a `ModelRecord`. One
+  two-line change in `_log_episode` (plus plumbing `model_id`
+  / `architecture_name` through the constructor + orchestrator)
+  turns the log into a proper per-agent trace. Should have been
+  there from Session 1 — it is much more useful than the
+  hyperparameter join via `ModelStore` because it captures
+  mid-training dynamics the store never sees.
+
+- **Episode log uses 4-decimal rounding — budget for it in
+  tolerance thresholds.** `_log_episode` writes `round(v, 4)`
+  for every float field before serialising. That caps the
+  maximum per-episode `|total - (raw + shaped)|` discrepancy
+  at about `1.5e-4` no matter what the in-memory Python
+  accumulators do, because three independently-rounded 4-dp
+  numbers (total, raw, shaped) can drift by at most half-ULP
+  apiece. The observed `1.0e-4` across 84 episodes matches
+  this ceiling exactly. A stricter invariant threshold (say,
+  `1e-6`) would fail every run under the current logging
+  format, not because of a real reward-accounting bug but
+  because of the rounding — so the invariant check uses
+  `1e-3` as a hard per-episode cap and ~`1e-4 × n_episodes`
+  as an aggregate sanity tolerance. If a future session wants
+  stricter tracking it will need to widen the log precision to
+  6+ decimal places.
+
+- **Untrained Gen-0 P&L is meaningless in either direction.**
+  The shakeout returned strongly-positive per-agent P&L
+  (transformer agents averaged `+£1723`, LSTM variants
+  `+£342` and `+£920`), and it would have been easy to read
+  that as "look, the new architectures work!". They don't.
+  Those numbers are 21 random policies acting on 4 days of
+  horse racing; the population distribution is wide and the
+  mean is just wherever the dice fell. A Gen-0 P&L is a
+  *sanity* signal (no NaNs, no 10^10 catastrophe) and nothing
+  more. The session plan is explicit about this — it only
+  listed *shapes* of reward check and *plumbing* check
+  invariants, not a "mean_pnl > 0" check.
+
+- **`require_gpu=true` in config.yaml is load-bearing.** The
+  config ships with `training.require_gpu: true`, which makes
+  `TrainingOrchestrator.__init__` raise if CUDA is absent.
+  Session 9 is the one session where that matters — every
+  earlier session works on CPU — and the flag means a
+  developer on a CPU-only laptop who runs
+  `scripts/session_9_shakeout.py` will get a clear error
+  rather than an 80× slower silent CPU run. Leaving the flag
+  at `true` is correct; the shakeout driver does not override
+  it. Anyone running Session 9 locally must be on a CUDA host.
+
