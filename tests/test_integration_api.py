@@ -23,16 +23,28 @@ from registry.model_store import (
 )
 from registry.scoreboard import Scoreboard
 from api.routers import models, training, replay
+from tests._data_fixtures import latest_processed_date
 
-# Real data paths
+# Real data paths.  Use whatever extracted day is currently on disk
+# rather than pinning a specific date — see tests/_data_fixtures.py
+# for the rationale (the old hard-coded 2026-03-26 was silently
+# skipping the whole module after that day was aged out).
 DATA_DIR = Path("data/processed")
-REAL_DATE = "2026-03-26"
-REAL_PARQUET = DATA_DIR / f"{REAL_DATE}.parquet"
+_LATEST = latest_processed_date(data_dir=DATA_DIR)
 
 pytestmark = pytest.mark.skipif(
-    not REAL_PARQUET.exists(),
-    reason=f"Real Parquet data not available at {REAL_PARQUET}",
+    _LATEST is None,
+    reason=f"No usable extracted Parquet day in {DATA_DIR}",
 )
+
+# Module-level constants kept for the tests below.  When the suite
+# runs without any extracted data, these are placeholders that the
+# pytestmark above will skip past before any test executes.
+REAL_DATE = _LATEST[0] if _LATEST else "0000-00-00"
+REAL_PARQUET = _LATEST[1] if _LATEST else DATA_DIR / "missing.parquet"
+# Bet timestamp is seeded into the test DB (not read from parquet),
+# so it just needs to be a self-consistent ISO string for the day.
+REAL_BET_TIMESTAMP = f"{REAL_DATE}T14:00:05"
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -133,7 +145,7 @@ def integration_env(real_markets):
                     run_id=run_id,
                     date=REAL_DATE,
                     market_id=market_id,
-                    tick_timestamp="2026-03-26T14:00:05",
+                    tick_timestamp=REAL_BET_TIMESTAMP,
                     seconds_to_off=1795.0,
                     runner_id=101,
                     runner_name="Test Runner",
@@ -321,7 +333,7 @@ class TestReplayIntegration:
         # Should have our seeded bet
         assert len(data["all_bets"]) == 1
         bet = data["all_bets"][0]
-        assert bet["tick_timestamp"] == "2026-03-26T14:00:05"
+        assert bet["tick_timestamp"] == REAL_BET_TIMESTAMP
         assert bet["action"] == "back"
         assert bet["price"] == 3.5
 

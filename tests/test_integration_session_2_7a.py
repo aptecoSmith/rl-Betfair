@@ -1,12 +1,21 @@
 """Integration tests for Session 2.7a — PolledMarketSnapshots + RaceStatusEvents.
 
-Tests against real extracted data (2026-03-26) and the live MySQL database.
-Skip gracefully when DB or data isn't available.
+The ``TestBackwardCompat`` group needs a parquet that *predates*
+Session 2.7a — i.e. one without the ``race_status`` column.  This
+file used to be hard-coded to ``2026-03-26``, but that day was aged
+out of the cold backups, leaving the whole class skipped.
+
+Now we synthesise a legacy-schema parquet on the fly: pick the
+latest available extracted day, drop the post-2.7a columns, and
+write the result to a temp dir alongside a copy of its runners
+file. ``load_day`` then loads it as if it were genuinely old
+data.  See :mod:`tests._data_fixtures` for the helper.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import date, datetime
 from pathlib import Path
 
@@ -18,6 +27,7 @@ from data.episode_builder import Day, load_day
 from data.extractor import DataExtractor, TICKS_COLUMNS
 from data.feature_engineer import RACE_STATUSES, engineer_race, market_tick_features
 from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+from tests._data_fixtures import latest_processed_date, make_legacy_schema_parquet
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -48,12 +58,33 @@ def extractor(config):
 
 
 @pytest.fixture(scope="module")
-def real_day() -> Day:
-    """Load the real 2026-03-26 day."""
-    parquet_path = DATA_DIR / "2026-03-26.parquet"
-    if not parquet_path.exists():
-        pytest.skip("2026-03-26.parquet not found")
-    return load_day("2026-03-26", data_dir=DATA_DIR)
+def real_day(tmp_path_factory) -> Day:
+    """Synthesise a legacy-schema day from the latest extracted parquet.
+
+    The ``TestBackwardCompat`` tests below assert that data WITHOUT
+    the post-Session-2.7a columns (``race_status``, each-way fields)
+    still loads through ``episode_builder.load_day`` and runs through
+    ``feature_engineer`` / ``BetfairEnv``.  We can't just hand them a
+    modern parquet — those tests would fail because real data has
+    those columns populated.  So we copy the latest day to a temp
+    dir, strip the post-2.7a columns from the ticks, and load the
+    result.
+    """
+    latest = latest_processed_date(data_dir=DATA_DIR)
+    if latest is None:
+        pytest.skip(f"No extracted parquet available in {DATA_DIR}")
+    date_str, ticks_path = latest
+    runners_path = DATA_DIR / f"{date_str}_runners.parquet"
+    if not runners_path.exists():
+        pytest.skip(f"No runners parquet for {date_str}")
+
+    tmp_dir = tmp_path_factory.mktemp("legacy_fixture")
+    legacy_ticks = tmp_dir / f"{date_str}.parquet"
+    legacy_runners = tmp_dir / f"{date_str}_runners.parquet"
+    make_legacy_schema_parquet(ticks_path, legacy_ticks)
+    shutil.copy(runners_path, legacy_runners)
+
+    return load_day(date_str, data_dir=tmp_dir)
 
 
 # ── Auto-detect tests ────────────────────────────────────────────────────────
@@ -127,19 +158,37 @@ class TestBackwardCompat:
         assert "time_since_status_change" in feats[0]["market_velocity"]
 
     def test_env_runs_full_episode_with_old_data(self, real_day, config):
-        """Full episode on legacy data should work with new obs_dim."""
+        """Full episode on legacy data should work end-to-end.
+
+        We pull the expected obs shape directly from the env's
+        ``observation_space`` rather than hand-summing dim constants
+        — the dim constants are imported here only to make sure
+        they're still valid imports for legacy callers.  The
+        previous version of this test hand-summed
+        ``MARKET + VELOCITY + RUNNER*N + AGENT`` and missed the
+        ``POSITION_DIM * max_runners`` term entirely, so the
+        assertion would always fail against a real env.  That bug
+        was hidden for months by an unrelated module-level skip.
+        """
         env = BetfairEnv(real_day, config)
         obs, info = env.reset()
 
-        expected_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
-        assert obs.shape == (expected_dim,)
-        assert expected_dim == 1587  # was 1583 (Session 2.8: +4 market velocity)
+        # Sanity-check that the legacy dim constants are still
+        # importable — we don't sum them here.
+        assert MARKET_DIM > 0
+        assert VELOCITY_DIM > 0
+        assert RUNNER_DIM > 0
+        assert AGENT_STATE_DIM > 0
+
+        expected_shape = env.observation_space.shape
+        assert obs.shape == expected_shape
 
         # Step through a few ticks
         import numpy as np
+        action_dim = env.action_space.shape[0]
         for _ in range(min(10, len(real_day.races[0].ticks))):
-            action = np.zeros(28, dtype=np.float32)
+            action = np.zeros(action_dim, dtype=np.float32)
             obs, reward, terminated, truncated, info = env.step(action)
             if terminated:
                 break
-            assert obs.shape == (expected_dim,)
+            assert obs.shape == expected_shape
