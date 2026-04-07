@@ -62,8 +62,8 @@ def _make_config(
                 "lstm_hidden_size": {"type": "int_choice", "choices": [64, 128, 256, 512, 1024, 2048]},
                 "mlp_hidden_size": {"type": "int_choice", "choices": [64, 128, 256]},
                 "mlp_layers": {"type": "int", "min": 1, "max": 3},
-                "observation_window_ticks": {"type": "int", "min": 3, "max": 360},
-                "reward_early_pick_bonus": {"type": "float", "min": 1.0, "max": 1.5},
+                "early_pick_bonus_min": {"type": "float", "min": 1.0, "max": 1.2},
+                "early_pick_bonus_max": {"type": "float", "min": 1.2, "max": 1.5},
                 "reward_efficiency_penalty": {"type": "float", "min": 0.001, "max": 0.05},
                 "reward_precision_bonus": {"type": "float", "min": 0.0, "max": 3.0},
             }

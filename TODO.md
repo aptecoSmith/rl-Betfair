@@ -167,8 +167,9 @@ No item is done until all three steps are complete.
 - `agents/population_manager.py` — initialise N agents (N from config) each
   with randomised hyperparameters drawn from defined search ranges
 - Hyperparameter schema: learning_rate, ppo_clip, entropy_coeff, lstm_hidden,
-  mlp_layers, mlp_hidden, reward_early_pick_bonus, reward_efficiency_penalty,
-  observation_window_ticks (see PLAN.md)
+  mlp_layers, mlp_hidden, reward_efficiency_penalty, early_pick_bonus_min/_max
+  (see PLAN.md; `observation_window_ticks` retired, `reward_early_pick_bonus`
+  scalar split into `_min`/`_max`)
 - **Test:** pytest — population initialises with correct size, all hyperparams
   within valid ranges, no two agents identical
 - **Integration test:** initialise population from real config → verify all

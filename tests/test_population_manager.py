@@ -44,8 +44,8 @@ def search_ranges_raw() -> dict:
         "lstm_hidden_size": {"type": "int_choice", "choices": [64, 128, 256, 512, 1024, 2048]},
         "mlp_hidden_size": {"type": "int_choice", "choices": [64, 128, 256]},
         "mlp_layers": {"type": "int", "min": 1, "max": 3},
-        "observation_window_ticks": {"type": "int", "min": 3, "max": 360},
-        "reward_early_pick_bonus": {"type": "float", "min": 1.0, "max": 1.5},
+        "early_pick_bonus_min": {"type": "float", "min": 1.0, "max": 1.2},
+        "early_pick_bonus_max": {"type": "float", "min": 1.2, "max": 1.5},
         "reward_efficiency_penalty": {"type": "float", "min": 0.001, "max": 0.05},
         "reward_precision_bonus": {"type": "float", "min": 0.0, "max": 3.0},
     }
@@ -128,12 +128,12 @@ class TestSampleHyperparams:
         for _ in range(50):
             hp = sample_hyperparams(hp_specs)
             assert 1 <= hp["mlp_layers"] <= 3
-            assert 3 <= hp["observation_window_ticks"] <= 360
 
     def test_reward_params_in_range(self, hp_specs: list[HyperparamSpec]):
         for _ in range(50):
             hp = sample_hyperparams(hp_specs)
-            assert 1.0 <= hp["reward_early_pick_bonus"] <= 1.5
+            assert 1.0 <= hp["early_pick_bonus_min"] <= 1.2
+            assert 1.2 <= hp["early_pick_bonus_max"] <= 1.5
             assert 0.001 <= hp["reward_efficiency_penalty"] <= 0.05
 
     def test_seeded_reproducibility(self, hp_specs: list[HyperparamSpec]):
@@ -403,9 +403,13 @@ class TestEdgeCases:
 
     def test_obs_dim_matches_env(self, small_config: dict):
         pm = PopulationManager(small_config, model_store=None)
+        # Dimension constants are defined in env/betfair_env.py — update that
+        # file if you need to change the observation layout. This test only
+        # asserts that PopulationManager agrees with whatever env currently
+        # exports, rather than hardcoding a fresh integer (which is what
+        # went stale originally).
         expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
         assert pm.obs_dim == expected
-        assert pm.obs_dim == 1630  # was 1587 (Session 4.10: +1 agent state + 42 position)
 
     def test_action_dim_matches_env(self, small_config: dict):
         pm = PopulationManager(small_config, model_store=None)

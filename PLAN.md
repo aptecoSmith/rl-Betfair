@@ -329,10 +329,14 @@ Hyperparameters subject to evolution:
 | `lstm_hidden_size` | int | 64, 128, 256, 512 |
 | `mlp_hidden_size` | int | 64, 128, 256 |
 | `mlp_layers` | int | 1 → 4 |
-| `observation_window_ticks` | int | 3 → 20 |
-| `reward_early_pick_bonus` | float | 1.0 → 2.0 |
+| `early_pick_bonus_min` / `early_pick_bonus_max` | float | 1.0 → 1.8 |
 | `reward_efficiency_penalty` | float | 0.001 → 0.05 |
 | `architecture_name` | str | keys in REGISTRY |
+
+> Note: `observation_window_ticks` was retired in arch-exploration Session 1
+> (sampled but unused); the scalar `reward_early_pick_bonus` was split into
+> `_min`/`_max` in arch-exploration Session 3. `config.yaml` is the
+> authoritative list of live genes.
 
 ### Genetic Event Logging
 
