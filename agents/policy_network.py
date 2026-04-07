@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Normal
 
 from env.betfair_env import (
@@ -150,7 +151,17 @@ class PPOLSTMPolicy(BasePolicy):
         mlp_layers = hyperparams.get("mlp_layers", 2)
         runner_embed_dim = mlp_hidden  # runner embedding matches MLP hidden
 
+        # Session 5 — LSTM structural genes. Defaults match the
+        # pre-Session-5 architecture so checkpoints saved without these
+        # keys load identically.
+        lstm_num_layers = int(hyperparams.get("lstm_num_layers", 1))
+        lstm_dropout = float(hyperparams.get("lstm_dropout", 0.0))
+        lstm_layer_norm = bool(hyperparams.get("lstm_layer_norm", False))
+
         self.lstm_hidden_size = lstm_hidden
+        self.lstm_num_layers = lstm_num_layers
+        self.lstm_dropout = lstm_dropout
+        self.lstm_layer_norm_enabled = lstm_layer_norm
         self.runner_embed_dim = runner_embed_dim
 
         # ── Runner encoder (shared weights across all runners) ──────────
@@ -172,11 +183,22 @@ class PPOLSTMPolicy(BasePolicy):
         # ── LSTM ────────────────────────────────────────────────────────
         # Input: market_emb + mean-pooled runner_embs + max-pooled runner_embs
         lstm_input_dim = mlp_hidden + runner_embed_dim * 2
+        # NOTE: PyTorch's nn.LSTM only applies ``dropout`` BETWEEN stacked
+        # layers, and silently ignores it when ``num_layers == 1``. To
+        # avoid the warning we only pass dropout in the stacked case.
         self.lstm = nn.LSTM(
             input_size=lstm_input_dim,
             hidden_size=lstm_hidden,
-            num_layers=1,
+            num_layers=lstm_num_layers,
+            dropout=(lstm_dropout if lstm_num_layers > 1 else 0.0),
             batch_first=True,
+        )
+
+        # Layer norm is applied to the LSTM output (post-recurrence) — a
+        # single fixed location chosen so the actor/critic heads always
+        # see normalised activations regardless of stacking.
+        self.lstm_output_norm: nn.Module = (
+            nn.LayerNorm(lstm_hidden) if lstm_layer_norm else nn.Identity()
         )
 
         # ── Actor head (per-runner) ─────────────────────────────────────
@@ -307,6 +329,7 @@ class PPOLSTMPolicy(BasePolicy):
         # LSTM forward
         lstm_out, new_hidden = self.lstm(lstm_input, hidden_state)
         # lstm_out: (batch, seq_len, lstm_hidden)
+        lstm_out = self.lstm_output_norm(lstm_out)
 
         # Use last timestep for action/value heads
         lstm_last = lstm_out[:, -1, :]  # (batch, lstm_hidden)
@@ -362,9 +385,13 @@ class PPOLSTMPolicy(BasePolicy):
     def init_hidden(
         self, batch_size: int = 1
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return zero-initialised LSTM hidden state ``(h_0, c_0)``."""
-        h = torch.zeros(1, batch_size, self.lstm_hidden_size)
-        c = torch.zeros(1, batch_size, self.lstm_hidden_size)
+        """Return zero-initialised LSTM hidden state ``(h_0, c_0)``.
+
+        Shape ``(num_layers, batch, hidden)`` — matches ``nn.LSTM``'s
+        expected hidden-state layout for stacked recurrence.
+        """
+        h = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
+        c = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
         return h, c
 
     def get_action_distribution(
@@ -506,7 +533,18 @@ class PPOTimeLSTMPolicy(BasePolicy):
         mlp_layers = hyperparams.get("mlp_layers", 2)
         runner_embed_dim = mlp_hidden
 
+        # Session 5 — LSTM structural genes. Defaults match the
+        # pre-Session-5 architecture (single layer, no dropout, no
+        # layer norm) so checkpoints saved without these keys load
+        # identically.
+        lstm_num_layers = int(hyperparams.get("lstm_num_layers", 1))
+        lstm_dropout = float(hyperparams.get("lstm_dropout", 0.0))
+        lstm_layer_norm = bool(hyperparams.get("lstm_layer_norm", False))
+
         self.lstm_hidden_size = lstm_hidden
+        self.lstm_num_layers = lstm_num_layers
+        self.lstm_dropout = lstm_dropout
+        self.lstm_layer_norm_enabled = lstm_layer_norm
         self.runner_embed_dim = runner_embed_dim
 
         # Runner encoder (shared weights)
@@ -525,11 +563,26 @@ class PPOTimeLSTMPolicy(BasePolicy):
             n_layers=mlp_layers,
         )
 
-        # Time-aware LSTM cell
+        # Time-aware LSTM cell(s) — stacked for num_layers > 1.
+        # Layer 0 takes the fused market+runner input; subsequent layers
+        # take the previous layer's hidden state as input. Dropout (when
+        # enabled AND num_layers > 1) is applied to the hidden state
+        # *between* layers via F.dropout during training only.
         lstm_input_dim = mlp_hidden + runner_embed_dim * 2
-        self.time_lstm_cell = TimeLSTMCell(
-            input_size=lstm_input_dim,
-            hidden_size=lstm_hidden,
+        self.time_lstm_cells = nn.ModuleList(
+            [
+                TimeLSTMCell(
+                    input_size=lstm_input_dim if layer_idx == 0 else lstm_hidden,
+                    hidden_size=lstm_hidden,
+                )
+                for layer_idx in range(lstm_num_layers)
+            ]
+        )
+
+        # Optional layer norm applied to the top-layer hidden state,
+        # mirroring the stock-nn.LSTM variant in PPOLSTMPolicy.
+        self.lstm_output_norm: nn.Module = (
+            nn.LayerNorm(lstm_hidden) if lstm_layer_norm else nn.Identity()
         )
 
         # Actor head (per-runner)
@@ -639,23 +692,47 @@ class PPOTimeLSTMPolicy(BasePolicy):
         time_deltas = self._extract_time_delta(time_deltas)
         time_deltas = time_deltas.view(batch, seq_len)
 
-        # Step through TimeLSTMCell for each timestep
-        # hidden_state comes in as (1, batch, hidden) — squeeze the layer dim
-        h = hidden_state[0].squeeze(0)  # (batch, hidden)
-        c = hidden_state[1].squeeze(0)
+        # Step through stacked TimeLSTMCells for each timestep.
+        # hidden_state comes in as (num_layers, batch, hidden). We keep
+        # per-layer h/c as Python lists so we can assign freely without
+        # in-place-ing autograd tensors.
+        h_layers = [hidden_state[0][i] for i in range(self.lstm_num_layers)]
+        c_layers = [hidden_state[1][i] for i in range(self.lstm_num_layers)]
 
         outputs = []
         for t in range(seq_len):
-            h, c = self.time_lstm_cell(
-                lstm_input[:, t, :],
-                (h, c),
-                time_deltas[:, t],
-            )
-            outputs.append(h)
+            layer_input = lstm_input[:, t, :]
+            dt = time_deltas[:, t]
+            for layer_idx, cell in enumerate(self.time_lstm_cells):
+                h_new, c_new = cell(
+                    layer_input,
+                    (h_layers[layer_idx], c_layers[layer_idx]),
+                    dt,
+                )
+                h_layers[layer_idx] = h_new
+                c_layers[layer_idx] = c_new
+                # Inter-layer dropout: applied between stacked layers,
+                # matching nn.LSTM's dropout semantics. Only active when
+                # there is another layer to feed and we're training.
+                if (
+                    self.lstm_dropout > 0.0
+                    and layer_idx < self.lstm_num_layers - 1
+                ):
+                    layer_input = F.dropout(
+                        h_new, p=self.lstm_dropout, training=self.training,
+                    )
+                else:
+                    layer_input = h_new
+            outputs.append(h_layers[-1])
 
         lstm_out = torch.stack(outputs, dim=1)  # (batch, seq_len, hidden)
-        # Restore layer dim for hidden state
-        new_hidden = (h.unsqueeze(0), c.unsqueeze(0))
+        lstm_out = self.lstm_output_norm(lstm_out)
+
+        # Restore layer dim for hidden state: (num_layers, batch, hidden)
+        new_hidden = (
+            torch.stack(h_layers, dim=0),
+            torch.stack(c_layers, dim=0),
+        )
 
         lstm_last = lstm_out[:, -1, :]
 
@@ -697,9 +774,13 @@ class PPOTimeLSTMPolicy(BasePolicy):
     def init_hidden(
         self, batch_size: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return zero-initialised hidden state ``(h_0, c_0)``."""
-        h = torch.zeros(1, batch_size, self.lstm_hidden_size)
-        c = torch.zeros(1, batch_size, self.lstm_hidden_size)
+        """Return zero-initialised hidden state ``(h_0, c_0)``.
+
+        Shape ``(num_layers, batch, hidden)`` — matches the stacked
+        TimeLSTMCell layout expected by ``forward``.
+        """
+        h = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
+        c = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
         return h, c
 
     def get_action_distribution(

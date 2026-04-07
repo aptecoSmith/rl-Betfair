@@ -176,3 +176,64 @@ provisional to belong there yet.
   the trainer's extractor silently drops it — no crash path. Three
   test files referenced the gene and were updated; no production code
   did.
+
+## 2026-04-07 — Session 5 (LSTM structural knobs)
+
+- **Stacked `TimeLSTMCell` can't reuse the old squeeze-the-layer-dim
+  shortcut.** The pre-Session-5 Time-LSTM forward did
+  `h = hidden_state[0].squeeze(0)` to drop the layer dim because
+  there was only ever one layer. For a stack this silently drops
+  shape information. The fix is to keep `h_layers` / `c_layers` as
+  Python lists of per-layer tensors (one entry per stacked cell),
+  assign into the list as each layer runs, then `torch.stack(..., 0)`
+  at the end to restore `(num_layers, batch, hidden)` for the
+  outgoing hidden state. Assigning into the list avoids in-place
+  mutation of autograd tensors.
+
+- **Inter-layer dropout in the stacked Time-LSTM must gate on
+  `self.training`, not a constructor flag.** `nn.LSTM` does this
+  implicitly because it owns the dropout layer internally. For the
+  hand-rolled stack, `F.dropout(h_new, p=..., training=self.training)`
+  is the right call — the `.eval()` / `.train()` switch propagates
+  to sub-modules automatically, so the cell stack doesn't need any
+  extra plumbing. Test 4 in `test_lstm_structural.py` asserts both
+  directions (eval → bit-for-bit identical, train → diverges under
+  heavy dropout).
+
+- **Actor-head gain=0.01 masks dropout divergence.** First draft of
+  the eval-vs-train dropout test checked `out.action_mean`. The
+  attenuation from the 0.01-gain orthogonal init collapsed the
+  signal into ~1e-7 float noise — both passes looked identical to
+  `torch.allclose(..., atol=1e-6)` regardless of dropout. Switched
+  the assertion to the value head (critic uses gain=1.0 init) and
+  the train-mode divergence became obvious at `atol=1e-4`. Rule:
+  when writing a test that's meant to prove a middle-of-the-network
+  source of variance reaches the output, route the assertion
+  through the head with the **largest** init gain, or use a scaled
+  input large enough to dominate the head.
+
+- **PyTorch silently ignores `dropout=...` on `nn.LSTM(num_layers=1)`.**
+  But the runtime *warning* it emits is loud and shows up in test
+  output. Gating the kwarg on `num_layers > 1` in
+  `PPOLSTMPolicy.__init__` keeps the test log clean without any
+  behavioural change.
+
+- **`int_choice` for booleans is fine.** I considered adding a
+  dedicated `bool_choice` sampler branch for `lstm_layer_norm` but
+  the payoff is near zero: `int_choice` with choices `[0, 1]`
+  round-trips through the existing sampler, mutator, JSON
+  checkpoint, and the `bool(...)` cast in the policy constructor
+  without any new code path. Would have been pure scope creep. The
+  only soft downside is the UI widget label ("0/1" instead of
+  "true/false") — that'll be handled in Session 8.
+
+- **`init_hidden` shape change is load-bearing but invisible.**
+  Before Session 5 both policies returned `(1, batch, hidden)`.
+  Now they return `(num_layers, batch, hidden)`. `PPOTrainer` only
+  treats the hidden state as an opaque tuple (it calls
+  `out.hidden_state` and feeds it back next step), so no trainer
+  change was needed — but if a future caller hardcodes
+  `hidden_state[0][0]` expecting the single layer, it'll silently
+  take layer 0 of a stacked policy. Worth noting because the change
+  is a landmine for anyone reading only one half of the diff.
+

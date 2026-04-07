@@ -389,3 +389,107 @@ Don't use this file for running thoughts — that's what
 
 **Next:** Session 5 — LSTM structural knobs.
 
+---
+
+## Session 5 — LSTM structural knobs (2026-04-07)
+
+**Shipped:**
+- Promoted three new structural genes to `config.yaml`
+  `hyperparameters.search_ranges`:
+  - `lstm_num_layers`: `int_choice` {1, 2}
+  - `lstm_dropout`: `float` [0.0, 0.3]
+  - `lstm_layer_norm`: `int_choice` {0, 1} (0/1 rather than
+    a dedicated `bool_choice` type — the existing sampler has no
+    bool branch, and bool-as-int round-trips cleanly through JSON
+    checkpoints and the `bool(...)` cast in the policy ctors).
+- `PPOLSTMPolicy.__init__` now reads all three keys via
+  `hyperparams.get(...)` with pre-Session-5 defaults
+  (`num_layers=1`, `dropout=0.0`, `layer_norm=False`). Dropout is
+  only forwarded to `nn.LSTM(...)` when `num_layers > 1` — PyTorch
+  emits a warning and ignores the value otherwise. Documented inline.
+- `PPOLSTMPolicy` layer-norm location: applied to the LSTM *output*
+  (post-recurrence, pre-head). One fixed location, recorded in a
+  comment. `nn.Identity` when disabled so the forward path is
+  branch-free.
+- `PPOLSTMPolicy.init_hidden` shape changed from `(1, batch, hidden)`
+  to `(num_layers, batch, hidden)` to match `nn.LSTM`'s stacked
+  hidden-state layout. `PPOTrainer` passes the hidden state opaquely
+  through the policy, so no trainer change was needed.
+- `PPOTimeLSTMPolicy` converts the single `time_lstm_cell` attribute
+  into `time_lstm_cells: nn.ModuleList[TimeLSTMCell]`. Layer 0 takes
+  the fused market+runner input (`lstm_input_dim`), subsequent layers
+  take the previous layer's hidden state as input (`lstm_hidden`).
+  `forward` keeps per-layer `h_layers` / `c_layers` as Python lists
+  so per-timestep assignment doesn't fight autograd, then stacks them
+  back to `(num_layers, batch, hidden)` for the outgoing hidden state.
+- Inter-layer dropout in the stacked Time-LSTM: `F.dropout` is
+  applied to each layer's hidden output *before it feeds the next
+  layer*, only when `lstm_dropout > 0` and there IS a next layer.
+  `training` is read from `self.training` so `.eval()` disables it
+  automatically. This matches `nn.LSTM`'s "dropout between layers
+  only" semantics.
+- `PPOTimeLSTMPolicy` layer norm: same location as the stock-LSTM
+  variant — applied to the top-layer hidden state (`lstm_out`) after
+  the per-timestep loop completes. `nn.Identity` when disabled.
+- `PPOTimeLSTMPolicy.init_hidden` now returns
+  `(num_layers, batch, hidden)` to match the list-of-layers forward.
+- Backward-compat: both policy constructors default every Session 5
+  gene to its pre-Session-5 value, so a checkpoint that was saved
+  without these keys instantiates into an identical single-layer,
+  no-dropout, no-layer-norm policy. Covered by
+  `test_policy_defaults_without_new_keys`.
+- `tests/test_config.py` expected-params list gets the three new
+  keys.
+- New test file `tests/arch_exploration/test_lstm_structural.py`
+  with 22 CPU-only cases covering all 5 items on the session plan:
+  1. Gene sampling + range checks + "both ends seen" for choice
+     genes (200 seeded iterations).
+  2. Policy instantiation grid — 16 combos × 2 architectures = 32
+     instantiation + forward-pass cases (wired as 16 parametrized
+     cases per arch). Each asserts output shapes, structural
+     attributes, and hidden-state shape.
+  3. `init_hidden()` shape matches `num_layers=2` on both arches.
+  4. Stacked `TimeLSTMCell` unit test: two-timestep sequence,
+     ModuleList length check, eval-mode determinism, train-mode
+     divergence under heavy dropout.
+  5. Backward-compat: both arches default cleanly when none of
+     the Session-5 keys are supplied.
+- Added `torch.nn.functional as F` import (needed for the stacked
+  Time-LSTM's inter-layer dropout).
+
+**Files changed:**
+- `config.yaml` — three new `search_ranges` entries under
+  `hyperparameters`.
+- `agents/policy_network.py` — `F` import, new structural-gene
+  reads in both policy ctors, `nn.LSTM` stacking + dropout + layer
+  norm in `PPOLSTMPolicy`, `ModuleList` of `TimeLSTMCell` +
+  per-layer loop + inter-layer `F.dropout` + layer norm in
+  `PPOTimeLSTMPolicy`, updated `init_hidden` shapes on both.
+- `tests/test_config.py` — expected-params list updated.
+- `tests/arch_exploration/test_lstm_structural.py` — new 22-test
+  file.
+- `plans/arch-exploration/progress.md`, `lessons_learnt.md`,
+  `ui_additions.md` — session notes (ui_additions Session 5
+  checklist reads as server-side complete; Session 8 will consume
+  the UI items).
+
+**Tests:**
+- `pytest tests/arch_exploration/test_lstm_structural.py` → 22
+  passed (~3.1 s).
+- `pytest tests/arch_exploration/ tests/test_config.py
+  tests/test_population_manager.py tests/test_genetic_operators.py`
+  → 142 passed, 1 pre-existing failure
+  (`test_population_manager.py::test_obs_dim_matches_env`, stale
+  `1630` vs actual `1636`; confirmed unrelated in Session 1 notes).
+
+**Not shipped:**
+- No transformer work. That's Session 6.
+- No tuning of default values — the new genes start from the legacy
+  `num_layers=1, dropout=0, layer_norm=False` defaults so any
+  checkpoint or call-site that doesn't know about them loads
+  bit-identically.
+- No UI work. `ui_additions.md` Session 5 entries are server-side
+  complete but the widget work itself lands in Session 8.
+
+**Next:** Session 6 — `ppo_transformer_v1` architecture.
+

@@ -110,9 +110,16 @@ This is the biggest UI piece. New page(s) needed:
 
 ## Session 5 — LSTM structural knobs
 
-- [ ] `lstm_num_layers` (choice editor, {1, 2})
-- [ ] `lstm_dropout` (range editor, float, [0, 0.3])
-- [ ] `lstm_layer_norm` (choice editor, {false, true})
+Server side landed in Session 5 (`config.yaml` search_ranges +
+`PPOLSTMPolicy` / `PPOTimeLSTMPolicy` constructors). UI widgets
+themselves still land in Session 8.
+
+- [ ] `lstm_num_layers` (choice editor, {1, 2}) — backend live
+- [ ] `lstm_dropout` (range editor, float, [0, 0.3]) — backend live
+- [ ] `lstm_layer_norm` (choice editor, {false, true}) — backend
+      live. Note: stored as `int_choice` 0/1 in `config.yaml` and
+      cast to bool in the policy ctor, so the UI should render it
+      as a true/false toggle but persist it as 0/1.
 
 ## Session 6 — Transformer architecture
 
