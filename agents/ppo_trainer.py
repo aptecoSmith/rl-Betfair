@@ -64,6 +64,7 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     "terminal_bonus_weight": ("terminal_bonus_weight",),
     "reward_efficiency_penalty": ("efficiency_penalty",),
     "reward_precision_bonus": ("precision_bonus",),
+    "reward_drawdown_shaping": ("drawdown_shaping_weight",),
 }
 
 

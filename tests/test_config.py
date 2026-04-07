@@ -97,6 +97,7 @@ def test_hyperparameter_search_ranges_present(config):
         "terminal_bonus_weight",
         "reward_efficiency_penalty",
         "reward_precision_bonus",
+        "reward_drawdown_shaping",
         "gamma",
         "gae_lambda",
         "value_loss_coeff",

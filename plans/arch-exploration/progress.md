@@ -656,3 +656,134 @@ Don't use this file for running thoughts — that's what
 
 **Next:** Session 7 — drawdown-aware shaping (DESIGN PASS FIRST).
 
+---
+
+## Session 7 — Drawdown-aware shaping (2026-04-07)
+
+**Design pass first.** Committed separately as `design pass for
+Session 7` before any implementation code was touched — the
+commit ordering is what the session plan's "Do not skip the
+design pass" rule is asking for.
+
+**Chosen formulation (Option D — reflection-symmetric range
+position).** None of the A/B/C options in the session plan gave a
+closed-form zero-mean term without either a hindsight bootstrap
+(Option A), a shadow policy doubling episode cost (Option B), or
+duplicating `efficiency_penalty` (Option C). Option D, added in
+the design pass:
+
+```
+peak_t   = max(peak_{t-1},  day_pnl_t)
+trough_t = min(trough_{t-1}, day_pnl_t)
+shaped  += weight × (2·day_pnl_t − peak_t − trough_t) / starting_budget
+```
+
+with `peak_0 = trough_0 = 0`. Under reflection `X → −X`,
+`peak ↔ −trough` so the per-race term flips sign exactly and
+paths + reflections cancel pairwise. See the design pass for the
+worked examples and the full proof.
+
+**Shipped:**
+- `env/betfair_env.py` — added `drawdown_shaping_weight` to
+  `_REWARD_OVERRIDE_KEYS`, plumbed via the Session-1 override
+  path. `__init__` reads it into `self._drawdown_shaping_weight`
+  (default `0.0`). `reset()` initialises `_day_pnl_peak` and
+  `_day_pnl_trough` to `0.0` — both the initial values are load-
+  bearing for the reflection proof, so they have a comment that
+  says so. New helper `_update_drawdown_shaping` contains the
+  whole formula (running-max/min + normalised range-position)
+  and is called from `_settle_current_race` after
+  `self._day_pnl += race_pnl`. Zero-weight is a clean no-op
+  early-exit so existing runs are byte-identical. The returned
+  term is added to `shaped`, which accumulates into
+  `self._cum_shaped_reward` — NOT `_cum_raw_reward`. Factoring
+  the formula into its own helper was purely for testability:
+  the unit tests drive it directly without having to run a full
+  bet-matching pipeline to produce race_pnl trajectories.
+- `agents/ppo_trainer.py` — one new row in `_REWARD_GENE_MAP`:
+  `"reward_drawdown_shaping": ("drawdown_shaping_weight",)`. Name
+  follows the existing `reward_efficiency_penalty` /
+  `reward_precision_bonus` convention (genes use `reward_`
+  prefix, env reward-config keys do not).
+- `config.yaml` — `reward.drawdown_shaping_weight: 0.0` default in
+  the reward block, plus a new `reward_drawdown_shaping` entry in
+  `hyperparameters.search_ranges` (float, `[0.0, 0.2]`). Upper
+  bound picked so the maximum accumulated episode contribution
+  (`≈ weight × N_races`) is comparable in scale to the existing
+  `precision_bonus` and `terminal_bonus_weight` maxima.
+- `tests/arch_exploration/test_drawdown_shaping.py` — new 9-test
+  file covering every item in the session plan and a couple of
+  additions:
+  1. Gene is present in `config.yaml`, spec is `[0.0, 0.2]`, and
+     50 seeded samples all stay in range.
+  2. `_reward_overrides_from_hp` maps `reward_drawdown_shaping`
+     → `drawdown_shaping_weight` (not the raw gene name).
+  3. **Zero-mean for random walks.** 1000 seeded symmetric walks
+     (uniform `[-10, +10]`, 25 races each) driven through
+     `_update_drawdown_shaping`; asserts the mean total
+     contribution is within 2 standard errors of zero. Runs in
+     well under a second — the sub-second budget holds because
+     the tests bypass the full env pipeline and drive the helper
+     directly.
+  4. **Reflection pairs cancel exactly.** Stronger than (3):
+     for 50 random walks, `forward + reflected` is asserted to
+     be algebraically `0` (within `1e-9`). Guards against
+     statistical false positives in test (3) and catches any
+     regression that introduces an asymmetric bias.
+  5. Drawdown-avoiding policy `[+2, +4, +6, +8]` → numerator
+     `+20`, total `+0.010` with `weight=0.05, budget=100`.
+     Replicates worked example 2 from the design pass exactly.
+  6. Drawdown-amplifying policy `[-10, +5, -10, +5]` → numerator
+     `-30`. Replicates worked example 3 exactly.
+  7. **`raw + shaped ≈ total_reward` invariant** with a non-zero
+     drawdown weight on a real 3-race `_make_day` episode — the
+     CLAUDE.md invariant must still hold with the new term live.
+  8. **Bucketing.** The term accumulates into
+     `_cum_shaped_reward` (visible via `info["shaped_bonus"]`),
+     never into `_cum_raw_reward` (`info["raw_pnl_reward"]`).
+     Drives a deterministic non-zero drawdown trajectory and
+     asserts raw stays pinned while shaped moves by exactly the
+     helper's return value.
+  9. Zero-weight early-exit is a clean no-op: returns `0.0` for
+     every step and leaves `_day_pnl_peak` / `_day_pnl_trough`
+     both at `0.0`. Guards against a future refactor that
+     accidentally advances peak/trough before the early-exit
+     check.
+- `tests/test_config.py` — `expected_params` in the schema-
+  presence test gains `reward_drawdown_shaping`.
+
+**Files changed:**
+- `env/betfair_env.py` — `_REWARD_OVERRIDE_KEYS`, `__init__`,
+  `reset`, `_settle_current_race`, new helper
+  `_update_drawdown_shaping`.
+- `agents/ppo_trainer.py` — `_REWARD_GENE_MAP` row.
+- `config.yaml` — reward default + search_ranges entry.
+- `tests/arch_exploration/test_drawdown_shaping.py` — new.
+- `tests/test_config.py` — expected_params list.
+- `plans/arch-exploration/session_7_drawdown_shaping.md` — design
+  pass (committed separately).
+- `plans/arch-exploration/progress.md`, `lessons_learnt.md`,
+  `ui_additions.md` — session notes.
+
+**Tests:**
+- `pytest tests/arch_exploration/test_drawdown_shaping.py tests/test_config.py`
+  → 22 passed (~3.1 s).
+- `pytest tests/arch_exploration/ tests/test_betfair_env.py tests/test_config.py`
+  → 145 passed (~6.5 s). No regressions in the existing reward
+  plumbing, reward schema, env, or config suites.
+
+**Not shipped:**
+- No per-tick drawdown shaping. Race-settlement schedule only —
+  the zero-mean proof assumes discrete settlement and the rest
+  of the shaping stack lives there.
+- No `info["day_pnl_peak"]` / `info["day_pnl_trough"]` exposure.
+  Nothing downstream needs it today; easy to add if a diagnostic
+  test later asks for it.
+- No hold-cost-per-open-liability-tick term. Explicitly out of
+  scope per the session plan — same asymmetric pitfalls,
+  deserves its own design pass.
+- No UI work. `ui_additions.md` Session 7 entries land in
+  Session 8 alongside the rest.
+
+**Next:** Session 8 — UI wiring for new knobs.
+

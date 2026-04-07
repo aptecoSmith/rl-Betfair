@@ -344,3 +344,68 @@ provisional to belong there yet.
   keeps it out of `state_dict()` so checkpoints stay clean — the
   mask is fully reconstructable from `ctx_ticks`.
 
+- spinning up the ui really needs to spin up the api too, as many ui elements need api calls.
+
+## Session 7 — Drawdown shaping
+
+- **The obvious drawdown formulation is a trap.** The first
+  instinct — `shaped = −ε × max(peak − current, 0) / budget` — is
+  strictly non-positive, so a random policy accumulates negative
+  shaped reward and "bet less" looks strictly better than
+  "bet more". This is the same asymmetric-shaping bug the
+  phantom-profit investigation spent a whole session fixing; the
+  session plan flags it loudly up front and the design pass
+  rules it out before any code is written. If a future session
+  adds a new shaped term, write the zero-mean proof into the
+  design pass **before** touching `_settle_current_race`. No
+  exceptions.
+
+- **Reflection symmetry is the cheapest zero-mean tool.** Option
+  D (`(2·day_pnl − peak − trough) / budget`) is zero-mean not
+  because the expectation integrates to zero by luck, but
+  because every path and its sign-flipped reflection cancel
+  *algebraically* when `peak_0 = trough_0 = 0`. Under `X → −X`,
+  `peak ↔ −trough`, so the per-race term maps to its own
+  negation. That means the zero-mean invariant can be guarded
+  with a much stronger "reflection pairs cancel exactly" test
+  (1e-9 tolerance) as well as the statistical "N=1000 within 2
+  SE of zero" test the session plan asks for — and if an
+  algebraic regression happens, the exact-cancellation test
+  catches it even when the statistical test would get lucky.
+
+- **`peak_0 = trough_0 = 0` is load-bearing.** The reflection
+  proof breaks if you initialise peak or trough to anything other
+  than zero (e.g. `-inf` / `+inf`), because then the initial
+  values don't map to each other under `X → −X`. The helper is
+  commented, but the invariant is easy to accidentally regress
+  during a "cleanup" — if you touch `reset()` and change either
+  default, the reflection test in `test_drawdown_shaping.py`
+  will fail immediately.
+
+- **Extract shaping formulas into helpers for unit testing.**
+  The drawdown formula originally lived inline in
+  `_settle_current_race`. Testing it that way would have
+  required running the full bet-matching pipeline to produce
+  a realistic `race_pnl` trajectory, which (a) is slow, (b)
+  couples the invariant test to `ExchangeMatcher` + `BetManager`
+  behaviour that has nothing to do with the reward math, and
+  (c) picks up a small commission drift that would force the
+  zero-mean test to loosen its tolerance. Pulling the formula
+  out into `_update_drawdown_shaping()` — a method that only
+  reads `_day_pnl` and mutates `_day_pnl_peak` / `_day_pnl_trough`
+  — let the tests drive it directly with arbitrary synthetic
+  trajectories. The settlement method is barely changed; the
+  extract is purely a testability win.
+
+- **Commission drift matters once you isolate the term.** The
+  existing `early_pick_bonus` and `precision_bonus` zero-mean
+  claims in `CLAUDE.md` are "zero-mean modulo commission". That
+  drift is small enough to hide inside a mixed-term test, but
+  if you run the drawdown term through the full env with the
+  default 5 % commission and N=1000 trials, the drift is large
+  enough to blow past 2 SE. The test fixture in
+  `test_drawdown_shaping.py` sets `commission: 0.0` for exactly
+  this reason — it isolates the mathematical property from the
+  unrelated commission bias. Future zero-mean tests on new
+  shaping terms should follow the same pattern.
+

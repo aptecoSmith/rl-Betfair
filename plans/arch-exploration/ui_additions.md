@@ -153,12 +153,25 @@ Session 8.
 
 ## Session 7 — Drawdown-aware shaping
 
-(If design pass approves the feature.)
+Design pass landed on Option D (reflection-symmetric range position).
+See `session_7_drawdown_shaping.md` for the full formulation.
 
-- [ ] `drawdown_penalty` (range editor, float, range TBD in design
-      pass)
-- [ ] Any new tracked stats (peak_day_pnl, running drawdown) need to
-      appear on the episode/diagnostic panels.
+- [ ] `reward_drawdown_shaping` (range editor, float, `[0.0, 0.2]`).
+      Gene name matches the `reward_efficiency_penalty` /
+      `reward_precision_bonus` convention; env reward-config key is
+      `drawdown_shaping_weight` (no `reward_` prefix inside the
+      reward block). The UI should display the gene name and the
+      spec range only — the env-key mapping is server-side.
+- [ ] Tooltip / help text: "Shaped reward for spending time near
+      the running day high (positive) vs running day low
+      (negative). Zero-mean for random policies by construction."
+      Users need to know setting it to 0 is a clean opt-out.
+- [ ] Episode diagnostic panel: no new fields *required* for
+      Session 7 — the term already flows through `shaped_bonus`
+      which the panel already displays. If/when we expose
+      `info["day_pnl_peak"]` / `info["day_pnl_trough"]` (not in
+      scope for Session 7), add "Day peak P&L" and "Day trough
+      P&L" sparklines at that point.
 
 ## Session 8 — The UI session itself
 

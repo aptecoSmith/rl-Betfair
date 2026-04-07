@@ -214,6 +214,7 @@ class BetfairEnv(gymnasium.Env):
         "terminal_bonus_weight",
         "efficiency_penalty",
         "precision_bonus",
+        "drawdown_shaping_weight",
         "commission",
     })
 
@@ -270,6 +271,9 @@ class BetfairEnv(gymnasium.Env):
         self._terminal_bonus_weight = reward_cfg.get("terminal_bonus_weight", 1.0)
         self._efficiency_penalty = reward_cfg["efficiency_penalty"]
         self._precision_bonus = reward_cfg.get("precision_bonus", 0.0)
+        self._drawdown_shaping_weight = reward_cfg.get(
+            "drawdown_shaping_weight", 0.0,
+        )
         self._commission = reward_cfg.get("commission", 0.05)
 
         # Pre-compute features and runner mappings
@@ -490,6 +494,11 @@ class BetfairEnv(gymnasium.Env):
         # that don't affect real P&L). Summing both reproduces total_reward.
         self._cum_raw_reward = 0.0
         self._cum_shaped_reward = 0.0
+        # Running high-water / low-water of day_pnl for the drawdown
+        # shaping term. Both start at 0.0 (the initial day_pnl) so the
+        # reflection-symmetry proof of zero-mean shaping holds.
+        self._day_pnl_peak = 0.0
+        self._day_pnl_trough = 0.0
 
         if self._total_races == 0:
             return self._terminal_obs(), self._get_info()
@@ -677,7 +686,18 @@ class BetfairEnv(gymnasium.Env):
         else:
             precision_reward = 0.0
 
-        shaped = early_pick_bonus + precision_reward - efficiency_cost
+        # Drawdown shaping — zero-mean by reflection symmetry. Emits a
+        # shaped term proportional to where the current day_pnl sits
+        # inside the running [trough, peak] range. See Session 7 design
+        # pass for the full proof.
+        drawdown_term = self._update_drawdown_shaping()
+
+        shaped = (
+            early_pick_bonus
+            + precision_reward
+            - efficiency_cost
+            + drawdown_term
+        )
         reward = race_pnl + shaped
 
         # Track raw vs shaped for diagnostic logging.
@@ -696,6 +716,41 @@ class BetfairEnv(gymnasium.Env):
         ))
 
         return reward
+
+    def _update_drawdown_shaping(self) -> float:
+        """Advance the running peak/trough and return the drawdown term.
+
+        Called from ``_settle_current_race`` **after** ``self._day_pnl``
+        has been updated with this race's P&L. Zero when the feature is
+        disabled (weight == 0) so existing runs are byte-identical.
+
+        The returned term is
+
+        ``weight · (2·day_pnl − peak − trough) / starting_budget``
+
+        which is zero-mean in expectation for any policy whose day_pnl
+        path distribution is symmetric under ``X → −X``. The running
+        peak/trough start at 0 (the initial day_pnl) so the reflection
+        maps ``peak → −trough`` and ``trough → −peak`` — without that
+        symmetric starting point, the invariant would not hold. See
+        ``plans/arch-exploration/session_7_drawdown_shaping.md`` for
+        the worked examples.
+        """
+        if self._drawdown_shaping_weight <= 0.0 or self.starting_budget <= 0:
+            return 0.0
+        if self._day_pnl > self._day_pnl_peak:
+            self._day_pnl_peak = self._day_pnl
+        if self._day_pnl < self._day_pnl_trough:
+            self._day_pnl_trough = self._day_pnl
+        return (
+            self._drawdown_shaping_weight
+            * (
+                2.0 * self._day_pnl
+                - self._day_pnl_peak
+                - self._day_pnl_trough
+            )
+            / self.starting_budget
+        )
 
     def _compute_early_pick_bonus(
         self,
