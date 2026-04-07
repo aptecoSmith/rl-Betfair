@@ -105,6 +105,24 @@ hyperparameters:
       choices:
       - 0
       - 1
+    transformer_heads:
+      type: int_choice
+      choices:
+      - 2
+      - 4
+      - 8
+    transformer_depth:
+      type: int_choice
+      choices:
+      - 1
+      - 2
+      - 3
+    transformer_ctx_ticks:
+      type: int_choice
+      choices:
+      - 32
+      - 64
+      - 128
     early_pick_bonus_min:
       type: float
       min: 1.0
@@ -134,6 +152,7 @@ hyperparameters:
       choices:
       - ppo_lstm_v1
       - ppo_time_lstm_v1
+      - ppo_transformer_v1
 training_worker:
   host: localhost
   port: 8002

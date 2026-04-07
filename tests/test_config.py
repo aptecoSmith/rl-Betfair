@@ -103,6 +103,9 @@ def test_hyperparameter_search_ranges_present(config):
         "lstm_num_layers",
         "lstm_dropout",
         "lstm_layer_norm",
+        "transformer_heads",
+        "transformer_depth",
+        "transformer_ctx_ticks",
     ]
     for param in expected_params:
         assert param in ranges, f"Missing hyperparameter search range: '{param}'"

@@ -274,6 +274,18 @@ class PopulationManager:
             arch_choices = None
             arch_slots = None
 
+        # Session 6 -- per-architecture hyperparameter overrides (e.g.
+        # a different learning-rate distribution for transformer agents).
+        # The plan may supply ``arch_lr_ranges`` mapping an architecture
+        # name to a ``HyperparamSpec``-shaped dict; after the normal
+        # sample completes we re-sample ``learning_rate`` from the
+        # override range for that agent. Keeping the override narrow to
+        # ``learning_rate`` is deliberate -- widening it is additive and
+        # can land in a later session when a concrete need shows up.
+        arch_lr_ranges = (
+            getattr(plan, "arch_lr_ranges", None) if plan is not None else None
+        )
+
         for slot_idx in range(pop_size):
             hp = sample_hyperparams(hp_specs_for_run, rng)
             # Resolve architecture: arch_mix > sampled gene > plan choices > default.
@@ -285,6 +297,20 @@ class PopulationManager:
                     sampled_arch = rng.choice(arch_choices)
                 arch_name = sampled_arch or self.default_architecture
             hp["architecture_name"] = arch_name
+
+            # Apply per-arch LR override (if the plan configured one).
+            if arch_lr_ranges and arch_name in arch_lr_ranges:
+                lr_range = dict(arch_lr_ranges[arch_name])
+                lr_spec = HyperparamSpec(
+                    name="learning_rate",
+                    type=lr_range.get("type", "float_log"),
+                    min=lr_range.get("min"),
+                    max=lr_range.get("max"),
+                    choices=lr_range.get("choices"),
+                )
+                hp["learning_rate"] = sample_hyperparams([lr_spec], rng)[
+                    "learning_rate"
+                ]
 
             # Create the policy network
             policy = create_policy(
@@ -497,7 +523,7 @@ class PopulationManager:
         hp: dict,
         mutation_rate: float = 0.3,
         rng: random.Random | None = None,
-    ) -> tuple[dict, dict[str, float | None]]:
+    ) -> tuple[dict, dict[str, float | None]]:  # noqa: C901
         """Apply mutation to hyperparameters.
 
         For each parameter, with probability ``mutation_rate``:
@@ -525,8 +551,20 @@ class PopulationManager:
         rng = rng or random.Random()
         deltas: dict[str, float | None] = {}
 
+        # Session 6 — architecture cooldown. An agent whose architecture
+        # was mutated in the previous generation keeps its arch for one
+        # generation before it can flip again. The cooldown counter is
+        # carried on the hyperparameter dict as metadata (not a spec)
+        # and decremented once per call to :meth:`mutate`.
+        arch_cooldown_in = int(hp.get("arch_change_cooldown", 0) or 0)
+        old_arch = hp.get("architecture_name")
+
         for spec in self.hp_specs:
             name = spec.name
+            if name == "architecture_name" and arch_cooldown_in > 0:
+                # Cooldown blocks the arch mutation this generation.
+                deltas[name] = None
+                continue
             if rng.random() >= mutation_rate:
                 deltas[name] = None
                 continue
@@ -573,6 +611,19 @@ class PopulationManager:
                 hp[name] = new_val
 
         _repair_reward_gene_pairs(hp)
+
+        # Post-mutation: update the arch cooldown counter. If the
+        # mutation actually changed the architecture name, arm the
+        # cooldown for the next generation (so this agent can't flip
+        # again immediately). Otherwise decrement any existing cooldown
+        # towards zero so it expires on schedule even in generations
+        # where no arch mutation was attempted.
+        new_arch = hp.get("architecture_name")
+        if new_arch != old_arch:
+            hp["arch_change_cooldown"] = 1
+        elif arch_cooldown_in > 0:
+            hp["arch_change_cooldown"] = arch_cooldown_in - 1
+
         return hp, deltas
 
     def breed(

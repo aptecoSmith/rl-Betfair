@@ -237,3 +237,110 @@ provisional to belong there yet.
   take layer 0 of a stacked policy. Worth noting because the change
   is a landmine for anyone reading only one half of the diff.
 
+## 2026-04-07 — Session 6 (transformer architecture)
+
+- **The "hidden state" slot is now genuinely polymorphic.** For
+  LSTM variants `hidden_state = (h, c)` — two tensors of the same
+  shape. For the transformer it's `(rolling_buffer, valid_count)` —
+  two tensors of *different* shapes and dtypes. The only invariant
+  across architectures is "2-tuple of tensors, both of which can be
+  moved to a device via `.to(device)`". The `BasePolicy` docstring
+  now spells this out explicitly because the next architecture to
+  land (hierarchical runner-attention?) will probably want its own
+  bespoke state layout and should know the contract is "2-tuple of
+  tensors", not "specifically an (h, c) pair". The reason this
+  matters: `PPOTrainer._collect_rollout` has a hardcoded
+  `hidden_state[0].to(device), hidden_state[1].to(device)` idiom and
+  can't be easily changed without touching every architecture.
+  Keeping the 2-tuple-of-tensors contract means no trainer edit is
+  ever required when adding a new architecture.
+
+- **Rolling-buffer warmup is "zero pad + learn to ignore".** I
+  considered adding a `key_padding_mask` that tells the attention
+  layer to skip unfilled slots during the warmup window. Then I
+  realised this adds complexity for an effect the model can learn
+  in a few hundred ticks (zero vectors produce zero attention
+  scores from any reasonable linear Q/K projection; after layer
+  norm their residual stream stays near zero too). Skipping the
+  padding mask keeps the buffer tensor shape fixed and makes the
+  batched forward path branch-free. The test for this behaviour
+  (`test_rolling_buffer_retains_most_recent_ctx_ticks`) feeds
+  distinctive fingerprint inputs and verifies the buffer contents
+  slot-by-slot, which would catch any silent "pad is leaking" bug.
+
+- **Causal-masking tests need `encode_sequence`, not `forward`.**
+  `forward` returns only the last-position output (what the actor
+  head consumes). To verify that position T's encoder output is
+  independent of position T+1's input, the test needs to inspect
+  an intermediate position. Added an `encode_sequence(obs)` helper
+  that mirrors `forward` up to the encoder output but returns the
+  full `(batch, ctx_ticks, d_model)` tensor. Kept out of
+  `BasePolicy` because it's transformer-specific and the LSTM
+  architectures have no analogous "per-position output" semantics.
+
+- **`arch_change_cooldown` lives on the hp dict as metadata, not a
+  spec.** Two reasons: (1) putting it in `search_ranges` would make
+  the sampler treat it as a mutable gene and the repair step in
+  Session 3's `_repair_reward_gene_pairs` would have to special-
+  case it, and (2) the cooldown value carries *state* (gen-to-gen
+  decrement + re-arm), not a *policy choice* the sampler should be
+  drawing from a distribution. Keeping it as a plain dict entry
+  that `PopulationManager.mutate` reads/writes means it travels
+  with the agent through crossover and the model registry's
+  `hyperparameters` column without schema plumbing. The only cost
+  is that `crossover` doesn't propagate it (child starts with
+  cooldown=0) — which is arguably correct: a child that *inherits*
+  an architecture hasn't *mutated* into it.
+
+- **The middle choice is the cleanest cooldown test fixture.**
+  `PopulationManager.mutate`'s `str_choice` branch moves the index
+  by ±1 with equal probability. Starting from index 0 or index
+  `len-1`, half the rolls clamp (no change); only from a middle
+  index does every ±1 always produce a real flip. Using
+  `"ppo_time_lstm_v1"` (middle of the 3-choice list) as the test
+  starting arch makes the assertion unambiguous regardless of RNG
+  seed: with `mutation_rate=1.0` and cooldown=0, the arch MUST
+  change. With cooldown>0, the arch MUST NOT change. No "unlucky
+  RNG → false negative" failure mode.
+
+- **Arch-specific LR override is opt-in and narrow.** The session
+  plan mentions a *per-architecture LR range* as the canonical
+  example of a knob transformers might want to set differently
+  (they traditionally prefer lower LRs than LSTMs). I resisted the
+  temptation to generalise this into a full per-arch hp-range
+  override table because (a) nobody currently wants the generalised
+  form, (b) the narrow form is two lines in `initialise_population`
+  plus one optional field on `TrainingPlan`, and (c) the
+  generalised form would need UI work to expose per-arch editing.
+  Pure YAGNI — wait until a concrete need shows up, then widen.
+
+- **`torch.cat([buffer[:, 1:, :], fused[:, t:t+1, :]], dim=1)` is
+  simpler than `torch.roll` + slice-assign.** First draft used
+  `torch.roll(buffer, -1, dim=1); buffer[:, -1, :] = fused[t]` which
+  mutates in place and needs a `.clone()` to avoid aliasing
+  complaints during training updates. The `torch.cat` version
+  produces a fresh tensor every iteration, avoids the clone, and
+  is bit-for-bit equivalent. Slightly more allocations, but
+  `ctx_ticks ≤ 128` and rollout `seq_len == 1` make the cost
+  negligible. Readability wins.
+
+- **`enable_nested_tensor=False` is required with `norm_first=True`.**
+  PyTorch emits a `UserWarning` on every `nn.TransformerEncoder`
+  construction when `norm_first=True` because the nested-tensor
+  fast path is disabled in that configuration. The warning appears
+  once per policy instance, which means once per agent — so
+  building a 50-agent population would spray 50 warnings into the
+  training log. Passing `enable_nested_tensor=False` explicitly
+  tells PyTorch we know what we're doing and silences the warning.
+  We never pass `src_key_padding_mask` anyway (see "zero pad + learn
+  to ignore" above), so the nested-tensor path wouldn't help us.
+
+- **`register_buffer("causal_mask", ..., persistent=False)` is the
+  right way to attach a static mask.** The mask depends only on
+  `ctx_ticks`, which is frozen at construction. Registering it as
+  a buffer means `.to(device)` / `.cuda()` move it with the module
+  automatically, so the rollout path doesn't need
+  `self.causal_mask.to(obs.device)` per call. `persistent=False`
+  keeps it out of `state_dict()` so checkpoints stay clean — the
+  mask is fully reconstructable from `ctx_ticks`.
+

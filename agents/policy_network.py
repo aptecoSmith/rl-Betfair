@@ -55,6 +55,15 @@ class BasePolicy(nn.Module, abc.ABC):
 
     Subclasses must accept ``(obs_dim, action_dim, max_runners, hyperparams)``
     in their ``__init__`` and call ``super().__init__()``.
+
+    Hidden-state protocol (Session 6): ``init_hidden`` returns a 2-tuple
+    of tensors so that existing callers (``PPOTrainer`` in particular)
+    can move them to device via ``h[0].to(device), h[1].to(device)``
+    without knowing which architecture produced them. For recurrent
+    architectures the tuple is ``(h, c)``; for the transformer it is
+    ``(rolling_buffer, valid_count)``. The precise shapes are private
+    to each architecture -- only the 2-tuple-of-tensors contract is
+    shared.
     """
 
     architecture_name: str = ""
@@ -69,7 +78,7 @@ class BasePolicy(nn.Module, abc.ABC):
 
     @abc.abstractmethod
     def init_hidden(self, batch_size: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return zero-initialised LSTM hidden state ``(h_0, c_0)``."""
+        """Return a zero-initialised hidden-state 2-tuple."""
         ...
 
 
@@ -80,7 +89,7 @@ class PolicyOutput:
     action_mean: torch.Tensor       # (batch, action_dim) — mean of action distribution
     action_log_std: torch.Tensor    # (batch, action_dim) — log std
     value: torch.Tensor             # (batch, 1) — state value estimate
-    hidden_state: tuple[torch.Tensor, torch.Tensor]  # new LSTM state
+    hidden_state: tuple[torch.Tensor, torch.Tensor]  # opaque 2-tuple (see BasePolicy)
 
 
 # ── Helper: build an MLP stack ──────────────────────────────────────────────
@@ -782,6 +791,378 @@ class PPOTimeLSTMPolicy(BasePolicy):
         h = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
         c = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
         return h, c
+
+    def get_action_distribution(
+        self,
+        obs: torch.Tensor,
+        hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[Normal, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Return the action distribution, value, and new hidden state."""
+        out = self.forward(obs, hidden_state)
+        std = out.action_log_std.exp()
+        dist = Normal(out.action_mean, std)
+        return dist, out.value, out.hidden_state
+
+
+# ── PPO + Transformer v1 (Session 6) ────────────────────────────────────────
+
+
+@register_architecture
+class PPOTransformerPolicy(BasePolicy):
+    """PPO + Transformer-encoder policy network (architecture v1).
+
+    Shares the market and per-runner encoders with the LSTM variants;
+    replaces the recurrent sequence model with a small transformer
+    encoder that attends over a rolling buffer of the last
+    ``transformer_ctx_ticks`` fused embeddings.
+
+    The ``hidden_state`` slot in :class:`BasePolicy`'s protocol is
+    repurposed as a *rolling context buffer*: ``(buffer, valid_count)``
+    where ``buffer`` has shape ``(batch, ctx_ticks, d_model)`` and
+    ``valid_count`` is a ``(batch,)`` long tensor tracking how many of
+    those slots have been filled with real data. Unfilled slots stay
+    zero and the transformer simply learns to ignore the initial
+    warmup window.
+
+    Three structural genes:
+    * ``transformer_heads`` ∈ {2, 4, 8}
+    * ``transformer_depth`` ∈ {1, 2, 3}
+    * ``transformer_ctx_ticks`` ∈ {32, 64, 128}
+
+    ``lstm_hidden_size`` is reused as the transformer's ``d_model``
+    (all valid choices divide evenly by any of the allowed head counts).
+    Positional information is injected via a learned
+    ``nn.Embedding(ctx_ticks, d_model)`` -- simpler than sinusoidal,
+    cleaner gradient, and cheap.
+
+    Causal masking is enforced so that when :meth:`forward` is called
+    with a 3-D ``(batch, seq_len, obs_dim)`` tensor, the transformer
+    cannot attend to positions in the future relative to the current
+    timestep. This matters for sequence-input use (e.g. tests,
+    diagnostics) even though the production rollout path feeds one
+    tick at a time.
+    """
+
+    architecture_name = "ppo_transformer_v1"
+    description = (
+        "PPO with transformer encoder over a bounded rolling tick-context "
+        "window. Shares market / per-runner encoders and actor / critic "
+        "heads with the LSTM variants; replaces the LSTM with a causal "
+        "transformer and a learned positional embedding."
+    )
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        max_runners: int,
+        hyperparams: dict,
+    ) -> None:
+        super().__init__()
+
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.max_runners = max_runners
+
+        # Shared-with-LSTM hyperparameters.
+        d_model = int(hyperparams.get("lstm_hidden_size", 256))
+        mlp_hidden = int(hyperparams.get("mlp_hidden_size", 128))
+        mlp_layers = int(hyperparams.get("mlp_layers", 2))
+        runner_embed_dim = mlp_hidden
+
+        # Session 6 — transformer structural genes.
+        self.transformer_heads = int(hyperparams.get("transformer_heads", 4))
+        self.transformer_depth = int(hyperparams.get("transformer_depth", 2))
+        self.ctx_ticks = int(hyperparams.get("transformer_ctx_ticks", 32))
+
+        # d_model must divide evenly by nhead. All shipped
+        # lstm_hidden_size choices (64, 128, 256, 512, 1024, 2048) are
+        # divisible by every allowed head count (2, 4, 8); this guard
+        # is defensive against hand-crafted hyperparam dicts.
+        if d_model % self.transformer_heads != 0:
+            raise ValueError(
+                f"d_model={d_model} must be divisible by transformer_heads="
+                f"{self.transformer_heads}"
+            )
+
+        self.d_model = d_model
+        self.lstm_hidden_size = d_model  # alias so population/trainer code
+        # that reads lstm_hidden_size still works on transformer agents.
+        self.runner_embed_dim = runner_embed_dim
+
+        # ── Runner encoder (shared weights across all runners) ──────────
+        self.runner_encoder = _build_mlp(
+            input_dim=RUNNER_INPUT_DIM,
+            hidden_dim=mlp_hidden,
+            output_dim=runner_embed_dim,
+            n_layers=mlp_layers,
+        )
+
+        # ── Market encoder ──────────────────────────────────────────────
+        self.market_encoder = _build_mlp(
+            input_dim=MARKET_TOTAL_DIM,
+            hidden_dim=mlp_hidden,
+            output_dim=mlp_hidden,
+            n_layers=mlp_layers,
+        )
+
+        # ── Fused → d_model projection ─────────────────────────────────
+        fused_dim = mlp_hidden + runner_embed_dim * 2
+        self.input_projection = nn.Linear(fused_dim, d_model)
+
+        # ── Positional embedding (learned) ──────────────────────────────
+        # Fixed length = ctx_ticks. Indices always 0..ctx_ticks-1 because
+        # the rolling buffer has a fixed size; the "current" tick is
+        # always at position ``ctx_ticks-1``.
+        self.position_embedding = nn.Embedding(self.ctx_ticks, d_model)
+
+        # ── Transformer encoder ─────────────────────────────────────────
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=self.transformer_heads,
+            dim_feedforward=max(d_model * 2, mlp_hidden),
+            dropout=0.0,
+            batch_first=True,
+            activation="gelu",
+            norm_first=True,
+        )
+        # ``enable_nested_tensor=False`` avoids a UserWarning when
+        # ``norm_first=True`` (nested-tensor fast path is disabled in
+        # that configuration anyway, and we never pass
+        # ``src_key_padding_mask`` so nested tensors wouldn't help).
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=self.transformer_depth,
+            enable_nested_tensor=False,
+        )
+        self.transformer_norm = nn.LayerNorm(d_model)
+
+        # Causal mask — registered as a buffer so .to(device) moves it
+        # with the module. ``nn.Transformer.generate_square_subsequent_mask``
+        # returns an upper-triangular tensor of 0/-inf suitable for use
+        # as an attention mask with ``batch_first=True``.
+        causal_mask = torch.triu(
+            torch.full((self.ctx_ticks, self.ctx_ticks), float("-inf")),
+            diagonal=1,
+        )
+        self.register_buffer("causal_mask", causal_mask, persistent=False)
+
+        # ── Actor head (per-runner) ─────────────────────────────────────
+        actor_input_dim = runner_embed_dim + d_model
+        self.actor_head = _build_mlp(
+            input_dim=actor_input_dim,
+            hidden_dim=mlp_hidden,
+            output_dim=2,
+            n_layers=1,
+        )
+
+        self.action_log_std = nn.Parameter(torch.zeros(action_dim))
+
+        # ── Critic head ─────────────────────────────────────────────────
+        self.critic_head = _build_mlp(
+            input_dim=d_model,
+            hidden_dim=mlp_hidden,
+            output_dim=1,
+            n_layers=1,
+        )
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        """Orthogonal init for linear layers (standard PPO)."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=2**0.5)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        for module in self.actor_head.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=0.01)
+        for module in self.critic_head.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=1.0)
+
+    # ── Shared obs splitter ─────────────────────────────────────────────
+    def _split_obs(
+        self, obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        market = obs[:, :MARKET_DIM]
+        velocity = obs[:, MARKET_DIM : MARKET_DIM + VELOCITY_DIM]
+        runner_start = MARKET_DIM + VELOCITY_DIM
+        runner_end = runner_start + self.max_runners * RUNNER_DIM
+        runners_flat = obs[:, runner_start:runner_end]
+        agent_state = obs[:, runner_end : runner_end + AGENT_STATE_DIM]
+        position_start = runner_end + AGENT_STATE_DIM
+        position_end = position_start + self.max_runners * POSITION_DIM
+        position_flat = obs[:, position_start:position_end]
+
+        market_feats = torch.cat([market, velocity, agent_state], dim=-1)
+        runner_feats_raw = runners_flat.view(-1, self.max_runners, RUNNER_DIM)
+        position_feats = position_flat.view(-1, self.max_runners, POSITION_DIM)
+        runner_feats = torch.cat([runner_feats_raw, position_feats], dim=-1)
+        return market_feats, runner_feats
+
+    def _encode_ticks(
+        self, obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode a batched tick stream into ``(fused, last_runner_embs)``.
+
+        Parameters
+        ----------
+        obs : (N, obs_dim) flat tensor.
+
+        Returns
+        -------
+        fused : (N, d_model) projected fused embedding per tick.
+        runner_embs : (N, max_runners, runner_embed_dim).
+        """
+        market_feats, runner_feats = self._split_obs(obs)
+        market_emb = self.market_encoder(market_feats)
+        n = runner_feats.shape[0]
+        runners_flat = runner_feats.reshape(
+            n * self.max_runners, RUNNER_INPUT_DIM,
+        )
+        runner_embs = self.runner_encoder(runners_flat).view(
+            n, self.max_runners, self.runner_embed_dim,
+        )
+        runner_mean = runner_embs.mean(dim=1)
+        runner_max = runner_embs.max(dim=1).values
+        fused = torch.cat([market_emb, runner_mean, runner_max], dim=-1)
+        fused = self.input_projection(fused)
+        return fused, runner_embs
+
+    def _run_encoder(self, buffer: torch.Tensor) -> torch.Tensor:
+        """Run positional + causal transformer encoder on ``buffer``.
+
+        Parameters
+        ----------
+        buffer : (batch, ctx_ticks, d_model)
+
+        Returns
+        -------
+        encoded : (batch, ctx_ticks, d_model) with final layer norm applied.
+        """
+        pos_ids = torch.arange(self.ctx_ticks, device=buffer.device)
+        pos_emb = self.position_embedding(pos_ids)  # (ctx_ticks, d_model)
+        x = buffer + pos_emb.unsqueeze(0)
+        encoded = self.transformer_encoder(x, mask=self.causal_mask)
+        return self.transformer_norm(encoded)
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> PolicyOutput:
+        """Forward pass.
+
+        Accepts 2-D ``(batch, obs_dim)`` (single timestep) or 3-D
+        ``(batch, seq_len, obs_dim)``. In both cases the rolling buffer
+        is shifted-and-appended once per timestep in the sequence and
+        the transformer is run on the final buffer state. The critic /
+        actor heads read the encoder output at the most recent (last)
+        position of the buffer.
+        """
+        if obs.dim() == 2:
+            obs = obs.unsqueeze(1)  # (batch, 1, obs_dim)
+        batch, seq_len, _ = obs.shape
+
+        if hidden_state is None:
+            hidden_state = self.init_hidden(batch)
+            hidden_state = (
+                hidden_state[0].to(obs.device),
+                hidden_state[1].to(obs.device),
+            )
+
+        buffer, valid_count = hidden_state
+        # ``buffer`` may be a view on storage we shouldn't mutate in
+        # place -- ``torch.cat`` below always produces a fresh tensor
+        # so we never hit an autograd / aliasing issue.
+
+        # Encode every tick in the provided sequence.
+        obs_flat = obs.reshape(batch * seq_len, -1)
+        fused_flat, _ = self._encode_ticks(obs_flat)
+        fused = fused_flat.view(batch, seq_len, self.d_model)
+
+        # Shift-left and append each fused tick, one at a time. Cheap
+        # even at the largest ctx_ticks (128) because seq_len is 1 on
+        # the production rollout path.
+        for t in range(seq_len):
+            buffer = torch.cat(
+                [buffer[:, 1:, :], fused[:, t : t + 1, :]], dim=1,
+            )
+            valid_count = torch.clamp(valid_count + 1, max=self.ctx_ticks)
+
+        encoded = self._run_encoder(buffer)  # (batch, ctx_ticks, d_model)
+        out_last = encoded[:, -1, :]  # most recent tick
+
+        # ── Actor: per-runner ──────────────────────────────────────────
+        # Re-derive the runner embeddings for the last tick only (we
+        # need them concatenated with the transformer output).
+        last_obs = obs[:, -1, :]
+        _, last_runner_embs = self._encode_ticks(last_obs)
+
+        out_expanded = out_last.unsqueeze(1).expand(
+            -1, self.max_runners, -1,
+        )
+        actor_input = torch.cat([last_runner_embs, out_expanded], dim=-1)
+        actor_out = self.actor_head(actor_input)
+        action_signal = actor_out[:, :, 0]
+        stake_fraction = actor_out[:, :, 1]
+        action_mean = torch.cat([action_signal, stake_fraction], dim=-1)
+
+        # ── Critic ────────────────────────────────────────────────────
+        value = self.critic_head(out_last)
+
+        return PolicyOutput(
+            action_mean=action_mean,
+            action_log_std=self.action_log_std.expand(batch, -1),
+            value=value,
+            hidden_state=(buffer, valid_count),
+        )
+
+    def init_hidden(
+        self, batch_size: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return a zero rolling buffer and zero valid-count tensor.
+
+        * ``buffer``: ``(batch, ctx_ticks, d_model)`` float tensor.
+        * ``valid_count``: ``(batch,)`` long tensor.
+
+        The 2-tuple shape matches :class:`BasePolicy`'s protocol so
+        that :class:`agents.ppo_trainer.PPOTrainer` can move both
+        elements to the training device via the standard
+        ``h[0].to(device), h[1].to(device)`` idiom without special
+        cases for the transformer.
+        """
+        buffer = torch.zeros(batch_size, self.ctx_ticks, self.d_model)
+        valid_count = torch.zeros(batch_size, dtype=torch.long)
+        return buffer, valid_count
+
+    def encode_sequence(self, obs: torch.Tensor) -> torch.Tensor:
+        """Return the per-position transformer output for ``obs``.
+
+        Utility used by the causal-masking test. Mirrors :meth:`forward`
+        up to the point where the encoder output is produced, but
+        returns the full ``(batch, ctx_ticks, d_model)`` tensor instead
+        of just the last-position slice.
+
+        Accepts 2-D or 3-D ``obs`` just like :meth:`forward`.
+        """
+        if obs.dim() == 2:
+            obs = obs.unsqueeze(1)
+        batch, seq_len, _ = obs.shape
+
+        buffer = torch.zeros(
+            batch, self.ctx_ticks, self.d_model, device=obs.device,
+        )
+        obs_flat = obs.reshape(batch * seq_len, -1)
+        fused_flat, _ = self._encode_ticks(obs_flat)
+        fused = fused_flat.view(batch, seq_len, self.d_model)
+        for t in range(seq_len):
+            buffer = torch.cat(
+                [buffer[:, 1:, :], fused[:, t : t + 1, :]], dim=1,
+            )
+        return self._run_encoder(buffer)
 
     def get_action_distribution(
         self,

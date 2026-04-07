@@ -123,17 +123,33 @@ themselves still land in Session 8.
 
 ## Session 6 — Transformer architecture
 
-- [ ] `transformer_heads` (choice editor, {2, 4, 8})
-- [ ] `transformer_depth` (choice editor, {1, 2, 3})
-- [ ] `transformer_ctx_ticks` (choice editor, {32, 64, 128})
+Server side landed in Session 6 (`config.yaml` search_ranges +
+`PPOTransformerPolicy` in `agents/policy_network.py` +
+`arch_change_cooldown` in `PopulationManager.mutate` +
+`TrainingPlan.arch_lr_ranges`). UI widgets themselves still land in
+Session 8.
+
+- [ ] `transformer_heads` (choice editor, {2, 4, 8}) — backend live
+- [ ] `transformer_depth` (choice editor, {1, 2, 3}) — backend live
+- [ ] `transformer_ctx_ticks` (choice editor, {32, 64, 128}) —
+      backend live
 - [ ] Update the architecture-choice widget to include
-      `ppo_transformer_v1`.
-- [ ] **Arch-specific LR range** support: the range editor for
-      `learning_rate` may need to accept per-architecture overrides
-      so transformers can use a different distribution than LSTMs.
-      (Confirm schema shape with Session 4's planner.)
+      `ppo_transformer_v1` — backend live (now in
+      `architecture_name` str_choice choices)
+- [ ] **Arch-specific LR range** support: the plan editor must
+      expose `TrainingPlan.arch_lr_ranges` — a per-architecture
+      HyperparamSpec-shaped override for `learning_rate`. Shape is
+      `{arch_name: {"type": "float_log", "min": ..., "max": ...}}`
+      and the backend accepts it on the `POST /api/training-plans`
+      payload via the standard `TrainingPlan.from_dict` path.
+      (Session 6 only handles `learning_rate`; widening to other
+      genes is additive and can land in a later session.)
 - [ ] Arch-cooldown indicator: show which lineages have cooldowns
-      active on the population view.
+      active on the population view. Field lives on the agent's hp
+      dict as `arch_change_cooldown` (int, defaults to 0) and is
+      updated by `PopulationManager.mutate` — no new schema needed,
+      the UI just needs to read and render the existing metadata
+      field.
 
 ## Session 7 — Drawdown-aware shaping
 

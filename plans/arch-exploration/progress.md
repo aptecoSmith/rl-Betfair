@@ -493,3 +493,166 @@ Don't use this file for running thoughts — that's what
 
 **Next:** Session 6 — `ppo_transformer_v1` architecture.
 
+---
+
+## Session 6 — `ppo_transformer_v1` architecture (2026-04-07)
+
+**Shipped:**
+- New `PPOTransformerPolicy` in `agents/policy_network.py` registered
+  via the existing `@register_architecture` decorator as
+  `ppo_transformer_v1`. Shares the market encoder, per-runner shared
+  MLP encoder (mean + max pool), actor head, and critic head with the
+  two LSTM variants — only the sequence model changes. The transformer
+  block is a stock `nn.TransformerEncoder` with `batch_first=True`,
+  `norm_first=True`, GELU activation, and
+  `enable_nested_tensor=False` (the latter silences a spurious user
+  warning that fires under `norm_first=True`).
+- Three new genes added to `config.yaml` `hyperparameters.search_ranges`:
+  - `transformer_heads`: `int_choice` {2, 4, 8}
+  - `transformer_depth`: `int_choice` {1, 2, 3}
+  - `transformer_ctx_ticks`: `int_choice` {32, 64, 128}
+- `ppo_transformer_v1` appended to the `architecture_name`
+  `str_choice` so the existing sampler / mutator can discover and
+  evolve transformer agents without any spec change.
+- Rolling tick-context buffer repurposes the `BasePolicy` hidden-state
+  slot as a 2-tuple `(buffer, valid_count)`:
+  - `buffer`: `(batch, ctx_ticks, d_model)` float tensor of fused
+    embeddings. Unfilled slots stay zero and the transformer learns
+    to ignore the warmup window.
+  - `valid_count`: `(batch,)` long tensor, clamped at `ctx_ticks`.
+  - `init_hidden` returns both elements as tensors so `PPOTrainer`'s
+    existing `h[0].to(device), h[1].to(device)` idiom still works
+    unchanged — no trainer edit needed. `BasePolicy`'s docstring now
+    documents the "opaque 2-tuple of tensors" contract explicitly.
+- `forward()` handles both 2-D `(batch, obs_dim)` (single-step
+  rollout) and 3-D `(batch, seq_len, obs_dim)` (sequence / test)
+  inputs. For each tick in the provided sequence it shift-left-
+  appends the fused embedding onto the rolling buffer. The
+  transformer is then run once on the final buffer with learned
+  positional embeddings and an upper-triangular causal mask
+  (registered as a non-persistent buffer so `.to(device)` moves it
+  with the module). The critic reads `encoded[:, -1, :]`; the actor
+  concatenates `encoded[:, -1, :]` with each runner's current
+  embedding, exactly mirroring the LSTM architectures.
+- `d_model` is aliased to `lstm_hidden_size` so the existing
+  hyperparameter spec still drives the transformer's width. All
+  shipped `lstm_hidden_size` choices (64, 128, 256, 512, 1024, 2048)
+  divide evenly by every allowed head count (2, 4, 8); a defensive
+  guard in `__init__` still raises on hand-crafted combos that
+  violate divisibility.
+- New `encode_sequence(obs)` helper returns the per-position encoder
+  output so the causal-masking test can inspect non-final positions
+  directly. Used only by tests and diagnostics.
+- **Arch cooldown.** `PopulationManager.mutate` now reads
+  `hp["arch_change_cooldown"]` (metadata-only, not a sampled gene,
+  defaults to 0). When the counter is positive, the
+  `architecture_name` mutation branch is skipped for that generation
+  and the counter is decremented toward zero. When a mutate() call
+  actually changes the architecture, the counter is re-armed to 1 so
+  the next generation cannot flip again. The field lives on the hp
+  dict so it travels with the agent through `crossover` and the
+  registry without a new schema field.
+- **Arch-specific learning-rate override.** `TrainingPlan` gains a new
+  optional `arch_lr_ranges: dict[str, dict] | None` field that maps
+  architecture name → `HyperparamSpec`-shaped dict. When the planner
+  drives Gen-0 via `initialise_population(plan=...)`, agents of the
+  overridden architecture re-sample their `learning_rate` from the
+  per-arch range immediately after the normal sample. Scope is
+  deliberately narrow to `learning_rate` (that is the gene the plan
+  explicitly calls out); widening to a full per-arch hp range table
+  is additive and can land in a later session.
+- New test file `tests/arch_exploration/test_transformer_arch.py`
+  with 14 CPU-only tests covering every item from the session plan:
+  1. Registry: `ppo_transformer_v1` is in `REGISTRY`, has the right
+     class, non-empty description, and `create_policy` returns a
+     `PPOTransformerPolicy` instance.
+  2. Sampler: 300 seeded samples from the real `config.yaml` specs
+     exercise every value of all three new genes and stay in range.
+  3. Instantiation grid: parametrised
+     `{heads: [2, 4]} × {depth: [1, 2]} × {ctx_ticks: [32, 64]}` —
+     8 combinations; each does two sequential `forward()` calls to
+     exercise the rolling buffer, and asserts structural attributes,
+     transformer layer count, output shapes, and hidden-state
+     shapes / valid_count increments.
+  4. Causal masking: two 4-tick sequences identical at ticks 0..2
+     and differing only at tick 3. `encode_sequence` is called on
+     both; output at buffer position `-2` (= tick 2) must be
+     bit-for-bit identical, position `-1` (= tick 3) must differ.
+     This catches any regression that drops the upper-triangular
+     mask from the encoder.
+  5. Rolling-buffer overflow: feed `ctx_ticks + 5 = 37` known
+     fingerprint obs; assert no crash, `valid_count` clamps at
+     `ctx_ticks`, the first 5 fingerprints have rolled off (verified
+     by confirming none of the 32 buffer slots matches
+     `_encode_ticks(obs_list[0])`), and each of the remaining 32
+     slots matches the freshly-encoded fingerprint of its expected
+     original obs.
+  6. Arch cooldown: construct a minimal `PopulationManager` with
+     three architectures, seed `architecture_name = "ppo_time_lstm_v1"`
+     (middle of the choice list so every ±1 mutation is a real
+     flip), `arch_change_cooldown = 1`, `mutation_rate = 1.0`.
+     Assert the first `mutate` does NOT change arch and decrements
+     cooldown to 0; the second `mutate` DOES change arch and re-arms
+     cooldown to 1; the third `mutate` is blocked again. Full round
+     trip through the cooldown state machine.
+  7. Planner arch-specific LR: `TrainingPlan.new(...,
+     arch_lr_ranges={"ppo_transformer_v1": {...}})` with
+     `global_lr.max < override_lr.min`, 10 LSTM + 10 transformer
+     slots via `arch_mix`. Build Gen-0 and assert every LSTM agent's
+     `learning_rate` is in the global range, every transformer
+     agent's `learning_rate` is in the override range, and
+     `max(lstm_lrs) < min(xf_lrs)` (no cross-contamination).
+
+**Files changed:**
+- `agents/policy_network.py` — added `math` / `Any` imports,
+  clarified the `BasePolicy` hidden-state protocol docstring,
+  appended `PPOTransformerPolicy` (class + forward + rolling-buffer
+  helper + `encode_sequence` + `init_hidden` + `get_action_distribution`).
+- `agents/population_manager.py` — arch cooldown state machine in
+  `mutate`; `initialise_population` applies `plan.arch_lr_ranges`
+  after resolving the per-slot architecture.
+- `training/training_plan.py` — new `arch_lr_ranges` field on
+  `TrainingPlan`, threaded through `to_dict`/`from_dict`/`new`.
+- `config.yaml` — three new `search_ranges` entries, appended
+  `ppo_transformer_v1` to the `architecture_name` choice list.
+- `tests/test_config.py` — expected-params list gains the three new
+  transformer genes.
+- `tests/arch_exploration/test_transformer_arch.py` — new 14-test
+  file.
+- `plans/arch-exploration/progress.md`, `lessons_learnt.md`,
+  `ui_additions.md` — session notes.
+
+**Tests:**
+- `pytest tests/arch_exploration/test_transformer_arch.py` →
+  14 passed (~3.1 s).
+- `pytest tests/arch_exploration/ tests/test_config.py` →
+  77 passed (~5.7 s).
+- `pytest tests/test_population_manager.py tests/test_genetic_operators.py
+  tests/test_genetic_selection.py tests/test_orchestrator.py` →
+  147 passed, 1 skipped, 1 pre-existing failure
+  (`test_obs_dim_matches_env` stale 1630 vs actual 1636, documented
+  in Session 1 progress / lessons as unrelated drive-by).
+- `pytest tests/test_policy_network.py tests/test_worker_run_overrides.py
+  tests/test_session_2_8.py` → 123 passed, 1 pre-existing failure
+  (`test_gradients_flow` references the now-renamed `time_lstm_cell`
+  attribute, which Session 5 turned into `time_lstm_cells`;
+  confirmed failing on plain `master` via `git stash`).
+
+**Not shipped:**
+- No GPU tests, no training loops — Session 9 consumes those.
+- No hierarchical runner-attention architecture (mentioned in the
+  design review as "a different architecture" — explicitly out of
+  scope per the session plan).
+- No LR-warmup, weight-decay, or optimiser changes. Adam / AdamW
+  single-LR stays.
+- No UI work — `ui_additions.md` Session 6 entries remain the
+  pending list for Session 8.
+- The per-arch override in `TrainingPlan` is narrow to
+  `learning_rate` only. A full per-arch hp-range table is additive
+  and can land when a concrete need shows up.
+- `observation_window_ticks` was retired cleanly in Session 1; the
+  new `transformer_ctx_ticks` is a fresh gene with its own name, no
+  silent aliasing or migration shim.
+
+**Next:** Session 7 — drawdown-aware shaping (DESIGN PASS FIRST).
+

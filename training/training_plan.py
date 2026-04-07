@@ -125,6 +125,15 @@ class TrainingPlan:
     min_arch_samples: int = DEFAULT_MIN_ARCH_SAMPLES_PER_PLAN
     notes: str = ""
     outcomes: list[GenerationOutcome] = field(default_factory=list)
+    #: Session 6 -- optional per-architecture ``learning_rate`` override.
+    #: Maps architecture name to a ``HyperparamSpec``-shaped dict, e.g.
+    #: ``{"ppo_transformer_v1": {"type": "float_log", "min": 1e-5,
+    #: "max": 1e-4}}``. When present, agents of that architecture sample
+    #: their learning rate from the override range instead of the
+    #: global ``hp_ranges`` / ``config.yaml`` range. Transformers
+    #: typically want a lower LR distribution than LSTMs, which is why
+    #: the override exists.
+    arch_lr_ranges: dict[str, dict] | None = None
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:
@@ -140,6 +149,7 @@ class TrainingPlan:
             "min_arch_samples": self.min_arch_samples,
             "notes": self.notes,
             "outcomes": [o.to_dict() for o in self.outcomes],
+            "arch_lr_ranges": self.arch_lr_ranges,
         }
 
     @classmethod
@@ -160,6 +170,7 @@ class TrainingPlan:
             outcomes=[
                 GenerationOutcome.from_dict(o) for o in raw.get("outcomes", [])
             ],
+            arch_lr_ranges=raw.get("arch_lr_ranges"),
         )
 
     @staticmethod
@@ -173,6 +184,7 @@ class TrainingPlan:
         arch_mix: dict[str, int] | None = None,
         min_arch_samples: int = DEFAULT_MIN_ARCH_SAMPLES_PER_PLAN,
         notes: str = "",
+        arch_lr_ranges: dict[str, dict] | None = None,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -186,6 +198,7 @@ class TrainingPlan:
             arch_mix=arch_mix,
             min_arch_samples=min_arch_samples,
             notes=notes,
+            arch_lr_ranges=arch_lr_ranges,
         )
 
 
