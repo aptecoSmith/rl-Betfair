@@ -54,12 +54,22 @@ def runners_df(request) -> pd.DataFrame:
 # ── Ticks Parquet schema ────────────────────────────────────────────────────
 
 
+#: Columns added after the original schema.  Old Parquet files
+#: extracted before each addition won't contain them, and the runtime
+#: (episode_builder, feature_engineer) handles their absence
+#: gracefully via ``_opt_float`` / ``_opt_int`` lookups.  Don't fail
+#: schema tests on these — they're optional by design.
+_OPTIONAL_TICK_COLUMNS = {
+    "race_status",                # Session 2.7a
+    "each_way_divisor",           # each-way support
+    "number_of_each_way_places",  # each-way support
+}
+
+
 class TestTicksSchema:
     def test_has_all_expected_columns(self, ticks_df):
         for col in TICKS_COLUMNS:
-            if col == "race_status":
-                # race_status added in Session 2.7a — old Parquet files
-                # won't have it.  Backward-compatible: allowed missing.
+            if col in _OPTIONAL_TICK_COLUMNS:
                 continue
             assert col in ticks_df.columns, f"Missing column: {col}"
 

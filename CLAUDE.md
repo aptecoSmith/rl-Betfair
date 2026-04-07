@@ -136,3 +136,11 @@ PPO trainer reads `info["day_pnl"]` into `EpisodeStats.total_pnl`.
 Prior to this fix, `total_pnl` was reading `realised_pnl` and reporting
 the last-race-only number — which is how the phantom-profit bug hid
 for so long.
+
+**`env.bet_manager.bets` is also last-race-only** — same root cause,
+different symptom. Anything that needs the full day's bet history
+(evaluator bet logs, replay UI) must read `env.all_settled_bets`
+instead. This list accumulates across races in `BetfairEnv.step`
+just before the BetManager is replaced. The evaluator was silently
+truncating to the last race's bets before this was fixed (see
+`plans/next_steps/bugs.md` B1).

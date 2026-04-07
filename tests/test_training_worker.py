@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import subprocess
 import sys
 import time
@@ -18,16 +17,9 @@ from pathlib import Path
 
 import pytest
 
+from tests._port_utils import kill_stale_on_port, port_free as _port_free
+
 ROOT = Path(__file__).parent.parent
-
-
-def _port_free(port: int) -> bool:
-    """Check if a TCP port is free."""
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1):
-            return False
-    except (ConnectionRefusedError, OSError):
-        return True
 
 
 def _port_listening(port: int, timeout: float = 10.0) -> bool:
@@ -44,8 +36,14 @@ def _port_listening(port: int, timeout: float = 10.0) -> bool:
 def worker_process():
     """Start a training worker on a test port, yield it, then kill it."""
     port = 18002  # Use a non-standard port to avoid conflicts
-    # Ensure port is free
-    assert _port_free(port), f"Port {port} is already in use — kill the stale process"
+    # Recover from a stale worker orphaned by a previous failed run.
+    # The port is test-only, so it's safe to evict whatever's holding
+    # it.  Without this, a single hung test poisons all subsequent
+    # runs until the user manually kills the process.
+    killed = kill_stale_on_port(port)
+    if killed:
+        print(f"  [test_training_worker] killed stale PIDs on port {port}: {killed}")
+    assert _port_free(port), f"Port {port} is still in use after kill — investigate"
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "training.worker", "--port", str(port)],

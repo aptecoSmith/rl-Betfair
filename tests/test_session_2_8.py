@@ -486,8 +486,9 @@ class TestPPOTimeLSTMPolicy:
         out = policy.forward(obs)
         loss = out.action_mean.sum() + out.value.sum()
         loss.backward()
-        # Check TimeLSTMCell W_dt has gradient
-        assert policy.time_lstm_cell.W_dt.grad is not None
+        # Check TimeLSTMCell W_dt has gradient (multi-layer LSTM stores
+        # cells in a ModuleList; check the first layer).
+        assert policy.time_lstm_cells[0].W_dt.grad is not None
 
     def test_time_delta_affects_hidden_state(self):
         """Different seconds_since_last_tick values should produce

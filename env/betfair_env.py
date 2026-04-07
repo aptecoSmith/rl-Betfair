@@ -302,6 +302,11 @@ class BetfairEnv(gymnasium.Env):
         self._day_pnl = 0.0  # sum of per-race P&Ls
         self._race_records: list[RaceRecord] = []
         self._bet_times: dict[int, float] = {}  # bet_index → seconds_to_off
+        # All settled bets from the entire day.  BetManager is recreated
+        # between races, so bets from earlier races are otherwise lost —
+        # this list keeps references so the evaluator can record the full
+        # day's bet log, not just the last race.
+        self._settled_bets: list = []
 
     # ── Pre-computation ───────────────────────────────────────────────────
 
@@ -432,6 +437,16 @@ class BetfairEnv(gymnasium.Env):
             vec[offset + 2] = pos["bet_count"] / max_bets
         return vec
 
+    @property
+    def all_settled_bets(self) -> list:
+        """All bets settled across the entire day so far.
+
+        ``BetManager`` is recreated between races, so its ``bets`` list
+        only ever holds the *current* race's bets.  Use this for any
+        consumer that needs the full day's bet log (evaluator, replay).
+        """
+        return list(self._settled_bets)
+
     def _terminal_obs(self) -> np.ndarray:
         """Return a zero observation for terminal states."""
         return np.zeros(self.observation_space.shape, dtype=np.float32)
@@ -494,6 +509,7 @@ class BetfairEnv(gymnasium.Env):
         # that don't affect real P&L). Summing both reproduces total_reward.
         self._cum_raw_reward = 0.0
         self._cum_shaped_reward = 0.0
+        self._settled_bets = []
         # Running high-water / low-water of day_pnl for the drawdown
         # shaping term. Both start at 0.0 (the initial day_pnl) so the
         # reflection-symmetry proof of zero-mean shaping holds.
@@ -529,6 +545,12 @@ class BetfairEnv(gymnasium.Env):
             self._race_idx += 1
             self._tick_idx = 0
             self._races_completed += 1
+
+            # Capture this race's settled bets before discarding the
+            # per-race BetManager.  Without this, only the final race's
+            # bets survive to evaluator/replay output (B1 in bugs.md).
+            assert self.bet_manager is not None
+            self._settled_bets.extend(self.bet_manager.bets)
 
             # Reset BetManager for the next race (fresh budget)
             if self._race_idx < self._total_races:

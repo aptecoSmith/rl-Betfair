@@ -16,7 +16,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -27,19 +26,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._port_utils import kill_stale_on_port, port_free as _port_free
+
 ROOT = Path(__file__).parent.parent
 WORKER_PORT = 18002
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
-
-
-def _port_free(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1):
-            return False
-    except (ConnectionRefusedError, OSError):
-        return True
 
 
 def _wait_for_ws(port: int, timeout: float = 30.0) -> bool:
@@ -169,7 +162,11 @@ def e2e_env():
 
 @pytest.fixture(scope="module")
 def worker_proc(e2e_env):
-    assert _port_free(WORKER_PORT), f"Port {WORKER_PORT} in use — kill the stale process"
+    # Recover from a stale worker orphaned by a previous failed run.
+    killed = kill_stale_on_port(WORKER_PORT)
+    if killed:
+        print(f"  [test_e2e_training] killed stale PIDs on port {WORKER_PORT}: {killed}")
+    assert _port_free(WORKER_PORT), f"Port {WORKER_PORT} still in use after kill"
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "training.worker",

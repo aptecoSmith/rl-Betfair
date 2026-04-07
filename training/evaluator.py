@@ -259,13 +259,15 @@ class Evaluator:
                 obs, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
 
-        # Extract metrics from the env's final info
-        bm = env.bet_manager
-        assert bm is not None
+        # Extract metrics from the env.  ``bet_manager`` is recreated
+        # between races, so it only contains the *last race's* bets —
+        # use the full-day bet log and the env's accumulated day_pnl
+        # instead.  See bugs.md B1.
+        all_bets = env.all_settled_bets
 
-        day_pnl = bm.realised_pnl
-        bet_count = bm.bet_count
-        winning_bets = bm.winning_bets
+        day_pnl = info.get("day_pnl", 0.0)
+        bet_count = len(all_bets)
+        winning_bets = sum(1 for b in all_bets if b.outcome is BetOutcome.WON)
         bet_precision = winning_bets / bet_count if bet_count > 0 else 0.0
         pnl_per_bet = day_pnl / bet_count if bet_count > 0 else 0.0
 
@@ -285,9 +287,10 @@ class Evaluator:
             profitable=day_pnl > 0,
         )
 
-        # Build bet records from bet manager
+        # Build bet records from the full day's settled bets (across all
+        # races, not just the last race's BetManager).
         bet_records: list[EvaluationBetRecord] = []
-        for bet in bm.bets:
+        for bet in all_bets:
             # Find the race this bet belongs to
             race = None
             for r in day.races:
