@@ -150,8 +150,9 @@ class TestTimeLSTMTraining:
         )
 
         # Set W_dt to a meaningful value so the effect is visible
+        # (multi-layer LSTM stores cells in a ModuleList; layer 0).
         with torch.no_grad():
-            policy.time_lstm_cell.W_dt.fill_(2.0)
+            policy.time_lstm_cells[0].W_dt.fill_(2.0)
 
         # Run several steps to build up non-trivial hidden state
         hidden = policy.init_hidden(1)
@@ -220,4 +221,4 @@ class TestTimeLSTMTraining:
         optimizer.step()
 
         # Verify weights updated
-        assert policy.time_lstm_cell.W_dt.grad is not None
+        assert policy.time_lstm_cells[0].W_dt.grad is not None
