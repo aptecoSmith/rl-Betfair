@@ -1,0 +1,36 @@
+<div class="choice-editor" [class.has-error]="emptyError()">
+  <div class="gene-label">
+    <span class="gene-name">{{ spec().name }}</span>
+    <span class="gene-type">{{ spec().type }}</span>
+  </div>
+
+  @if (isToggleMode()) {
+    <label class="bool-toggle">
+      <input
+        type="checkbox"
+        [checked]="toggleOn()"
+        (change)="onToggleChange($any($event.target).checked)"
+        [attr.data-testid]="'toggle-' + spec().name"
+      />
+      <span>{{ toggleOn() ? 'true' : 'false' }} (persists as {{ toggleOn() ? 1 : 0 }})</span>
+    </label>
+  } @else {
+    <div class="chip-group">
+      @for (choice of availableChoices(); track choice) {
+        <button
+          type="button"
+          class="chip"
+          [class.active]="isSelected(choice)"
+          (click)="toggleChoice(choice)"
+          [attr.data-testid]="'chip-' + spec().name + '-' + choice"
+        >
+          {{ choice }}
+        </button>
+      }
+    </div>
+  }
+
+  @if (emptyError()) {
+    <div class="inline-error">{{ emptyError() }}</div>
+  }
+</div>

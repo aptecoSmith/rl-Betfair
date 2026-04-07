@@ -296,7 +296,17 @@
                   </div>
                 }
                 <p class="help-text">
-                  These settings are fixed via <code>config.yaml</code> for now. Making them configurable in the UI is planned for a future release.
+                  These population-level knobs are fixed via <code>config.yaml</code>.
+                  To plan a Gen-0 run with custom hyperparameter ranges, an architecture
+                  mix, or per-architecture learning-rate overrides, use the
+                  <a routerLink="/training-plans" data-testid="link-to-training-plans">Training Plans</a>
+                  page — it talks to <code>POST /api/training-plans</code> instead of
+                  <code>POST /api/training/start</code> and lets you persist a plan
+                  for review before launching.
+                </p>
+                <p class="help-text">
+                  See the full live gene schema on the
+                  <a routerLink="/schema-inspector">Schema Inspector</a>.
                 </p>
               }
 

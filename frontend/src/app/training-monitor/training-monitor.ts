@@ -1,5 +1,6 @@
 import { Component, inject, computed, effect, signal, OnDestroy, ViewChild, ElementRef, AfterViewChecked } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { RouterLink } from '@angular/router';
 import { DecimalPipe, JsonPipe } from '@angular/common';
 import { TrainingService } from '../services/training.service';
 import { ApiService } from '../services/api.service';
@@ -28,7 +29,7 @@ export interface AgentGridItem {
 @Component({
   selector: 'app-training-monitor',
   standalone: true,
-  imports: [JsonPipe, DecimalPipe, FormsModule],
+  imports: [JsonPipe, DecimalPipe, FormsModule, RouterLink],
   templateUrl: './training-monitor.html',
   styleUrl: './training-monitor.scss',
 })

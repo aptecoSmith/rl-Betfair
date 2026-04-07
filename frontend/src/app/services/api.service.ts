@@ -6,6 +6,13 @@ import { ModelDetailResponse, LineageResponse, GeneticsResponse } from '../model
 import { ReplayDayResponse, ReplayRaceResponse } from '../models/replay.model';
 import { BetExplorerResponse } from '../models/bet-explorer.model';
 import {
+  HyperparamSchemaEntry,
+  TrainingPlanListResponse,
+  TrainingPlanDetailResponse,
+  TrainingPlanPayload,
+  CoverageResponse,
+} from '../models/training-plan.model';
+import {
   ExtractedDaysResponse,
   BackupDaysResponse,
   AdminAgentsResponse,
@@ -194,6 +201,30 @@ export class ApiService {
 
   finishTraining(): Observable<{ detail: string }> {
     return this.http.post<{ detail: string }>(`${this.baseUrl}/training/finish`, {});
+  }
+
+  // ── Hyperparameter schema (Session 8) ──────────────────────────────
+
+  getHyperparameterSchema(): Observable<HyperparamSchemaEntry[]> {
+    return this.http.get<HyperparamSchemaEntry[]>(`${this.baseUrl}/training/hyperparameter-schema`);
+  }
+
+  // ── Training plans (Session 4 backend, Session 8 UI) ──────────────
+
+  listTrainingPlans(): Observable<TrainingPlanListResponse> {
+    return this.http.get<TrainingPlanListResponse>(`${this.baseUrl}/training-plans`);
+  }
+
+  getTrainingPlan(planId: string): Observable<TrainingPlanDetailResponse> {
+    return this.http.get<TrainingPlanDetailResponse>(`${this.baseUrl}/training-plans/${planId}`);
+  }
+
+  createTrainingPlan(payload: TrainingPlanPayload): Observable<TrainingPlanDetailResponse> {
+    return this.http.post<TrainingPlanDetailResponse>(`${this.baseUrl}/training-plans`, payload);
+  }
+
+  getTrainingPlanCoverage(): Observable<CoverageResponse> {
+    return this.http.get<CoverageResponse>(`${this.baseUrl}/training-plans/coverage`);
   }
 
   // ── Betting constraints ───────────────────────────────────────────

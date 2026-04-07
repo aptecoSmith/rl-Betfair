@@ -1,0 +1,68 @@
+<div class="coverage-panel">
+  <h3>Coverage report</h3>
+  <div class="totals">
+    <div class="kv"><span class="k">Total agents</span><span class="v">{{ report().total_agents }}</span></div>
+  </div>
+
+  <div class="arch-counts">
+    <h4>Architecture counts</h4>
+    @if (archCountEntries().length === 0) {
+      <div class="empty">No historical agents yet</div>
+    } @else {
+      <ul>
+        @for (a of archCountEntries(); track a.name) {
+          <li>
+            <span class="arch-name">{{ a.name }}</span>
+            <span class="arch-count">{{ a.count }}</span>
+            @if (report().arch_undercovered.includes(a.name)) {
+              <span class="badge warning">undercovered</span>
+            }
+          </li>
+        }
+      </ul>
+    }
+  </div>
+
+  @if (biasedGenes().length > 0) {
+    <div class="biased-list">
+      <h4>Biased genes (planner would nudge)</h4>
+      <div class="chips">
+        @for (g of biasedGenes(); track g) {
+          <span class="chip">{{ g }}</span>
+        }
+      </div>
+    </div>
+  }
+
+  <div class="gene-coverage">
+    <h4>Per-gene bucket coverage</h4>
+    @if (geneCoverage().length === 0) {
+      <div class="empty">No numeric genes to plot</div>
+    } @else {
+      @for (gene of geneCoverage(); track gene.name) {
+        <div class="gene-row" [class.biased]="isBiased(gene.name)" [attr.data-testid]="'gene-cov-' + gene.name">
+          <div class="gene-header">
+            <span class="gene-name">{{ gene.name }}</span>
+            <span class="badge" [class.good]="gene.is_well_covered" [class.warning]="!gene.is_well_covered">
+              {{ gene.is_well_covered ? 'well-covered' : 'poorly-covered' }}
+            </span>
+            <span class="samples">n={{ gene.total_samples }}</span>
+          </div>
+          <svg class="bar-chart" viewBox="0 0 320 50" preserveAspectRatio="none">
+            @for (bar of buildBars(gene); track $index) {
+              <rect
+                [attr.x]="bar.x"
+                [attr.y]="bar.y"
+                [attr.width]="bar.w"
+                [attr.height]="bar.h"
+                [attr.fill]="gene.is_well_covered ? '#81c784' : '#ffb74d'"
+              >
+                <title>bucket {{ $index }}: {{ bar.v }}</title>
+              </rect>
+            }
+          </svg>
+        </div>
+      }
+    }
+  </div>
+</div>

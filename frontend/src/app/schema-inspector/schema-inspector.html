@@ -1,0 +1,40 @@
+<div class="schema-inspector-page">
+  <div class="page-header">
+    <h1>Schema Inspector</h1>
+    <p class="hint">
+      Every gene currently in <code>config.yaml</code>'s
+      <code>hyperparameters.search_ranges</code>, with its type and source.
+      Use this view to confirm a new gene is live without grepping the
+      codebase.
+    </p>
+  </div>
+
+  @if (loading()) {
+    <div class="loading">Loading schema…</div>
+  } @else if (error()) {
+    <div class="message error">{{ error() }}</div>
+  } @else if (schema().length === 0) {
+    <div class="empty">No genes returned by the schema endpoint.</div>
+  } @else {
+    <table class="schema-table">
+      <thead>
+        <tr>
+          <th>Gene</th>
+          <th>Type</th>
+          <th>Range / Choices</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (entry of schema(); track entry.name) {
+          <tr [attr.data-testid]="'schema-row-' + entry.name">
+            <td class="gene-name">{{ entry.name }}</td>
+            <td class="gene-type">{{ entry.type }}</td>
+            <td class="gene-range">{{ rangeOrChoices(entry) }}</td>
+            <td class="gene-source"><code>{{ entry.source_file }}</code></td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+</div>

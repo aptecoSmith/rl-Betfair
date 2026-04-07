@@ -18,6 +18,7 @@ from api.schemas import (
     ArchitectureInfo,
     FinishTrainingResponse,
     GeneticsInfo,
+    HyperparamSchemaEntry,
     ProgressSnapshot,
     StartTrainingRequest,
     StartTrainingResponse,
@@ -193,6 +194,40 @@ def get_genetics(request: Request):
         selection_top_pct=pop_cfg.get("selection_top_pct", 0.5),
         mutation_rate=pop_cfg.get("mutation_rate", 0.3),
     )
+
+
+@router.get(
+    "/training/hyperparameter-schema",
+    response_model=list[HyperparamSchemaEntry],
+)
+def get_hyperparameter_schema(request: Request):
+    """Return the full hyperparameter search-range schema for the UI.
+
+    The Session 8 UI renders one widget per entry in this list, dispatched
+    by ``type``. Returning ``source_file`` lets the schema-inspector page
+    point developers at the canonical definition without grepping.
+
+    No hardcoded gene list — adding/removing a gene in ``config.yaml``
+    automatically flows into the UI on the next reload.
+    """
+    config = request.app.state.config
+    raw = (
+        config.get("hyperparameters", {})
+        .get("search_ranges", {})
+    )
+    entries: list[HyperparamSchemaEntry] = []
+    for name, defn in raw.items():
+        entries.append(
+            HyperparamSchemaEntry(
+                name=name,
+                type=defn["type"],
+                min=defn.get("min"),
+                max=defn.get("max"),
+                choices=defn.get("choices"),
+                source_file=f"config.yaml#hyperparameters.search_ranges.{name}",
+            )
+        )
+    return entries
 
 
 @router.get("/training/architectures/defaults")

@@ -396,6 +396,20 @@ class GeneticsInfo(BaseModel):
     mutation_rate: float
 
 
+class HyperparamSchemaEntry(BaseModel):
+    """One gene in the hyperparameter search-range schema.
+
+    Returned by ``GET /api/training/hyperparameter-schema`` so the UI can
+    render the right widget for each gene without hardcoding the list.
+    """
+    name: str
+    type: str  # "float" | "float_log" | "int" | "int_choice" | "str_choice"
+    min: float | None = None
+    max: float | None = None
+    choices: list | None = None
+    source_file: str  # e.g. "config.yaml#hyperparameters.search_ranges.<name>"
+
+
 class StartTrainingResponse(BaseModel):
     run_id: str
     train_days: list[str]

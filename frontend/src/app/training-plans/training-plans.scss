@@ -1,0 +1,257 @@
+.training-plans-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+  color: #e0e0e0;
+
+  .page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    h1 { font-size: 1.8rem; color: #fff; margin: 0; }
+    .header-actions { display: flex; gap: 0.5rem; }
+  }
+}
+
+.message {
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+
+  &.success { background: rgba(76, 175, 80, 0.15); border: 1px solid #4caf50; color: #81c784; }
+  &.error { background: rgba(244, 67, 54, 0.15); border: 1px solid #f44336; color: #e57373; }
+  &.warning { background: rgba(255, 183, 77, 0.15); border: 1px solid #ffb74d; color: #ffb74d; }
+}
+
+.btn-primary, .btn-secondary {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+.btn-primary { background: #4caf50; color: #fff; }
+.btn-secondary { background: #2a2a3a; color: #e0e0e0; text-decoration: none; display: inline-block; }
+
+.loading, .empty { color: #888; font-style: italic; }
+
+// ── List mode ──────────────────────────────────────────────────
+.plan-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 1rem;
+}
+.plan-card {
+  background: #1e1e2e;
+  border: 1px solid #2a2a3a;
+  border-radius: 8px;
+  padding: 1rem;
+  cursor: pointer;
+
+  &:hover { border-color: #4caf50; }
+
+  .plan-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.5rem;
+
+    .plan-name { font-weight: 600; color: #fff; font-size: 1.05rem; }
+    .plan-created { color: #888; font-size: 0.75rem; font-family: monospace; }
+  }
+
+  .plan-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.85rem;
+    .k { color: #888; margin-right: 0.4rem; }
+    .v { color: #e0e0e0; font-family: monospace; }
+  }
+
+  .plan-notes {
+    margin-top: 0.5rem;
+    color: #aaa;
+    font-style: italic;
+    font-size: 0.85rem;
+  }
+
+  .plan-outcomes {
+    margin-top: 0.5rem;
+    h4 { font-size: 0.75rem; color: #888; text-transform: uppercase; margin: 0 0 0.3rem 0; }
+    table { width: 100%; font-size: 0.75rem; border-collapse: collapse;
+      th, td { padding: 0.2rem 0.4rem; border-bottom: 1px solid #2a2a3a; text-align: left; }
+      th { color: #888; }
+    }
+  }
+}
+
+.coverage-section { margin-top: 2rem; }
+
+// ── Detail mode ────────────────────────────────────────────────
+.plan-detail {
+  background: #1e1e2e;
+  padding: 1.5rem;
+  border-radius: 8px;
+  h2 { color: #fff; margin: 0 0 0.3rem 0; }
+  .plan-id { color: #888; font-size: 0.8rem; margin-bottom: 1rem; }
+}
+
+.plan-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1rem;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+
+  dt { color: #888; font-family: monospace; }
+  dd { color: #e0e0e0; margin: 0; }
+}
+
+.json-block {
+  background: #14141d;
+  color: #aaa;
+  padding: 0.8rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  overflow-x: auto;
+}
+
+.outcomes-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  th, td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #2a2a3a; text-align: left; }
+  th { color: #888; }
+}
+
+.validation-section {
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+
+  .badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    &.error { background: rgba(244, 67, 54, 0.15); border: 1px solid #f44336; color: #e57373; }
+    &.warning { background: rgba(255, 183, 77, 0.15); border: 1px solid #ffb74d; color: #ffb74d; }
+  }
+}
+
+// ── Editor mode ────────────────────────────────────────────────
+.plan-editor {
+  background: #1e1e2e;
+  padding: 1.5rem;
+  border-radius: 8px;
+
+  h2 { color: #fff; margin-top: 0; }
+  h3 { color: #fff; font-size: 1.1rem; margin-top: 1.5rem; }
+  h4 { color: #aaa; font-size: 0.85rem; text-transform: uppercase; }
+}
+
+.form-field {
+  margin-bottom: 0.8rem;
+
+  label {
+    display: block;
+    color: #aaa;
+    font-size: 0.8rem;
+    margin-bottom: 0.2rem;
+    font-family: monospace;
+  }
+  input, textarea {
+    background: #14141d;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    padding: 0.4rem 0.6rem;
+    border-radius: 4px;
+    width: 100%;
+    box-sizing: border-box;
+    font-family: monospace;
+  }
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.8rem;
+}
+
+.form-section {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2a2a3a;
+
+  .hint {
+    color: #888;
+    font-size: 0.8rem;
+    margin: 0 0 0.6rem 0;
+  }
+}
+
+.bias-toggle-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+
+.arch-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+
+  .chip {
+    background: #14141d;
+    border: 1px solid #333;
+    color: #aaa;
+    padding: 0.3rem 0.7rem;
+    border-radius: 12px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 0.8rem;
+
+    &.active { background: rgba(76, 175, 80, 0.15); border-color: #81c784; color: #81c784; }
+  }
+}
+
+.arch-lr-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+
+  .arch-name {
+    font-family: monospace;
+    color: #e0e0e0;
+    flex: 1;
+  }
+}
+.arch-lr-edit {
+  margin-bottom: 0.6rem;
+  .arch-lr-label {
+    color: #aaa;
+    font-size: 0.75rem;
+    font-family: monospace;
+    margin-bottom: 0.2rem;
+  }
+}
+
+.inline-error { color: #e57373; font-size: 0.75rem; margin-top: 0.2rem; }
+
+.form-actions {
+  margin-top: 1.5rem;
+  display: flex;
+  gap: 0.6rem;
+}
+
+.validation-errors, .validation-warnings {
+  margin-top: 1rem;
+}

@@ -1,0 +1,37 @@
+<div class="range-editor" [class.has-error]="minError()">
+  <div class="gene-label">
+    <span class="gene-name">{{ spec().name }}</span>
+    <span class="gene-type">{{ spec().type }}</span>
+  </div>
+  <div class="range-inputs">
+    <label class="bound-label">
+      <span>min</span>
+      <input
+        type="number"
+        [step]="stepHint()"
+        [value]="value().min ?? ''"
+        (input)="onMinChange($any($event.target).value)"
+        [attr.data-testid]="'range-min-' + spec().name"
+      />
+    </label>
+    <label class="bound-label">
+      <span>max</span>
+      <input
+        type="number"
+        [step]="stepHint()"
+        [value]="value().max ?? ''"
+        (input)="onMaxChange($any($event.target).value)"
+        [attr.data-testid]="'range-max-' + spec().name"
+      />
+    </label>
+  </div>
+  @if (minError()) {
+    <div class="inline-error">{{ minError() }}</div>
+  }
+  @if (outOfRangeWarning()) {
+    <div class="inline-warning">{{ outOfRangeWarning() }}</div>
+  }
+  <div class="spec-hint">
+    spec range: [{{ spec().min }}, {{ spec().max }}]
+  </div>
+</div>

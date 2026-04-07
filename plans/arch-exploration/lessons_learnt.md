@@ -409,3 +409,84 @@ provisional to belong there yet.
   unrelated commission bias. Future zero-mean tests on new
   shaping terms should follow the same pattern.
 
+## 2026-04-07 — Session 8 (UI wiring for new knobs)
+
+- **Side-quest: the schema endpoint was missing.** Sessions 1–7
+  added every gene to `config.yaml` `search_ranges` plus the
+  `parse_search_ranges` helper, but no API endpoint exposed the
+  parsed schema to the UI. The Session 8 plan rules out hardcoding
+  the gene list in the frontend, so I added
+  `GET /api/training/hyperparameter-schema` (returning
+  `list[{name, type, min, max, choices, source_file}]`) before any
+  UI work. With that endpoint in place every editor in the UI is
+  schema-driven: adding a gene to `config.yaml` automatically grows
+  the editor and the schema-inspector on the next page load.
+  Without this side-quest the new gene-editor / training-plans
+  editor / and schema-inspector pages would all have grown a
+  hardcoded gene list and become a future maintenance trap. Tiny
+  endpoint, big leverage.
+
+- **Pre-existing test-fixture rot blocked the test runner.** Eight
+  spec files (header, training.service, scoreboard, race-replay,
+  garage, bet-explorer) had `TrainingStatus` / `ScoreboardEntry`
+  mocks missing the newer `worker_connected` / `created_at` /
+  `last_evaluated_at` fields. Compilation is monolithic in
+  `@angular/build:unit-test`, so a single TS error in any spec
+  blocks the entire test run — meaning the new Session 8 specs
+  could not run until the unrelated mocks were repaired. Verified
+  via `git stash` that the errors exist on plain master.
+  Resolution was strictly additive (added the missing fields to
+  the mock factories); no source files were touched. Two
+  pre-existing *runtime* failures remain (`admin.spec.ts`'s
+  `getBettingConstraints` mock is missing,
+  `scoreboard.spec.ts`'s column header expectation is stale) —
+  both unrelated to Session 8 and explicitly out of scope per
+  "no refactors of existing code for cleanliness".
+
+- **Angular 21 standalone components and signal-based inputs are
+  the load-bearing pattern.** The reusable widgets all use
+  `input.required<T>()` + `output<T>()`. Two-way binding between
+  parent and child happens via `[value]="..." (valueChange)="..."`,
+  the same shape `[(ngModel)]` desugars to. It scales cleanly
+  through the dispatcher (gene-editor → range-editor /
+  choice-editor) without any FormControl plumbing.
+
+- **`lstm_layer_norm` int_choice → bool toggle is one place.** The
+  Session 5 lessons flagged the friction of "0/1 ints that mean
+  bool". The resolution is to put the conversion in the
+  `choice-editor` widget itself, gated by a `displayAs="toggle"`
+  input that the gene-editor dispatcher sets when the gene name
+  matches `lstm_layer_norm`. The override still persists `[0]` or
+  `[1]` so the wire format and the backend never see a boolean.
+  Display-only fork; semantics unchanged.
+
+- **The "nothing-dropped" smoke test is the highest-leverage
+  spec in this session.** It is a single `it()` block in
+  `training-plans.spec.ts` that builds the editor with a mocked
+  schema containing every gene from `config.yaml`'s
+  `search_ranges` and asserts every gene name appears in the
+  rendered DOM. If a future session adds a gene to
+  `ui_additions.md` (or to `config.yaml`) but forgets to wire it
+  through the schema-driven editor, this test fails immediately —
+  it is the structural guarantee that the schema-driven UI
+  design actually delivers the promised "no hardcoded gene list"
+  property.
+
+- **Never refactored the existing config editor.** Session 8's
+  rules say "additive only". The training-monitor wizard's
+  Step 4 (Genetics) gained a single paragraph linking out to the
+  new Training Plans page rather than being rewritten to host
+  the new knobs inline — the Plans page is the dedicated home
+  for the Session 5/6/7 gene editing, and the wizard stays
+  focused on launching the existing `POST /api/training/start`.
+  The two flows coexist; the wizard's "Start training" button
+  is unchanged.
+
+- **`arch_change_cooldown` surfaces for free.** The model-detail
+  page already renders every key in `model.hyperparameters`
+  sorted alphabetically. `arch_change_cooldown` lives on the
+  agent's hp dict (Session 6), so when an agent has a non-zero
+  cooldown the field shows up in the existing hyperparameters
+  table without any UI change. No extra widget required to
+  satisfy the "arch cooldown indicator on population view" item.
+

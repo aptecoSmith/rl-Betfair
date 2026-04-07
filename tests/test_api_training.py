@@ -351,6 +351,66 @@ class TestArchitecturesEndpoint:
         assert data["defaults"] == ["ppo_lstm_v1", "ppo_time_lstm_v1"]
 
 
+class TestHyperparameterSchemaEndpoint:
+    def test_returns_full_schema(self):
+        """GET /training/hyperparameter-schema returns every gene from config."""
+        client, app = _make_app()
+        app.state.config = {
+            "hyperparameters": {
+                "search_ranges": {
+                    "learning_rate": {"type": "float_log", "min": 1e-5, "max": 5e-4},
+                    "lstm_layer_norm": {"type": "int_choice", "choices": [0, 1]},
+                    "architecture_name": {
+                        "type": "str_choice",
+                        "choices": ["ppo_lstm_v1", "ppo_time_lstm_v1"],
+                    },
+                }
+            }
+        }
+        resp = client.get("/training/hyperparameter-schema")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 3
+        names = [e["name"] for e in data]
+        assert "learning_rate" in names
+        assert "lstm_layer_norm" in names
+        assert "architecture_name" in names
+
+    def test_schema_entry_shape(self):
+        """Each entry contains name/type/min/max/choices/source_file."""
+        client, app = _make_app()
+        app.state.config = {
+            "hyperparameters": {
+                "search_ranges": {
+                    "learning_rate": {"type": "float_log", "min": 1e-5, "max": 5e-4},
+                    "lstm_num_layers": {"type": "int_choice", "choices": [1, 2]},
+                }
+            }
+        }
+        resp = client.get("/training/hyperparameter-schema")
+        data = {e["name"]: e for e in resp.json()}
+        lr = data["learning_rate"]
+        assert lr["type"] == "float_log"
+        assert lr["min"] == 1e-5
+        assert lr["max"] == 5e-4
+        assert lr["choices"] is None
+        assert lr["source_file"] == "config.yaml#hyperparameters.search_ranges.learning_rate"
+        ll = data["lstm_num_layers"]
+        assert ll["type"] == "int_choice"
+        assert ll["choices"] == [1, 2]
+        assert ll["min"] is None
+        assert ll["max"] is None
+
+    def test_empty_config_returns_empty_list(self):
+        """No search_ranges -> empty list (not 500)."""
+        client, app = _make_app()
+        app.state.config = {}
+        resp = client.get("/training/hyperparameter-schema")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
 class TestGeneticsEndpoint:
     def test_returns_genetics_info(self):
         """GET /training/genetics returns population config."""

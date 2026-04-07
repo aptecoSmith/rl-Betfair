@@ -1,0 +1,290 @@
+<div class="training-plans-page">
+  <div class="page-header">
+    <h1>Training Plans</h1>
+    <div class="header-actions">
+      @if (mode() !== 'list') {
+        <button class="btn-secondary" (click)="openList()">Back to list</button>
+      }
+      @if (mode() === 'list') {
+        <button class="btn-primary" (click)="openEditor()">New plan</button>
+      }
+      <a routerLink="/schema-inspector" class="btn-secondary">Schema inspector</a>
+    </div>
+  </div>
+
+  @if (schemaError()) {
+    <div class="message error">Schema load error: {{ schemaError() }}</div>
+  }
+
+  <!-- ── LIST MODE ─────────────────────────────────────────────── -->
+  @if (mode() === 'list') {
+    <section class="plans-list">
+      @if (loadingPlans()) {
+        <div class="loading">Loading plans…</div>
+      } @else if (listError()) {
+        <div class="message error">{{ listError() }}</div>
+      } @else if (plans().length === 0) {
+        <div class="empty">No training plans yet — click "New plan" to create one.</div>
+      } @else {
+        <div class="plan-cards">
+          @for (plan of plans(); track plan.plan_id) {
+            <div class="plan-card" (click)="openDetail(plan.plan_id)" [attr.data-testid]="'plan-card-' + plan.plan_id">
+              <div class="plan-card-header">
+                <div class="plan-name">{{ plan.name }}</div>
+                <div class="plan-created">{{ plan.created_at }}</div>
+              </div>
+              <div class="plan-meta">
+                <div><span class="k">Population</span> <span class="v">{{ plan.population_size }}</span></div>
+                <div><span class="k">Architectures</span> <span class="v">{{ plan.architectures.join(', ') }}</span></div>
+                @if (plan.arch_mix) {
+                  <div><span class="k">Arch mix</span> <span class="v">configured</span></div>
+                }
+                @if (plan.seed != null) {
+                  <div><span class="k">Seed</span> <span class="v">{{ plan.seed }}</span></div>
+                }
+                <div><span class="k">min_arch_samples</span> <span class="v">{{ plan.min_arch_samples }}</span></div>
+              </div>
+              @if (plan.notes) {
+                <div class="plan-notes">{{ plan.notes }}</div>
+              }
+              @if (plan.outcomes.length > 0) {
+                <div class="plan-outcomes">
+                  <h4>Outcomes</h4>
+                  <table>
+                    <thead><tr><th>gen</th><th>recorded_at</th><th>best</th><th>mean</th><th>alive</th><th>died</th><th>n</th></tr></thead>
+                    <tbody>
+                      @for (o of plan.outcomes; track o.generation) {
+                        <tr>
+                          <td>{{ o.generation }}</td>
+                          <td>{{ o.recorded_at }}</td>
+                          <td>{{ o.best_fitness }}</td>
+                          <td>{{ o.mean_fitness }}</td>
+                          <td>{{ o.architectures_alive.length }}</td>
+                          <td>{{ o.architectures_died.length }}</td>
+                          <td>{{ o.n_agents }}</td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              }
+            </div>
+          }
+        </div>
+      }
+    </section>
+
+    @if (coverageReport(); as report) {
+      <section class="coverage-section">
+        <app-coverage-panel [report]="report" [biasedGenes]="coverageBiased()" />
+      </section>
+    } @else if (coverageError()) {
+      <div class="message error">Coverage error: {{ coverageError() }}</div>
+    }
+  }
+
+  <!-- ── DETAIL MODE ───────────────────────────────────────────── -->
+  @if (mode() === 'detail' && selectedPlan(); as plan) {
+    <section class="plan-detail">
+      <h2>{{ plan.name }}</h2>
+      <div class="plan-id">plan_id: <code>{{ plan.plan_id }}</code></div>
+
+      @if (selectedValidation().length > 0) {
+        <div class="validation-section">
+          @for (issue of selectedValidation(); track issue.code) {
+            <div class="badge" [class.error]="issue.severity === 'error'" [class.warning]="issue.severity === 'warning'">
+              [{{ issue.severity }}] {{ issue.code }}: {{ issue.message }}
+            </div>
+          }
+        </div>
+      }
+
+      <dl class="plan-fields">
+        <dt>population_size</dt><dd>{{ plan.population_size }}</dd>
+        <dt>architectures</dt><dd>{{ plan.architectures.join(', ') }}</dd>
+        <dt>seed</dt><dd>{{ plan.seed ?? '(none)' }}</dd>
+        <dt>min_arch_samples</dt><dd>{{ plan.min_arch_samples }}</dd>
+        <dt>notes</dt><dd>{{ plan.notes || '(none)' }}</dd>
+        <dt>created_at</dt><dd>{{ plan.created_at }}</dd>
+      </dl>
+
+      <h3>hp_ranges</h3>
+      <pre class="json-block">{{ plan.hp_ranges | json }}</pre>
+
+      @if (plan.arch_lr_ranges) {
+        <h3>arch_lr_ranges</h3>
+        <pre class="json-block">{{ plan.arch_lr_ranges | json }}</pre>
+      }
+
+      @if (plan.outcomes.length > 0) {
+        <h3>Generation outcomes</h3>
+        <table class="outcomes-table">
+          <thead><tr><th>gen</th><th>recorded_at</th><th>best</th><th>mean</th><th>alive</th><th>died</th><th>n_agents</th></tr></thead>
+          <tbody>
+            @for (o of plan.outcomes; track o.generation) {
+              <tr>
+                <td>{{ o.generation }}</td>
+                <td>{{ o.recorded_at }}</td>
+                <td>{{ o.best_fitness }}</td>
+                <td>{{ o.mean_fitness }}</td>
+                <td>{{ o.architectures_alive.join(',') }}</td>
+                <td>{{ o.architectures_died.join(',') }}</td>
+                <td>{{ o.n_agents }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
+    </section>
+  }
+
+  <!-- ── EDITOR MODE ───────────────────────────────────────────── -->
+  @if (mode() === 'editor') {
+    <section class="plan-editor" data-testid="plan-editor">
+      <h2>New training plan</h2>
+
+      @if (editorTopError()) {
+        <div class="message error" data-testid="editor-top-error">{{ editorTopError() }}</div>
+      }
+
+      <div class="form-field">
+        <label>name</label>
+        <input type="text" [ngModel]="editorName()" (ngModelChange)="editorName.set($event)" data-testid="editor-name" />
+        @if (errorForField('name'); as e) {
+          <div class="inline-error">{{ e.code }}: {{ e.message }}</div>
+        }
+      </div>
+
+      <div class="form-row">
+        <div class="form-field">
+          <label>population_size</label>
+          <input type="number" [ngModel]="editorPopulationSize()" (ngModelChange)="editorPopulationSize.set($event)" data-testid="editor-pop-size" />
+        </div>
+        <div class="form-field">
+          <label>min_arch_samples</label>
+          <input type="number" [ngModel]="editorMinArchSamples()" (ngModelChange)="editorMinArchSamples.set($event)" data-testid="editor-min-arch" />
+        </div>
+        <div class="form-field">
+          <label>seed (optional)</label>
+          <input type="number" [ngModel]="editorSeed()" (ngModelChange)="editorSeed.set($event)" data-testid="editor-seed" />
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label>architectures (multi-select)</label>
+        <div class="arch-chips">
+          @for (a of architectures(); track a.name) {
+            <button
+              type="button"
+              class="chip"
+              [class.active]="isArchSelected(a.name)"
+              (click)="toggleArchSelection(a.name)"
+              [attr.data-testid]="'arch-chip-' + a.name"
+            >
+              {{ a.name }}
+            </button>
+          }
+        </div>
+      </div>
+
+      @if (coverageWarning()) {
+        <div class="message warning" data-testid="coverage-warning">{{ coverageWarning() }}</div>
+      }
+
+      <div class="form-field">
+        <label>notes</label>
+        <textarea rows="3" [ngModel]="editorNotes()" (ngModelChange)="editorNotes.set($event)"></textarea>
+      </div>
+
+      <div class="form-section">
+        <h3>Hyperparameter ranges</h3>
+        <p class="hint">
+          One widget per gene from <code>config.yaml</code>'s
+          <code>hyperparameters.search_ranges</code>. Adding a gene there
+          automatically appears here on the next page load — no UI change
+          required.
+        </p>
+
+        <div class="bias-toggle-row">
+          <button type="button" class="btn-secondary" (click)="applyBias()" data-testid="bias-toggle">
+            Bias toward uncovered
+          </button>
+          @if (editorBiasToggle()) {
+            <span class="hint">Bias applied — review and tweak ranges below before saving.</span>
+          }
+        </div>
+
+        @if (minSpec() && maxSpec()) {
+          <app-early-pick-validator
+            [minSpec]="minSpec()!"
+            [maxSpec]="maxSpec()!"
+            [minValue]="geneValue('early_pick_bonus_min')"
+            [maxValue]="geneValue('early_pick_bonus_max')"
+            (minValueChange)="updateMinGene($event)"
+            (maxValueChange)="updateMaxGene($event)"
+          />
+        }
+
+        @for (gene of genericGenes(); track gene.name) {
+          <div [attr.data-testid]="'gene-row-' + gene.name">
+            <app-gene-editor
+              [spec]="gene"
+              [value]="geneValue(gene.name)"
+              (valueChange)="updateGene(gene.name, $event)"
+            />
+          </div>
+        }
+      </div>
+
+      @if (lrSpec(); as lr) {
+        <div class="form-section">
+          <h3>arch_lr_ranges (per-architecture learning rate override)</h3>
+          <p class="hint">Override <code>learning_rate</code> for specific architectures (Session 6).</p>
+          @for (arch of selectedArchsArray(); track arch) {
+            <div class="arch-lr-row" [attr.data-testid]="'arch-lr-row-' + arch">
+              <span class="arch-name">{{ arch }}</span>
+              @if (hasArchLrOverride(arch)) {
+                <button type="button" class="btn-secondary" (click)="removeArchLrOverride(arch)">Remove override</button>
+              } @else {
+                <button type="button" class="btn-secondary" (click)="addArchLrOverride(arch)">Add LR override</button>
+              }
+            </div>
+          }
+          @for (entry of archLrEntries(); track entry.arch) {
+            <div class="arch-lr-edit">
+              <div class="arch-lr-label">{{ entry.arch }} → learning_rate</div>
+              <app-gene-editor
+                [spec]="lr"
+                [value]="entry.value"
+                (valueChange)="updateArchLrOverride(entry.arch, $event)"
+              />
+            </div>
+          }
+        </div>
+      }
+
+      @if (validationErrors().length > 0) {
+        <div class="validation-errors">
+          <h4>Validation errors (server)</h4>
+          @for (e of validationErrors(); track e.code) {
+            <div class="message error">[{{ e.code }}] {{ e.field ?? '' }}: {{ e.message }}</div>
+          }
+        </div>
+      }
+      @if (validationWarnings().length > 0) {
+        <div class="validation-warnings">
+          @for (w of validationWarnings(); track w.code) {
+            <div class="message warning">[{{ w.code }}] {{ w.field ?? '' }}: {{ w.message }}</div>
+          }
+        </div>
+      }
+
+      <div class="form-actions">
+        <button class="btn-primary" (click)="savePlan()" [disabled]="editorSaving()" data-testid="save-plan">
+          {{ editorSaving() ? 'Saving…' : 'Save plan' }}
+        </button>
+        <button class="btn-secondary" (click)="openList()">Cancel</button>
+      </div>
+    </section>
+  }
+</div>

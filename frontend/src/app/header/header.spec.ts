@@ -18,6 +18,7 @@ function idleStatus(): TrainingStatus {
     item: null,
     detail: null,
     last_agent_score: null,
+    worker_connected: false,
   };
 }
 
@@ -44,6 +45,7 @@ function runningStatus(): TrainingStatus {
     },
     detail: 'Episode 312 | reward=+1.24 | loss=0.0042',
     last_agent_score: 0.82,
+    worker_connected: true,
   };
 }
 

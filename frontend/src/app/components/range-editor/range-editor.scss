@@ -1,0 +1,68 @@
+.range-editor {
+  background: #1e1e2e;
+  border: 1px solid #2a2a3a;
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.5rem;
+
+  &.has-error {
+    border-color: #e57373;
+  }
+
+  .gene-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.3rem;
+
+    .gene-name {
+      font-family: monospace;
+      color: #e0e0e0;
+      font-weight: 600;
+    }
+    .gene-type {
+      color: #888;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+    }
+  }
+
+  .range-inputs {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  .bound-label {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    font-size: 0.75rem;
+    color: #aaa;
+
+    input {
+      background: #14141d;
+      border: 1px solid #333;
+      color: #e0e0e0;
+      padding: 0.3rem 0.4rem;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+  }
+
+  .inline-error {
+    margin-top: 0.3rem;
+    color: #e57373;
+    font-size: 0.75rem;
+  }
+  .inline-warning {
+    margin-top: 0.3rem;
+    color: #ffb74d;
+    font-size: 0.75rem;
+  }
+  .spec-hint {
+    margin-top: 0.2rem;
+    color: #666;
+    font-size: 0.7rem;
+    font-family: monospace;
+  }
+}

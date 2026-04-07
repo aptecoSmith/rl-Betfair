@@ -26,6 +26,7 @@ function createTestHarness() {
     item: null,
     detail: null,
     last_agent_score: null,
+    worker_connected: false,
   });
   const latestEvent = signal<WSEvent | null>(null);
   const lastRunCompletedAt = signal<number | null>(null);
@@ -45,6 +46,7 @@ function createTestHarness() {
         item: null,
         detail: event.detail ?? null,
         last_agent_score: null,
+        worker_connected: false,
       });
       return;
     }

@@ -26,6 +26,8 @@ function makeEntry(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
     early_picks: 3,
     garaged: true,
     garaged_at: '2026-03-26T10:00:00',
+    created_at: null,
+    last_evaluated_at: null,
     ...overrides,
   };
 }

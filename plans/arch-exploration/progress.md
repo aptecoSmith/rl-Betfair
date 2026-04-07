@@ -787,3 +787,191 @@ worked examples and the full proof.
 
 **Next:** Session 8 — UI wiring for new knobs.
 
+---
+
+## Session 8 — UI wiring for new knobs (2026-04-07)
+
+**Shipped:**
+
+- **Backend side-quest:** New `GET /api/training/hyperparameter-schema`
+  endpoint in `api/routers/training.py` returning the parsed
+  `config.yaml` `search_ranges` as a typed list. Schema entries
+  carry a `source_file` pointer
+  (`config.yaml#hyperparameters.search_ranges.<name>`) so the UI
+  schema-inspector page can show developers exactly where each gene
+  is defined. Pydantic response model `HyperparamSchemaEntry` added
+  to `api/schemas.py`. Three CPU-only unit tests in
+  `tests/test_api_training.py::TestHyperparameterSchemaEndpoint`.
+
+- **Frontend reusable widgets** under `frontend/src/app/components/`:
+  - `range-editor` — two-input min/max editor for `float`,
+    `float_log`, `int` genes. Type-aware step hint, inline
+    `min > max` error, soft out-of-range warning against the spec
+    bounds, gene-name + type label.
+  - `choice-editor` — chip-group editor for `int_choice` /
+    `str_choice` genes. Special-cases `displayAs="toggle"` for
+    boolean-like 0/1 int_choice (used by `lstm_layer_norm`) —
+    renders as a true/false toggle but persists `[0]` / `[1]` so
+    the wire format never changes.
+  - `gene-editor` — dispatcher that takes a `HyperparamSchemaEntry`
+    and renders the right child editor. The single place that maps
+    type → widget. Special-cases `architecture_name` (renders a
+    no-op stub because the multi-select handles it) and
+    `lstm_layer_norm` (toggle display).
+  - `early-pick-validator` — composite editor wrapping two
+    range-editors for `early_pick_bonus_min` and
+    `early_pick_bonus_max`. Enforces the cross-gene invariant
+    `max.max >= min.min` BEFORE save with a red inline error
+    (Session 3 belt-and-braces; backend `_repair_reward_gene_pairs`
+    is still authoritative).
+  - `coverage-panel` — read-only panel that visualises a
+    `CoverageReport`. Renders `total_agents`, `arch_counts`,
+    `arch_undercovered`, per-gene inline-SVG bar chart of
+    `bucket_counts`, well-covered/poorly-covered flag, and the
+    `biased_genes` list. SVG bars match the training-monitor
+    reward-chart approach — no chart library.
+
+- **Training Plans page** at `/training-plans`
+  (`frontend/src/app/training-plans/`). Three modes:
+  - **List**: cards showing `plan.name`, `plan.created_at`,
+    `population_size`, `architectures`, `arch_mix` flag, `seed`,
+    `min_arch_samples`, `notes`, and the full `outcomes` table
+    (gen / recorded_at / best_fitness / mean_fitness / arch alive
+    counts / arch died counts / n_agents).
+  - **Detail**: full plan field dump + validation badges (yellow
+    warning, red error from the `validation` array on
+    `GET /api/training-plans/{id}`).
+  - **Editor**: schema-driven gene editor — one widget per entry
+    in the hyperparameter-schema endpoint, dispatched via
+    `gene-editor`. Plus name / population_size / min_arch_samples
+    / seed / notes / multi-select architectures, inline coverage
+    warning when `population < min × archs`, "Bias toward
+    uncovered" toggle that calls
+    `GET /api/training-plans/coverage` and tightens editable
+    `hp_ranges` toward empty buckets in biased genes (UI preview;
+    server-side `bias_sampler` is the authoritative source),
+    arch-specific LR override editor (Session 6
+    `arch_lr_ranges`), 422 error surfacing per-issue with
+    `errorForField()`, opaque `plan_id` (never editable). Save
+    button POSTs to `/api/training-plans` and switches to detail
+    mode on success.
+
+- **Schema Inspector page** at `/schema-inspector`
+  (`frontend/src/app/schema-inspector/`). Read-only table listing
+  every gene returned by the schema endpoint with name, type,
+  range/choices, and `source_file`. The "nothing-dropped" visual
+  check that catches dead-gene bugs without grepping.
+
+- **Training-monitor wizard wiring.** Step 4 (Genetics) gained a
+  paragraph linking out to the new Training Plans page (with
+  `routerLink="/training-plans"`) and a link to the Schema
+  Inspector. The wizard's "Start training" button still POSTs to
+  `/api/training/start` (no behavioural change). Per the session
+  plan, the new knobs live in the dedicated Plans page rather
+  than being rewritten into the wizard inline — additive, not
+  refactor.
+
+- **Header navigation.** New `Plans` and `Schema` links added to
+  `header.html`.
+
+- **Lazy routes** added to `app.routes.ts` for both new pages.
+
+- **API service methods** added to `api.service.ts`:
+  `getHyperparameterSchema`, `listTrainingPlans`,
+  `getTrainingPlan`, `createTrainingPlan`,
+  `getTrainingPlanCoverage`. Models live in
+  `frontend/src/app/models/training-plan.model.ts` (mirrors the
+  backend pydantic shapes).
+
+- **`arch_change_cooldown` indicator** required no new code. The
+  model-detail page already renders every key in
+  `model.hyperparameters` alphabetically, so when an agent has a
+  non-zero cooldown the field shows up in the existing
+  hyperparameters table for free.
+
+**Files added:**
+
+- `api/schemas.py` — `HyperparamSchemaEntry` pydantic model.
+- `api/routers/training.py` — `GET /training/hyperparameter-schema`.
+- `tests/test_api_training.py` —
+  `TestHyperparameterSchemaEndpoint` class (3 tests).
+- `frontend/src/app/models/training-plan.model.ts` — TS interfaces
+  for the schema, plan, validation, coverage, and create payload.
+- `frontend/src/app/components/range-editor/`
+  (`.ts`, `.html`, `.scss`, `.spec.ts`).
+- `frontend/src/app/components/choice-editor/`
+  (`.ts`, `.html`, `.scss`, `.spec.ts`).
+- `frontend/src/app/components/gene-editor/`
+  (`.ts` inline template, `.spec.ts`).
+- `frontend/src/app/components/early-pick-validator/`
+  (`.ts` inline template, `.spec.ts`).
+- `frontend/src/app/components/coverage-panel/`
+  (`.ts`, `.html`, `.scss`, `.spec.ts`).
+- `frontend/src/app/training-plans/`
+  (`.ts`, `.html`, `.scss`, `.spec.ts`).
+- `frontend/src/app/schema-inspector/`
+  (`.ts`, `.html`, `.scss`, `.spec.ts`).
+
+**Files changed:**
+
+- `frontend/src/app/services/api.service.ts` — five new methods,
+  five new model imports.
+- `frontend/src/app/app.routes.ts` — two lazy routes.
+- `frontend/src/app/header/header.html` — `Plans` and `Schema`
+  nav links.
+- `frontend/src/app/training-monitor/training-monitor.ts` —
+  `RouterLink` import.
+- `frontend/src/app/training-monitor/training-monitor.html` —
+  Step 4 paragraph linking to new pages.
+- Pre-existing test-fixture rot fix (additive only — added missing
+  `worker_connected` / `created_at` / `last_evaluated_at` fields
+  to mock factories so the monolithic test compile succeeds):
+  - `frontend/src/app/header/header.spec.ts`
+  - `frontend/src/app/services/training.service.spec.ts`
+  - `frontend/src/app/scoreboard/scoreboard.spec.ts`
+  - `frontend/src/app/race-replay/race-replay.spec.ts`
+  - `frontend/src/app/garage/garage.spec.ts`
+  - `frontend/src/app/bet-explorer/bet-explorer.spec.ts`
+- `plans/arch-exploration/ui_additions.md` — every checklist
+  ticked.
+- `plans/arch-exploration/progress.md`, `lessons_learnt.md` —
+  session notes.
+
+**Tests:**
+
+- Backend: `pytest tests/test_api_training.py::TestHyperparameterSchemaEndpoint tests/test_api_training.py::TestArchitecturesEndpoint tests/test_api_training.py::TestGeneticsEndpoint`
+  → 7 passed (~3.9 s).
+- Frontend: `cd frontend && npx ng test --watch=false --filter="RangeEditor|ChoiceEditor|GeneEditor|EarlyPickValidator|CoveragePanel|TrainingPlans|SchemaInspector"`
+  → 51 passed across 7 spec files.
+- Includes the **nothing-dropped smoke test** in
+  `training-plans.spec.ts` that asserts every gene from a
+  canonical config-yaml mock schema appears as a form field in
+  the rendered editor.
+
+**Not shipped:**
+
+- No GPU runs, no live training, no clicks of the
+  "Start training" button — Session 9 handles GPU shakeout per
+  the session plan.
+- No refactor of the training-monitor wizard. The new gene
+  editing lives on the dedicated Training Plans page (linked
+  from Step 4 of the wizard) — additive only.
+- No "launch from plan" button. The Plans editor only persists
+  via `POST /api/training-plans`; converting a saved plan into
+  a real training run is Session 9's job.
+- No real-time outcome streaming. The list and detail views
+  render `plan.outcomes` as it stands at fetch time; live
+  updates are out of scope until an outcome stream exists.
+- The two pre-existing frontend test failures (`admin.spec.ts`'s
+  `getBettingConstraints` mock missing,
+  `scoreboard.spec.ts`'s column header expectation stale) are
+  unrelated to Session 8 and explicitly out of scope per the
+  "no refactors of existing code for cleanliness" rule.
+- The pre-existing backend failure
+  (`tests/test_api_training.py::TestTrainingStatus::test_running_no_event`)
+  is also unrelated; the new schema-endpoint tests sit alongside
+  it untouched.
+
+**Next:** Session 9 — GPU shakeout (the first session that
+actually runs the new genes through a full Gen-0 on GPU).
+
