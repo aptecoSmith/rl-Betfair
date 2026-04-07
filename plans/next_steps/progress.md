@@ -209,18 +209,13 @@ follow-up item in `next_steps.md`.
 - `plans/next_steps/next_steps.md` (pre-existing fast-suite failures
   follow-up)
 
-**Manual tests run:** M1 (UI smoke) — partial.
+**Manual tests run:** M1 (UI smoke) — pass (2026-04-07).
   - Automated surrogate: grep of `frontend/` and `api/` for the two
     retired names returns zero hits, so no stale UI label/tooltip/
-    error string can leak the retired gene names. Pass.
-  - Human-click portion (visit schema inspector, confirm every
-    live gene renders; open the plan editor; confirm no console
-    errors) **not executed in this session** — the session was
-    CPU-only and headless. Queued for the next session that spins
-    up the stack.
+    error string can leak the retired gene names.
+  - Human-click portion: user confirmed pass.
 
 **Not shipped / deferred:**
-- Human-driven portion of M1 UI smoke — see above.
 - Fixes to the 18 pre-existing fast-suite failures — out of scope
   per "do not fix integration tests that were already broken".
 
