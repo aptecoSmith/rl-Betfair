@@ -75,7 +75,7 @@ GPU.
 - All frontend tests pass.
 - Manual sanity check: spin up the UI (`npm run dev` or equivalent
   under `frontend/`), visit the config page, visit the training-plan
-  page, confirm every new gene is visible and editable.
+  page, confirm every new gene is visible and editable. You will need the api too.
 - `progress.md` Session 8 entry.
 - `lessons_learnt.md` — capture anything about the existing
   frontend patterns that surprised you.
