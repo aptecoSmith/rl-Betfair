@@ -158,6 +158,8 @@ hyperparameters:
       - ppo_lstm_v1
       - ppo_time_lstm_v1
       - ppo_transformer_v1
+features:
+  obi_top_n: 3
 training_worker:
   host: localhost
   port: 8002

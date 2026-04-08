@@ -64,11 +64,13 @@ something the agent can use.
 P1 is split into four sessions (19–22) so each diff is small enough
 to review cleanly and fit into a Sonnet context window.
 
-- [ ] **Session 19 — P1a: OBI feature + obs schema bump**
+- [x] **Session 19 — P1a: OBI feature + obs schema bump**
       (`sessions/session_19_p1a_obi.md`)
-  - Create `env/features.py` (dependency-free, vendorable).
-  - Single feature: `obi_topN`.
-  - Establishes the schema-bump infrastructure reused by 20/21.
+  - [x] Create `env/features.py` (dependency-free, vendorable).
+  - [x] `obi_topN` feature; RUNNER_DIM 110 → 111.
+  - [x] `OBS_SCHEMA_VERSION = 2`; `validate_obs_schema`; schema enforced in `model_store` + `population_manager`.
+  - [x] `info["debug_features"]` per-runner dict.
+  - [x] 13 tests (7 pure + 3 env + 3 schema).
 
 - [ ] **Session 20 — P1b: weighted microprice feature**
       (`sessions/session_20_p1b_microprice.md`)

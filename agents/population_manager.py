@@ -201,10 +201,12 @@ class PopulationManager:
         from env.betfair_env import (
             AGENT_STATE_DIM,
             MARKET_DIM,
+            OBS_SCHEMA_VERSION,
             POSITION_DIM,
             RUNNER_DIM,
             VELOCITY_DIM,
         )
+        self._obs_schema_version = OBS_SCHEMA_VERSION
 
         self.obs_dim = (
             MARKET_DIM
@@ -331,8 +333,11 @@ class PopulationManager:
                     architecture_description=arch_cls.description,
                     hyperparameters=hp,
                 )
-                # Save initial weights
-                self.model_store.save_weights(model_id, policy.state_dict())
+                # Save initial weights (include schema version so loaders can validate)
+                self.model_store.save_weights(
+                    model_id, policy.state_dict(),
+                    obs_schema_version=self._obs_schema_version,
+                )
             else:
                 import uuid
 
@@ -371,8 +376,10 @@ class PopulationManager:
             hyperparams=hp,
         )
 
-        # Load saved weights
-        state_dict = self.model_store.load_weights(model_id)
+        # Load saved weights — validate schema version before touching layers
+        state_dict = self.model_store.load_weights(
+            model_id, expected_obs_schema_version=self._obs_schema_version,
+        )
         policy.load_state_dict(state_dict)
 
         return AgentRecord(
@@ -713,7 +720,10 @@ class PopulationManager:
                     parent_a_id=parent_a_id,
                     parent_b_id=parent_b_id,
                 )
-                self.model_store.save_weights(model_id, policy.state_dict())
+                self.model_store.save_weights(
+                    model_id, policy.state_dict(),
+                    obs_schema_version=self._obs_schema_version,
+                )
             else:
                 model_id = str(uuid.uuid4())
 

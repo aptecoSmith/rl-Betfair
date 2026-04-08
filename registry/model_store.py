@@ -377,12 +377,23 @@ class ModelStore:
 
     # -- Weights I/O ----------------------------------------------------------
 
-    def save_weights(self, model_id: str, state_dict: dict) -> str:
-        """Save PyTorch state dict to disk.  Returns the file path."""
+    def save_weights(
+        self, model_id: str, state_dict: dict, obs_schema_version: int | None = None
+    ) -> str:
+        """Save PyTorch state dict to disk.  Returns the file path.
+
+        When *obs_schema_version* is provided the checkpoint is wrapped as
+        ``{"obs_schema_version": N, "weights": state_dict}`` so that loaders
+        can refuse mismatched versions loudly.
+        """
         import torch
 
         path = self.weights_dir / f"{model_id}.pt"
-        torch.save(state_dict, str(path))
+        if obs_schema_version is not None:
+            payload: dict = {"obs_schema_version": obs_schema_version, "weights": state_dict}
+        else:
+            payload = state_dict
+        torch.save(payload, str(path))
 
         conn = self._get_conn()
         try:
@@ -395,8 +406,15 @@ class ModelStore:
             conn.close()
         return str(path)
 
-    def load_weights(self, model_id: str) -> dict:
-        """Load PyTorch state dict from disk."""
+    def load_weights(
+        self, model_id: str, expected_obs_schema_version: int | None = None
+    ) -> dict:
+        """Load PyTorch state dict from disk.
+
+        When *expected_obs_schema_version* is provided the checkpoint is
+        validated before the state dict is returned.  A version mismatch
+        raises ``ValueError`` — see :func:`env.betfair_env.validate_obs_schema`.
+        """
         model = self.get_model(model_id)
         if model is None:
             raise ValueError(f"Model {model_id} not found in registry")
@@ -404,7 +422,15 @@ class ModelStore:
             raise ValueError(f"Model {model_id} has no saved weights")
         import torch
 
-        return torch.load(model.weights_path, weights_only=True)
+        raw = torch.load(model.weights_path, weights_only=True)
+        if expected_obs_schema_version is not None:
+            from env.betfair_env import validate_obs_schema
+            validate_obs_schema(raw)
+        # Support both wrapped format ({"obs_schema_version": N, "weights": ...})
+        # and bare state-dict format for forward compatibility.
+        if isinstance(raw, dict) and "weights" in raw and "obs_schema_version" in raw:
+            return raw["weights"]
+        return raw
 
     # -- Evaluation runs ------------------------------------------------------
 

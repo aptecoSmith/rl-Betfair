@@ -34,6 +34,35 @@ Format:
 
 ---
 
+## 2026-04-08 — Session 19 — P1a: OBI feature + obs schema bump
+
+**Shipped:**
+- `env/features.py` (NEW) — pure, dependency-free `compute_obi(back_levels, lay_levels, n)` function. No numpy, no env-internal imports. Vendorable verbatim into `ai-betfair`.
+- `env/betfair_env.py` — `OBS_SCHEMA_VERSION = 2` constant; `validate_obs_schema(checkpoint)` function; `"obi_topN"` appended to `RUNNER_KEYS`; `RUNNER_DIM` 110 → 111; `self._obi_top_n` from config; `debug_features` key in `_get_info` with per-runner `{"obi_topN": float}`; `engineer_day` call passes `obi_top_n`.
+- `data/feature_engineer.py` — imports `compute_obi`; `engineer_tick / engineer_race / engineer_day` accept `obi_top_n: int = 3`; obi computed per runner in `engineer_tick` from raw ladder levels.
+- `config.yaml` — `features: obi_top_n: 3` section added.
+- `registry/model_store.py` — `save_weights` accepts optional `obs_schema_version`; `load_weights` accepts optional `expected_obs_schema_version` and validates via `validate_obs_schema` when provided; unwraps `{"obs_schema_version": N, "weights": ...}` format.
+- `agents/population_manager.py` — imports `OBS_SCHEMA_VERSION`; both `save_weights` calls pass it; `load_agent` passes `expected_obs_schema_version`.
+
+**Tests added:**
+- `tests/research_driven/test_p1a_obi.py` — 13 tests (7 pure-function + 3 env + 3 schema):
+  - Pure: balanced book → 0.0; all-back → 1.0; all-lay → -1.0; empty → 0.0; respects N; asymmetric; N > level count.
+  - Env smoke: `obi_topN` appears in `info["debug_features"]`, in `[-1, 1]`; determinism across two runs; obs vector shape matches RUNNER_DIM=111.
+  - Schema: refuses checkpoint with old version; refuses bare state-dict; accepts current version.
+
+**Did not ship:**
+- Manual test spot-check (UI not yet wired) — acceptance row already in `ui_additions.md`.
+- `weighted_microprice`, `traded_delta_T`, `mid_drift_T` — deferred to sessions 20/21 per plan.
+
+**Notes for next session:**
+- Session 20 (P1b microprice) reuses `env/features.py` and the same schema-bump pattern. `OBS_SCHEMA_VERSION` must be bumped again in that session.
+- Commit SHA for this session: (filled by git after commit)
+
+**Cross-repo follow-ups:**
+- `downstream_knockon.md` §1: `ai-betfair` now needs `obi_topN` in its per-runner observation assembly. It can vendor `env/features.py` directly.
+
+---
+
 ## 2026-04-08 — Session 18 — R-2 self-depletion fix
 
 **Shipped:**

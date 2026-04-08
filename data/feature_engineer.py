@@ -36,6 +36,7 @@ from data.episode_builder import (
     RunnerSnap,
     Tick,
 )
+from env.features import compute_obi
 
 NaN = float("nan")
 
@@ -854,6 +855,7 @@ def engineer_tick(
     tick: Tick,
     race: Race,
     tick_history: TickHistory,
+    obi_top_n: int = 3,
 ) -> dict[str, object]:
     """Compute ALL features for a single tick.
 
@@ -891,6 +893,12 @@ def engineer_tick(
         # Add velocity features
         feats.update(tick_history.runner_velocity_features(sid))
 
+        # OBI — computed from raw ladder levels so the formula stays
+        # byte-identical to the ai-betfair live path.
+        feats["obi_topN"] = compute_obi(
+            snap.available_to_back, snap.available_to_lay, obi_top_n,
+        )
+
         runners_out[sid] = feats
 
     # Update history (after reading velocity — velocity uses prior state)
@@ -906,7 +914,7 @@ def engineer_tick(
     }
 
 
-def engineer_race(race: Race) -> list[dict[str, object]]:
+def engineer_race(race: Race, obi_top_n: int = 3) -> list[dict[str, object]]:
     """Compute features for every tick in a race.
 
     Creates a fresh :class:`TickHistory` per race, so velocity features
@@ -917,11 +925,11 @@ def engineer_race(race: Race) -> list[dict[str, object]]:
     history = TickHistory()
     results: list[dict[str, object]] = []
     for tick in race.ticks:
-        results.append(engineer_tick(tick, race, history))
+        results.append(engineer_tick(tick, race, history, obi_top_n=obi_top_n))
     return results
 
 
-def engineer_day(day: Day) -> list[list[dict[str, object]]]:
+def engineer_day(day: Day, obi_top_n: int = 3) -> list[list[dict[str, object]]]:
     """Compute features for every tick in every race of a day.
 
     Returns a nested list: ``day[race_idx][tick_idx] → feature_dict``.
@@ -929,7 +937,7 @@ def engineer_day(day: Day) -> list[list[dict[str, object]]]:
     results = []
     for race in day.races:
         t0 = time.perf_counter()
-        feats = engineer_race(race)
+        feats = engineer_race(race, obi_top_n=obi_top_n)
         elapsed = time.perf_counter() - t0
         logger.debug(
             "  Race %s: %d ticks engineered in %.3fs",

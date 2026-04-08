@@ -24,15 +24,28 @@ Format per row:
 
 ### Owed by Phase 1 sessions
 
-- [ ] **Show new pressure features in the per-runner panel**
-      (source: P1 session, see `proposals.md`)
-  - Add columns for `obi_topN`, `weighted_microprice`,
-    `traded_delta_T`, `mid_drift_T` next to the existing ladder
-    snapshot for each runner.
-  - Acceptance: open one race in the replay UI, find a tick where
-    the operator can visually confirm the OBI value matches the
-    visible book, and the microprice lies between best back and
-    best lay.
+- [ ] **Show `obi_topN` in the per-runner panel** (source: session 19 / P1a,
+      `env/betfair_env.py` `_get_info` → `debug_features`)
+  - `info["debug_features"][selection_id]["obi_topN"]` is now populated every
+    tick. Wire it into the per-runner row in the replay UI.
+  - Acceptance: open one race in the replay UI, find a tick where the
+    operator can visually confirm that the OBI value matches the visible
+    back/lay size balance (e.g. dominant back side → obi > 0).
+
+- [ ] **Show `weighted_microprice`, `traded_delta_T`, `mid_drift_T` in the
+      per-runner panel** (source: sessions 20–21 / P1b–c, see `proposals.md`)
+  - Add columns for those features once sessions 20–21 land.
+  - Acceptance: microprice lies between best back and best lay; windowed
+    features update each tick.
+
+- [ ] **Show spread cost as a separate line in per-race shaped
+      reward** (source: P2 session, see `proposals.md`)
+  - The shaped-reward breakdown panel currently shows `early
+    pick`, `precision`, `efficiency`. Add a `spread cost` line so
+    the operator can see when the agent is paying it and when not.
+  - Acceptance: open a race where the agent crossed at least one
+    wide spread; the new line shows a non-zero value and the sum
+    of all shaped lines equals `info["shaped_bonus"]`.
 
 - [ ] **Show spread cost as a separate line in per-race shaped
       reward** (source: P2 session, see `proposals.md`)

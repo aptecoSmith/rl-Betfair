@@ -40,9 +40,19 @@ import logging
 from data.episode_builder import Day, Race, Tick
 from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
+from env.features import compute_obi
 from training.perf_log import perf_log
 
 logger = logging.getLogger(__name__)
+
+# ── Obs schema version ───────────────────────────────────────────────────────
+# Bump this integer whenever the observation vector layout changes.
+# Checkpoints saved with a different version are refused loudly on load —
+# silent zero-padding is forbidden (hard_constraints.md §13).
+#
+#   Version 1 — original obs vector (sessions 1–18)
+#   Version 2 — added obi_topN per runner (session 19 / P1a)
+OBS_SCHEMA_VERSION: int = 2
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
@@ -128,6 +138,8 @@ RUNNER_KEYS: list[str] = [
     "vol_delta_10", "vol_delta_10_log",
     "ltp_volatility_5", "ltp_volatility_10",
     "tick_count",
+    # ── P1a features (1, Session 19) ──
+    "obi_topN",
 ]
 
 AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
@@ -136,12 +148,50 @@ POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
-RUNNER_DIM = len(RUNNER_KEYS)             # 110 (was 93, +17 past race features)
+RUNNER_DIM = len(RUNNER_KEYS)             # 111 (was 110, +1 obi_topN P1a)
 
 # Action thresholds
 _BACK_THRESHOLD = 0.33
 _LAY_THRESHOLD = -0.33
 _MIN_STAKE = 2.00  # Betfair Exchange minimum stake (£2)
+
+
+# ── Schema validation ────────────────────────────────────────────────────────
+
+
+def validate_obs_schema(checkpoint: dict) -> None:
+    """Raise ``ValueError`` if *checkpoint* was saved with a different obs schema.
+
+    Checkpoints must be saved as ``{"obs_schema_version": N, "weights": ...}``.
+    Loading a checkpoint whose schema version does not match
+    :data:`OBS_SCHEMA_VERSION` is refused loudly — silent zero-padding or
+    silent truncation is forbidden (hard_constraints.md §13).
+
+    Parameters
+    ----------
+    checkpoint:
+        The raw dict loaded from a ``.pt`` file.
+
+    Raises
+    ------
+    ValueError
+        If ``obs_schema_version`` is absent or does not equal
+        :data:`OBS_SCHEMA_VERSION`.
+    """
+    saved = checkpoint.get("obs_schema_version")
+    if saved is None:
+        raise ValueError(
+            "Checkpoint has no obs_schema_version key (pre-schema-bump "
+            f"format). Expected OBS_SCHEMA_VERSION={OBS_SCHEMA_VERSION}. "
+            "Refusing to load — silent zero-pad is forbidden."
+        )
+    if saved != OBS_SCHEMA_VERSION:
+        raise ValueError(
+            f"Checkpoint obs_schema_version={saved!r}, but current env "
+            f"expects OBS_SCHEMA_VERSION={OBS_SCHEMA_VERSION}. "
+            "The observation vector layouts are incompatible. "
+            "Retrain from scratch or use a matching env version."
+        )
 
 
 # ── Per-race record ─────────────────────────────────────────────────────────
@@ -236,6 +286,7 @@ class BetfairEnv(gymnasium.Env):
         self._max_lay_price: float | None = constraints.get("max_lay_price")
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
         self._total_races = len(day.races)
+        self._obi_top_n: int = config.get("features", {}).get("obi_top_n", 3)
 
         # Reward parameters — start from shared config, then overlay any
         # per-agent overrides passed in by the trainer. The shared config
@@ -333,7 +384,7 @@ class BetfairEnv(gymnasium.Env):
                 logger,
                 f"Feature engineering ({n_races} races, {n_ticks} ticks)",
             ):
-                day_features = engineer_day(self.day)
+                day_features = engineer_day(self.day, obi_top_n=self._obi_top_n)
             if feature_cache is not None:
                 feature_cache[self.day.date] = day_features
 
@@ -472,6 +523,22 @@ class BetfairEnv(gymnasium.Env):
         if self._race_idx < self._total_races:
             total_bets += bm.bet_count
             total_winning += bm.winning_bets
+        # Per-runner debug features for the current tick.  Keyed by
+        # selection_id; value is a dict of computed features so the replay
+        # UI and manual tests can spot-check values against the raw book.
+        debug_features: dict[int, dict[str, float]] = {}
+        if self._race_idx < self._total_races and self._tick_idx < len(
+            self.day.races[self._race_idx].ticks
+        ):
+            tick = self.day.races[self._race_idx].ticks[self._tick_idx]
+            for runner in tick.runners:
+                obi = compute_obi(
+                    runner.available_to_back,
+                    runner.available_to_lay,
+                    self._obi_top_n,
+                )
+                debug_features[runner.selection_id] = {"obi_topN": obi}
+
         return {
             "race_idx": self._race_idx,
             "tick_idx": self._tick_idx,
@@ -486,6 +553,7 @@ class BetfairEnv(gymnasium.Env):
             "winning_bets": total_winning,
             "races_completed": self._races_completed,
             "race_records": list(self._race_records),
+            "debug_features": debug_features,
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
