@@ -120,12 +120,43 @@ class ExchangeMatcher:
 
     # ── Public API ──────────────────────────────────────────────────
 
+    def pick_top_price(
+        self,
+        levels: Iterable[PriceLevel],
+        reference_price: float,
+        lower_is_better: bool,
+    ) -> float | None:
+        """Return the best post-filter top-of-book price without executing a fill.
+
+        Returns ``None`` if there are no valid levels (no LTP, empty ladder,
+        or all levels outside the junk filter).  Used by ``BetManager`` to
+        peek at the fill price before consulting the ``_matched_at_level``
+        accumulator, keeping filter logic in one place.
+        """
+        if reference_price is None or reference_price <= 0.0:
+            return None
+        lst = list(levels)
+        if not lst:
+            return None
+        lo = reference_price * (1.0 - self.max_price_deviation_pct)
+        hi = reference_price * (1.0 + self.max_price_deviation_pct)
+        filtered = [
+            lv for lv in lst
+            if lv.price > 0.0 and lv.size > 0.0 and lo <= lv.price <= hi
+        ]
+        if not filtered:
+            return None
+        top = min(filtered, key=lambda lv: lv.price) if lower_is_better \
+            else max(filtered, key=lambda lv: lv.price)
+        return top.price
+
     def match_back(
         self,
         available_to_lay: Iterable[PriceLevel],
         stake: float,
         reference_price: float,
         max_price: float | None = None,
+        already_matched_at_top: float = 0.0,
     ) -> MatchResult:
         """Attempt to fill a back bet against the lay side of the book.
 
@@ -139,6 +170,7 @@ class ExchangeMatcher:
             reference_price=reference_price,
             max_price=max_price,
             lower_is_better=True,
+            already_matched_at_top=already_matched_at_top,
         )
 
     def match_lay(
@@ -147,6 +179,7 @@ class ExchangeMatcher:
         stake: float,
         reference_price: float,
         max_price: float | None = None,
+        already_matched_at_top: float = 0.0,
     ) -> MatchResult:
         """Attempt to fill a lay bet against the back side of the book.
 
@@ -160,6 +193,7 @@ class ExchangeMatcher:
             reference_price=reference_price,
             max_price=max_price,
             lower_is_better=False,
+            already_matched_at_top=already_matched_at_top,
         )
 
     # ── Internals ───────────────────────────────────────────────────
@@ -172,6 +206,7 @@ class ExchangeMatcher:
         reference_price: float,
         max_price: float | None,
         lower_is_better: bool,
+        already_matched_at_top: float = 0.0,
     ) -> MatchResult:
         if stake <= 0.0:
             return MatchResult(0.0, 0.0, 0.0, "non-positive stake")
@@ -212,9 +247,16 @@ class ExchangeMatcher:
                 f"best price {top.price:.2f} exceeds max_price cap {max_price:.2f}",
             )
 
-        # Single-price fill: take up to the available size, leave the
-        # remainder unmatched. No walking to worse levels.
-        matched = min(stake, top.size)
+        # Single-price fill: take up to the available size after subtracting
+        # any stake the agent already matched at this level in this race.
+        # No walking to worse levels.
+        adjusted_size = max(0.0, top.size - already_matched_at_top)
+        if adjusted_size == 0.0:
+            return MatchResult(
+                0.0, stake, 0.0,
+                "self-depletion exhausted level",
+            )
+        matched = min(stake, adjusted_size)
         unmatched = stake - matched
         return MatchResult(
             matched_stake=matched,

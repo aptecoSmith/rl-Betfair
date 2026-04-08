@@ -88,6 +88,9 @@ class BetManager:
     bets: list[Bet] = field(default_factory=list)
     _open_liability: float = 0.0
     matcher: ExchangeMatcher = field(default=DEFAULT_MATCHER)
+    _matched_at_level: dict[tuple[int, BetSide, float], float] = field(
+        init=False, default_factory=dict, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.budget = self.starting_budget
@@ -138,11 +141,24 @@ class BetManager:
         if capped <= 0.0:
             return None
 
+        # Peek at the top-of-book price so we can look up how much of that
+        # level the agent has already consumed in this race.
+        top_price = self.matcher.pick_top_price(
+            runner.available_to_lay,
+            reference_price=runner.last_traded_price,
+            lower_is_better=True,
+        )
+        already_matched = (
+            self._matched_at_level.get((runner.selection_id, BetSide.BACK, top_price), 0.0)
+            if top_price is not None else 0.0
+        )
+
         result: MatchResult = self.matcher.match_back(
             runner.available_to_lay,
             stake=capped,
             reference_price=runner.last_traded_price,
             max_price=max_price,
+            already_matched_at_top=already_matched,
         )
         if result.matched_stake <= 0.0:
             return None
@@ -158,6 +174,8 @@ class BetManager:
         # Back bets: the stake is the cost (paid up-front).
         self.budget -= result.matched_stake
         self.bets.append(bet)
+        key = (runner.selection_id, BetSide.BACK, result.average_price)
+        self._matched_at_level[key] = self._matched_at_level.get(key, 0.0) + result.matched_stake
         return bet
 
     def place_lay(
@@ -185,12 +203,25 @@ class BetManager:
         if stake <= 0.0:
             return None
 
+        # Peek at the top-of-book price so we can look up how much of that
+        # level the agent has already consumed in this race.
+        top_price = self.matcher.pick_top_price(
+            runner.available_to_back,
+            reference_price=runner.last_traded_price,
+            lower_is_better=False,
+        )
+        already_matched = (
+            self._matched_at_level.get((runner.selection_id, BetSide.LAY, top_price), 0.0)
+            if top_price is not None else 0.0
+        )
+
         # First pass: probe the top-of-book price at the requested stake.
         result: MatchResult = self.matcher.match_lay(
             runner.available_to_back,
             stake=stake,
             reference_price=runner.last_traded_price,
             max_price=max_price,
+            already_matched_at_top=already_matched,
         )
         if result.matched_stake <= 0.0:
             return None
@@ -210,6 +241,7 @@ class BetManager:
                 stake=max_stake,
                 reference_price=runner.last_traded_price,
                 max_price=max_price,
+                already_matched_at_top=already_matched,
             )
             if result.matched_stake <= 0.0:
                 return None
@@ -226,6 +258,8 @@ class BetManager:
         # Reserve the liability from the budget.
         self._open_liability += liability
         self.bets.append(bet)
+        key = (runner.selection_id, BetSide.LAY, result.average_price)
+        self._matched_at_level[key] = self._matched_at_level.get(key, 0.0) + result.matched_stake
         return bet
 
     # ── Settlement ───────────────────────────────────────────────────────

@@ -44,7 +44,7 @@ fills"; sequencing them strictly was overreach.
 - [ ] **Phantom-fill fix shipped in `ai-betfair`** (cross-repo,
       tracks the deployment gate — tick when confirmed in
       production logs).
-- [ ] **Session 18 — R-2 self-depletion fix**
+- [x] **Session 18 — R-2 self-depletion fix**
       (`sessions/session_18_r2_self_depletion.md`)
   - `BetManager` gains `_matched_at_level` accumulator.
   - `ExchangeMatcher._match` gains optional
