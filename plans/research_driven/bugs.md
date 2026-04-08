@@ -72,10 +72,10 @@ there.
   population sometimes explores. Tighter
   `betting_constraints.max_bets_per_race` masks the symptom but
   does not fix the cause.
-- **Status:** Open. Surfaced 2026-04-07 via the operator's
-  inspection of the 14:00 race in `ai-betfair`, where two bets
-  (£12.10 and £17) appeared to have matched against £21 of
-  visible liquidity 12 seconds apart.
+- **Status:** Fixed in session 18, commit a12802c. Surfaced
+  2026-04-07 via the operator's inspection of the 14:00 race in
+  `ai-betfair`, where two bets (£12.10 and £17) appeared to have
+  matched against £21 of visible liquidity 12 seconds apart.
 - **Notes:**
   - **Sim fix:** give `BetManager` a
     `_matched_at_level: dict[(selection_id, BetSide, price), float]`
