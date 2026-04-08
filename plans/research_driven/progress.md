@@ -56,7 +56,7 @@ Format:
 
 **Notes for next session:**
 - Session 20 (P1b microprice) reuses `env/features.py` and the same schema-bump pattern. `OBS_SCHEMA_VERSION` must be bumped again in that session.
-- Commit SHA for this session: (filled by git after commit)
+- Commit SHA for this session: 906ed0b
 
 **Cross-repo follow-ups:**
 - `downstream_knockon.md` §1: `ai-betfair` now needs `obi_topN` in its per-runner observation assembly. It can vendor `env/features.py` directly.
