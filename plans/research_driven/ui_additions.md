@@ -40,10 +40,12 @@ Format per row:
     asymmetric (clearly more size on one side); confirm microprice pulls toward
     the heavier side and lies between best back and best lay.
 
-- [ ] **Show `traded_delta_T`, `mid_drift_T` in the per-runner panel**
-      (source: session 21 / P1c, see `proposals.md`)
-  - Add columns once session 21 lands.
-  - Acceptance: windowed features update each tick.
+- [ ] **Show `traded_delta`, `mid_drift` in the per-runner panel**
+      (source: session 21 / P1c, `env/betfair_env.py` `_get_info` → `debug_features`)
+  - `info["debug_features"][selection_id]["traded_delta"]` and `["mid_drift"]` are
+    now populated every tick. Wire both into the per-runner row in the replay UI.
+  - Acceptance: open one race, confirm `traded_delta` stays near zero on quiet ticks
+    and spikes around visible volume surges; `mid_drift` tracks the microprice trajectory.
 
 - [ ] **Show spread cost as a separate line in per-race shaped
       reward** (source: P2 session, see `proposals.md`)

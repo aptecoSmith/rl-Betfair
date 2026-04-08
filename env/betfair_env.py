@@ -40,7 +40,13 @@ import logging
 from data.episode_builder import Day, Race, Tick
 from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
-from env.features import compute_microprice, compute_obi
+from env.features import (
+    betfair_tick_size,
+    compute_mid_drift,
+    compute_microprice,
+    compute_obi,
+    compute_traded_delta,
+)
 from training.perf_log import perf_log
 
 logger = logging.getLogger(__name__)
@@ -53,7 +59,8 @@ logger = logging.getLogger(__name__)
 #   Version 1 — original obs vector (sessions 1–18)
 #   Version 2 — added obi_topN per runner (session 19 / P1a)
 #   Version 3 — added weighted_microprice per runner (session 20 / P1b)
-OBS_SCHEMA_VERSION: int = 3
+#   Version 4 — added traded_delta, mid_drift per runner (session 21 / P1c)
+OBS_SCHEMA_VERSION: int = 4
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
@@ -143,6 +150,9 @@ RUNNER_KEYS: list[str] = [
     "obi_topN",
     # ── P1b features (1, Session 20) ──
     "weighted_microprice",
+    # ── P1c features (2, Session 21) ──
+    "traded_delta",
+    "mid_drift",
 ]
 
 AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
@@ -151,7 +161,7 @@ POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
-RUNNER_DIM = len(RUNNER_KEYS)             # 112 (was 111, +1 weighted_microprice P1b)
+RUNNER_DIM = len(RUNNER_KEYS)             # 114 (was 112, +2 traded_delta/mid_drift P1c)
 
 # Action thresholds
 _BACK_THRESHOLD = 0.33
@@ -289,8 +299,11 @@ class BetfairEnv(gymnasium.Env):
         self._max_lay_price: float | None = constraints.get("max_lay_price")
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
         self._total_races = len(day.races)
-        self._obi_top_n: int = config.get("features", {}).get("obi_top_n", 3)
-        self._microprice_top_n: int = config.get("features", {}).get("microprice_top_n", 3)
+        feat_cfg = config.get("features", {})
+        self._obi_top_n: int = feat_cfg.get("obi_top_n", 3)
+        self._microprice_top_n: int = feat_cfg.get("microprice_top_n", 3)
+        self._traded_delta_window_s: float = float(feat_cfg.get("traded_delta_window_s", 60.0))
+        self._mid_drift_window_s: float = float(feat_cfg.get("mid_drift_window_s", 60.0))
 
         # Reward parameters — start from shared config, then overlay any
         # per-agent overrides passed in by the trainer. The shared config
@@ -362,6 +375,15 @@ class BetfairEnv(gymnasium.Env):
         # this list keeps references so the evaluator can record the full
         # day's bet log, not just the last race.
         self._settled_bets: list = []
+        # ── P1c runtime windowed history (Session 21) ────────────────────────
+        # Per-runner deque of (timestamp_s, microprice, vol_delta) tuples,
+        # keyed by selection_id.  Reset at race boundaries.  Used for
+        # debug_features in _get_info() and the "history bounded" test.
+        # The maxlen mirrors TickHistory._windowed_maxlen.
+        _wmax = max(int(max(self._traded_delta_window_s, self._mid_drift_window_s) * 2) + 20, 200)
+        self._windowed_maxlen: int = _wmax
+        self._windowed_history: dict = {}   # sid → deque[(ts, mp, vol_delta)]
+        self._prev_total_matched_rt: dict = {}  # sid → float
 
     # ── Pre-computation ───────────────────────────────────────────────────
 
@@ -392,6 +414,8 @@ class BetfairEnv(gymnasium.Env):
                     self.day,
                     obi_top_n=self._obi_top_n,
                     microprice_top_n=self._microprice_top_n,
+                    traded_delta_window_s=self._traded_delta_window_s,
+                    mid_drift_window_s=self._mid_drift_window_s,
                 )
             if feature_cache is not None:
                 feature_cache[self.day.date] = day_features
@@ -555,9 +579,20 @@ class BetfairEnv(gymnasium.Env):
                     )
                 except ValueError:
                     mp = float("nan")
+                now_ts = tick.timestamp.timestamp() if tick.timestamp is not None else 0.0
+                hist = self._windowed_history.get(runner.selection_id, [])
+                ref_mp = mp if not (mp != mp) else runner.last_traded_price  # nan-safe fallback
+                traded_delta = compute_traded_delta(
+                    hist, ref_mp, self._traded_delta_window_s, now_ts,
+                )
+                mid_drift = compute_mid_drift(
+                    hist, self._mid_drift_window_s, now_ts, betfair_tick_size,
+                )
                 debug_features[runner.selection_id] = {
                     "obi_topN": obi,
                     "weighted_microprice": mp,
+                    "traded_delta": traded_delta,
+                    "mid_drift": mid_drift,
                 }
 
         return {
@@ -604,6 +639,9 @@ class BetfairEnv(gymnasium.Env):
         # reflection-symmetry proof of zero-mean shaping holds.
         self._day_pnl_peak = 0.0
         self._day_pnl_trough = 0.0
+        # P1c runtime windowed history — reset to empty at episode start.
+        self._windowed_history = {}
+        self._prev_total_matched_rt = {}
 
         if self._total_races == 0:
             return self._terminal_obs(), self._get_info()
@@ -619,6 +657,10 @@ class BetfairEnv(gymnasium.Env):
 
         race = self.day.races[self._race_idx]
         tick = race.ticks[self._tick_idx]
+
+        # 0. Update runtime windowed history with the current tick so that
+        #    _get_info() can serve windowed debug_features for this tick.
+        self._update_runtime_windowed(tick)
 
         # 1. Process action (bets only on pre-race ticks)
         if not tick.in_play:
@@ -641,10 +683,12 @@ class BetfairEnv(gymnasium.Env):
             assert self.bet_manager is not None
             self._settled_bets.extend(self.bet_manager.bets)
 
-            # Reset BetManager for the next race (fresh budget)
+            # Reset BetManager and windowed history for the next race.
             if self._race_idx < self._total_races:
                 self.bet_manager = BetManager(starting_budget=self.starting_budget)
                 self._bet_times = {}
+                self._windowed_history = {}
+                self._prev_total_matched_rt = {}
 
         # 4. Check if episode is over
         terminated = self._race_idx >= self._total_races
@@ -668,6 +712,39 @@ class BetfairEnv(gymnasium.Env):
         obs = self._get_obs() if not terminated else self._terminal_obs()
         info = self._get_info()
         return obs, reward, terminated, False, info
+
+    # ── P1c runtime windowed history ──────────────────────────────────────
+
+    def _update_runtime_windowed(self, tick: Tick) -> None:
+        """Append current tick's data to per-runner runtime windowed history.
+
+        Called at the start of every ``step()`` so ``_get_info()`` can
+        serve windowed debug_features for the tick that was just processed.
+        The deques are bounded by ``_windowed_maxlen`` so they never grow
+        unboundedly over a long race.
+        """
+        import math
+        from collections import deque
+
+        now_ts = tick.timestamp.timestamp() if tick.timestamp is not None else 0.0
+        for snap in tick.runners:
+            sid = snap.selection_id
+            if sid not in self._windowed_history:
+                self._windowed_history[sid] = deque(maxlen=self._windowed_maxlen)
+            ltp = snap.last_traded_price
+            try:
+                mp = compute_microprice(
+                    snap.available_to_back, snap.available_to_lay,
+                    self._microprice_top_n, ltp,
+                )
+            except ValueError:
+                mp = float("nan")
+            if math.isnan(mp):
+                mp = ltp  # fall back to LTP so history is always numeric
+            prev = self._prev_total_matched_rt.get(sid)
+            vol_delta = 0.0 if prev is None else max(0.0, snap.total_matched - prev)
+            self._prev_total_matched_rt[sid] = snap.total_matched
+            self._windowed_history[sid].append((now_ts, mp, vol_delta))
 
     # ── Action processing ─────────────────────────────────────────────────
 

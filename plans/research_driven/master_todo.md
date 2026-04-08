@@ -77,7 +77,7 @@ to review cleanly and fit into a Sonnet context window.
   - Second static feature.
   - Bounded by best-back / best-lay (tested).
 
-- [ ] **Session 21 — P1c: windowed features (traded delta + mid
+- [x] **Session 21 — P1c: windowed features (traded delta + mid
       drift)** (`sessions/session_21_p1c_windowed.md`)
   - Two features in one session because they share windowing.
   - First features in this folder with cross-tick state.

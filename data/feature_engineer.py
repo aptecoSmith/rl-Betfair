@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,13 @@ from data.episode_builder import (
     RunnerSnap,
     Tick,
 )
-from env.features import compute_microprice, compute_obi
+from env.features import (
+    betfair_tick_size,
+    compute_mid_drift,
+    compute_microprice,
+    compute_obi,
+    compute_traded_delta,
+)
 
 NaN = float("nan")
 
@@ -693,12 +700,16 @@ def cross_runner_features(
 
 @dataclass
 class TickHistory:
-    """Rolling window of recent tick data for velocity calculations.
+    """Rolling window of recent tick data for velocity and windowed calculations.
 
-    Maintains a per-runner LTP and volume history up to ``max_window`` ticks.
+    Maintains a per-runner LTP, volume, and windowed-feature history.
     """
 
     max_window: int = 20
+    # ── P1c windowed feature config (Session 21) ────────────────────────────
+    # Wall-clock window lengths for traded_delta and mid_drift.
+    traded_delta_window_s: float = 60.0
+    mid_drift_window_s: float = 60.0
     _ltp_history: dict[int, list[float]] = field(default_factory=dict)
     _vol_history: dict[int, list[float]] = field(default_factory=dict)
     _market_vol_history: list[float] = field(default_factory=list)
@@ -709,6 +720,17 @@ class TickHistory:
     _tick_counter: int = field(default=0)
     # Timestamp tracking for time delta features (Session 2.8)
     _timestamp_history: list[float] = field(default_factory=list)  # epoch seconds
+    # ── P1c windowed history (Session 21) ───────────────────────────────────
+    # Per-runner deque of (timestamp_s, microprice, vol_delta) tuples.
+    # maxlen caps memory; oldest entries are discarded automatically.
+    _windowed_history: dict = field(default_factory=dict, init=False, repr=False)
+    _prev_total_matched: dict = field(default_factory=dict, init=False, repr=False)
+    _windowed_maxlen: int = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        max_w = max(self.traded_delta_window_s, self.mid_drift_window_s)
+        # Generous bound: 2× window at ~1 tick/s plus a fixed margin.
+        self._windowed_maxlen = max(int(max_w * 2) + 20, 200)
 
     def update(self, tick: Tick, market_feats: dict[str, float]) -> None:
         """Record the latest tick's data into the history."""
@@ -836,6 +858,26 @@ class TickHistory:
 
         return feats
 
+    def update_windowed(
+        self, sid: int, now_ts: float, microprice: float, total_matched: float,
+    ) -> None:
+        """Append a windowed-feature history entry for runner *sid*.
+
+        Computes ``vol_delta = total_matched - previous_total_matched``
+        (clamped to ≥ 0).  On the first tick for a runner, vol_delta is
+        ``0.0`` so first-tick windowed features are always zero.
+        """
+        if sid not in self._windowed_history:
+            self._windowed_history[sid] = deque(maxlen=self._windowed_maxlen)
+        prev = self._prev_total_matched.get(sid)
+        vol_delta = 0.0 if prev is None else max(0.0, total_matched - prev)
+        self._prev_total_matched[sid] = total_matched
+        self._windowed_history[sid].append((now_ts, microprice, vol_delta))
+
+    def windowed_history_for(self, sid: int):
+        """Return the windowed history deque for runner *sid* (empty list if none)."""
+        return self._windowed_history.get(sid, [])
+
     def reset(self) -> None:
         """Clear all history (call between races if needed)."""
         self._ltp_history.clear()
@@ -846,6 +888,8 @@ class TickHistory:
         self._last_status_change_tick = 0
         self._tick_counter = 0
         self._timestamp_history.clear()
+        self._windowed_history.clear()
+        self._prev_total_matched.clear()
 
 
 # ── High-level feature assembly ──────────────────────────────────────────────
@@ -906,12 +950,28 @@ def engineer_tick(
         # that upstream — we do not silently return zero here).
         ltp = snap.last_traded_price
         try:
-            feats["weighted_microprice"] = compute_microprice(
+            mp = compute_microprice(
                 snap.available_to_back, snap.available_to_lay,
                 microprice_top_n, ltp,
             )
         except ValueError:
-            feats["weighted_microprice"] = NaN
+            mp = NaN
+        feats["weighted_microprice"] = mp
+
+        # ── P1c windowed features (Session 21) ──────────────────────────────
+        # Update windowed history BEFORE computing features so the current
+        # tick is included in the window (first-tick vol_delta = 0 by design).
+        now_ts = tick.timestamp.timestamp() if tick.timestamp is not None else 0.0
+        if not math.isnan(mp):
+            tick_history.update_windowed(sid, now_ts, mp, snap.total_matched)
+        hist = tick_history.windowed_history_for(sid)
+        ref_mp = mp if not math.isnan(mp) else ltp
+        feats["traded_delta"] = compute_traded_delta(
+            hist, ref_mp, tick_history.traded_delta_window_s, now_ts,
+        )
+        feats["mid_drift"] = compute_mid_drift(
+            hist, tick_history.mid_drift_window_s, now_ts, betfair_tick_size,
+        )
 
         runners_out[sid] = feats
 
@@ -932,15 +992,20 @@ def engineer_race(
     race: Race,
     obi_top_n: int = 3,
     microprice_top_n: int = 3,
+    traded_delta_window_s: float = 60.0,
+    mid_drift_window_s: float = 60.0,
 ) -> list[dict[str, object]]:
     """Compute features for every tick in a race.
 
-    Creates a fresh :class:`TickHistory` per race, so velocity features
-    start from zero at the beginning of each race.
+    Creates a fresh :class:`TickHistory` per race, so velocity and windowed
+    features start from zero at the beginning of each race.
 
     Returns a list of feature dicts (one per tick, in tick order).
     """
-    history = TickHistory()
+    history = TickHistory(
+        traded_delta_window_s=traded_delta_window_s,
+        mid_drift_window_s=mid_drift_window_s,
+    )
     results: list[dict[str, object]] = []
     for tick in race.ticks:
         results.append(engineer_tick(
@@ -955,6 +1020,8 @@ def engineer_day(
     day: Day,
     obi_top_n: int = 3,
     microprice_top_n: int = 3,
+    traded_delta_window_s: float = 60.0,
+    mid_drift_window_s: float = 60.0,
 ) -> list[list[dict[str, object]]]:
     """Compute features for every tick in every race of a day.
 
@@ -963,7 +1030,13 @@ def engineer_day(
     results = []
     for race in day.races:
         t0 = time.perf_counter()
-        feats = engineer_race(race, obi_top_n=obi_top_n, microprice_top_n=microprice_top_n)
+        feats = engineer_race(
+            race,
+            obi_top_n=obi_top_n,
+            microprice_top_n=microprice_top_n,
+            traded_delta_window_s=traded_delta_window_s,
+            mid_drift_window_s=mid_drift_window_s,
+        )
         elapsed = time.perf_counter() - t0
         logger.debug(
             "  Race %s: %d ticks engineered in %.3fs",

@@ -90,6 +90,147 @@ def compute_microprice(back_levels, lay_levels, n: int, ltp_fallback) -> float:
     return (back_size_sum * best_back_price + lay_size_sum * best_lay_price) / total_size
 
 
+def betfair_tick_size(price: float) -> float:
+    """Return the Betfair price tick size at the given price.
+
+    Standard horse-racing ladder::
+
+        1.01–2.00 → 0.01
+        2.00–3.00 → 0.02
+        3.00–4.00 → 0.05
+        4.00–6.00 → 0.10
+        6.00–10.0 → 0.20
+        10.0–20.0 → 0.50
+        20.0–30.0 → 1.00
+        30.0–50.0 → 2.00
+        50.0–100. → 5.00
+        100–1000  → 10.0
+    """
+    if price < 2.0:
+        return 0.01
+    elif price < 3.0:
+        return 0.02
+    elif price < 4.0:
+        return 0.05
+    elif price < 6.0:
+        return 0.10
+    elif price < 10.0:
+        return 0.20
+    elif price < 20.0:
+        return 0.50
+    elif price < 30.0:
+        return 1.00
+    elif price < 50.0:
+        return 2.00
+    elif price < 100.0:
+        return 5.00
+    else:
+        return 10.0
+
+
+def compute_traded_delta(
+    history,
+    reference_microprice: float,
+    window_seconds: float,
+    now_ts: float,
+) -> float:
+    """Signed net traded volume relative to current microprice over the window.
+
+    Each entry in *history* is a ``(timestamp_s, microprice, vol_delta)``
+    tuple.  Volume that traded when microprice ≤ reference_microprice is
+    counted positively (backing pressure); above reference_microprice is
+    negative (laying pressure).
+
+    Parameters
+    ----------
+    history:
+        Iterable of ``(timestamp_s, microprice, vol_delta)`` tuples,
+        ordered oldest-first.  ``timestamp_s`` must be in the same unit
+        as ``now_ts`` (Unix epoch seconds).
+    reference_microprice:
+        Current microprice — the comparison baseline for sign assignment.
+    window_seconds:
+        Length of the look-back window in wall-clock seconds.
+    now_ts:
+        Current timestamp in the same unit as history timestamps.
+
+    Returns
+    -------
+    float
+        Positive → net backing pressure; negative → net laying pressure.
+        Returns ``0.0`` when history is empty or no entries fall within
+        the window.
+    """
+    cutoff = now_ts - window_seconds
+    total = 0.0
+    for ts, mp, delta in history:
+        if ts < cutoff:
+            continue
+        total += delta if mp <= reference_microprice else -delta
+    return total
+
+
+def compute_mid_drift(
+    history,
+    window_seconds: float,
+    now_ts: float,
+    tick_size_fn,
+) -> float:
+    """Change in weighted_microprice over the window, in Betfair price ticks.
+
+    Finds the entry in *history* whose timestamp is nearest to
+    ``now_ts - window_seconds`` and still at or before that point (i.e.
+    the latest entry with ``ts ≤ now_ts - window_seconds``).  If no such
+    entry exists, returns ``0.0``.  The drift is the difference between
+    the most recent microprice and that baseline microprice, divided by
+    the Betfair tick size at the baseline price.
+
+    Parameters
+    ----------
+    history:
+        Iterable of ``(timestamp_s, microprice, vol_delta)`` tuples,
+        ordered oldest-first.
+    window_seconds:
+        Length of the look-back window in wall-clock seconds.
+    now_ts:
+        Current timestamp in the same unit as history timestamps.
+    tick_size_fn:
+        Callable ``(price: float) -> float``.  Returns the Betfair tick
+        size at *price*.  Injected by the caller so this function stays
+        dependency-free.
+
+    Returns
+    -------
+    float
+        Drift in Betfair price ticks.  Positive → price rose (runner
+        drifted out / became longer odds); negative → price fell (runner
+        shortened).  Returns ``0.0`` if fewer than two entries are
+        available or no baseline exists.
+    """
+    history_list = list(history)
+    if len(history_list) < 2:
+        return 0.0
+
+    cutoff = now_ts - window_seconds
+    baseline_mp: float | None = None
+    for ts, mp, _ in history_list:
+        if ts <= cutoff:
+            baseline_mp = mp  # keep updating; final value = latest at-or-before cutoff
+
+    if baseline_mp is None:
+        return 0.0
+
+    current_mp = history_list[-1][1]
+    diff = current_mp - baseline_mp
+    if diff == 0.0:
+        return 0.0
+
+    ts_size = tick_size_fn(baseline_mp)
+    if ts_size <= 0.0:
+        return 0.0
+    return diff / ts_size
+
+
 def compute_obi(back_levels, lay_levels, n: int) -> float:
     """Order Book Imbalance for the top-N ladder levels.
 

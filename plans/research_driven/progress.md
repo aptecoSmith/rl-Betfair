@@ -34,6 +34,48 @@ Format:
 
 ---
 
+## 2026-04-08 — Session 21 — P1c: windowed features (traded_delta + mid_drift)
+
+**Shipped:**
+- `env/features.py` — `betfair_tick_size(price)`, `compute_traded_delta(history, reference_microprice, window_seconds, now_ts)`, `compute_mid_drift(history, window_seconds, now_ts, tick_size_fn)` added. All pure, no numpy, no env imports. `betfair_tick_size` implements the standard Betfair horse-racing price ladder and is passed as the `tick_size_fn` callback. `compute_traded_delta` signs volume relative to the current microprice (≤ ref → positive/backing, > ref → negative/laying). `compute_mid_drift` uses the latest history entry at-or-before (now − window) as baseline; returns 0.0 when no such entry exists.
+- `data/feature_engineer.py` — imports `deque`, new functions; `TickHistory` dataclass gains `traded_delta_window_s: float = 60.0`, `mid_drift_window_s: float = 60.0`, `_windowed_history`, `_prev_total_matched`, `_windowed_maxlen` fields, `__post_init__`, `update_windowed`, `windowed_history_for`, and updated `reset()`. `engineer_tick` updates windowed history before computing `traded_delta` and `mid_drift` per runner; `NaN` microprice runners fall back to LTP for windowed history. `engineer_race` and `engineer_day` accept `traded_delta_window_s` and `mid_drift_window_s` params.
+- `env/betfair_env.py` — `OBS_SCHEMA_VERSION = 4`; `"traded_delta"`, `"mid_drift"` appended to `RUNNER_KEYS`; `RUNNER_DIM` 112 → 114; `self._traded_delta_window_s`, `self._mid_drift_window_s` from config; `engineer_day` call passes window params; runtime windowed history buffers (`_windowed_history`, `_prev_total_matched_rt`, `_windowed_maxlen`) added and reset between races; `_update_runtime_windowed(tick)` helper added and called at start of `step()`; `debug_features` per-runner dict now includes `traded_delta` and `mid_drift`.
+- `config.yaml` — `features.traded_delta_window_s: 60`, `features.mid_drift_window_s: 60` added. Default 60 s; will be swept in session 22.
+- `tests/research_driven/test_p1a_obi.py` — updated `test_obi_in_obs_vector` to expect `RUNNER_DIM=114`.
+- `tests/research_driven/test_p1b_microprice.py` — updated `test_refuses_p1a_checkpoint` to expect `OBS_SCHEMA_VERSION=4`.
+
+**Tests added:**
+- `tests/research_driven/test_p1c_windowed.py` — 29 tests across 10 logical groups:
+  - `betfair_tick_size`: 6 boundary checks.
+  - Test 1 (first-tick zero): 4 checks (empty history + single zero-delta entry, for both functions).
+  - Test 2 (positive sign): 3 checks (at-reference, below-reference, multiple entries all positive).
+  - Test 3 (negative sign): 2 checks (above-reference, mixed net result).
+  - Test 4 (traded_delta window edge): 3 checks (just inside, just outside, exactly at cutoff).
+  - Test 5 (mid_drift rising): 2 checks.
+  - Test 6 (mid_drift falling): 1 check.
+  - Test 7 (mid_drift window edge): 3 checks (just outside = IS baseline, just inside = not baseline, latest at-or-before wins).
+  - Test 8 (env smoke): features appear in `debug_features`; first step = 0.0; mid-race at least one non-zero.
+  - Test 9 (determinism): two independent replays yield byte-identical feature values.
+  - Test 10 (bounded buffer): deque length ≤ `_windowed_maxlen` after a full race.
+  - Schema: refuses P1b checkpoint (v3); accepts v4.
+
+**Did not ship:**
+- Retrain comparison — deferred to session 22.
+
+**Implementation notes:**
+- Sign convention for `traded_delta`: history entries with microprice ≤ reference are counted positively (backing pressure). This treats the reference (current) microprice as the neutral point — volume that traded when the runner was cheaper (more favoured) is net backing.
+- `compute_mid_drift` baseline selection: latest entry with `ts ≤ now - window`. If no entry exists before the window boundary, returns 0.0 (not a stale baseline). This means the first ~60 s of a race have `mid_drift=0` until the window fills.
+- The architecture keeps windowed features in `RUNNER_KEYS` (precomputed via `TickHistory` in `_precompute`) for the obs vector, AND maintains separate runtime deques on the env for `debug_features`. Both compute identically given the same tick sequence.
+- `_windowed_maxlen = max(int(max_window * 2) + 20, 200)` — generous bound ensuring no reachable tick frequency exhausts the deque.
+
+**Notes for next session:**
+- Session 22 (P1d retrain + decision gate): train one policy with the 4-feature obs (OBI, microprice, traded_delta, mid_drift). Compare vs P1b baseline on the 9-day eval window. Sweep `traded_delta_window_s` and `mid_drift_window_s` (try 30, 60, 120).
+
+**Cross-repo follow-ups:**
+- `downstream_knockon.md` §1: `ai-betfair` now needs `traded_delta` and `mid_drift` in its per-runner obs assembly. It will own its own windowed history buffers from the live stream.
+
+---
+
 ## 2026-04-08 — Session 20 — P1b: weighted microprice feature
 
 **Shipped:**

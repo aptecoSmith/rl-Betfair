@@ -1,4 +1,4 @@
-# Session 21 — P1c: windowed features (traded delta + mid drift)
+# Session 21 — P1c: windowed features (traded delta + mid drift)  ✅ COMPLETE
 
 ## Before you start — read these
 
@@ -72,9 +72,9 @@ across ticks**. The state lives on the env, not on `features.py`
    Then call the two feature functions.
 
 4. **Add config keys.**
-   `features.traded_delta_window_s: 5`
-   `features.mid_drift_window_s: 5`
-   Default 5 seconds; will be swept in session 22.
+   `features.traded_delta_window_s: 60`
+   `features.mid_drift_window_s: 60`
+   Default 60 seconds; will be swept in session 22.
 
 5. **Bump the obs schema version.** Loader refuses pre-P1c
    checkpoints loudly.
