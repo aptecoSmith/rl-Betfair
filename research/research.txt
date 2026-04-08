@@ -1,0 +1,746 @@
+
+Before we go further than session 10 work, I want to look at this research I did earlier and see what we need to implement, likely after session 10.  ANy suggestions here will form a new folder in plans/research_driven
+
+What is 'money pressure'? I asked this of an ai: does our training allow this to be seen and learnt from?
+# What “Money Pressure” Means (Betfair Exchange)
+
+## 🧠 The basic idea
+
+**Money pressure** refers to the imbalance of money in the order book that suggests:
+
+> Which direction the price is more likely to move
+
+It’s essentially:
+
+- More money trying to BACK → price likely to **fall**
+- More money trying to LAY → price likely to **rise**
+
+---
+
+## 📊 Where it comes from
+
+At any moment, the order book shows:
+
+- Available BACK money (bids)
+- Available LAY money (asks)
+
+Example:
+
+| Price | BACK (£) | LAY (£) |
+|------|--------|--------|
+| 2.00 | 1,200  |        |
+| 2.02 |        | 300    |
+
+👉 There is **more BACK money than LAY money**
+
+This suggests:
+
+> 🟢 Downward pressure on price (towards 1.98, 1.96, etc.)
+
+---
+
+## 🎯 Intuition
+
+Think of it like supply and demand:
+
+- BACK money = demand (people want to buy the outcome)
+- LAY money = supply (people want to sell the outcome)
+
+---
+
+## 🔥 Simple scenarios
+
+### 🟢 Strong BACK pressure
+
+- Large queues on BACK side  
+- Thin LAY side  
+
+👉 Likely outcome:
+- LAY side gets eaten  
+- Price **moves down**
+
+---
+
+### 🔴 Strong LAY pressure
+
+- Large queues on LAY side  
+- Thin BACK side  
+
+👉 Likely outcome:
+- BACK side gets eaten  
+- Price **moves up**
+
+---
+
+## ⚠️ Important: It’s not just static volume
+
+Naively, you might think:
+
+> “Just compare BACK vs LAY amounts”
+
+❌ That’s not enough
+
+Real money pressure depends on:
+
+- How fast money is being matched  
+- Orders being added/cancelled  
+- Momentum of traded volume  
+
+---
+
+## 🧠 Better definition
+
+A more accurate view:
+
+> **Money pressure = the dynamic imbalance between liquidity and trading activity on each side of the book**
+
+---
+
+## ⚙️ How traders/bots use it
+
+Bots often derive signals like:
+
+- Order book imbalance (OBI)
+- Weighted volume near best prices
+- Recent traded volume direction
+
+Then decide:
+
+- Join queue?
+- Cancel?
+- Cross the spread?
+
+---
+
+## 🔧 Simple proxy (good starting point)
+
+A basic approximation:
+pressure = (back_volume - lay_volume) / (back_volume + lay_volume)
+
+
+Where:
+- `back_volume` = sum of top N BACK prices  
+- `lay_volume` = sum of top N LAY prices  
+
+👉 Result:
+- Positive → BACK pressure  
+- Negative → LAY pressure  
+
+---
+
+## 🚨 Why this matters
+
+Money pressure helps answer:
+
+- “Is the queue in front of me likely to clear?”
+- “Am I about to get run over?”
+- “Should I take the price now?”
+
+---
+
+## 👍 Bottom line
+
+- **Money pressure = which side of the market is stronger**
+- It helps predict **short-term price movement**
+- It’s a key ingredient in:
+  - Entry timing  
+  - Exit timing  
+  - Queue decisions  
+
+---
+
+
+
+
+'What is queue position?' I asked this of an ai:
+
+# Queue Position in Betfair Exchange
+
+## 🧠 What “queue position” actually means
+
+On the Betfair Exchange, orders are matched using:
+
+> **Price–time priority**
+
+That means:
+1. Best price gets matched first  
+2. At the same price → **earlier orders get matched first**
+
+---
+
+## 🎯 So “queue position” = your place in line
+
+Imagine this at odds **3.0** on the BACK side:
+
+- £500 already waiting to be matched  
+- You place a £100 back bet at 3.0  
+
+👉 You are now:
+
+> **£500 behind in the queue**
+
+---
+
+## 📊 What has to happen for you to get matched?
+
+For your £100 to fill:
+
+- At least **£500 must be matched first** (the people ahead of you)  
+- Then your £100 gets matched  
+
+👉 Total traded volume needed at that price = **£600**
+
+---
+
+## ⚠️ Why this matters (a lot)
+
+Most beginners assume:
+
+> “If price touches my level, I get filled”
+
+❌ That’s wrong
+
+In reality:
+- Price can sit at 3.0  
+- Even trade at 3.0  
+- And you still **don’t get matched**
+
+Because:
+- There’s still money ahead of you in the queue  
+
+---
+
+## 🔥 Simple example
+
+Order book at 2.0 (LAY side):
+
+- £1,000 available to lay at 2.0  
+- You place a BACK bet for £100 at 2.0  
+
+👉 You are behind £1,000  
+
+Now:
+
+- £200 gets matched at 2.0  
+- Price moves away  
+
+👉 You get:
+- ❌ **0 matched**
+
+Even though:
+- Trades happened at your price  
+
+---
+
+## 💡 This is where edge comes from
+
+Good traders care about:
+
+- How big the queue is  
+- Whether it’s shrinking or growing  
+- Whether they’re likely to get filled  
+
+---
+
+## 🧠 How it shows up in your data
+
+From the stream you’re recording, you can see:
+
+- Available volume at each price  
+- Traded volume  
+
+👉 From this, you can estimate:
+
+> “How much volume was ahead of me when I entered?”
+And surely we can therefore detect - where am I in the queue and, has the traded volume surpassed where I would have been in the queue - now I'm matched!
+
+---
+
+## ⚙️ How bots use queue position
+
+### Before placing an order:
+- Check:
+  - Queue size  
+  - Recent traded volume  
+  - Momentum  
+
+👉 Decide:
+- Join queue?  
+- Or cross the spread?  
+
+---
+
+### After placing:
+- Track:
+  - Has volume ahead decreased?  
+  - Am I close to getting filled?  
+
+👉 Decide:
+- Stay  
+- Cancel  
+- Move price  
+
+---
+
+## 🚨 Why this breaks most backtests
+
+If you ignore queue position:
+
+- Your bot assumes:
+  - Instant fills  
+- Reality:
+  - You’re stuck in queue  
+- Result:
+  - Backtest profits vanish live  
+
+---
+
+## 🔧 Rough way to estimate it (using your data)
+
+When you place an order:
+
+1. Record:
+   - Available volume at that price  
+   - e.g. £500  
+
+2. Assume:
+   - That’s your queue ahead  
+
+3. Then track:
+   - Traded volume at that price  
+
+4. Fill when:
+   - Traded volume ≥ queue ahead  
+
+👉 Not perfect, but surprisingly effective  
+
+---
+
+## 👍 Bottom line
+
+- **Queue position = your place in line at a given price**
+- You only get matched after:
+  - Everyone ahead of you is matched  
+- It’s one of the **main reasons bots fail in live trading**
+
+I then asked: what does cross the spread mean?
+
+# What “Crossing the Spread” Means (Betfair Exchange)
+
+## 🧠 The basic idea
+
+The **spread** is the gap between:
+
+- Best BACK price (highest someone is willing to back at)
+- Best LAY price (lowest someone is willing to lay at)
+
+Example:
+
+- Best BACK: **2.00**
+- Best LAY: **2.02**
+
+👉 The spread = **2.00 → 2.02**
+
+---
+
+## 🎯 “Crossing the spread” = taking the opposite side immediately
+
+Instead of waiting in the queue, you:
+
+- Accept the **current best available price**
+- Trade instantly with someone already offering liquidity
+
+---
+
+## 🔥 Example
+
+### 🟢 Not crossing the spread (passive order)
+
+You:
+- Place a BACK bet at **2.00**
+
+Result:
+- You join the queue  
+- You wait to be matched  
+- No guarantee of a fill  
+
+---
+
+### 🔴 Crossing the spread (aggressive order)
+
+You:
+- Place a BACK bet at **2.02** (the best LAY price)
+
+Result:
+- You match **instantly**  
+- You skip the queue completely  
+
+---
+
+## ⚖️ Trade-off
+
+### ✅ Pros
+- Immediate execution  
+- No queue risk  
+- Certainty of fill  
+
+### ❌ Cons
+- Worse price  
+- You “pay the spread”  
+
+---
+
+## 💡 Why it matters for trading bots
+
+Your bot constantly chooses between:
+
+### 1. Join the queue (better price)
+- Higher profit potential  
+- Risk of not getting matched  
+
+### 2. Cross the spread (worse price)
+- Guaranteed execution  
+- Lower profit margin  
+
+---
+
+## 🧠 Simple way to think about it
+
+- **Joining the queue** = being a *market maker* (patient)  
+- **Crossing the spread** = being a *market taker* (aggressive)  
+
+---
+
+## 🚨 Why this is critical in backtesting
+
+If your backtest assumes:
+- You always get filled at your chosen price  
+
+👉 You are effectively assuming:
+> You never need to cross the spread
+
+❌ This is unrealistic  
+
+In reality:
+- Many profitable trades only happen if you’re willing to:
+  - Cross the spread  
+  - Or miss the trade entirely  
+
+---
+
+## 👍 Bottom line
+
+- **Crossing the spread = trading immediately at the opposite best price**
+- You:
+  - Skip the queue  
+  - Pay a worse price  
+- It’s a core decision in any Betfair trading strategy
+
+Do we need to improve our mechanism for bets being accepted?  And do we need to do anything to allow the models to cross the spread, or can they do this already?
+
+I think the model is picking lay prices as prices it can back on.  I've checked a number of screenshots, and the bet price is actually the lay price in many of them.  This might be crossing the spread, but I'm not sure it makes sense as described to me:
+## 🔥 Example
+
+### 🟢 Not crossing the spread (passive order)
+
+You:
+- Place a BACK bet at **2.00**
+
+Result:
+- You join the queue  
+- You wait to be matched  
+- No guarantee of a fill  
+
+---
+
+### 🔴 Crossing the spread (aggressive order)
+
+You:
+- Place a BACK bet at **2.02** (the best LAY price)
+
+Result:
+- You match **instantly**  
+- You skip the queue completely  
+
+
+# Why “Crossing the Spread” Works (Correct Pricing Explanation)
+
+## 🧠 The key rule (corrected)
+
+On Betfair:
+
+> ✅ You are matched at the **best available price within your limit**
+
+That means:
+- You **can get a better price than requested**
+- You will **never be matched at a worse price than requested**
+
+---
+
+## 🎯 What your price actually means
+
+### BACK bet at 2.00
+You are saying:
+
+> “I want **2.00 or higher**”
+
+---
+
+### LAY bet at 2.02
+You are saying:
+
+> “I want **2.02 or lower**”
+
+---
+
+## 📊 Example market
+
+- Best BACK: **2.00**
+- Best LAY: **2.02**
+
+---
+
+## 🟢 Not crossing the spread (passive order)
+
+You:
+- Place a BACK bet at **2.00**
+
+Result:
+- You join the queue at 2.00  
+- You wait for someone to LAY at 2.00  
+- No guarantee of a fill  
+
+---
+
+## 🔴 Crossing the spread (aggressive order)
+
+You:
+- Place a BACK bet at **2.02** (the best LAY price)
+
+Result:
+- There is already someone willing to LAY at 2.02  
+- You match **instantly at 2.02**  
+- You skip the queue completely  
+
+---
+
+## 💡 What happens if you ask for a *better* price
+
+You:
+- Place a BACK bet at **1.98**
+
+Result:
+- There are LAY offers at **2.02 (better for you)**  
+- You get matched at **2.02**, not 1.98  
+
+---
+
+## ⚠️ What happens if price moves against you
+
+You:
+- Place a BACK bet at **5.0**
+
+Then market moves:
+- Best LAY becomes **4.5**
+
+Result:
+- ❌ You do NOT get matched  
+- Because 4.5 is **worse than your limit (5.0)**  
+
+---
+
+## 🔄 Same logic for LAY bets
+
+Market:
+
+- Best BACK: **2.00**
+- Best LAY: **2.02**
+
+---
+
+### 🔴 Crossing the spread (LAY at 2.00)
+
+You:
+- Place a LAY bet at **2.00**
+
+Result:
+- You match instantly with BACKers at 2.00  
+
+---
+
+### 🟢 Passive order (LAY at 2.02)
+
+You:
+- Place a LAY bet at **2.02**
+
+Result:
+- You join the queue  
+- You wait for someone to BACK at 2.02  
+
+---
+
+## 🧠 Correct mental model
+
+- You set a **limit price**
+- Betfair:
+  - Matches you instantly if possible  
+  - Gives you the **best price available within your limit**  
+
+---
+
+## 👍 Bottom line
+
+- **Crossing the spread = accepting the current opposite best price**
+- You:
+  - Get matched immediately  
+  - Avoid the queue  
+- You never get:
+  - A worse price than you asked for  
+- But you might:
+  - Miss trades if the market moves away from your limit
+
+
+
+---
+
+
+But if we did this, we would get a back bet on at a **higher** price than was currently available.  It would make sense to go the other way - place a back bet at 1.98 and, if the liquidity is there, it will get matched straight away, because you are saying I will take less winning money to get this bet on.  Similarly for lays, rather than try and lay it at 2.02, if the liquidity is there at 2.04, lay it there.  You are offering to pay out more if the horse wins than the current 'best price'.
+Hmm - I asked the ai to clarify and it said this:
+
+# Why “Crossing the Spread” Works the Way It Does
+
+## 🧠 The key rule (most important thing to understand)
+
+On Betfair:
+
+> ✅ You are ALWAYS matched at the **best available price**, not necessarily the price you ask for
+
+---
+
+## 🎯 What happens when you submit an order
+
+### Example market:
+
+- Best BACK: **2.00**
+- Best LAY: **2.02**
+
+---
+
+## 🔴 Case 1 — Crossing the spread (BACK at 2.02)
+
+You submit:
+- BACK £100 @ **2.02**
+
+What happens:
+- There is already someone offering to LAY at 2.02  
+- You match with them **instantly**
+
+👉 You get matched at **2.02**
+
+---
+
+## 🟢 Case 2 — Improving the price (BACK at 1.98)
+
+You submit:
+- BACK £100 @ **1.98**
+
+What happens:
+- There are already LAY offers at **2.02 (better for you)**
+- Betfair matches you at the **best available price**
+
+👉 You actually get matched at **2.02**, not 1.98
+
+---
+
+## 💡 This is the crucial insight
+
+> You can’t “force” a worse price if a better one exists
+
+So:
+
+- Asking for 1.98 when 2.02 is available  
+- 👉 You still get 2.02  
+
+---
+
+## 🔄 Same logic for LAY bets
+
+Market:
+
+- Best BACK: **2.00**
+- Best LAY: **2.02**
+
+---
+
+### 🔴 Crossing the spread (LAY at 2.00)
+
+You submit:
+- LAY @ **2.00**
+
+👉 You match instantly with BACKers at 2.00
+
+---
+
+### 🟢 Asking for worse price (LAY at 2.04)
+
+You submit:
+- LAY @ **2.04**
+
+What happens:
+- There are BACK bets at **2.00 (better for you)**  
+- You get matched at **2.00**, not 2.04
+
+---
+
+## ⚠️ Why your intuition feels right (but isn’t how it works)
+
+You said:
+
+> “Offer worse price to get matched faster”
+
+That *would* make sense in some markets…
+
+But Betfair is designed to:
+
+- Always give you **best execution**
+- Prevent you from accidentally taking a worse deal
+
+---
+
+## 🔥 So what actually determines instant matching?
+
+Not “worse price”, but:
+
+> 👉 Are you hitting existing liquidity?
+
+---
+
+### ✔️ Instant match
+- BACK at best LAY price  
+- LAY at best BACK price  
+
+---
+
+### ❌ Join queue
+- BACK below best LAY  
+- LAY above best BACK  
+
+---
+
+## 👍 Correct mental model
+
+- **Crossing the spread** = accepting the *other side’s best price*  
+- **Not crossing** = placing inside your own side and waiting  
+
+---
+
+## 🧠 Final takeaway
+
+- You can’t “cheat” the system by offering a worse price  
+- Betfair will always match you at the best available price  
+- Crossing the spread is about:
+  - **taking liquidity**
+  - not offering worse terms
+
+
+-------------------------

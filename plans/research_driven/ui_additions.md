@@ -1,0 +1,108 @@
+# UI Additions — Research-Driven
+
+Running list of UI work owed by sessions in this folder. Every
+session that introduces a new configurable value, a new observation
+column, a new action verb, or anything else the operator might want
+to see on a screen, appends a row here. The session is not complete
+until the row is filed.
+
+The replay UI in this repo and the live dashboard in `ai-betfair`
+are tracked in separate sub-sections so the cross-repo work is
+visible.
+
+Format per row:
+
+```
+- [ ] **Description** (source: session NN, file)
+  - what to add, where, why it matters
+  - acceptance: how the operator will know it's done
+```
+
+---
+
+## Replay UI (this repo)
+
+### Owed by Phase 1 sessions
+
+- [ ] **Show new pressure features in the per-runner panel**
+      (source: P1 session, see `proposals.md`)
+  - Add columns for `obi_topN`, `weighted_microprice`,
+    `traded_delta_T`, `mid_drift_T` next to the existing ladder
+    snapshot for each runner.
+  - Acceptance: open one race in the replay UI, find a tick where
+    the operator can visually confirm the OBI value matches the
+    visible book, and the microprice lies between best back and
+    best lay.
+
+- [ ] **Show spread cost as a separate line in per-race shaped
+      reward** (source: P2 session, see `proposals.md`)
+  - The shaped-reward breakdown panel currently shows `early
+    pick`, `precision`, `efficiency`. Add a `spread cost` line so
+    the operator can see when the agent is paying it and when not.
+  - Acceptance: open a race where the agent crossed at least one
+    wide spread; the new line shows a non-zero value and the sum
+    of all shaped lines equals `info["shaped_bonus"]`.
+
+- [ ] **Fill-side annotation on bet rows** (source: P5 session, see
+      `proposals.md`)
+  - Each bet row shows a one-character annotation indicating which
+    side of the book the fill came from (e.g. "L→B" for back filled
+    at lay-side top-of-book).
+  - Acceptance: three races opened, every bet row shows the
+    annotation, no overlap with the fill price column on a normal
+    window size.
+
+### Owed by Phase 2 sessions
+
+- [ ] **Visualise resting passive orders** (source: P3+P4 session,
+      see `proposals.md`)
+  - Resting orders should be visible on the ladder snapshot they
+    are sitting in (e.g. an outline around the price level), and
+    the order's "queue ahead" estimator value should be inspectable.
+  - Acceptance: open a race with a P3-trained policy, find a
+    resting passive order, and confirm the operator can read its
+    queue-ahead value.
+
+- [ ] **Cancel events in the bet log** (source: P3+P4 session)
+  - When the agent cancels a resting order, the bet log should
+    show the cancel as a distinct event (not just disappear the
+    row). Useful for the manual checks in
+    `manual_testing_plan.md`.
+  - Acceptance: cancel events visible in at least one race; cancel
+    rate visible in the per-race header.
+
+---
+
+## Live dashboard (`ai-betfair`)
+
+### Owed by Phase 0 (the phantom-fill fix)
+
+- [ ] **"Bets on today" counter sourced from order stream**
+      (source: `downstream_knockon.md` §0)
+  - Replace the policy-emission counter with a counter sourced
+    from the Betfair order stream's confirmed matches. This is the
+    surface of the phantom-fill bug fix.
+  - Acceptance: a race where the policy emits a request the
+    exchange does not match shows zero in the counter, not one.
+  - Lives in the `ai-betfair` repo. Tracked here so the cross-repo
+    work doesn't get forgotten.
+
+### Owed by P1 / P2 / P3+P4 / P5 (parity with replay UI)
+
+- [ ] **Pressure features visible on live dashboard** (source: P1)
+- [ ] **Spread cost visible on live dashboard** (source: P2)
+- [ ] **Resting passive orders visible on live dashboard** (source:
+      P3+P4)
+- [ ] **Cancel events visible on live dashboard** (source: P3+P4)
+- [ ] **Fill-side annotation on live dashboard bet rows** (source:
+      P5)
+
+All five live in the `ai-betfair` repo. They are deliberately
+listed here as well so the simulator-side session that introduces
+each item knows it owes a follow-up across the repo boundary.
+
+---
+
+When a row ships, tick the box and leave the row in place. Do not
+delete shipped rows — historical record matters more than file
+length.
