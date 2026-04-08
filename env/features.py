@@ -18,8 +18,16 @@ from __future__ import annotations
 def compute_microprice(back_levels, lay_levels, n: int, ltp_fallback) -> float:
     """Size-weighted midpoint of the top-N ladder levels per side.
 
-    mp = (Σ back_size_i × back_price_i + Σ lay_size_i × lay_price_i)
+    mp = (Σ back_size_i × best_back_price + Σ lay_size_i × best_lay_price)
          / (Σ back_size_i + Σ lay_size_i)
+
+    The sizes from the top-N levels are summed and used as weights, but
+    only the **best price on each side** (``levels[0].price``) is used in
+    the numerator.  Using individual level prices (``price_i``) would pull
+    the result outside ``[best_back, best_lay]`` whenever N > 1, because
+    deeper back levels are priced *below* best_back and deeper lay levels
+    are priced *above* best_lay.  Weighting on best prices preserves the
+    N-level depth signal while guaranteeing the bounded constraint.
 
     Parameters
     ----------
