@@ -35,14 +35,21 @@ first.
 
 ### P1 — money-pressure features
 
-- A 1-day training run with the new features, asserting that the
-  feature columns appear in the saved replay logs and that the
-  policy uses them (gradient norms on the new columns are non-zero
-  after step N).
-- Comparison run: same hyperparameters, P1 obs vs pre-P1 obs, raw
-  P&L on the held-out eval window. Recorded in `progress.md`. Not
-  a strict pass/fail — this is the data that informs the
-  decision gate at the end of Phase 1 in `master_todo.md`.
+- **Gradient-norm check on P1 columns (session 22 — shipped):**
+  `scripts/session_22_p1d_compare.py --dry-run` builds both policies
+  and validates obs-slicing. After ≥1 gradient step on a non-collapsed
+  policy, `check_p1_gradient_norm()` asserts the L2 norm of
+  ∂value/∂obs at OBI+microprice+traded_delta+mid_drift columns is
+  non-zero. (Must be run on a fresh policy, not one that has already
+  collapsed to 0 bets — collapsed policies produce near-zero gradients
+  everywhere.)
+- **Comparison run (session 22 — shipped, result: inconclusive):**
+  Full run in `scripts/session_22_p1d_compare.py`. P1 obs vs pre-P1
+  obs, raw P&L on held-out eval window, results in `progress.md`. Not
+  a strict pass/fail. Single-seed result is dominated by training
+  variance; future re-runs should use the evolutionary infrastructure
+  (N≥10 agents per config) for a meaningful signal. See `progress.md`
+  session 22 entry for diagnosis.
 
 ### P2 — spread-cost shaped reward
 

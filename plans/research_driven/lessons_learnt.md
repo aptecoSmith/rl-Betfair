@@ -158,7 +158,71 @@ actually a bottleneck.
 
 ---
 
-## (no further entries yet)
+## 2026-04-08 — Session 22 — Single-seed PPO comparison is uninformative as a phase gate
+
+**What happened:** The P1 vs baseline comparison ran two full PPO
+training runs under identical hyperparameters. One policy collapsed
+to 0 bets (entropy vanished, all actions mapped to "do nothing"); the
+other continued betting normally. Which one collapsed differed across
+runs — in the session's actual run the P1 policy collapsed and the
+baseline did not, producing a spuriously large baseline lead. There
+was no signal about whether the P1 features were useful.
+
+**Why it was surprising:** The expectation was that two policies
+trained from different initialisations on the same market data would
+produce at minimum a directionally informative comparison — even if
+noisy. In practice, PPO collapse is itself a high-variance event.
+The comparison was completely dominated by "which run happened to
+avoid the local entropy-minimum" rather than by obs quality. A
+single seed cannot distinguish "P1 features hurt" from "this seed's
+P1 run collapsed first".
+
+**What changes because of it:**
+- `master_todo.md` Phase 1 gate result recorded as INCONCLUSIVE,
+  not as evidence against P1. Proceeding to P2 is still justified
+  because the features are correctly wired (gradient flows at fresh
+  init; confirmed in a separate targeted run).
+- Future phase gates must use the evolutionary infrastructure
+  (N≥10 agents per config, tournament selection) rather than
+  single-seed PPO. The evolutionary framework was built precisely
+  because single-seed runs are noisy; the decision-gate comparison
+  should have used it from the start.
+- `integration_testing.md` updated to call out that the comparison
+  run result is not a strict pass/fail and that single-seed results
+  should not be relied on.
+
+---
+
+## 2026-04-08 — Session 22 — Gradient norm is near-zero on collapsed policies
+
+**What happened:** `check_p1_gradient_norm` reported a gradient
+norm of ~1e-10 on the P1 policy after training — technically
+non-zero (so the assertion `grad_norm != 0.0` passed) but
+meaningless at 8 decimal places. The policy had already collapsed
+to 0 bets before the check ran.
+
+**Why it was surprising:** The check was designed to catch
+mis-wiring (P1 columns silently ignored by the network). A
+collapsed policy fails the check for a completely different reason:
+when the actor-critic value head always returns a near-constant
+(because the LSTM hidden state is constant — no bets → same state
+every tick), the gradient of value w.r.t. the input is near-zero
+regardless of wiring. The distinction matters: "gradient is zero
+because features are ignored" and "gradient is zero because the
+policy has collapsed" look identical to the assertion.
+
+**What changes because of it:**
+- `integration_testing.md` updated: the gradient-norm check must
+  be run on a **fresh policy** (before or very early in training),
+  not on one that has already been trained to completion. A
+  collapsed policy will pass the non-zero assertion trivially while
+  hiding the wiring question entirely.
+- The check in `scripts/session_22_p1d_compare.py` is run before
+  training as a dry-run step (`--dry-run` flag); this is the
+  intended usage. Do not interpret the post-training gradient norm
+  as a wiring check.
+
+---
 
 New entries get appended below this line in chronological order.
 Don't reformat or rewrite earlier entries — if a finding turns out

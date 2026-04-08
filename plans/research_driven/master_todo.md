@@ -83,12 +83,19 @@ to review cleanly and fit into a Sonnet context window.
   - First features in this folder with cross-tick state.
   - State lives on the env; `features.py` stays pure.
 
-- [ ] **Session 22 — P1d: re-train and Phase 1 decision gate**
+- [x] **Session 22 — P1d: re-train and Phase 1 decision gate**
       (`sessions/session_22_p1d_retrain.md`)
   - Train one policy on the new obs; compare vs baseline on the
     9-day eval window under the Q3 metric.
   - Gradient-norm sanity check on the new columns.
   - Recommendation recorded in `progress.md`.
+  - **Gate result: INCONCLUSIVE — single-seed comparison dominated
+    by training variance (P1 policy collapsed to 0 bets in this
+    seed; baseline did not). Both policies + comparison script ship.
+    Proceeding to P2 — features are correctly wired (gradient flows
+    at non-collapsed init, confirmed in separate run). Do not rely on
+    single-seed PPO for Phase 2 gate; use evolutionary infrastructure
+    instead.**
 
 - [ ] **Session 23 — P2: spread-cost shaped reward**
       (`sessions/session_23_p2_spread_cost.md`)

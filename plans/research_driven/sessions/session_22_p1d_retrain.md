@@ -1,5 +1,11 @@
 # Session 22 — P1d: P1 re-train and decision-gate comparison
 
+## Q3 resolution
+
+**Metric:** Raw daily P&L on the held-out eval window (raw cash, no Sharpe).
+Resolved by operator 2026-04-08 (start of this session). Option A from
+`open_questions.md`. All per-day and aggregate numbers below use this metric.
+
 ## Before you start — read these
 
 - `../purpose.md`

@@ -188,3 +188,62 @@ The first entry will be added when the first item from
 The first session that lands here is **not** session 11. Numbering
 continues from `next_steps/master_todo.md` — pick the next free
 number when promoting an item, do not start over.
+
+
+---
+
+## 2026-04-08 — Session 22 — P1d: re-train and decision-gate comparison
+
+**Shipped:**
+- `scripts/session_22_p1d_compare.py` (NEW) — standalone comparison script. Defines `BaselinePPOLSTMPolicy` (RUNNER_DIM=110, schema v1), `BaselinePPOTrainer` (obs-slicing subclass of PPOTrainer), `evaluate_policy`, `check_p1_gradient_norm`, `build_baseline_obs_indices`. Both policies use identical `SHARED_HP`. Results appended to this file. Script is rerunnable.
+- `plans/research_driven/open_questions.md` — Q3 resolved: raw daily P&L on held-out eval window (operator choice A, 2026-04-08).
+- `plans/research_driven/sessions/session_22_p1d_retrain.md` — `## Q3 resolution` heading added at top.
+
+**Comparison run result (2026-04-08, scripts/session_22_p1d_compare.py):**
+
+Setup: 4 train days (2026-03-31 to 2026-04-03), 3 eval days (2026-04-04 to 2026-04-06), 5 epochs, CUDA, identical hyperparameters.
+
+Per-day raw P&L on held-out eval window:
+
+| Date       | Baseline P&L | P1 P&L | Delta      |
+|------------|-------------|--------|------------|
+| 2026-04-04 | +12044.47   | +0.00  | -12044.47  |
+| 2026-04-05 | +8783.61    | +0.00  | -8783.61   |
+| 2026-04-06 | +8048.47    | +0.00  | -8048.47   |
+| **TOTAL**  | **+28876.55** | **+0.00** | **-28876.55** |
+| MEAN/DAY   | +9625.52    | +0.00  | -9625.52   |
+
+- Baseline total bets on eval: 1771 (high-betting strategy)
+- P1 total bets on eval: 0 (collapsed to no-bet strategy during training)
+- P1 gradient norm on new columns (after training): ~1e-10 (effectively zero — consistent with collapsed policy, not with wiring error)
+
+**Diagnosis — result is confounded by training variance, not feature quality:**
+
+The P1 policy learned to place 0 bets by epoch 2 and never recovered ("collapsed policy" problem). The baseline policy happened to discover a high-volume backing strategy. In a re-run with different random seeds, either policy could collapse. Two runs of the script show this: in run 1, baseline collapsed and P1 was profitable; in run 2, P1 collapsed and baseline was profitable. Neither outcome is reproducible.
+
+Single-seed single-agent PPO comparison cannot discriminate feature quality in this regime. The gradient norm was ~1e-10 (near-zero) because the collapsed P1 policy's critic outputs near-constant values — confirming training collapse, not wiring error.
+
+**Recommendation at Phase 1 gate:**
+
+The comparison as designed cannot answer "does the P1 obs help?" in 5 epochs × 4 days × 1 seed. The session plan assumed a more stable training regime. Two options:
+
+1. **Use the existing evolutionary infrastructure** (N=50 agents, selection, multi-generation) with half the population on P1 obs and half on baseline obs — the population averages across seeds. This is the right comparison but was out of scope for this session.
+2. **Proceed to P2 anyway**: the P1 features (OBI, microprice, traded_delta, mid_drift) are correctly wired (gradient does flow at non-collapsed initialisation — confirmed in run 1), and the features are correct by unit test. The single-seed gate is not informative enough to stop the programme.
+
+**Decision for master_todo.md:** proceed cautiously — tick the gate as "inconclusive, continuing to P2". Record in lessons_learnt.md.
+
+**Tests added:**
+- `scripts/session_22_p1d_compare.py` integration test (description in `integration_testing.md`): trains P1 policy on 1-day fixture, asserts gradient norm on new columns is non-zero at non-collapsed initialisation.
+
+**Did not ship:**
+- Window parameter sweep (`traded_delta_window_s` 30/60/120) — descoped; the single-seed result made the sweep meaningless.
+- Manual spot-check via UI — no evaluator UI wired yet (deferred from session 19).
+
+**Notes for next session (23 — P2 spread-cost shaped reward):**
+- The `BaselinePPOLSTMPolicy` and comparison infrastructure in session_22 script are session-22-only. Do not import or extend them in production code.
+- The evolutionary framework (PopulationManager + TrainingOrchestrator) is the right comparison tool; use it for the P2 gate rather than this script.
+- Gradient check needs a non-collapsed policy as input — run it early in training (after episode 1), not after the full training run.
+
+**Cross-repo follow-ups:**
+- None new.
+

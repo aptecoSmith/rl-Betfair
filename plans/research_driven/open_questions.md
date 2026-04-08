@@ -61,9 +61,11 @@ The choice matters because P2 (spread cost in shaped reward) will
 when it improves expected live performance. If we judge it on raw
 P&L alone we will reject it for the wrong reason.
 
-**Operator decision needed:** which metric (or combo) is the
-arbiter? Probably needs to be settled before P2 is started, so we
-don't relitigate the whole change in code review.
+**RESOLVED 2026-04-08 (Session 22):** Raw daily P&L on the held-out
+eval window. Operator chose option A. This metric is used for all
+Phase 1 comparisons. P2 results may need a supplementary note
+acknowledging that raw P&L can decrease even when live performance
+improves — record both numbers when P2 runs.
 
 ---
 
