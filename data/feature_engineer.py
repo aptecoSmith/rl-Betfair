@@ -36,7 +36,7 @@ from data.episode_builder import (
     RunnerSnap,
     Tick,
 )
-from env.features import compute_obi
+from env.features import compute_microprice, compute_obi
 
 NaN = float("nan")
 
@@ -856,6 +856,7 @@ def engineer_tick(
     race: Race,
     tick_history: TickHistory,
     obi_top_n: int = 3,
+    microprice_top_n: int = 3,
 ) -> dict[str, object]:
     """Compute ALL features for a single tick.
 
@@ -899,6 +900,19 @@ def engineer_tick(
             snap.available_to_back, snap.available_to_lay, obi_top_n,
         )
 
+        # Weighted microprice — size-weighted midpoint of top-N levels.
+        # Falls back to LTP when both sides are empty; raises if LTP is
+        # also missing (the env's "skip unpriceable runner" path handles
+        # that upstream — we do not silently return zero here).
+        ltp = snap.last_traded_price
+        try:
+            feats["weighted_microprice"] = compute_microprice(
+                snap.available_to_back, snap.available_to_lay,
+                microprice_top_n, ltp,
+            )
+        except ValueError:
+            feats["weighted_microprice"] = NaN
+
         runners_out[sid] = feats
 
     # Update history (after reading velocity — velocity uses prior state)
@@ -914,7 +928,11 @@ def engineer_tick(
     }
 
 
-def engineer_race(race: Race, obi_top_n: int = 3) -> list[dict[str, object]]:
+def engineer_race(
+    race: Race,
+    obi_top_n: int = 3,
+    microprice_top_n: int = 3,
+) -> list[dict[str, object]]:
     """Compute features for every tick in a race.
 
     Creates a fresh :class:`TickHistory` per race, so velocity features
@@ -925,11 +943,19 @@ def engineer_race(race: Race, obi_top_n: int = 3) -> list[dict[str, object]]:
     history = TickHistory()
     results: list[dict[str, object]] = []
     for tick in race.ticks:
-        results.append(engineer_tick(tick, race, history, obi_top_n=obi_top_n))
+        results.append(engineer_tick(
+            tick, race, history,
+            obi_top_n=obi_top_n,
+            microprice_top_n=microprice_top_n,
+        ))
     return results
 
 
-def engineer_day(day: Day, obi_top_n: int = 3) -> list[list[dict[str, object]]]:
+def engineer_day(
+    day: Day,
+    obi_top_n: int = 3,
+    microprice_top_n: int = 3,
+) -> list[list[dict[str, object]]]:
     """Compute features for every tick in every race of a day.
 
     Returns a nested list: ``day[race_idx][tick_idx] → feature_dict``.
@@ -937,7 +963,7 @@ def engineer_day(day: Day, obi_top_n: int = 3) -> list[list[dict[str, object]]]:
     results = []
     for race in day.races:
         t0 = time.perf_counter()
-        feats = engineer_race(race, obi_top_n=obi_top_n)
+        feats = engineer_race(race, obi_top_n=obi_top_n, microprice_top_n=microprice_top_n)
         elapsed = time.perf_counter() - t0
         logger.debug(
             "  Race %s: %d ticks engineered in %.3fs",

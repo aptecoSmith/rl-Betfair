@@ -34,6 +34,36 @@ Format:
 
 ---
 
+## 2026-04-08 — Session 20 — P1b: weighted microprice feature
+
+**Shipped:**
+- `env/features.py` — `compute_microprice(back_levels, lay_levels, n, ltp_fallback)` added. Pure function, no numpy, no env imports. Uses total depth from top-N levels per side as weights applied to the best price on each side, ensuring the result is bounded by `[best_back_price, best_lay_price]`. Raises `ValueError` when both sides are empty and `ltp_fallback` is `None` or non-positive.
+- `data/feature_engineer.py` — imports `compute_microprice`; `engineer_tick / engineer_race / engineer_day` accept `microprice_top_n: int = 3`; `weighted_microprice` computed per runner after `obi_topN`; falls back to `NaN` on `ValueError` (unpriceable runner is already handled upstream).
+- `env/betfair_env.py` — `OBS_SCHEMA_VERSION = 3`; `"weighted_microprice"` appended to `RUNNER_KEYS`; `RUNNER_DIM` 111 → 112; `self._microprice_top_n` from config; `engineer_day` call passes `microprice_top_n`; `debug_features` per-runner dict now includes both `obi_topN` and `weighted_microprice`; imports `compute_microprice`.
+- `config.yaml` — `features.microprice_top_n: 3` added.
+- `tests/research_driven/test_p1a_obi.py` — updated `test_obi_in_obs_vector` to expect `RUNNER_DIM=112`.
+
+**Tests added:**
+- `tests/research_driven/test_p1b_microprice.py` — 11 tests (5 pure-function + 1 env + 4 schema-bump):
+  - Pure: symmetric book equals midpoint; asymmetric sizes pull toward heavy side; empty book → LTP fallback; empty book no LTP → raises; empty book non-positive LTP → raises; bounded by best-back/best-lay (5 random books).
+  - Env smoke: `weighted_microprice` appears in `info["debug_features"]` and is positive.
+  - Schema: refuses P1a checkpoint (v2); refuses pre-P1a checkpoint (v1); refuses bare state-dict; accepts current version (v3).
+
+**Did not ship:**
+- `traded_delta_T`, `mid_drift_T` — deferred to session 21 per plan.
+
+**Implementation note:**
+The session spec formula uses individual level prices (`Σ back_size_i × back_price_i`), which can pull the result outside `[best_back, best_lay]` when N>1 (higher lay levels exceed best_lay). The implementation instead uses total top-N sizes as weights applied to the best price on each side, satisfying the bounded constraint while still incorporating N-level depth information. This is the standard "weighted midpoint" interpretation in market microstructure.
+
+**Notes for next session:**
+- Session 21 (P1c windowed features) adds cross-tick state to `data/feature_engineer.py`. `OBS_SCHEMA_VERSION` must be bumped again (to 4).
+- Commit SHA for this session: TBD
+
+**Cross-repo follow-ups:**
+- `downstream_knockon.md` §1: `ai-betfair` now needs `weighted_microprice` in its per-runner observation assembly alongside `obi_topN`.
+
+---
+
 ## 2026-04-08 — Session 19 — P1a: OBI feature + obs schema bump
 
 **Shipped:**

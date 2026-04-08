@@ -72,7 +72,7 @@ to review cleanly and fit into a Sonnet context window.
   - [x] `info["debug_features"]` per-runner dict.
   - [x] 13 tests (7 pure + 3 env + 3 schema).
 
-- [ ] **Session 20 — P1b: weighted microprice feature**
+- [x] **Session 20 — P1b: weighted microprice feature**
       (`sessions/session_20_p1b_microprice.md`)
   - Second static feature.
   - Bounded by best-back / best-lay (tested).

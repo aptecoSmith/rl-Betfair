@@ -40,7 +40,7 @@ import logging
 from data.episode_builder import Day, Race, Tick
 from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
-from env.features import compute_obi
+from env.features import compute_microprice, compute_obi
 from training.perf_log import perf_log
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,8 @@ logger = logging.getLogger(__name__)
 #
 #   Version 1 — original obs vector (sessions 1–18)
 #   Version 2 — added obi_topN per runner (session 19 / P1a)
-OBS_SCHEMA_VERSION: int = 2
+#   Version 3 — added weighted_microprice per runner (session 20 / P1b)
+OBS_SCHEMA_VERSION: int = 3
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
@@ -140,6 +141,8 @@ RUNNER_KEYS: list[str] = [
     "tick_count",
     # ── P1a features (1, Session 19) ──
     "obi_topN",
+    # ── P1b features (1, Session 20) ──
+    "weighted_microprice",
 ]
 
 AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
@@ -148,7 +151,7 @@ POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
-RUNNER_DIM = len(RUNNER_KEYS)             # 111 (was 110, +1 obi_topN P1a)
+RUNNER_DIM = len(RUNNER_KEYS)             # 112 (was 111, +1 weighted_microprice P1b)
 
 # Action thresholds
 _BACK_THRESHOLD = 0.33
@@ -287,6 +290,7 @@ class BetfairEnv(gymnasium.Env):
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
         self._total_races = len(day.races)
         self._obi_top_n: int = config.get("features", {}).get("obi_top_n", 3)
+        self._microprice_top_n: int = config.get("features", {}).get("microprice_top_n", 3)
 
         # Reward parameters — start from shared config, then overlay any
         # per-agent overrides passed in by the trainer. The shared config
@@ -384,7 +388,11 @@ class BetfairEnv(gymnasium.Env):
                 logger,
                 f"Feature engineering ({n_races} races, {n_ticks} ticks)",
             ):
-                day_features = engineer_day(self.day, obi_top_n=self._obi_top_n)
+                day_features = engineer_day(
+                    self.day,
+                    obi_top_n=self._obi_top_n,
+                    microprice_top_n=self._microprice_top_n,
+                )
             if feature_cache is not None:
                 feature_cache[self.day.date] = day_features
 
@@ -537,7 +545,20 @@ class BetfairEnv(gymnasium.Env):
                     runner.available_to_lay,
                     self._obi_top_n,
                 )
-                debug_features[runner.selection_id] = {"obi_topN": obi}
+                ltp = runner.last_traded_price
+                try:
+                    mp = compute_microprice(
+                        runner.available_to_back,
+                        runner.available_to_lay,
+                        self._microprice_top_n,
+                        ltp,
+                    )
+                except ValueError:
+                    mp = float("nan")
+                debug_features[runner.selection_id] = {
+                    "obi_topN": obi,
+                    "weighted_microprice": mp,
+                }
 
         return {
             "race_idx": self._race_idx,

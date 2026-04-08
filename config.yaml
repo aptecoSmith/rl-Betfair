@@ -160,6 +160,7 @@ hyperparameters:
       - ppo_transformer_v1
 features:
   obi_top_n: 3
+  microprice_top_n: 3
 training_worker:
   host: localhost
   port: 8002

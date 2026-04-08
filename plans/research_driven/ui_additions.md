@@ -32,11 +32,18 @@ Format per row:
     operator can visually confirm that the OBI value matches the visible
     back/lay size balance (e.g. dominant back side → obi > 0).
 
-- [ ] **Show `weighted_microprice`, `traded_delta_T`, `mid_drift_T` in the
-      per-runner panel** (source: sessions 20–21 / P1b–c, see `proposals.md`)
-  - Add columns for those features once sessions 20–21 land.
-  - Acceptance: microprice lies between best back and best lay; windowed
-    features update each tick.
+- [ ] **Show `weighted_microprice` in the per-runner panel** (source: session 20 / P1b,
+      `env/betfair_env.py` `_get_info` → `debug_features`)
+  - `info["debug_features"][selection_id]["weighted_microprice"]` is now populated
+    every tick. Wire it into the per-runner row in the replay UI.
+  - Acceptance: open one race in the replay UI, find a tick where the book is
+    asymmetric (clearly more size on one side); confirm microprice pulls toward
+    the heavier side and lies between best back and best lay.
+
+- [ ] **Show `traded_delta_T`, `mid_drift_T` in the per-runner panel**
+      (source: session 21 / P1c, see `proposals.md`)
+  - Add columns once session 21 lands.
+  - Acceptance: windowed features update each tick.
 
 - [ ] **Show spread cost as a separate line in per-race shaped
       reward** (source: P2 session, see `proposals.md`)
