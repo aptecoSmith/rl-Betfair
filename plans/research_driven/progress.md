@@ -57,7 +57,7 @@ The session spec formula uses individual level prices (`Σ back_size_i × back_p
 
 **Notes for next session:**
 - Session 21 (P1c windowed features) adds cross-tick state to `data/feature_engineer.py`. `OBS_SCHEMA_VERSION` must be bumped again (to 4).
-- Commit SHA for this session: TBD
+- Commit SHA for this session: ee03b8b
 
 **Cross-repo follow-ups:**
 - `downstream_knockon.md` §1: `ai-betfair` now needs `weighted_microprice` in its per-runner observation assembly alongside `obi_topN`.
