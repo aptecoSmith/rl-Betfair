@@ -249,7 +249,7 @@ class BetfairEnv(gymnasium.Env):
     Reward
     ------
     Sparse — emitted at race settlement:
-    ``race_pnl + early_pick_bonus + precision_bonus − (bet_count × efficiency_penalty)``
+    ``race_pnl + early_pick_bonus + precision_bonus − (bet_count × efficiency_penalty) − (spread_cost_weight × Σ spread_cost_per_bet)``
 
     - ``race_pnl`` is the real cash P&L of the race (raw reward).
     - ``early_pick_bonus`` amplifies *both* winning and losing early back
@@ -278,6 +278,7 @@ class BetfairEnv(gymnasium.Env):
         "efficiency_penalty",
         "precision_bonus",
         "drawdown_shaping_weight",
+        "spread_cost_weight",
         "commission",
     })
 
@@ -342,6 +343,10 @@ class BetfairEnv(gymnasium.Env):
         self._drawdown_shaping_weight = reward_cfg.get(
             "drawdown_shaping_weight", 0.0,
         )
+        # Session 23 — P2: spread-cost shaping.  Strictly non-positive, intentionally
+        # NOT zero-mean (see design pass and lessons_learnt.md Session 23 entry).
+        # Default 0.0 keeps all pre-session runs byte-identical.
+        self._spread_cost_weight = reward_cfg.get("spread_cost_weight", 0.0)
         self._commission = reward_cfg.get("commission", 0.05)
 
         # Pre-compute features and runner mappings
@@ -605,6 +610,7 @@ class BetfairEnv(gymnasium.Env):
             "day_pnl": self._day_pnl,
             "raw_pnl_reward": self._cum_raw_reward,
             "shaped_bonus": self._cum_shaped_reward,
+            "spread_cost": self._cum_spread_cost,
             "bet_count": total_bets,
             "winning_bets": total_winning,
             "races_completed": self._races_completed,
@@ -633,6 +639,7 @@ class BetfairEnv(gymnasium.Env):
         # that don't affect real P&L). Summing both reproduces total_reward.
         self._cum_raw_reward = 0.0
         self._cum_shaped_reward = 0.0
+        self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         self._settled_bets = []
         # Running high-water / low-water of day_pnl for the drawdown
         # shaping term. Both start at 0.0 (the initial day_pnl) so the
@@ -880,17 +887,36 @@ class BetfairEnv(gymnasium.Env):
         # pass for the full proof.
         drawdown_term = self._update_drawdown_shaping()
 
+        # Spread-cost shaping (Session 23 — P2).
+        #
+        # INTENTIONAL ASYMMETRY — this term is strictly non-positive and
+        # deliberately violates the zero-mean rule in hard_constraints.md #1.
+        # Random policies pay the spread on every bet; that cost is real
+        # friction and the asymmetry IS the defence against random betting.
+        # Do NOT add an offset to make it zero-mean — that would nullify the
+        # friction signal.  See design pass and lessons_learnt.md (Session 23)
+        # for the full justification.
+        race_spread_cost = 0.0
+        if self._spread_cost_weight > 0.0:
+            for bet in race_bets:
+                ltp = bet.ltp_at_placement
+                if ltp > 0.0:
+                    race_spread_cost += bet.matched_stake * abs(bet.average_price - ltp) / ltp
+        spread_cost_term = -self._spread_cost_weight * race_spread_cost
+
         shaped = (
             early_pick_bonus
             + precision_reward
             - efficiency_cost
             + drawdown_term
+            + spread_cost_term
         )
         reward = race_pnl + shaped
 
         # Track raw vs shaped for diagnostic logging.
         self._cum_raw_reward += race_pnl
         self._cum_shaped_reward += shaped
+        self._cum_spread_cost += spread_cost_term
 
         self._race_records.append(RaceRecord(
             market_id=race.market_id,

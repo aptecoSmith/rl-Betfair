@@ -60,6 +60,7 @@ class Bet:
     outcome: BetOutcome = BetOutcome.UNSETTLED
     pnl: float = 0.0
     tick_index: int = -1  # index into Race.ticks where bet was placed (-1 = not recorded)
+    ltp_at_placement: float = 0.0  # runner's last traded price when the bet was placed (Session 23 — used by spread_cost shaping)
 
     @property
     def liability(self) -> float:
@@ -170,6 +171,7 @@ class BetManager:
             matched_stake=result.matched_stake,
             average_price=result.average_price,
             market_id=market_id,
+            ltp_at_placement=runner.last_traded_price or 0.0,
         )
         # Back bets: the stake is the cost (paid up-front).
         self.budget -= result.matched_stake
@@ -254,6 +256,7 @@ class BetManager:
             matched_stake=result.matched_stake,
             average_price=result.average_price,
             market_id=market_id,
+            ltp_at_placement=runner.last_traded_price or 0.0,
         )
         # Reserve the liability from the budget.
         self._open_liability += liability

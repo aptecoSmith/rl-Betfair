@@ -34,6 +34,63 @@ Format:
 
 ---
 
+## 2026-04-08 — Session 23 — P2: spread-cost shaped reward
+
+**Shipped:**
+- `plans/research_driven/sessions/session_23_p2_spread_cost.md` — design pass
+  committed separately (commit `08f2fe9`) before implementation.
+- `env/bet_manager.py` — `Bet` dataclass gains `ltp_at_placement: float = 0.0` field;
+  `BetManager.place_back` and `place_lay` populate it from `runner.last_traded_price`.
+- `env/betfair_env.py` — `_REWARD_OVERRIDE_KEYS` gains `"spread_cost_weight"`;
+  `__init__` reads `self._spread_cost_weight`; `reset()` initialises `_cum_spread_cost`;
+  `_settle_current_race` computes `spread_cost_term = −weight × Σ |fill−ltp|/ltp × stake`
+  and adds it to `shaped`; `_get_info` exposes `info["spread_cost"]`.
+- `config.yaml` — `reward.spread_cost_weight: 0.0` (off by default); gene
+  `reward_spread_cost_weight: {type: float, min: 0.0, max: 1.0}` added to
+  `hyperparameters.search_ranges`.
+- `agents/ppo_trainer.py` — `_REWARD_GENE_MAP` entry
+  `"reward_spread_cost_weight": ("spread_cost_weight",)`.
+
+**Chosen formulation:**
+`spread_cost_per_bet = matched_stake × |average_price − ltp_at_placement| / ltp_at_placement`
+using LTP (not true book mid) as the fair-value reference.  See design pass §1 for
+why `|·|` is used and why LTP is preferred over recomputing the book mid.
+`efficiency_penalty` is unchanged — the two terms are complementary (bet count vs spread
+width), not redundant.
+
+**Tests added:**
+- `tests/research_driven/test_p2_spread_cost.py` — 20 tests across 8 logical groups:
+  - `TestPureComputation` (4): `ltp_at_placement` stamped correctly on back/lay;
+    formula `|fill−ltp|/ltp` verified for back and lay bets.
+  - `TestNoBetPolicy` (2): zero spread_cost and zero shaped_bonus for no-bet run.
+  - `TestTightSpreadCost` (2): strictly negative cost when bets placed; small magnitude.
+  - `TestWideSpreadCost` (1): wide spread produces larger negative cost than tight.
+  - `TestRandomPolicyAsymmetry` (2): pins the intentional non-zero-mean; includes
+    explicit comment that this test MUST NOT be "fixed" to allow zero spread_cost.
+  - `TestRewardInvariant` (3): raw + shaped ≈ total for no-bets, with-bets, and across
+    weight values 0/0.25/1.0.
+  - `TestBucketing` (3): spread_cost in shaped not raw; info key always present; delta
+    shaped equals info["spread_cost"].
+  - `TestGenePlumbing` (5): gene in search_ranges; default 0; reward_override respected;
+    ppo_trainer map entry; weight=0 gives zero cost.
+
+**Did not ship:**
+- Actual replay UI line for `spread_cost` breakdown — deferred per the session plan.
+  Row recorded in `ui_additions.md`.
+- `downstream_knockon.md` §2 update — no code change needed (alerting note only).
+
+**Notes for next session:**
+- Default `spread_cost_weight: 0.0` means all pre-session runs are byte-identical.
+  Enable by setting `reward_spread_cost_weight` in hyperparameter search or by setting
+  `reward.spread_cost_weight: X` in config.yaml.
+- The intentional-asymmetry exception is recorded in `lessons_learnt.md` (Session 23
+  entry) and pinned by a test (`TestRandomPolicyAsymmetry`). Do not zero-mean it.
+
+**Cross-repo follow-ups:**
+- None — no obs schema or action-space changes. `ai-betfair` is unaffected.
+
+---
+
 ## 2026-04-08 — Session 21 — P1c: windowed features (traded_delta + mid_drift)
 
 **Shipped:**

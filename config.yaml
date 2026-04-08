@@ -17,6 +17,7 @@ reward:
   efficiency_penalty: 0.01
   precision_bonus: 1.0
   drawdown_shaping_weight: 0.0
+  spread_cost_weight: 0.0
   coefficients:
     win_rate: 0.35
     sharpe: 0.3
@@ -152,6 +153,10 @@ hyperparameters:
       type: float
       min: 0.0
       max: 0.2
+    reward_spread_cost_weight:
+      type: float
+      min: 0.0
+      max: 1.0
     architecture_name:
       type: str_choice
       choices:

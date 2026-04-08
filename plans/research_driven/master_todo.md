@@ -97,10 +97,13 @@ to review cleanly and fit into a Sonnet context window.
     single-seed PPO for Phase 2 gate; use evolutionary infrastructure
     instead.**
 
-- [ ] **Session 23 — P2: spread-cost shaped reward**
+- [x] **Session 23 — P2: spread-cost shaped reward**
       (`sessions/session_23_p2_spread_cost.md`)
-  - DESIGN PASS FIRST (like session 12 in `next_steps/`).
-  - Intentional asymmetry — this term is a cost, not zero-mean.
+  - Design pass committed separately before implementation.
+  - `Bet.ltp_at_placement` stashed at placement time; no matcher API changes.
+  - Formula: `matched_stake × |fill − ltp| / ltp` (direction-independent half-spread).
+  - `efficiency_penalty` unchanged — the two terms are complementary.
+  - Intentional asymmetry documented in code, lessons_learnt.md, and design pass.
   - Knock-on: deployment note for `ai-betfair` low-bet-count
     alerting (no code change). `downstream_knockon.md` §2.
 

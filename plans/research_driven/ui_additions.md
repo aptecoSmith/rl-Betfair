@@ -48,22 +48,13 @@ Format per row:
     and spikes around visible volume surges; `mid_drift` tracks the microprice trajectory.
 
 - [ ] **Show spread cost as a separate line in per-race shaped
-      reward** (source: P2 session, see `proposals.md`)
-  - The shaped-reward breakdown panel currently shows `early
-    pick`, `precision`, `efficiency`. Add a `spread cost` line so
-    the operator can see when the agent is paying it and when not.
-  - Acceptance: open a race where the agent crossed at least one
-    wide spread; the new line shows a non-zero value and the sum
-    of all shaped lines equals `info["shaped_bonus"]`.
-
-- [ ] **Show spread cost as a separate line in per-race shaped
-      reward** (source: P2 session, see `proposals.md`)
-  - The shaped-reward breakdown panel currently shows `early
-    pick`, `precision`, `efficiency`. Add a `spread cost` line so
-    the operator can see when the agent is paying it and when not.
-  - Acceptance: open a race where the agent crossed at least one
-    wide spread; the new line shows a non-zero value and the sum
-    of all shaped lines equals `info["shaped_bonus"]`.
+      reward** (source: session 23 / P2, `env/betfair_env.py` → `info["spread_cost"]`)
+  - `info["spread_cost"]` is now populated every episode (cumulative, ≤ 0).
+    Wire it into the per-race shaped-reward breakdown panel alongside `early pick`,
+    `precision`, and `efficiency`.
+  - Acceptance: open a race where the agent crossed at least one wide spread;
+    the new `spread cost` line shows a non-zero negative value; the sum of all
+    shaped-component lines equals `info["shaped_bonus"]`.
 
 - [ ] **Fill-side annotation on bet rows** (source: P5 session, see
       `proposals.md`)

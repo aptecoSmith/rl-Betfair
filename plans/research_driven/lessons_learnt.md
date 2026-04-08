@@ -228,3 +228,39 @@ New entries get appended below this line in chronological order.
 Don't reformat or rewrite earlier entries — if a finding turns out
 to be wrong, write a new entry recording the reversal and cite the
 earlier one.
+
+---
+
+## 2026-04-08 — Session 23 — Spread-cost term is intentionally non-zero-mean (asymmetric)
+
+**What happened:** P2 added `spread_cost` to the shaped reward.  Unlike all previous
+shaped terms (`early_pick_bonus`, `precision_reward`, `drawdown_shaping`), this term is
+strictly non-positive — it is a *cost*, not a bonus that averages to zero.
+
+**Why it was surprising (and why this entry is mandatory):** The standing rule in
+`hard_constraints.md` #1 requires new shaped terms to be zero-mean for random policies,
+specifically to prevent the "participation trophy" bug where the agent learns to bet
+more because betting is free.  When writing the design pass for P2, it was not obvious
+whether spread cost should be an exception to this rule or should be centered somehow.
+
+The conclusion was that the zero-mean rule applies to *bonuses* (terms that can be
+positive or negative depending on behaviour quality) but NOT to *costs* (terms that are
+always non-positive).  For spread cost, the asymmetry IS the defence: a random policy
+that bets indiscriminately will accumulate strictly negative expected spread cost, which
+discourages random betting directly.  Centering the term (e.g. by subtracting the
+expected random-policy cost) would nullify this signal and teach the agent that the
+spread is irrelevant.
+
+**What changes because of it:**
+
+- This entry is the mandatory historical record required by `session_23_p2_spread_cost.md`
+  and the design pass §6.  **Do NOT "fix" spread_cost to be zero-mean** — the asymmetry
+  is not an implementation oversight but a deliberate exception to the zero-mean rule.
+- `test_p2_spread_cost.py :: TestRandomPolicyAsymmetry :: test_aggressive_policy_expected_spread_cost_strictly_negative`
+  pins the asymmetry with an assertion and an explicit comment so any future refactor
+  that accidentally zeros it will fail loudly.
+- The comment above the spread_cost computation in `_settle_current_race` cites this
+  session by number and says "DO NOT add an offset to make it zero-mean".
+- `hard_constraints.md` #1 already notes the exception: "pure-cost terms are the
+  one exception to this rule".  No change to hard_constraints.md needed, but this
+  lessons_learnt entry is the cross-reference cited there.
