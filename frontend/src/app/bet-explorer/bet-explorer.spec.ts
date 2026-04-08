@@ -4,7 +4,7 @@ import { provideHttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { BetExplorer, formatTimeToOff } from './bet-explorer';
+import { BetExplorer, formatTimeToOff, fillSideAnnotation } from './bet-explorer';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardResponse, ScoreboardEntry } from '../models/scoreboard.model';
@@ -624,5 +624,17 @@ describe('formatTimeToOff', () => {
 
   it('should format in-play minutes', () => {
     expect(formatTimeToOff(-90)).toBe('+1m 30s');
+  });
+});
+
+// ── P5: fill-side annotation ──
+
+describe('fillSideAnnotation', () => {
+  it('returns L→B for a back bet', () => {
+    expect(fillSideAnnotation('back')).toBe('L→B');
+  });
+
+  it('returns B→L for a lay bet', () => {
+    expect(fillSideAnnotation('lay')).toBe('B→L');
   });
 });

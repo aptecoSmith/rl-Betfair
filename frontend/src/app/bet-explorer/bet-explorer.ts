@@ -226,6 +226,10 @@ export class BetExplorer implements OnInit {
     return formatTimeToOff(seconds);
   }
 
+  fillSideAnnotation(action: string): string {
+    return fillSideAnnotation(action);
+  }
+
   formatRaceTime(isoTimestamp: string): string {
     if (!isoTimestamp) return '';
     return new Date(isoTimestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -239,6 +243,14 @@ export class BetExplorer implements OnInit {
     this.selectionState.replayRaceId.set(bet.race_id);
     this.router.navigate(['/replay']);
   }
+}
+
+/** Returns a compact fill-side label for a bet.
+ *  Back bets are filled at the best lay (L→B).
+ *  Lay bets are filled at the best back (B→L).
+ */
+export function fillSideAnnotation(action: string): string {
+  return action === 'back' ? 'L→B' : 'B→L';
 }
 
 export function formatTimeToOff(seconds: number): string {

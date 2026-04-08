@@ -113,6 +113,7 @@
             <th>Race</th>
             <th>Runner</th>
             <th>Action</th>
+            <th title="Which side of the book the fill came from">Fill</th>
             <th class="sortable" (click)="toggleSort('tick_timestamp')" data-testid="sort-time-to-off">
               Time to Off{{ sortIndicator('tick_timestamp') }}
             </th>
@@ -143,6 +144,7 @@
                   {{ bet.action | uppercase }}
                 </span>
               </td>
+              <td class="mono fill-side-badge" [attr.title]="bet.action === 'back' ? 'Filled at lay-side top-of-book' : 'Filled at back-side top-of-book'">{{ fillSideAnnotation(bet.action) }}</td>
               <td class="mono">{{ formatSecondsToOff(bet.seconds_to_off) }}</td>
               <td class="mono">{{ bet.price | number:'1.2-2' }}</td>
               <td class="mono">£{{ bet.stake | number:'1.2-2' }}</td>
@@ -162,7 +164,7 @@
           }
           @if (sortedBets().length === 0) {
             <tr>
-              <td colspan="12" class="empty-row" data-testid="empty-row">
+              <td colspan="13" class="empty-row" data-testid="empty-row">
                 @if (allBets().length === 0) {
                   No bets found for this model.
                 } @else {

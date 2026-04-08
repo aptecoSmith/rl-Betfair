@@ -34,6 +34,45 @@ Format:
 
 ---
 
+## 2026-04-08 — Session 24 — P5: UI fill-side annotation
+
+**Shipped:**
+- `frontend/src/app/race-replay/race-replay.ts` — `fillSideAnnotation(action)` module-level
+  export + delegate method on the component class.
+- `frontend/src/app/race-replay/race-replay.html` — `<span class="fill-side-badge">` added
+  to `.bet-card-header`, after the action badge, pushed right with `margin-left: auto`.
+- `frontend/src/app/race-replay/race-replay.scss` — `.fill-side-badge` rule (monospace 0.65rem,
+  muted #888, flex-shrink: 0).
+- `frontend/src/app/bet-explorer/bet-explorer.ts` — same `fillSideAnnotation` function exported;
+  delegate method on `BetExplorer` class.
+- `frontend/src/app/bet-explorer/bet-explorer.html` — "Fill" column header + `<td>` cell with
+  `fillSideAnnotation` call; empty-row colspan bumped 12 → 13.
+- `frontend/src/app/bet-explorer/bet-explorer.scss` — `.fill-side-badge` rule (monospace 0.75rem,
+  muted #888).
+- `plans/research_driven/master_todo.md` — Session 24 box ticked.
+- `plans/research_driven/ui_additions.md` — replay UI fill-side row ticked; live dashboard row
+  remains open.
+
+**Tests added:**
+- `frontend/src/app/race-replay/race-replay.spec.ts` — `describe('fillSideAnnotation')`: two
+  pure-function tests (`back` → `L→B`, `lay` → `B→L`). Both pass.
+- `frontend/src/app/bet-explorer/bet-explorer.spec.ts` — same two tests. Both pass.
+
+**Did not ship:**
+- Live dashboard (`ai-betfair`) annotation — out of scope per session instructions; row in
+  `ui_additions.md` remains open.
+- Screenshots: no snapshot framework exists; manual check is the acceptance gate.
+
+**Notes for next session:**
+- The four `fillSideAnnotation` tests are pure-function and fast; the TestBed-based tests in
+  both files have a pre-existing `initTestEnvironment` failure (not introduced by this session).
+
+**Cross-repo follow-ups:**
+- `ai-betfair` owes a matching fill-side annotation on the live dashboard bet rows (separate
+  session, separate reviewer context). Tracked in `ui_additions.md` §Live dashboard P5 row.
+
+---
+
 ## 2026-04-08 — Session 23 — P2: spread-cost shaped reward
 
 **Shipped:**

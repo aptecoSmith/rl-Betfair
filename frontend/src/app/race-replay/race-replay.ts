@@ -718,4 +718,16 @@ export class RaceReplay implements OnInit, OnDestroy, AfterViewInit {
     const sign = seconds < 0 ? '+' : '-';
     return `${sign}${mins}:${secs.toString().padStart(2, '0')}`;
   }
+
+  fillSideAnnotation(action: string): string {
+    return fillSideAnnotation(action);
+  }
+}
+
+/** Returns a compact fill-side label for a bet.
+ *  Back bets are filled at the best lay (L→B).
+ *  Lay bets are filled at the best back (B→L).
+ */
+export function fillSideAnnotation(action: string): string {
+  return action === 'back' ? 'L→B' : 'B→L';
 }

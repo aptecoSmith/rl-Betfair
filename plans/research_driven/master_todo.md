@@ -107,7 +107,7 @@ to review cleanly and fit into a Sonnet context window.
   - Knock-on: deployment note for `ai-betfair` low-bet-count
     alerting (no code change). `downstream_knockon.md` §2.
 
-- [ ] **Session 24 — P5: UI fill-side annotation**
+- [x] **Session 24 — P5: UI fill-side annotation**
       (`sessions/session_24_p5_ui_fill_side.md`)
   - Tiny session; can land at any time after session 18.
   - Knock-on: parity annotation on the `ai-betfair` live dashboard

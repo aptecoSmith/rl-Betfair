@@ -147,6 +147,7 @@
                 <span class="bet-action-badge" [class.back]="card.bet.action === 'back'" [class.lay]="card.bet.action === 'lay'">
                   {{ card.bet.action | uppercase }}
                 </span>
+                <span class="fill-side-badge" [attr.title]="card.bet.action === 'back' ? 'Filled at lay-side top-of-book' : 'Filled at back-side top-of-book'">{{ fillSideAnnotation(card.bet.action) }}</span>
               </div>
               <div class="bet-card-runner">{{ card.bet.runner_name }} @ {{ card.bet.price | number:'1.2-2' }}</div>
               <div class="bet-card-details">

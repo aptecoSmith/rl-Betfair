@@ -257,6 +257,13 @@
   &.lost { color: #e57373; }
 }
 
+.fill-side-badge {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #888;
+  white-space: nowrap;
+}
+
 .pnl-cell {
   font-weight: 600;
 

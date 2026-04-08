@@ -5,7 +5,7 @@ import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { Injectable } from '@angular/core';
 import { of, throwError, Observable, EMPTY } from 'rxjs';
 import { vi, describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
-import { RaceReplay } from './race-replay';
+import { RaceReplay, fillSideAnnotation } from './race-replay';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardResponse, ScoreboardEntry } from '../models/scoreboard.model';
@@ -941,5 +941,17 @@ describe('RaceReplay', () => {
     setup();
     expect(component.selectedModelId()).toBeNull();
     expect(component.selectedDate()).toBeNull();
+  });
+});
+
+// ── P5: fill-side annotation ──
+
+describe('fillSideAnnotation', () => {
+  it('returns L→B for a back bet', () => {
+    expect(fillSideAnnotation('back')).toBe('L→B');
+  });
+
+  it('returns B→L for a lay bet', () => {
+    expect(fillSideAnnotation('lay')).toBe('B→L');
   });
 });

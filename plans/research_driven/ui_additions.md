@@ -56,7 +56,7 @@ Format per row:
     the new `spread cost` line shows a non-zero negative value; the sum of all
     shaped-component lines equals `info["shaped_bonus"]`.
 
-- [ ] **Fill-side annotation on bet rows** (source: P5 session, see
+- [x] **Fill-side annotation on bet rows** (source: P5 session, see
       `proposals.md`)
   - Each bet row shows a one-character annotation indicating which
     side of the book the fill came from (e.g. "L→B" for back filled
