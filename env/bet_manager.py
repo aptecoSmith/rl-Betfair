@@ -94,7 +94,8 @@ class PassiveOrder:
     ltp_at_placement: float = 0.0         # LTP when order was placed (for Bet.ltp_at_placement on fill)
     traded_volume_since_placement: float = 0.0
     matched_stake: float = 0.0            # set to requested_stake on fill (session 26)
-    cancelled: bool = False               # reserved for session 29
+    cancelled: bool = False
+    cancel_reason: str = ""                # e.g. "race-off" or "agent" (session 29)
 
     def to_dict(self) -> dict:
         return {
@@ -109,6 +110,7 @@ class PassiveOrder:
             "traded_volume_since_placement": self.traded_volume_since_placement,
             "matched_stake": self.matched_stake,
             "cancelled": self.cancelled,
+            "cancel_reason": self.cancel_reason,
         }
 
 
@@ -125,7 +127,8 @@ class PassiveOrderBook:
     so that this class can access and mutate budget fields and the bets list
     without circular import issues.
 
-    Cancellation lands in session 29.
+    Race-off cancellation via ``cancel_all`` (session 27); agent-driven cancel
+    action lands in session 29.
     """
 
     def __init__(self, matcher: ExchangeMatcher = DEFAULT_MATCHER) -> None:
@@ -152,6 +155,11 @@ class PassiveOrderBook:
         # start of each on_tick; read by BetfairEnv._get_info for
         # info["passive_fills"].  Each entry: (selection_id, price, filled_stake).
         self._last_fills: list[tuple[int, float, float]] = []
+        # Cancellation events emitted by cancel_all().  Read by
+        # BetfairEnv._get_info for info["passive_cancels"].
+        self._last_cancels: list[dict] = []
+        # History of cancelled orders — kept for the replay UI.
+        self._cancelled_orders: list[PassiveOrder] = []
 
     @property
     def orders(self) -> list[PassiveOrder]:
@@ -166,6 +174,62 @@ class PassiveOrderBook:
         start of every ``on_tick``; an empty list means no fills this tick.
         """
         return list(self._last_fills)
+
+    @property
+    def last_cancels(self) -> list[dict]:
+        """Cancellation events from the most recent ``cancel_all`` call."""
+        return list(self._last_cancels)
+
+    @property
+    def cancelled_orders(self) -> list[PassiveOrder]:
+        """All orders cancelled during this race (history for replay UI)."""
+        return list(self._cancelled_orders)
+
+    @property
+    def cancel_count(self) -> int:
+        """Number of orders cancelled in this race."""
+        return len(self._cancelled_orders)
+
+    def cancel_all(self, reason: str = "race-off") -> None:
+        """Cancel all open passive orders, releasing budget reservations.
+
+        Called at race-off (session 27) to clean up unfilled passive orders
+        before race settlement runs.  Cancelled orders contribute zero P&L.
+
+        Idempotent: calling twice produces the same state as calling once.
+
+        Args:
+            reason: Human-readable reason string for the replay UI.
+        """
+        self._last_cancels = []
+        bm = self._bet_manager
+
+        for order in self._orders:
+            order.cancelled = True
+            order.cancel_reason = reason
+
+            # Release budget reservation.
+            if bm is not None:
+                if order.side is BetSide.BACK:
+                    bm.budget += order.requested_stake
+                else:  # LAY
+                    liability = order.requested_stake * (order.price - 1.0)
+                    bm._open_liability -= liability
+
+            # Emit cancellation event for info["passive_cancels"].
+            self._last_cancels.append({
+                "selection_id": order.selection_id,
+                "price": order.price,
+                "requested_stake": order.requested_stake,
+                "reason": reason,
+            })
+
+            # Keep in history for replay UI.
+            self._cancelled_orders.append(order)
+
+        # Clear all open orders and the sid index.
+        self._orders.clear()
+        self._orders_by_sid.clear()
 
     def place(
         self,

@@ -155,11 +155,14 @@ isolation.
   - [x] 19 assertions across 9 test classes; all pass.
   - [x] Junk filter blocks fill on drifted ticks; fill resumes when LTP returns.
 
-- [ ] **Session 27 — P4c: race-off cleanup**
+- [x] **Session 27 — P4c: race-off cleanup**
       (`sessions/session_27_p4c_race_off_cleanup.md`)
-  - Unfilled passives cancelled at race end with zero P&L.
-  - Budget reservations released.
-  - Efficiency-penalty interaction decided and pinned.
+  - [x] Unfilled passives cancelled at race end with zero P&L.
+  - [x] Budget reservations released.
+  - [x] Efficiency-penalty interaction decided and pinned (YES — cancelled passives count toward `bet_count` for efficiency penalty; API call friction is real).
+  - [x] Hook point (A): top of `_settle_current_race`.
+  - [x] 13 assertions across 9 test classes; all pass.
+  - P4 as a whole is now complete (sessions 25–27).
 
 ### P3 — Passive orders + cancel action (sessions 28–30)
 

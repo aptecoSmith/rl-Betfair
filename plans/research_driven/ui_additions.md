@@ -74,11 +74,12 @@ Format per row:
   - Fill events should be highlighted briefly when they occur so the operator can see the rest-then-fill sequence.
   - Acceptance: open a race with passive orders; find a tick where `passive_fills` is non-empty; confirm the fill event is visible and the order disappears from `passive_orders` on the same tick.
 
-- [ ] **Cancel events in the bet log** (source: P3+P4 session)
-  - When the agent cancels a resting order, the bet log should
-    show the cancel as a distinct event (not just disappear the
-    row). Useful for the manual checks in
-    `manual_testing_plan.md`.
+- [ ] **Cancel events in the bet log** (source: P3+P4 session; data available since session 27)
+  - When a passive order is cancelled (at race-off or by agent action),
+    the bet log should show the cancel as a distinct event with the
+    reason string ("race-off" or "agent"). `info["passive_cancels"]`
+    provides per-cancel `{selection_id, price, requested_stake, reason}`.
+    `PassiveOrderBook.cancelled_orders` provides the full history.
   - Acceptance: cancel events visible in at least one race; cancel
     rate visible in the per-race header.
 

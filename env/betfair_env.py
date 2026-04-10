@@ -623,6 +623,7 @@ class BetfairEnv(gymnasium.Env):
             "debug_features": debug_features,
             "passive_orders": [o.to_dict() for o in bm.passive_book.orders],
             "passive_fills": bm.passive_book.last_fills,
+            "passive_cancels": bm.passive_book.last_cancels,
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -847,6 +848,15 @@ class BetfairEnv(gymnasium.Env):
         """
         bm = self.bet_manager
         assert bm is not None
+
+        # ── Race-off cleanup (session 27 — P4c) ──────────────────────────
+        # Cancel all unfilled passive orders before settlement.  Budget
+        # reservations are released, P&L contribution is zero.  Idempotent.
+        # Hook point (A): top of _settle_current_race, before settlement
+        # runs — keeps cleanup next to the settlement code where the
+        # operator's mental model expects "end of race" logic to live.
+        bm.passive_book.cancel_all("race-off")
+
         budget_before = bm.starting_budget  # each race starts with fresh budget
 
         # Use winning_selection_ids (WINNER + PLACED for EACH_WAY markets).
@@ -872,6 +882,14 @@ class BetfairEnv(gymnasium.Env):
         race_bets = bm.race_bets(race.market_id)
         race_bet_count = len(race_bets)
 
+        # Cancelled-at-race-off passive orders count toward bet_count for
+        # the efficiency penalty.  In live trading, placing the order cost
+        # an API call, so the friction is real — ignoring it would let
+        # passive-heavy policies look artificially efficient.  Cancelled
+        # passives do NOT contribute to precision, early_pick, or spread-cost
+        # (they never matched, so those terms have no meaningful input).
+        race_cancel_count = bm.passive_book.cancel_count
+
         # Early pick bonus — symmetric: applies to all settled back bets
         # regardless of outcome, so losing bets punish the shaped reward
         # exactly as much as winning bets reward it. This removes the
@@ -880,8 +898,8 @@ class BetfairEnv(gymnasium.Env):
             race, race_bets,
         )
 
-        # Efficiency penalty
-        efficiency_cost = race_bet_count * self._efficiency_penalty
+        # Efficiency penalty — includes cancelled passives (API call friction).
+        efficiency_cost = (race_bet_count + race_cancel_count) * self._efficiency_penalty
 
         # Precision bonus — centred at 0.5 so random betting is neutral,
         # better-than-random is positive, worse-than-random is negative.

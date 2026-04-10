@@ -34,6 +34,47 @@ Format:
 
 ---
 
+## 2026-04-10 — Session 27 — P4c: race-off cleanup for unfilled passive orders
+
+**Shipped:**
+- `env/bet_manager.py` — `PassiveOrder` gains `cancel_reason: str` field. `PassiveOrderBook` extended with:
+  - `cancel_all(reason)` method: cancels all open passive orders, releases budget reservations (back: restores stake to `BetManager.budget`; lay: reduces `_open_liability`), marks orders as `cancelled=True` with reason string, emits cancellation events, moves orders to history list. Idempotent (second call is a no-op).
+  - `_last_cancels` list: cancellation events from most recent `cancel_all` call.
+  - `_cancelled_orders` list: history of all cancelled orders for the replay UI.
+  - `last_cancels`, `cancelled_orders`, `cancel_count` properties.
+- `env/betfair_env.py` — Race-off cleanup hook added at top of `_settle_current_race` (hook point A), before race settlement runs. `info["passive_cancels"]` added to info dict. Efficiency penalty now includes `cancel_count`: `efficiency_cost = (race_bet_count + race_cancel_count) × efficiency_penalty`.
+
+**Hook-point choice: (A)** — top of `_settle_current_race`, before settlement runs. Keeps cleanup next to the settlement code where the operator's mental model expects "end of race" logic to live. Deterministic: runs once per race, at a well-defined point in the settlement path.
+
+**Efficiency-penalty interaction: YES, cancelled passives count.** In live trading, placing the order cost an API call, so the friction is real. Ignoring it would let passive-heavy policies look artificially efficient. Cancelled passives do NOT contribute to precision, early_pick, spread-cost, or any P&L term (they never matched).
+
+**Tests added:**
+- `tests/research_driven/test_p4c_race_off_cleanup.py` — 13 assertions across 9 test classes:
+  - `TestUnfilledPassiveCancelledAtRaceOff` (3): cancelled and removed from open list; cancellation event emitted; cancelled order in history.
+  - `TestCancelledPassiveZeroPnl` (2): does not affect P&L with aggressive bets; zero P&L when only passive.
+  - `TestBudgetFullyRestored` (2): back budget restored; lay budget and open_liability restored.
+  - `TestIdempotentCleanup` (1): double cancel is idempotent.
+  - `TestCleanupDoesNotTouchFilledPassives` (1): filled passive stays in bets; unfilled is cancelled.
+  - `TestRaceResetIsolation` (1): race B passive fills normally after race A cleanup.
+  - `TestEfficiencyPenaltyInteraction` (1): env-level test pins that cancelled passive counts toward efficiency penalty.
+  - `TestRewardInvariant` (1): `raw + shaped ≈ total_reward` holds with cancelled passives.
+  - `TestAggressivePassiveMixedRun` (1): mixed aggressive + passive race settles correctly end-to-end.
+
+**Did not ship:**
+- Policy-driven cancel action — session 29.
+- Action-space change — session 28.
+
+**Notes for next session (28 — P3a aggression flag):**
+- P4 is now complete (sessions 25–27 all shipped). Passive orders can be placed, filled, and cleaned up at race-off.
+- `PassiveOrder.cancelled` and `cancel_reason` are now populated by race-off cleanup. Session 29 will use the same fields for agent-driven cancellation.
+- `info["passive_cancels"]` is ready for the replay UI to consume.
+
+**Cross-repo follow-ups:**
+- `downstream_knockon.md` §3 D updated: `ai-betfair` must mirror race-off cleanup. The simulator cancels all unfilled passives at the top of `_settle_current_race`; `ai-betfair` can rely on Betfair's `LAPSE` persistence (orders are automatically cancelled at in-play) or explicitly cancel via the API. Budget release logic must match.
+- `info["passive_cancels"]` is now available for the live dashboard.
+
+---
+
 ## 2026-04-10 — Session 26 — P4b: passive-fill triggering + budget reservation
 
 **Shipped:**

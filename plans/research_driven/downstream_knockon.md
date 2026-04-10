@@ -294,14 +294,21 @@ truth. So `ai-betfair` needs:
 This *is* the fix for the phantom-fill bug in §0, just generalised.
 It's also the most invasive single change in this whole audit.
 
-### D. Cancel-at-race-off cleanup
+### D. Cancel-at-race-off cleanup (shipped in session 27 — P4c)
 
-The simulator implicitly cancels all unfilled passive orders when
-the race goes in-play. `ai-betfair` must mirror this — or rely on
-Betfair's own behaviour around in-play (orders with persistence
-`LAPSE` are cancelled automatically; `PERSIST` orders stay). The
-mapping between simulator persistence semantics and Betfair
-persistence flags needs to be deliberate, not accidental.
+The simulator cancels all unfilled passive orders at the top of
+`_settle_current_race` (before race settlement runs). Budget
+reservations are released (back: stake restored; lay: liability
+released). Cancelled orders contribute zero P&L but DO count
+toward `efficiency_penalty × bet_count` (API call friction is real).
+
+`ai-betfair` must mirror this — or rely on Betfair's own behaviour
+around in-play (orders with persistence `LAPSE` are cancelled
+automatically; `PERSIST` orders stay). The mapping between simulator
+persistence semantics and Betfair persistence flags needs to be
+deliberate, not accidental. Budget release logic must match the
+simulator's: back orders release `requested_stake`; lay orders
+release `requested_stake × (price − 1)` from open liability.
 
 ### E. Latency
 
@@ -370,6 +377,7 @@ backtest-only utility.
 | P2 spread cost | Re-tune low-bet-count alerts (deployment note only) | Trivial |
 | P3 + P4 passive/cancel/queue | Action translation, order-ID mapping, live queue from order stream, latency model | 2–3 sessions |
 | P4b budget-at-placement (session 26) | Reserve budget at order send, not at fill confirm; release on cancel/lapse | Folded into §3 above |
+| P4c race-off cleanup (session 27) | Mirror cancel-at-race-off: `LAPSE` persistence or explicit API cancel; release budget reservations | Folded into §3 above |
 | P5 UI annotation | Mirror on live dashboard | ½ session |
 
 Total `ai-betfair` work, assuming everything in `proposals.md` lands
