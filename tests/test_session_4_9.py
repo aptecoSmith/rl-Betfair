@@ -277,9 +277,9 @@ class TestStartEndpoint:
         """POST /training/start returns train/test split and params."""
         client, app = _make_test_app()
 
-        # Mock asyncio.create_task to prevent actual training from running
-        with patch("api.routers.training.asyncio.create_task") as mock_task:
-            mock_task.return_value = MagicMock()
+        # Mock _send_to_worker since start now delegates to the worker process
+        mock_resp = {"type": "ack", "run_id": "test-run-123"}
+        with patch("api.routers.training._send_to_worker", new_callable=AsyncMock, return_value=mock_resp):
             resp = client.post("/training/start", json={"n_generations": 2, "n_epochs": 1})
 
         assert resp.status_code == 200
@@ -300,13 +300,15 @@ class TestStopEndpoint:
         assert resp.status_code == 409
 
     def test_stop_sets_event(self):
-        """POST /training/stop sets the stop_event."""
+        """POST /training/stop sends stop command to worker."""
         client, app = _make_test_app()
         app.state.training_state["running"] = True
 
-        resp = client.post("/training/stop")
+        # Mock _send_to_worker since stop now delegates to the worker process
+        mock_resp = {"type": "ack"}
+        with patch("api.routers.training._send_to_worker", new_callable=AsyncMock, return_value=mock_resp):
+            resp = client.post("/training/stop")
         assert resp.status_code == 200
-        assert app.state.stop_event.is_set()
         assert "Stop requested" in resp.json()["detail"]
 
 

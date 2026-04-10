@@ -97,6 +97,7 @@ def _make_app(training_state: dict | None = None) -> tuple[TestClient, FastAPI]:
     }
     app.state.progress_queue = asyncio.Queue()
     app.state.ws_clients = set()
+    app.state.worker_connected = app.state.training_state.get("running", False)
 
     # Use context manager so the lifespan (and queue consumer) actually starts
     client = TestClient(app)
