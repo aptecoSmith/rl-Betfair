@@ -229,8 +229,10 @@ class Evaluator:
         run_id: str,
     ) -> tuple[EvaluationDayRecord, list[EvaluationBetRecord]]:
         """Run one episode (one day) in eval mode and collect metrics."""
+        t_env_start = time.perf_counter()
         env = BetfairEnv(day, self.config, feature_cache=self.feature_cache)
         obs, info = env.reset()
+        t_env_ready = time.perf_counter()
 
         hidden_state = policy.init_hidden(batch_size=1)
         hidden_state = (
@@ -244,7 +246,9 @@ class Evaluator:
             1, obs_dim, dtype=torch.float32, device=self.device,
         )
 
+        n_ticks = sum(len(r.ticks) for r in day.races)
         done = False
+        steps = 0
         with torch.no_grad():
             while not done:
                 obs_buffer[0] = torch.as_tensor(obs, dtype=torch.float32)
@@ -258,6 +262,8 @@ class Evaluator:
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
+                steps += 1
+        t_loop_done = time.perf_counter()
 
         # Extract metrics from the env.  ``bet_manager`` is recreated
         # between races, so it only contains the *last race's* bets —
@@ -286,6 +292,8 @@ class Evaluator:
             early_picks=early_picks,
             profitable=day_pnl > 0,
         )
+
+        t_metrics_done = time.perf_counter()
 
         # Build bet records from the full day's settled bets (across all
         # races, not just the last race's BetManager).
@@ -344,11 +352,33 @@ class Evaluator:
             day_record.mean_opportunity_window_s = float(np.mean(windows))
             day_record.median_opportunity_window_s = float(np.median(windows))
 
+        t_bets_done = time.perf_counter()
+
+        step_rate = int(steps / max(t_loop_done - t_env_ready, 0.001))
+        timing_detail = (
+            f"Eval {day.date} done | "
+            f"env_init={t_env_ready - t_env_start:.1f}s "
+            f"step_loop={t_loop_done - t_env_ready:.1f}s "
+            f"({steps} steps, {step_rate}/s) "
+            f"bet_records={t_bets_done - t_metrics_done:.1f}s "
+            f"total={t_bets_done - t_env_start:.1f}s"
+        )
         logger.info(
-            "Eval %s | pnl=%.2f bets=%d winning=%d precision=%.2f opp_window=%.1fs",
+            "Eval %s | pnl=%.2f bets=%d winning=%d precision=%.2f opp_window=%.1fs | %s",
             day.date, day_pnl, bet_count, winning_bets, bet_precision,
             day_record.mean_opportunity_window_s,
+            timing_detail,
         )
+        # Emit timing as a progress event so it's visible on WebSocket
+        if self.progress_queue is not None:
+            try:
+                self.progress_queue.put_nowait({
+                    "event": "progress",
+                    "phase": "evaluating",
+                    "detail": timing_detail,
+                })
+            except Exception:
+                pass
 
         return day_record, bet_records
 

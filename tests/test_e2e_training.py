@@ -11,25 +11,30 @@ Starts a real worker process on a non-standard port to avoid conflicts.
 
 Running this test
 -----------------
-Expect ~2-5 minutes with real data, ~30s with synthetic.  Run with ``-s``
-to see live progress (pytest captures stdout by default)::
+Run with ``-s`` to see live progress (pytest captures stdout by default)::
 
     python -m pytest tests/test_e2e_training.py -xvs
 
 Typical timeline with real data (39 races, ~9 000 ticks per day):
 
     0-5s     Worker startup + WebSocket handshake
-    5-30s    Training phase (GPU/CPU spike, then idle)
-    30-600s  Evaluation phase — this is the long tail.  The evaluator
-             steps through every tick of the test day with no intermediate
-             WebSocket events (only per-day granularity).  CPU/GPU will
-             appear idle because individual forward passes are tiny.
-             The heartbeat line ``... waiting for events (phase: evaluating)``
-             confirms the test is alive, not stuck.
+    5-30s    Training phase (GPU/CPU spike visible)
+    30-90s   Evaluation phase — usually 15-20s of actual compute
+             (feature eng ~4s + step loop ~12s at ~800 steps/s).
+             CPU/GPU will appear idle because individual forward
+             passes are tiny.
 
-If the test times out at 600s, the evaluation phase is the bottleneck —
-not a deadlock.  Consider bumping ``@pytest.mark.timeout`` if your real
-data has many races.
+The evaluation step loop is **model-dependent**: an aggressive model
+that places many passive orders causes ``PassiveOrderBook.on_tick()``
+to slow down (O(orders * ticks) per race).  A conservative model
+finishes in ~15s; an aggressive one may take 5+ minutes on the same
+data.  If CPU/GPU spike and then go idle but the test keeps waiting,
+this is what's happening — the step loop is still running, just slowly.
+
+The heartbeat line ``... waiting for events (phase: evaluating)``
+confirms the WebSocket is alive.  The evaluator prints a timing
+breakdown when it finishes (``env_init=Xs step_loop=Ys ...``) so you
+can see exactly where the time went.
 
 All ``print()`` output goes through ``_print()`` which forces
 ``flush=True`` — without this, Python buffers stdout and you see
@@ -248,8 +253,14 @@ def test_full_training_flow(worker_proc, e2e_env):
         import websockets
 
         _print(f"\n  {_elapsed()} Connecting to worker on ws://127.0.0.1:{WORKER_PORT}")
+        # Generous ping timeout: the worker's asyncio event loop can stall
+        # during CPU-bound phases (model saving, scoring) that hold the GIL,
+        # preventing it from responding to WebSocket pings promptly.
         async with websockets.connect(
-            f"ws://127.0.0.1:{WORKER_PORT}", open_timeout=10,
+            f"ws://127.0.0.1:{WORKER_PORT}",
+            open_timeout=10,
+            ping_interval=30,
+            ping_timeout=120,
         ) as ws:
             # ── Step 1: Verify idle ───────────────────────────────
             raw = await asyncio.wait_for(ws.recv(), timeout=5)
