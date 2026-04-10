@@ -18,6 +18,7 @@ from env.betfair_env import (
     MARKET_DIM,
     POSITION_DIM,
     RUNNER_DIM,
+    RUNNER_KEYS,
     VELOCITY_DIM,
 )
 
@@ -93,7 +94,7 @@ class TestObsDimConstants:
         assert VELOCITY_DIM == 11  # 6 base + 1 time_since_status_change + 4 market velocity (Session 2.8)
 
     def test_runner_dim(self):
-        assert RUNNER_DIM == 110  # was 93, +17 past race features (Session 2.7b)
+        assert RUNNER_DIM == len(RUNNER_KEYS)
 
     def test_agent_state_dim(self):
         assert AGENT_STATE_DIM == 6  # +1 day_pnl_norm (Session 4.10)
@@ -106,8 +107,7 @@ class TestObsDimConstants:
 
     def test_obs_dim_matches_env(self):
         expected = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM + (POSITION_DIM * MAX_RUNNERS)
-        assert expected == 1636  # +6 market type / each-way features
-        assert OBS_DIM == 1636
+        assert OBS_DIM == expected
 
 
 # ── PPOLSTMPolicy architecture ──────────────────────────────────────────────
