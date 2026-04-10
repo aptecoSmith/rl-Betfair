@@ -396,11 +396,11 @@ class TestEvaluateProgressEvents:
         while not queue.empty():
             events.append(queue.get_nowait())
 
-        assert len(events) == 2  # one per day
+        # 2 "eval starting" + 2 per-day tracker + 2 timing detail = 6 total
+        assert len(events) == 6
         for e in events:
             assert e["event"] == "progress"
             assert e["phase"] == "evaluating"
-            assert "item" in e
             assert "detail" in e
 
     def test_progress_events_in_order(self):
@@ -415,9 +415,10 @@ class TestEvaluateProgressEvents:
         while not queue.empty():
             events.append(queue.get_nowait())
 
-        # Progress should show increasing completion
-        assert events[0]["item"]["completed"] == 1
-        assert events[1]["item"]["completed"] == 2
+        # Filter to tracker events (those with "item" key) and verify order
+        tracker_events = [e for e in events if "item" in e]
+        assert tracker_events[0]["item"]["completed"] == 1
+        assert tracker_events[1]["item"]["completed"] == 2
 
     def test_no_events_when_no_queue(self):
         """Evaluator should not fail when no queue is provided."""

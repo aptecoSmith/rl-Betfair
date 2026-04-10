@@ -71,13 +71,15 @@ def compute_opportunity_window(
     def _price_available(tick_idx: int) -> bool:
         """Check if the price is available for this runner at the given tick."""
         tick = ticks[tick_idx]
+        # Fast path: find runner by selection_id without scanning all runners
         for runner in tick.runners:
-            if runner.selection_id != selection_id:
-                continue
-            if side == "back":
-                return any(ps.price >= price for ps in runner.available_to_back)
-            else:  # lay
-                return any(ps.price <= price for ps in runner.available_to_lay)
+            if runner.selection_id == selection_id:
+                if side == "back":
+                    return any(ps.price >= price for ps in runner.available_to_back)
+                else:  # lay
+                    return any(ps.price <= price for ps in runner.available_to_lay)
+                # Found the runner, no need to continue
+                break
         return False
 
     # Scan backward
@@ -230,7 +232,8 @@ class Evaluator:
     ) -> tuple[EvaluationDayRecord, list[EvaluationBetRecord]]:
         """Run one episode (one day) in eval mode and collect metrics."""
         t_env_start = time.perf_counter()
-        env = BetfairEnv(day, self.config, feature_cache=self.feature_cache)
+        env = BetfairEnv(day, self.config, feature_cache=self.feature_cache,
+                         emit_debug_features=False)
         obs, info = env.reset()
         t_env_ready = time.perf_counter()
 
@@ -247,10 +250,35 @@ class Evaluator:
         )
 
         n_ticks = sum(len(r.ticks) for r in day.races)
+        logger.info(
+            "Eval starting %s: %d races, %d ticks, device=%s, "
+            "policy_device=%s, obs_buffer_device=%s",
+            day.date, len(day.races), n_ticks,
+            self.device,
+            next(policy.parameters()).device,
+            obs_buffer.device,
+        )
+        # Also emit as progress event
+        if self.progress_queue is not None:
+            try:
+                self.progress_queue.put_nowait({
+                    "event": "progress",
+                    "phase": "evaluating",
+                    "detail": (
+                        f"Eval starting {day.date}: {len(day.races)} races, "
+                        f"{n_ticks} ticks, device={self.device}, "
+                        f"policy={next(policy.parameters()).device}"
+                    ),
+                })
+            except Exception:
+                pass
         done = False
         steps = 0
+        log_interval = 100  # frequent progress for debugging
+        slow_step_threshold = 5.0  # log any step taking > 5 seconds
         with torch.no_grad():
             while not done:
+                step_t0 = time.perf_counter()
                 obs_buffer[0] = torch.as_tensor(obs, dtype=torch.float32)
 
                 out: PolicyOutput = policy(obs_buffer, hidden_state)
@@ -263,6 +291,41 @@ class Evaluator:
                 obs, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
                 steps += 1
+                step_dur = time.perf_counter() - step_t0
+
+                if step_dur > slow_step_threshold:
+                    logger.warning(
+                        "SLOW STEP %d: %.1fs (race=%d tick=%d)",
+                        steps, step_dur, env._race_idx, env._tick_idx,
+                    )
+                    if self.progress_queue is not None:
+                        try:
+                            self.progress_queue.put_nowait({
+                                "event": "progress",
+                                "phase": "evaluating",
+                                "detail": f"SLOW STEP {steps}: {step_dur:.1f}s race={env._race_idx}",
+                            })
+                        except Exception:
+                            pass
+
+                if steps % log_interval == 0:
+                    elapsed = time.perf_counter() - t_env_ready
+                    rate = steps / max(elapsed, 0.001)
+                    step_detail = (
+                        f"Eval {day.date} step {steps}/{n_ticks} "
+                        f"({elapsed:.1f}s, {int(rate)}/s) "
+                        f"race={env._race_idx}/{env._total_races}"
+                    )
+                    logger.info(step_detail)
+                    if self.progress_queue is not None:
+                        try:
+                            self.progress_queue.put_nowait({
+                                "event": "progress",
+                                "phase": "evaluating",
+                                "detail": step_detail,
+                            })
+                        except Exception:
+                            pass
         t_loop_done = time.perf_counter()
 
         # Extract metrics from the env.  ``bet_manager`` is recreated
@@ -297,14 +360,10 @@ class Evaluator:
 
         # Build bet records from the full day's settled bets (across all
         # races, not just the last race's BetManager).
+        race_by_market = {r.market_id: r for r in day.races}
         bet_records: list[EvaluationBetRecord] = []
         for bet in all_bets:
-            # Find the race this bet belongs to
-            race = None
-            for r in day.races:
-                if r.market_id == bet.market_id:
-                    race = r
-                    break
+            race = race_by_market.get(bet.market_id)
 
             runner_name = ""
             tick_timestamp = ""

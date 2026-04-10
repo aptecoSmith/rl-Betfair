@@ -567,7 +567,7 @@ def main() -> None:
     # Kill any stale process holding our port before starting
     _clear_port(port)
 
-    worker = TrainingWorker(config=config, host=host, port=port)
+    worker = TrainingWorker(config=config, host=host, port=port, config_path=args.config)
 
     try:
         asyncio.run(worker.serve())

@@ -131,6 +131,8 @@ class PassiveOrderBook:
     def __init__(self, matcher: ExchangeMatcher = DEFAULT_MATCHER) -> None:
         self._matcher = matcher
         self._orders: list[PassiveOrder] = []
+        # Index: selection_id → list of orders for O(1) lookup in on_tick.
+        self._orders_by_sid: dict[int, list[PassiveOrder]] = {}
         # Per-runner last-seen total_matched value, for computing deltas.
         # Populated on first on_tick call; reset when the PassiveOrderBook
         # is replaced (fresh BetManager per race).
@@ -255,6 +257,7 @@ class PassiveOrderBook:
             ltp_at_placement=ltp,
         )
         self._orders.append(order)
+        self._orders_by_sid.setdefault(order.selection_id, []).append(order)
         # Seed the volume baseline so the first on_tick call computes the
         # delta from the moment of placement, not from first sight.
         # Per open_questions.md Q4: "compute at runtime by snapshotting at
@@ -290,9 +293,10 @@ class PassiveOrderBook:
         runner_by_sid = {r.selection_id: r for r in tick.runners}
 
         # ── Phase 1: accumulate traded-volume deltas ──────────────────────
-        active_sids: set[int] = {o.selection_id for o in self._orders}
-
-        for sid in active_sids:
+        # Use the sid index to avoid scanning all orders per runner.
+        for sid, sid_orders in self._orders_by_sid.items():
+            if not sid_orders:
+                continue
             snap = runner_by_sid.get(sid)
             if snap is None:
                 continue
@@ -301,19 +305,20 @@ class PassiveOrderBook:
             self._last_total_matched[sid] = snap.total_matched
 
             if delta > 0.0:
-                for order in self._orders:
-                    if order.selection_id == sid:
-                        order.traded_volume_since_placement += delta
+                for order in sid_orders:
+                    order.traded_volume_since_placement += delta
 
         # ── Phase 2: fill check ───────────────────────────────────────────
         if self._bet_manager is None:
             return
 
-        # Iterate over a snapshot of the list so removals don't skip entries.
+        # Collect filled orders, then remove in bulk to avoid O(n) per removal.
         # The self-depletion accumulator is updated eagerly inside the loop so
         # that the second order at the same price immediately sees the first
         # order's filled stake in its threshold calculation.
-        for order in list(self._orders):
+        filled: list[PassiveOrder] = []
+
+        for order in self._orders:
             snap = runner_by_sid.get(order.selection_id)
             if snap is None:
                 continue
@@ -366,8 +371,16 @@ class PassiveOrderBook:
                 (order.selection_id, order.price, order.requested_stake)
             )
 
-            # Remove from open order list.
-            self._orders.remove(order)
+            filled.append(order)
+
+        # Bulk removal: rebuild the order list and index excluding filled orders.
+        if filled:
+            filled_set = set(id(o) for o in filled)
+            self._orders = [o for o in self._orders if id(o) not in filled_set]
+            for sid, sid_orders in self._orders_by_sid.items():
+                self._orders_by_sid[sid] = [
+                    o for o in sid_orders if id(o) not in filled_set
+                ]
 
 
 @dataclass(slots=True)

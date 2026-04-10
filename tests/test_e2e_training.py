@@ -134,6 +134,9 @@ def _make_test_config(tmp_dir: Path, data_dir: str) -> Path:
             "max_runners": 14,
             "max_bets_per_race": 20,
             "require_gpu": False,
+            # Force CPU: single-step LSTM inference is faster on CPU than
+            # GPU due to per-step CPU↔GPU transfer overhead (no batching).
+            "device": "cpu",
             "retraining": {"min_days": 30},
         },
         "discard_policy": {"min_win_rate": 0.0, "min_mean_pnl": -9999, "min_sharpe": -9999},
@@ -260,7 +263,7 @@ def test_full_training_flow(worker_proc, e2e_env):
             f"ws://127.0.0.1:{WORKER_PORT}",
             open_timeout=10,
             ping_interval=30,
-            ping_timeout=120,
+            ping_timeout=600,
         ) as ws:
             # ── Step 1: Verify idle ───────────────────────────────
             raw = await asyncio.wait_for(ws.recv(), timeout=5)

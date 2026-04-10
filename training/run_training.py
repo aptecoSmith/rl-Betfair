@@ -131,9 +131,12 @@ class TrainingOrchestrator:
         self.training_plan = training_plan
         self.plan_registry = plan_registry
 
-        # GPU auto-detection
+        # GPU auto-detection (config.training.device overrides auto-detect)
+        config_device = config.get("training", {}).get("device")
         if device is not None:
             self.device = device
+        elif config_device is not None:
+            self.device = config_device
         elif torch.cuda.is_available():
             self.device = "cuda"
             logger.info(

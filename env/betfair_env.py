@@ -288,10 +288,12 @@ class BetfairEnv(gymnasium.Env):
         config: dict,
         feature_cache: dict[str, list] | None = None,
         reward_overrides: dict | None = None,
+        emit_debug_features: bool = True,
     ) -> None:
         super().__init__()
         self.day = day
         self.config = config
+        self._emit_debug_features = emit_debug_features
         self.max_runners: int = config["training"]["max_runners"]
         self.starting_budget: float = config["training"]["starting_budget"]
         self.max_bets_per_race: int = config["training"].get("max_bets_per_race", 20)
@@ -563,8 +565,11 @@ class BetfairEnv(gymnasium.Env):
         # Per-runner debug features for the current tick.  Keyed by
         # selection_id; value is a dict of computed features so the replay
         # UI and manual tests can spot-check values against the raw book.
+        # Skipped when emit_debug_features=False (e.g. during evaluation)
+        # as computing OBI, microprice, traded_delta, and mid_drift per
+        # runner per step is expensive and unnecessary for rollouts.
         debug_features: dict[int, dict[str, float]] = {}
-        if self._race_idx < self._total_races and self._tick_idx < len(
+        if self._emit_debug_features and self._race_idx < self._total_races and self._tick_idx < len(
             self.day.races[self._race_idx].ticks
         ):
             tick = self.day.races[self._race_idx].ticks[self._tick_idx]
