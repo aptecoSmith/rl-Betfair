@@ -238,31 +238,48 @@ def test_full_training_flow(worker_proc, e2e_env):
             }))
 
             # Wait for started response — may take time if data loading is slow
+            print(f"  {_elapsed()} Waiting for 'started' (data loading can take up to 60s)...")
             for attempt in range(6):
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=10)
                     msg = json.loads(raw)
-                    print(f"  {_elapsed()} Response: type={msg.get('type')}")
-                    if msg.get("type") == "error":
+                    msg_type = msg.get("type")
+                    print(f"  {_elapsed()} Response: type={msg_type}")
+                    if msg_type == "error":
                         pytest.skip(f"Worker could not start: {msg.get('message')}")
-                    if msg.get("type") == "started":
+                    if msg_type == "started":
                         break
                 except asyncio.TimeoutError:
-                    print(f"  {_elapsed()} Waiting for started (attempt {attempt + 1}/6)...")
+                    print(f"  {_elapsed()} ... still loading data ({(attempt + 1) * 10}s / 60s)")
                     continue
             else:
                 pytest.fail("Did not receive 'started' response within 60s")
 
             # ── Step 3: Wait for completion (10 min timeout) ──────
             print(f"  {_elapsed()} Training started, waiting for completion...")
+            print(f"  {'-' * 70}")
             deadline = time.monotonic() + 600
             completed = False
             event_count = 0
+            phase_timers: dict[str, float] = {}   # phase -> start time
+            phase_durations: list[tuple[str, float]] = []  # (phase, seconds)
+            current_phase: str | None = None
+            last_heartbeat = time.monotonic()
+
+            def _progress_bar(pct: float, width: int = 30) -> str:
+                filled = int(width * pct / 100)
+                return f"[{'#' * filled}{'.' * (width - filled)}] {pct:5.1f}%"
 
             while time.monotonic() < deadline:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 except asyncio.TimeoutError:
+                    # Heartbeat so watchers know we're still alive
+                    elapsed_since_hb = time.monotonic() - last_heartbeat
+                    if elapsed_since_hb >= 15:
+                        phase_label = f" (phase: {current_phase})" if current_phase else ""
+                        print(f"  {_elapsed()} ... waiting for events{phase_label}")
+                        last_heartbeat = time.monotonic()
                     continue
                 msg = json.loads(raw)
                 event_count += 1
@@ -274,17 +291,56 @@ def test_full_training_flow(worker_proc, e2e_env):
 
                 event_type = payload.get("event")
                 phase = payload.get("phase")
-                detail = str(payload.get("detail", ""))[:60]
+                detail = str(payload.get("detail", ""))
+                summary = payload.get("summary", {})
 
-                # Log non-progress events and periodic progress
-                if event_type != "progress" or event_count % 5 == 0:
-                    print(f"  {_elapsed()} #{event_count} event={event_type} phase={phase} {detail}")
+                # ── Phase transitions: always print prominently ──
+                if event_type == "phase_start":
+                    current_phase = phase
+                    phase_timers[phase] = time.monotonic()
+                    summary_str = " | ".join(f"{k}={v}" for k, v in summary.items()) if summary else ""
+                    print(f"  {_elapsed()} >> PHASE: {phase} {summary_str}")
+
+                elif event_type == "phase_complete":
+                    duration = time.monotonic() - phase_timers.get(phase, time.monotonic())
+                    phase_durations.append((phase, duration))
+                    summary_str = " | ".join(f"{k}={v}" for k, v in summary.items()) if summary else ""
+                    print(f"  {_elapsed()} OK DONE:  {phase} ({duration:.1f}s) {summary_str}")
+
+                # ── Progress events: compact bar + ETA ──
+                elif event_type == "progress":
+                    proc = payload.get("process")
+                    item = payload.get("item")
+                    if proc and proc.get("total"):
+                        bar = _progress_bar(proc.get("pct", 0))
+                        eta = proc.get("process_eta_human", "")
+                        label = proc.get("label", phase or "")
+                        eta_str = f" ETA {eta}" if eta else ""
+                        parts = [f"  {_elapsed()} {bar}{eta_str}  {label}"]
+                        # Show nested item progress (e.g. evaluation steps) inline
+                        if item and item.get("total"):
+                            parts.append(f"  step {item['completed']}/{item['total']}")
+                        print("".join(parts))
+                    elif detail:
+                        print(f"  {_elapsed()} i: {detail[:100]}")
+
+                # ── Other events (info, errors): always print ──
+                else:
+                    print(f"  {_elapsed()} #{event_count} event={event_type} phase={phase} {detail[:80]}")
+
+                last_heartbeat = time.monotonic()
 
                 if event_type in ("run_complete",) or (
                     event_type == "phase_complete"
                     and phase in ("run_complete", "run_stopped")
                 ):
-                    print(f"  {_elapsed()} Training completed! ({event_count} events)")
+                    total_elapsed = time.monotonic() - t0
+                    print(f"  {'-' * 70}")
+                    print(f"  {_elapsed()} Training completed! ({event_count} events, {total_elapsed:.0f}s total)")
+                    if phase_durations:
+                        print(f"  Phase breakdown:")
+                        for p_name, p_dur in phase_durations:
+                            print(f"    {p_name:.<30s} {p_dur:6.1f}s")
                     completed = True
                     break
                 if event_type == "phase_complete" and phase == "run_error":
