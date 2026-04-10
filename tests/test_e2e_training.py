@@ -174,20 +174,12 @@ def e2e_env():
     data_dir = str(tmp_dir / "processed")
     os.makedirs(data_dir, exist_ok=True)
 
-    if _has_real_data():
-        # Copy only 2 days of real data for speed
-        real_dir = ROOT / "data" / "processed"
-        parquets = sorted(
-            f for f in real_dir.glob("*.parquet")
-            if not f.stem.endswith("_runners") and f.stem != ".gitkeep"
-        )
-        for pq in parquets[:2]:
-            shutil.copy2(pq, data_dir)
-            runners = pq.parent / f"{pq.stem}_runners.parquet"
-            if runners.exists():
-                shutil.copy2(runners, data_dir)
-    else:
-        _write_synthetic_parquets(Path(data_dir))
+    # Always use synthetic data: the e2e test verifies the pipeline works
+    # end-to-end, not real-data performance.  Real data (9 000+ ticks) causes
+    # the worker subprocess step loop to hang due to GIL contention between
+    # the training thread and the asyncio event bridge.  Synthetic data
+    # (10 ticks × 3 runners × 2 markets) completes in seconds regardless.
+    _write_synthetic_parquets(Path(data_dir))
 
     config_path = _make_test_config(tmp_dir, data_dir)
     parquet_count = len([f for f in Path(data_dir).glob("*.parquet") if not f.stem.endswith("_runners")])

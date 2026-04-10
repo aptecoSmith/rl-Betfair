@@ -364,20 +364,23 @@ class TrainingWorker:
     # ── Event bridge ────────────────────────────────────────────────
 
     async def _bridge_events(self) -> None:
-        """Drain the thread-safe queue → broadcast to WS clients + terminal."""
+        """Drain the thread-safe queue → broadcast to WS clients + terminal.
+
+        Uses non-blocking get_nowait + asyncio.sleep instead of
+        asyncio.to_thread(queue.get, timeout) to avoid GIL contention
+        that can stall the training thread on Windows/Python 3.14.
+        """
         while True:
             try:
-                event = await asyncio.to_thread(
-                    self.progress_queue.get, timeout=1.0,
-                )
-            except Exception:
-                # Timeout — send keepalive if running
+                event = self.progress_queue.get_nowait()
+            except thread_queue.Empty:
+                # No events — check if training thread died
                 if self.running and self.training_thread and not self.training_thread.is_alive():
-                    # Thread died without a terminal event
                     self.running = False
                     self.latest_process = None
                     self.latest_item = None
                     console.print("[red]Training thread exited unexpectedly[/red]")
+                await asyncio.sleep(0.1)
                 continue
 
             # Update local state

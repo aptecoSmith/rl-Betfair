@@ -674,7 +674,9 @@ class BetfairEnv(gymnasium.Env):
 
         # 0. Update runtime windowed history with the current tick so that
         #    _get_info() can serve windowed debug_features for this tick.
-        self._update_runtime_windowed(tick)
+        #    Skipped when debug features are disabled (evaluation mode).
+        if self._emit_debug_features:
+            self._update_runtime_windowed(tick)
 
         # 0b. Advance passive order book — accumulate traded-volume deltas
         #     before the action is processed (mirrors live order-stream timing).
