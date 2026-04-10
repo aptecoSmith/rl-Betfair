@@ -136,11 +136,13 @@ isolation.
 
 ### P4 — Queue-position bookkeeping (sessions 25–27)
 
-- [ ] **Session 25 — P4a: queue-snapshot bookkeeping (state only)**
+- [x] **Session 25 — P4a: queue-snapshot bookkeeping (state only)**
       (`sessions/session_25_p4a_queue_snapshot.md`)
-  - New `PassiveOrderBook` class owned by `BetManager`.
-  - Snapshot `queue_ahead_at_placement`, accumulate
-    `traded_volume_since_placement` — no fill logic yet.
+  - [x] `PassiveOrder` dataclass + `PassiveOrderBook` class (option B).
+  - [x] Snapshot `queue_ahead_at_placement`; accumulate
+        `traded_volume_since_placement` via runner total_matched deltas.
+  - [x] `on_tick` wired into `betfair_env.step()`; `info["passive_orders"]` exposed.
+  - [x] 14 assertions across 8 test classes; all pass.
   - Matcher unchanged.
 
 - [ ] **Session 26 — P4b: passive-fill triggering + budget

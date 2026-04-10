@@ -34,6 +34,41 @@ Format:
 
 ---
 
+## 2026-04-10 — Session 25 — P4a: queue-snapshot bookkeeping (state only)
+
+**Structure choice:** **(B) — `PassiveOrderBook` as a separate class owned by `BetManager` as `self.passive_book`.** This keeps aggressive code on `BetManager` directly and passive code on `passive_book`, making the separation visible at a glance to reviewers. Fill logic in session 26 attaches cleanly to `PassiveOrderBook` without touching `BetManager`'s aggressive paths.
+
+**Shipped:**
+- `env/bet_manager.py` — `PassiveOrder` dataclass (11 fields incl. `queue_ahead_at_placement`, `traded_volume_since_placement`, `matched_stake` and `cancelled` reserved for sessions 26/29); `PassiveOrderBook` class (`place()`, `on_tick()`, `orders` property); `BetManager` gains `passive_book: PassiveOrderBook` field (initialised in `__post_init__`).
+- `env/betfair_env.py` — `passive_book.on_tick(tick)` called at step 0b of `step()`, before action processing; `info["passive_orders"]` exposes serialised passive orders for the current race.
+
+**Tests added:**
+- `tests/research_driven/test_p4a_queue_snapshot.py` — 14 assertions across 8 test classes:
+  - `TestPassiveBackPlacement` (2): `queue_ahead_at_placement` = top back size; order appears in book.
+  - `TestPassiveLayPlacement` (1): `queue_ahead_at_placement` = top lay size.
+  - `TestJunkFilteredPlacementRefused` (3): back junk refused; lay junk refused; no-LTP refused.
+  - `TestTradedVolumeAccumulates` (2): delta sums across K ticks; first tick seeds baseline (delta=0).
+  - `TestVolumeAtOtherRunnersIgnored` (1): runner B volume does not affect runner A's order.
+  - `TestRaceResetEmptiesBook` (2): new BetManager has empty orders; empty `_last_total_matched`.
+  - `TestNoAggressiveRegression` (2): aggressive bets still go through `bets`; passive has no self-depletion effect on matcher.
+  - `TestBudgetUnaffectedByPassivePlacement` (2): `available_budget` and `budget` both unchanged.
+
+**Did not ship:**
+- Fill logic — session 26.
+- Budget reservation — session 26.
+- Cancel action — session 29.
+- Action-space change — session 28.
+
+**Notes for next session (26 — P4b passive-fill triggering + budget reservation):**
+- `PassiveOrderBook.on_tick` currently only accumulates volume. Session 26 adds the fill condition: when `traded_volume_since_placement >= queue_ahead_at_placement`, the order is filled. It also adds budget reservation at placement (deducted from `BetManager.budget`) and converts (not double-subtracts) on fill.
+- `PassiveOrder.matched_stake` and `cancelled` fields are already present with zero/False defaults — session 26 populates them.
+- Session 26 must extend the self-depletion logic (session 18) to cover passive fills: passive fill at price P depletes available volume for aggressive bets at the same price in the same race tick.
+
+**Cross-repo follow-ups:**
+- None — no obs schema, action space, or matcher API changes.
+
+---
+
 ## 2026-04-08 — Session 24 — P5: UI fill-side annotation
 
 **Shipped:**

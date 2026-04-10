@@ -616,6 +616,7 @@ class BetfairEnv(gymnasium.Env):
             "races_completed": self._races_completed,
             "race_records": list(self._race_records),
             "debug_features": debug_features,
+            "passive_orders": [o.to_dict() for o in bm.passive_book.orders],
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -668,6 +669,11 @@ class BetfairEnv(gymnasium.Env):
         # 0. Update runtime windowed history with the current tick so that
         #    _get_info() can serve windowed debug_features for this tick.
         self._update_runtime_windowed(tick)
+
+        # 0b. Advance passive order book — accumulate traded-volume deltas
+        #     before the action is processed (mirrors live order-stream timing).
+        assert self.bet_manager is not None
+        self.bet_manager.passive_book.on_tick(tick)
 
         # 1. Process action (bets only on pre-race ticks)
         if not tick.in_play:

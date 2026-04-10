@@ -30,9 +30,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from data.episode_builder import PriceSize, RunnerSnap
 from env.exchange_matcher import DEFAULT_MATCHER, ExchangeMatcher, MatchResult
+
+if TYPE_CHECKING:
+    from data.episode_builder import Tick
 
 
 class BetSide(str, Enum):
@@ -71,6 +75,180 @@ class Bet:
 
 
 @dataclass(slots=True)
+class PassiveOrder:
+    """A resting (unmatched) order waiting in the queue.
+
+    Queue position is estimated by snapshotting the own-side top-of-book size
+    at placement time (``queue_ahead_at_placement``) and accumulating traded
+    volume on that runner since placement (``traded_volume_since_placement``).
+    Fill logic is not implemented here — that lands in session 26.
+
+    Fields marked "reserved for session 26/29" are populated as 0 / False
+    now so the struct is stable across sessions.
+    """
+
+    selection_id: int
+    side: BetSide
+    price: float                          # price the order rests at
+    requested_stake: float
+    queue_ahead_at_placement: float       # own-side top-level size at placement
+    placed_tick_index: int
+    market_id: str
+    traded_volume_since_placement: float = 0.0
+    matched_stake: float = 0.0            # reserved for session 26
+    cancelled: bool = False               # reserved for session 29
+
+    def to_dict(self) -> dict:
+        return {
+            "selection_id": self.selection_id,
+            "side": self.side.value,
+            "price": self.price,
+            "requested_stake": self.requested_stake,
+            "queue_ahead_at_placement": self.queue_ahead_at_placement,
+            "placed_tick_index": self.placed_tick_index,
+            "market_id": self.market_id,
+            "traded_volume_since_placement": self.traded_volume_since_placement,
+            "matched_stake": self.matched_stake,
+            "cancelled": self.cancelled,
+        }
+
+
+class PassiveOrderBook:
+    """Bookkeeping container for resting (passive) orders.
+
+    Owned by :class:`BetManager` as ``self.passive_book``. Responsible for:
+    - Snapshotting queue-ahead at placement time.
+    - Accumulating traded-volume deltas per runner across ticks.
+
+    Fill logic, budget reservation, and cancellation all land in later
+    sessions (26 and 29). This class is deliberately minimal.
+
+    The matcher stays stateless and is only consulted to apply the same
+    junk-filter as aggressive orders, so refused passive placements are
+    consistent with refused aggressive placements.
+    """
+
+    def __init__(self, matcher: ExchangeMatcher = DEFAULT_MATCHER) -> None:
+        self._matcher = matcher
+        self._orders: list[PassiveOrder] = []
+        # Per-runner last-seen total_matched value, for computing deltas.
+        # Populated on first on_tick call; reset when the PassiveOrderBook
+        # is replaced (fresh BetManager per race).
+        self._last_total_matched: dict[int, float] = {}
+
+    @property
+    def orders(self) -> list[PassiveOrder]:
+        """All passive orders in this race (including filled/cancelled in future sessions)."""
+        return list(self._orders)
+
+    def place(
+        self,
+        runner: RunnerSnap,
+        stake: float,
+        side: BetSide,
+        market_id: str,
+        tick_index: int,
+    ) -> PassiveOrder | None:
+        """Record a resting order at the own-side best price.
+
+        For a passive back the order rests in the available_to_back queue
+        (the price other backers are offering); for a passive lay it rests
+        in the available_to_lay queue.
+
+        The best post-filter price is found via the same junk filter the
+        aggressive matcher uses. If no valid level exists (empty ladder or
+        all levels outside ±``max_price_deviation_pct`` from LTP), returns
+        ``None`` — passive placement into filtered-out levels silently
+        succeeds in no simulator; it must fail explicitly here.
+
+        Budget is **not** affected. That is session 26's job.
+        """
+        ltp = runner.last_traded_price
+        if ltp is None or ltp <= 0.0:
+            return None
+
+        if side is BetSide.BACK:
+            # Passive back: order rests on the back side (we are offering to back)
+            levels = runner.available_to_back
+            lower_is_better = False  # highest back price is best for a backer
+        else:
+            # Passive lay: order rests on the lay side
+            levels = runner.available_to_lay
+            lower_is_better = True   # lowest lay price is best for a layer
+
+        top_price = self._matcher.pick_top_price(
+            levels,
+            reference_price=ltp,
+            lower_is_better=lower_is_better,
+        )
+        if top_price is None:
+            return None
+
+        # Snapshot the size at that level for queue_ahead_at_placement.
+        lo = ltp * (1.0 - self._matcher.max_price_deviation_pct)
+        hi = ltp * (1.0 + self._matcher.max_price_deviation_pct)
+        filtered = [
+            lv for lv in levels
+            if lv.price > 0.0 and lv.size > 0.0 and lo <= lv.price <= hi
+        ]
+        if not filtered:
+            return None
+        if lower_is_better:
+            top_level = min(filtered, key=lambda lv: lv.price)
+        else:
+            top_level = max(filtered, key=lambda lv: lv.price)
+
+        order = PassiveOrder(
+            selection_id=runner.selection_id,
+            side=side,
+            price=top_level.price,
+            requested_stake=stake,
+            queue_ahead_at_placement=top_level.size,
+            placed_tick_index=tick_index,
+            market_id=market_id,
+        )
+        self._orders.append(order)
+        # Seed the volume baseline so the first on_tick call computes the
+        # delta from the moment of placement, not from first sight.
+        # Per open_questions.md Q4: "compute at runtime by snapshotting at
+        # placement and subtracting."
+        sid = runner.selection_id
+        if sid not in self._last_total_matched:
+            self._last_total_matched[sid] = runner.total_matched
+        return order
+
+    def on_tick(self, tick: "Tick") -> None:
+        """Accumulate traded-volume deltas for all open passive orders.
+
+        For each runner in the tick, computes the delta of
+        ``RunnerSnap.total_matched`` since the last time we saw this runner
+        and adds it to ``traded_volume_since_placement`` for every passive
+        order on that runner.
+
+        Volume from runners that don't match any passive order's
+        ``selection_id`` is ignored, so passive orders on runner A are
+        unaffected by trading on runner B.
+        """
+        runner_by_sid = {r.selection_id: r for r in tick.runners}
+
+        # Collect which selection_ids have open passive orders.
+        active_sids: set[int] = {o.selection_id for o in self._orders}
+
+        for sid in active_sids:
+            snap = runner_by_sid.get(sid)
+            if snap is None:
+                continue
+            prev = self._last_total_matched.get(sid)
+            delta = 0.0 if prev is None else max(0.0, snap.total_matched - prev)
+            self._last_total_matched[sid] = snap.total_matched
+
+            if delta > 0.0:
+                for order in self._orders:
+                    if order.selection_id == sid:
+                        order.traded_volume_since_placement += delta
+
+
+@dataclass(slots=True)
 class BetManager:
     """Tracks bets, budget and P&L across an episode.
 
@@ -92,9 +270,11 @@ class BetManager:
     _matched_at_level: dict[tuple[int, BetSide, float], float] = field(
         init=False, default_factory=dict, repr=False
     )
+    passive_book: PassiveOrderBook = field(init=False)
 
     def __post_init__(self) -> None:
         self.budget = self.starting_budget
+        self.passive_book = PassiveOrderBook(matcher=self.matcher)
 
     # ── Public properties ────────────────────────────────────────────────
 
