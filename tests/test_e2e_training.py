@@ -51,6 +51,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -191,6 +192,27 @@ def e2e_env():
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _drain_pipe(pipe) -> None:
+    """Read and discard pipe output to prevent buffer-full deadlock.
+
+    The worker subprocess writes Rich progress bars + logger output to
+    stdout.  When stdout is piped (``subprocess.PIPE``), the OS pipe
+    buffer (~4 KB on Windows) fills up quickly.  Once full, any write
+    blocks the worker — including the training thread's ``logger.info``
+    calls — causing a deadlock that looks like GIL contention.
+
+    This function runs in a daemon thread and continuously drains the
+    pipe so the worker never blocks.
+    """
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                break
+    except Exception:
+        pass
+
+
 @pytest.fixture(scope="module")
 def worker_proc(e2e_env):
     # Recover from a stale worker orphaned by a previous failed run.
@@ -210,11 +232,18 @@ def worker_proc(e2e_env):
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
     )
 
+    # Drain the worker's stdout in a background thread to prevent the
+    # pipe buffer from filling up and deadlocking the worker process.
+    drain_thread = threading.Thread(
+        target=_drain_pipe, args=(proc.stdout,), daemon=True,
+        name="worker-stdout-drain",
+    )
+    drain_thread.start()
+
     _print(f"  Waiting for worker WebSocket on port {WORKER_PORT}...")
     if not _wait_for_ws(WORKER_PORT, timeout=30):
-        out = proc.stdout.read(8192).decode("utf-8", errors="replace") if proc.stdout else ""
         proc.kill()
-        pytest.fail(f"Worker WebSocket not ready on port {WORKER_PORT} within 30s.\nOutput:\n{out}")
+        pytest.fail(f"Worker WebSocket not ready on port {WORKER_PORT} within 30s.")
 
     _print(f"  Worker ready (PID {proc.pid})")
     yield proc

@@ -64,6 +64,42 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+# ── Async bridge queue ─────────────────────────────────────────────
+
+
+class _AsyncBridgeQueue:
+    """Drop-in ``queue.Queue`` substitute that pushes events directly into
+    the asyncio event loop via ``loop.call_soon_threadsafe``.
+
+    This eliminates GIL contention between the training thread and the
+    asyncio event bridge.  The previous approach used
+    ``asyncio.to_thread(queue.get, timeout=…)`` which dispatched to the
+    default ``ThreadPoolExecutor``, starving the training thread on
+    Windows / Python 3.14.
+
+    Only ``put_nowait`` is meaningful — the handler runs in the event
+    loop thread.  ``empty`` / ``get_nowait`` are stubs so callers that
+    drain the queue (e.g. reset logic) are no-ops instead of errors.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        handler: object,
+    ) -> None:
+        self._loop = loop
+        self._handler = handler
+
+    def put_nowait(self, item: dict) -> None:  # noqa: N802
+        self._loop.call_soon_threadsafe(self._handler, item)
+
+    def empty(self) -> bool:
+        return True
+
+    def get_nowait(self) -> None:  # noqa: N802
+        raise thread_queue.Empty
+
+
 # ── Worker ──────────────────────────────────────────────────────────
 
 
@@ -90,8 +126,9 @@ class TrainingWorker:
         self.running = False
         self.stop_event = threading.Event()
         self.finish_event = threading.Event()
-        self.progress_queue: thread_queue.Queue = thread_queue.Queue()
+        self.progress_queue: thread_queue.Queue | _AsyncBridgeQueue = thread_queue.Queue()
         self.training_thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # Latest state for catch-up on connect / status queries
         self.latest_event: dict | None = None
@@ -363,55 +400,61 @@ class TrainingWorker:
 
     # ── Event bridge ────────────────────────────────────────────────
 
-    async def _bridge_events(self) -> None:
-        """Drain the thread-safe queue → broadcast to WS clients + terminal."""
+    def _handle_event(self, event: dict) -> None:
+        """Process a progress event in the asyncio event loop thread.
+
+        Called via ``loop.call_soon_threadsafe`` from the training thread
+        (through ``_AsyncBridgeQueue.put_nowait``).  This replaces the old
+        ``_bridge_events`` coroutine that polled a ``queue.Queue`` via
+        ``asyncio.to_thread`` — which caused GIL contention that starved
+        the training thread on Windows / Python 3.14.
+
+        Must be synchronous (``call_soon_threadsafe`` requirement).
+        Broadcasts to WebSocket clients via ``asyncio.create_task``.
+        """
+        # Update local state
+        self.latest_event = event
+
+        if event.get("process"):
+            self.latest_process = event["process"]
+        if event.get("item"):
+            self.latest_item = event["item"]
+
+        is_terminal = False
+        if event.get("event") == "phase_start":
+            self.running = True
+            self.latest_item = None
+        elif (
+            event.get("event") == "run_complete"
+            or (
+                event.get("event") == "phase_complete"
+                and event.get("phase") in (
+                    "run_complete", "run_stopped", "run_error",
+                )
+            )
+        ):
+            self.running = False
+            self.latest_process = None
+            self.latest_item = None
+            is_terminal = True
+
+        # Broadcast to WS clients (async — schedule as a task)
+        msg = make_event_msg(event)
+        asyncio.create_task(self._broadcast(msg))
+
+        # Print to terminal
+        self._print_event(event, is_terminal)
+
+    async def _check_dead_thread(self) -> None:
+        """Periodically check if the training thread died without sending
+        a terminal event."""
         while True:
-            try:
-                event = await asyncio.to_thread(
-                    self.progress_queue.get, timeout=1.0,
-                )
-            except Exception:
-                # Timeout — send keepalive if running
-                if self.running and self.training_thread and not self.training_thread.is_alive():
-                    # Thread died without a terminal event
-                    self.running = False
-                    self.latest_process = None
-                    self.latest_item = None
-                    console.print("[red]Training thread exited unexpectedly[/red]")
-                continue
-
-            # Update local state
-            self.latest_event = event
-
-            if event.get("process"):
-                self.latest_process = event["process"]
-            if event.get("item"):
-                self.latest_item = event["item"]
-
-            is_terminal = False
-            if event.get("event") == "phase_start":
-                self.running = True
-                self.latest_item = None
-            elif (
-                event.get("event") == "run_complete"
-                or (
-                    event.get("event") == "phase_complete"
-                    and event.get("phase") in (
-                        "run_complete", "run_stopped", "run_error",
-                    )
-                )
-            ):
+            await asyncio.sleep(2.0)
+            if self.running and self.training_thread and not self.training_thread.is_alive():
                 self.running = False
                 self.latest_process = None
                 self.latest_item = None
-                is_terminal = True
-
-            # Broadcast to WS clients
-            msg = make_event_msg(event)
-            await self._broadcast(msg)
-
-            # Print to terminal
-            self._print_event(event, is_terminal)
+                console.print("[red]Training thread exited unexpectedly[/red]")
 
     async def _broadcast(self, msg: str) -> None:
         dead: set = set()
@@ -495,7 +538,17 @@ class TrainingWorker:
     # ── Main serve loop ─────────────────────────────────────────────
 
     async def serve(self) -> None:
-        bridge_task = asyncio.create_task(self._bridge_events())
+        self._loop = asyncio.get_running_loop()
+
+        # Replace the plain thread_queue.Queue with a bridge that pushes
+        # events directly into the asyncio event loop.  All producers
+        # (TrainingOrchestrator, Evaluator, load_days) call put_nowait()
+        # unchanged — the _AsyncBridgeQueue dispatches via
+        # loop.call_soon_threadsafe, eliminating the GIL contention that
+        # the old asyncio.to_thread(queue.get) polling loop caused.
+        self.progress_queue = _AsyncBridgeQueue(self._loop, self._handle_event)
+
+        dead_thread_task = asyncio.create_task(self._check_dead_thread())
 
         async with websockets.serve(
             self._handle_client,
@@ -514,7 +567,7 @@ class TrainingWorker:
             except asyncio.CancelledError:
                 pass
             finally:
-                bridge_task.cancel()
+                dead_thread_task.cancel()
 
 
 # ── Entry point ─────────────────────────────────────────────────────
