@@ -535,6 +535,7 @@ class TrainingOrchestrator:
             evaluator = Evaluator(
                 config=self.config,
                 model_store=self.model_store,
+                progress_queue=self.progress_queue,
                 device=self.device,
                 feature_cache=self.feature_cache,
             )
