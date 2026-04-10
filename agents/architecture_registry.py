@@ -9,7 +9,7 @@ Usage::
 
     from agents.architecture_registry import create_policy, REGISTRY
 
-    policy = create_policy("ppo_lstm_v1", obs_dim=1338, action_dim=28, hyperparams={})
+    policy = create_policy("ppo_lstm_v1", obs_dim=1338, action_dim=42, hyperparams={})
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def create_policy(
     obs_dim:
         Dimension of the flat observation vector.
     action_dim:
-        Dimension of the action vector (max_runners * 2).
+        Dimension of the action vector (max_runners * ACTIONS_PER_RUNNER).
     max_runners:
         Maximum number of runners the env pads to.
     hyperparams:

@@ -23,6 +23,7 @@ from agents.policy_network import (
     RUNNER_DIM,
     VELOCITY_DIM,
 )
+from env.betfair_env import ACTIONS_PER_RUNNER
 
 
 MAX_RUNNERS = 14  # matches config.yaml training.max_runners
@@ -39,7 +40,7 @@ def _obs_dim(max_runners: int = MAX_RUNNERS) -> int:
 
 
 def _action_dim(max_runners: int = MAX_RUNNERS) -> int:
-    return max_runners * 2
+    return max_runners * ACTIONS_PER_RUNNER
 
 
 #: Minimal hyperparameter dict big enough for every arch but small

@@ -14,6 +14,7 @@ from agents.policy_network import (
     PPOLSTMPolicy,
 )
 from env.betfair_env import (
+    ACTIONS_PER_RUNNER,
     AGENT_STATE_DIM,
     MARKET_DIM,
     POSITION_DIM,
@@ -27,7 +28,7 @@ from env.betfair_env import (
 
 MAX_RUNNERS = 14
 OBS_DIM = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM + (POSITION_DIM * MAX_RUNNERS)
-ACTION_DIM = MAX_RUNNERS * 2  # action_signal + stake_fraction per runner
+ACTION_DIM = MAX_RUNNERS * ACTIONS_PER_RUNNER  # action_signal + stake_fraction per runner
 
 
 @pytest.fixture
@@ -71,7 +72,7 @@ class TestArchitectureRegistry:
 
     def test_create_policy_unknown_name_raises(self):
         with pytest.raises(KeyError, match="Unknown architecture"):
-            create_policy("nonexistent", obs_dim=100, action_dim=28, max_runners=14)
+            create_policy("nonexistent", obs_dim=100, action_dim=42, max_runners=14)
 
     def test_create_policy_default_hyperparams(self):
         policy = create_policy(

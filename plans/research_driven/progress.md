@@ -34,6 +34,65 @@ Format:
 
 ---
 
+## 2026-04-10 — Session 28 — P3a: aggression flag in action space
+
+**Shipped:**
+- `env/betfair_env.py` — Action space extended from `max_runners × 2` to
+  `max_runners × ACTIONS_PER_RUNNER` (3: signal, stake, aggression).
+  New constants: `ACTION_SCHEMA_VERSION = 1`, `ACTIONS_PER_RUNNER = 3`,
+  `_AGGRESSION_THRESHOLD = 0.0`. New `validate_action_schema()` refuses
+  pre-P3 checkpoints. `_process_action` reads the aggression slot and
+  dispatches: `> 0` → aggressive (cross spread, existing path), `≤ 0` →
+  passive (`PassiveOrderBook.place`). `actions.force_aggressive` config
+  override forces all dispatch to aggressive regardless of the flag.
+  `info["action_debug"]` exposes per-slot dispatch decision:
+  `{passive_placed, aggressive_placed, skipped_reason}`.
+- `registry/model_store.py` — `save_weights` and `load_weights` extended
+  with `action_schema_version` parameter alongside existing
+  `obs_schema_version`.
+- `agents/policy_network.py` — All three architecture forward methods
+  (`PPOLSTMPolicy`, `PPOTimeLSTMPolicy`, `PPOTransformerPolicy`) now use
+  `action_dim // max_runners` for the per-runner actor head output dim
+  instead of hardcoded 2. Action assembly is generic over
+  `_per_runner_action_dim`.
+- `agents/population_manager.py` — `action_dim` computed from
+  `ACTIONS_PER_RUNNER` constant.
+- `config.yaml` — New `actions.force_aggressive: false` section.
+- `plans/research_driven/design_decisions.md` — Entry recording the
+  discrete-vs-continuous aggression choice with reasoning.
+
+**Tests added:**
+- `tests/research_driven/test_p3a_aggression_flag.py` — 16 tests across
+  6 classes: action space shape, aggressive dispatch (back/lay), passive
+  dispatch (back/lay, boundary at 0), mixed per-slot dispatch,
+  action schema validation (missing/wrong/correct/pre-P1), force_aggressive
+  override (passive signal/zero/lay), action_debug info dict.
+
+**Did not ship:**
+- Cancel action — session 29 (P3b). Placing it here would make the
+  review unwieldy.
+- Retrain — session 30 (P3c). Action-space change invalidates all
+  existing checkpoints; fresh re-train is the deliberate cost.
+- Manual test — deferred to session 29. The "watch a race with both
+  regimes" test only makes sense once cancel exists.
+
+**Notes for next session:**
+- Sessions 28 and 29 must ship as a pair. This session alone is not a
+  valid production release (no cancel action = policy commits liquidity
+  it cannot withdraw).
+- All existing checkpoints are invalidated. Loader refuses them loudly.
+  Phase 1 comparison data (session 22) is still valid as a baseline.
+- `actions.force_aggressive: true` is the regression backstop. Existing
+  tests use it to reproduce pre-P3 behaviour byte-identically.
+- The `ACTIONS_PER_RUNNER` constant will increase to 4 in session 29
+  when the cancel flag is added.
+
+**Cross-repo follow-ups:**
+- `ai-betfair` will need the action-space change when the new policy
+  ships (gated by session 30 decision + phantom-fill prerequisite).
+
+---
+
 ## 2026-04-10 — Session 27 — P4c: race-off cleanup for unfilled passive orders
 
 **Shipped:**

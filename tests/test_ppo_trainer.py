@@ -20,7 +20,7 @@ from agents.ppo_trainer import (
     TrainingStats,
 )
 from data.episode_builder import Day, PriceSize, Race, RunnerMeta, RunnerSnap, Tick
-from env.betfair_env import BetfairEnv
+from env.betfair_env import ACTIONS_PER_RUNNER, BetfairEnv
 
 
 # ── Synthetic data helpers ────────────────────────────────────────────────────
@@ -200,7 +200,7 @@ def _make_policy(config: dict) -> torch.nn.Module:
     max_runners = config["training"]["max_runners"]
     from env.betfair_env import AGENT_STATE_DIM, MARKET_DIM, RUNNER_DIM, VELOCITY_DIM
     obs_dim = MARKET_DIM + VELOCITY_DIM + RUNNER_DIM * max_runners + AGENT_STATE_DIM
-    action_dim = max_runners * 2
+    action_dim = max_runners * ACTIONS_PER_RUNNER
     return create_policy(
         "ppo_lstm_v1", obs_dim, action_dim, max_runners,
         hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},

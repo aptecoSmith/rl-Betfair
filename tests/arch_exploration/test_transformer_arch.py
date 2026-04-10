@@ -27,6 +27,7 @@ from agents.policy_network import (
     VELOCITY_DIM,
     PPOTransformerPolicy,
 )
+from env.betfair_env import ACTIONS_PER_RUNNER
 from agents.population_manager import (
     HyperparamSpec,
     PopulationManager,
@@ -50,7 +51,7 @@ def _obs_dim(max_runners: int = MAX_RUNNERS) -> int:
 
 
 def _action_dim(max_runners: int = MAX_RUNNERS) -> int:
-    return max_runners * 2
+    return max_runners * ACTIONS_PER_RUNNER
 
 
 @pytest.fixture

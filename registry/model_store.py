@@ -378,19 +378,28 @@ class ModelStore:
     # -- Weights I/O ----------------------------------------------------------
 
     def save_weights(
-        self, model_id: str, state_dict: dict, obs_schema_version: int | None = None
+        self,
+        model_id: str,
+        state_dict: dict,
+        obs_schema_version: int | None = None,
+        action_schema_version: int | None = None,
     ) -> str:
         """Save PyTorch state dict to disk.  Returns the file path.
 
         When *obs_schema_version* is provided the checkpoint is wrapped as
         ``{"obs_schema_version": N, "weights": state_dict}`` so that loaders
-        can refuse mismatched versions loudly.
+        can refuse mismatched versions loudly.  *action_schema_version* is
+        included alongside it (session 28 / P3a).
         """
         import torch
 
         path = self.weights_dir / f"{model_id}.pt"
-        if obs_schema_version is not None:
-            payload: dict = {"obs_schema_version": obs_schema_version, "weights": state_dict}
+        if obs_schema_version is not None or action_schema_version is not None:
+            payload: dict = {"weights": state_dict}
+            if obs_schema_version is not None:
+                payload["obs_schema_version"] = obs_schema_version
+            if action_schema_version is not None:
+                payload["action_schema_version"] = action_schema_version
         else:
             payload = state_dict
         torch.save(payload, str(path))
@@ -407,13 +416,16 @@ class ModelStore:
         return str(path)
 
     def load_weights(
-        self, model_id: str, expected_obs_schema_version: int | None = None
+        self,
+        model_id: str,
+        expected_obs_schema_version: int | None = None,
+        expected_action_schema_version: int | None = None,
     ) -> dict:
         """Load PyTorch state dict from disk.
 
-        When *expected_obs_schema_version* is provided the checkpoint is
-        validated before the state dict is returned.  A version mismatch
-        raises ``ValueError`` — see :func:`env.betfair_env.validate_obs_schema`.
+        When *expected_obs_schema_version* or *expected_action_schema_version*
+        is provided the checkpoint is validated before the state dict is
+        returned.  A version mismatch raises ``ValueError``.
         """
         model = self.get_model(model_id)
         if model is None:
@@ -426,9 +438,12 @@ class ModelStore:
         if expected_obs_schema_version is not None:
             from env.betfair_env import validate_obs_schema
             validate_obs_schema(raw)
+        if expected_action_schema_version is not None:
+            from env.betfair_env import validate_action_schema
+            validate_action_schema(raw)
         # Support both wrapped format ({"obs_schema_version": N, "weights": ...})
         # and bare state-dict format for forward compatibility.
-        if isinstance(raw, dict) and "weights" in raw and "obs_schema_version" in raw:
+        if isinstance(raw, dict) and "weights" in raw:
             return raw["weights"]
         return raw
 

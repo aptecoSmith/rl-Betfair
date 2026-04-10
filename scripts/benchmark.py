@@ -31,7 +31,7 @@ from agents.architecture_registry import create_policy
 from agents.population_manager import PopulationManager
 from agents.ppo_trainer import PPOTrainer
 from data.episode_builder import load_day, load_days
-from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, ACTIONS_PER_RUNNER
 from training.evaluator import Evaluator
 from training.perf_log import gpu_memory_summary
 
@@ -201,7 +201,7 @@ def main():
     # ---- Phase 3: Create policy ----
     max_runners = config["training"]["max_runners"]
     obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
-    action_dim = max_runners * 2
+    action_dim = max_runners * ACTIONS_PER_RUNNER
     hyperparams = {
         "learning_rate": 3e-4,
         "lstm_hidden_size": 256,

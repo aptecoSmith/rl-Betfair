@@ -170,12 +170,13 @@ Sessions 28 and 29 **must ship as a pair**. Cancel without passive
 placement is a no-op; passive placement without cancel is a trap.
 See `hard_constraints.md` #9.
 
-- [ ] **Session 28 — P3a: aggression flag in action space**
+- [x] **Session 28 — P3a: aggression flag in action space**
       (`sessions/session_28_p3a_aggression_flag.md`)
   - Extend per-slot action with discrete passive/aggressive flag.
-  - Action schema bump.
+  - Action schema bump (`ACTION_SCHEMA_VERSION = 1`).
   - `actions.force_aggressive=true` config override reproduces
     pre-P3 policy exactly (regression backstop).
+  - 16 tests in `test_p3a_aggression_flag.py`; all pass.
 
 - [ ] **Session 29 — P3b: cancel action**
       (`sessions/session_29_p3b_cancel.md`)

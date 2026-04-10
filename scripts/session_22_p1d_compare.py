@@ -49,6 +49,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from data.episode_builder import Day, load_days  # noqa: E402
 from env.betfair_env import (  # noqa: E402
+    ACTIONS_PER_RUNNER,
     AGENT_STATE_DIM,
     MARKET_DIM,
     POSITION_DIM,
@@ -786,7 +787,7 @@ def main() -> int:
         config = yaml.safe_load(f)
 
     max_runners: int = config["training"]["max_runners"]
-    action_dim: int = max_runners * 2
+    action_dim: int = max_runners * ACTIONS_PER_RUNNER
 
     # ── Device ───────────────────────────────────────────────────────────
     if args.device == "auto":

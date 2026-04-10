@@ -29,6 +29,7 @@ from agents.policy_network import (
     PPOTimeLSTMPolicy,
     TimeLSTMCell,
 )
+from env.betfair_env import ACTIONS_PER_RUNNER
 from agents.population_manager import parse_search_ranges, sample_hyperparams
 
 
@@ -49,7 +50,7 @@ def _obs_dim(max_runners: int = MAX_RUNNERS) -> int:
 
 
 def _action_dim(max_runners: int = MAX_RUNNERS) -> int:
-    return max_runners * 2
+    return max_runners * ACTIONS_PER_RUNNER
 
 
 @pytest.fixture

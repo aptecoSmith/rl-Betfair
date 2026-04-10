@@ -19,6 +19,7 @@ from agents.population_manager import (
     validate_hyperparams,
 )
 from env.betfair_env import (
+    ACTIONS_PER_RUNNER,
     AGENT_STATE_DIM,
     MARKET_DIM,
     POSITION_DIM,
@@ -28,7 +29,7 @@ from env.betfair_env import (
 
 MAX_RUNNERS = 14
 OBS_DIM = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * MAX_RUNNERS) + AGENT_STATE_DIM + (POSITION_DIM * MAX_RUNNERS)
-ACTION_DIM = MAX_RUNNERS * 2
+ACTION_DIM = MAX_RUNNERS * ACTIONS_PER_RUNNER
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -413,4 +414,5 @@ class TestEdgeCases:
 
     def test_action_dim_matches_env(self, small_config: dict):
         pm = PopulationManager(small_config, model_store=None)
-        assert pm.action_dim == 28
+        from env.betfair_env import ACTIONS_PER_RUNNER
+        assert pm.action_dim == 14 * ACTIONS_PER_RUNNER

@@ -212,11 +212,13 @@ class PPOLSTMPolicy(BasePolicy):
 
         # ── Actor head (per-runner) ─────────────────────────────────────
         # For each runner: concat(runner_emb, lstm_output) → action params
+        # output_dim = action_dim // max_runners (signal + stake + aggression)
         actor_input_dim = runner_embed_dim + lstm_hidden
+        self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
             hidden_dim=mlp_hidden,
-            output_dim=2,  # action_signal_mean, stake_fraction_mean
+            output_dim=self._per_runner_action_dim,
             n_layers=1,
         )
 
@@ -371,15 +373,13 @@ class PPOLSTMPolicy(BasePolicy):
             [last_runner_embs, lstm_expanded], dim=-1
         )  # (batch, max_runners, embed + lstm_hidden)
 
-        # Per-runner action params: (batch, max_runners, 2)
+        # Per-runner action params: (batch, max_runners, per_runner_action_dim)
         actor_out = self.actor_head(actor_input)
-        action_signal = actor_out[:, :, 0]    # (batch, max_runners)
-        stake_fraction = actor_out[:, :, 1]   # (batch, max_runners)
 
-        # Flatten to action_dim: [signals..., stakes...]
-        action_mean = torch.cat(
-            [action_signal, stake_fraction], dim=-1
-        )  # (batch, max_runners * 2)
+        # Flatten to action_dim: [signals..., stakes..., aggression...]
+        # Each per-runner dim is scattered into its own contiguous block.
+        parts = [actor_out[:, :, i] for i in range(self._per_runner_action_dim)]
+        action_mean = torch.cat(parts, dim=-1)  # (batch, max_runners * per_runner_action_dim)
 
         # ── Critic: scalar V(s) ────────────────────────────────────────
         value = self.critic_head(lstm_last)  # (batch, 1)
@@ -596,10 +596,11 @@ class PPOTimeLSTMPolicy(BasePolicy):
 
         # Actor head (per-runner)
         actor_input_dim = runner_embed_dim + lstm_hidden
+        self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
             hidden_dim=mlp_hidden,
-            output_dim=2,
+            output_dim=self._per_runner_action_dim,
             n_layers=1,
         )
 
@@ -766,9 +767,8 @@ class PPOTimeLSTMPolicy(BasePolicy):
         )
         actor_input = torch.cat([last_runner_embs, lstm_expanded], dim=-1)
         actor_out = self.actor_head(actor_input)
-        action_signal = actor_out[:, :, 0]
-        stake_fraction = actor_out[:, :, 1]
-        action_mean = torch.cat([action_signal, stake_fraction], dim=-1)
+        parts = [actor_out[:, :, i] for i in range(self._per_runner_action_dim)]
+        action_mean = torch.cat(parts, dim=-1)
 
         # Critic
         value = self.critic_head(lstm_last)
@@ -949,10 +949,11 @@ class PPOTransformerPolicy(BasePolicy):
 
         # ── Actor head (per-runner) ─────────────────────────────────────
         actor_input_dim = runner_embed_dim + d_model
+        self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
             hidden_dim=mlp_hidden,
-            output_dim=2,
+            output_dim=self._per_runner_action_dim,
             n_layers=1,
         )
 
@@ -1106,9 +1107,8 @@ class PPOTransformerPolicy(BasePolicy):
         )
         actor_input = torch.cat([last_runner_embs, out_expanded], dim=-1)
         actor_out = self.actor_head(actor_input)
-        action_signal = actor_out[:, :, 0]
-        stake_fraction = actor_out[:, :, 1]
-        action_mean = torch.cat([action_signal, stake_fraction], dim=-1)
+        parts = [actor_out[:, :, i] for i in range(self._per_runner_action_dim)]
+        action_mean = torch.cat(parts, dim=-1)
 
         # ── Critic ────────────────────────────────────────────────────
         value = self.critic_head(out_last)

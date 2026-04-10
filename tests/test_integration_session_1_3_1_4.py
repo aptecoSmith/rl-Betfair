@@ -16,7 +16,7 @@ import torch
 from agents.architecture_registry import create_policy
 from agents.ppo_trainer import PPOTrainer, TrainingStats
 from data.episode_builder import load_day
-from env.betfair_env import AGENT_STATE_DIM, MARKET_DIM, RUNNER_DIM, VELOCITY_DIM
+from env.betfair_env import ACTIONS_PER_RUNNER, AGENT_STATE_DIM, MARKET_DIM, RUNNER_DIM, VELOCITY_DIM
 from registry.model_store import EvaluationBetRecord, EvaluationDayRecord, ModelStore
 from registry.scoreboard import Scoreboard
 
@@ -46,7 +46,7 @@ def _make_config() -> dict:
 def _make_policy(config: dict):
     max_runners = config["training"]["max_runners"]
     obs_dim = MARKET_DIM + VELOCITY_DIM + RUNNER_DIM * max_runners + AGENT_STATE_DIM
-    action_dim = max_runners * 2
+    action_dim = max_runners * ACTIONS_PER_RUNNER
     return create_policy(
         config["training"]["architecture"],
         obs_dim, action_dim, max_runners,

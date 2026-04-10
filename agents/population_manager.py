@@ -215,7 +215,8 @@ class PopulationManager:
             + AGENT_STATE_DIM
             + (POSITION_DIM * self.max_runners)
         )
-        self.action_dim = self.max_runners * 2
+        from env.betfair_env import ACTIONS_PER_RUNNER
+        self.action_dim = self.max_runners * ACTIONS_PER_RUNNER
 
         # Parse hyperparameter search ranges
         raw_ranges = config["hyperparameters"]["search_ranges"]

@@ -115,12 +115,12 @@ class TestTimeLSTMTraining:
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         policy = PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
-            action_dim=28,
+            action_dim=42,
             max_runners=14,
             hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},
         )
         out = policy.forward(obs_t)
-        assert out.action_mean.shape == (1, 28)
+        assert out.action_mean.shape == (1, 42)
         assert out.value.shape == (1, 1)
         assert not torch.any(torch.isnan(out.action_mean))
         assert not torch.any(torch.isnan(out.value))
@@ -144,7 +144,7 @@ class TestTimeLSTMTraining:
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         policy = PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
-            action_dim=28,
+            action_dim=42,
             max_runners=14,
             hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},
         )
@@ -193,7 +193,7 @@ class TestTimeLSTMTraining:
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         policy = PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
-            action_dim=28,
+            action_dim=42,
             max_runners=14,
             hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},
         )

@@ -62,6 +62,19 @@ logger = logging.getLogger(__name__)
 #   Version 4 — added traded_delta, mid_drift per runner (session 21 / P1c)
 OBS_SCHEMA_VERSION: int = 4
 
+# ── Action schema version ────────────────────────────────────────────────────
+# Bump this integer whenever the action vector layout changes.
+# Same rules as OBS_SCHEMA_VERSION: old checkpoints are refused loudly.
+#
+#   Version 1 — added aggression flag per slot (session 28 / P3a)
+#               Layout: [signal × N | stake × N | aggression × N]
+#               Previously: [signal × N | stake × N] (no version tracked)
+ACTION_SCHEMA_VERSION: int = 1
+
+# Number of action values per runner slot. Increase when new per-slot
+# action dimensions are added (e.g. cancel flag in session 29).
+ACTIONS_PER_RUNNER: int = 3  # signal, stake, aggression
+
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
 
@@ -167,6 +180,7 @@ RUNNER_DIM = len(RUNNER_KEYS)             # 114 (was 112, +2 traded_delta/mid_dr
 _BACK_THRESHOLD = 0.33
 _LAY_THRESHOLD = -0.33
 _MIN_STAKE = 2.00  # Betfair Exchange minimum stake (£2)
+_AGGRESSION_THRESHOLD = 0.0  # > 0 → aggressive (cross spread), ≤ 0 → passive (join queue)
 
 
 # ── Schema validation ────────────────────────────────────────────────────────
@@ -207,6 +221,34 @@ def validate_obs_schema(checkpoint: dict) -> None:
         )
 
 
+def validate_action_schema(checkpoint: dict) -> None:
+    """Raise ``ValueError`` if *checkpoint* was saved with a different action schema.
+
+    Checkpoints must include ``"action_schema_version": N``.  Loading a
+    checkpoint whose action schema version does not match
+    :data:`ACTION_SCHEMA_VERSION` is refused loudly — same policy as obs
+    schema (hard_constraints.md §13).
+
+    Pre-P3 checkpoints have no ``action_schema_version`` key and are
+    unconditionally refused.
+    """
+    saved = checkpoint.get("action_schema_version")
+    if saved is None:
+        raise ValueError(
+            "Checkpoint has no action_schema_version key (pre-P3 format). "
+            f"Expected ACTION_SCHEMA_VERSION={ACTION_SCHEMA_VERSION}. "
+            "Refusing to load — the action vector layout changed in "
+            "session 28 (P3a: aggression flag). Retrain from scratch."
+        )
+    if saved != ACTION_SCHEMA_VERSION:
+        raise ValueError(
+            f"Checkpoint action_schema_version={saved!r}, but current env "
+            f"expects ACTION_SCHEMA_VERSION={ACTION_SCHEMA_VERSION}. "
+            "The action vector layouts are incompatible. "
+            "Retrain from scratch or use a matching env version."
+        )
+
+
 # ── Per-race record ─────────────────────────────────────────────────────────
 
 
@@ -239,12 +281,16 @@ class BetfairEnv(gymnasium.Env):
 
     Action space
     ------------
-    ``Box(-1, 1, shape=(max_runners × 2,))``.
+    ``Box(-1, 1, shape=(max_runners × ACTIONS_PER_RUNNER,))``.
 
     - First ``max_runners`` values: action signal per runner.
       > 0.33 → back, < −0.33 → lay, in between → do nothing.
     - Second ``max_runners`` values: stake fraction per runner.
       Mapped from [−1, 1] → [0, 1], then multiplied by current budget.
+    - Third ``max_runners`` values: aggression flag per runner.
+      > 0 → aggressive (cross the spread), ≤ 0 → passive (join queue).
+      Overridden to always-aggressive when ``actions.force_aggressive``
+      is true in config.
 
     Reward
     ------
@@ -301,6 +347,8 @@ class BetfairEnv(gymnasium.Env):
         self._max_back_price: float | None = constraints.get("max_back_price")
         self._max_lay_price: float | None = constraints.get("max_lay_price")
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
+        actions_cfg = config.get("actions", {})
+        self._force_aggressive: bool = actions_cfg.get("force_aggressive", False)
         self._total_races = len(day.races)
         feat_cfg = config.get("features", {})
         self._obi_top_n: int = feat_cfg.get("obi_top_n", 3)
@@ -366,7 +414,7 @@ class BetfairEnv(gymnasium.Env):
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32,
         )
         self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(self.max_runners * 2,), dtype=np.float32,
+            low=-1.0, high=1.0, shape=(self.max_runners * ACTIONS_PER_RUNNER,), dtype=np.float32,
         )
 
         # Runtime state (initialised in reset)
@@ -624,6 +672,7 @@ class BetfairEnv(gymnasium.Env):
             "passive_orders": [o.to_dict() for o in bm.passive_book.orders],
             "passive_fills": bm.passive_book.last_fills,
             "passive_cancels": bm.passive_book.last_cancels,
+            "action_debug": dict(self._last_action_debug),
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -649,6 +698,7 @@ class BetfairEnv(gymnasium.Env):
         self._cum_shaped_reward = 0.0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         self._settled_bets = []
+        self._last_action_debug: dict[int, dict] = {}
         # Running high-water / low-water of day_pnl for the drawdown
         # shaping term. Both start at 0.0 (the initial day_pnl) so the
         # reflection-symmetry proof of zero-mean shaping holds.
@@ -771,11 +821,19 @@ class BetfairEnv(gymnasium.Env):
     # ── Action processing ─────────────────────────────────────────────────
 
     def _process_action(self, action: np.ndarray, tick: Tick, race: Race) -> None:
-        """Interpret the action array and place bets via the BetManager."""
+        """Interpret the action array and place bets via the BetManager.
+
+        Per-slot layout: ``[signal, stake, aggression]``.
+
+        - signal > 0.33 → BACK, < −0.33 → LAY, else → skip.
+        - aggression > 0 → aggressive (cross spread), ≤ 0 → passive (join queue).
+        - ``actions.force_aggressive`` config overrides aggression to always-aggressive.
+        """
         bm = self.bet_manager
         assert bm is not None
         slot_map = self._slot_maps[self._race_idx]
         runner_by_sid = {r.selection_id: r for r in tick.runners}
+        action_debug: dict[int, dict] = {}
 
         for slot_idx in range(self.max_runners):
             # Enforce max bets per race
@@ -793,6 +851,7 @@ class BetfairEnv(gymnasium.Env):
 
             action_signal = float(action[slot_idx])
             stake_raw = float(action[self.max_runners + slot_idx])
+            aggression_raw = float(action[2 * self.max_runners + slot_idx])
             # Map [-1, 1] → [0, 1] for stake fraction
             stake_fraction = np.clip((stake_raw + 1.0) / 2.0, 0.0, 1.0)
             stake = stake_fraction * bm.budget
@@ -805,30 +864,53 @@ class BetfairEnv(gymnasium.Env):
             if self._min_seconds_before_off > 0 and time_to_off < self._min_seconds_before_off:
                 continue
 
-            if action_signal > _BACK_THRESHOLD and runner.available_to_lay:
-                # ``max_back_price`` is now enforced inside the matcher,
-                # which filters junk ladder levels BEFORE the cap check,
-                # so we pass it through instead of gating on
-                # available_to_lay[0].price (which can be the *junk*
-                # top-of-book when the real market is elsewhere).
-                bet = bm.place_back(
-                    runner, stake, market_id=race.market_id,
-                    max_price=self._max_back_price,
-                )
-                if bet is not None:
-                    bet.tick_index = self._tick_idx
-                    self._bet_times[len(bm.bets) - 1] = time_to_off
+            # Determine aggression: config override or policy decision
+            is_aggressive = self._force_aggressive or aggression_raw > _AGGRESSION_THRESHOLD
 
-            elif action_signal < _LAY_THRESHOLD and runner.available_to_back:
-                # See comment above — ``max_lay_price`` is enforced
-                # inside the matcher after junk filtering.
-                bet = bm.place_lay(
-                    runner, stake, market_id=race.market_id,
-                    max_price=self._max_lay_price,
+            if action_signal > _BACK_THRESHOLD:
+                side = BetSide.BACK
+            elif action_signal < _LAY_THRESHOLD:
+                side = BetSide.LAY
+            else:
+                continue  # no bet signal
+
+            if is_aggressive:
+                # ── Aggressive path (cross the spread) ───────────────
+                if side == BetSide.BACK and runner.available_to_lay:
+                    bet = bm.place_back(
+                        runner, stake, market_id=race.market_id,
+                        max_price=self._max_back_price,
+                    )
+                    if bet is not None:
+                        bet.tick_index = self._tick_idx
+                        self._bet_times[len(bm.bets) - 1] = time_to_off
+                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "skipped_reason": None}
+                    else:
+                        action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "aggressive_back_failed"}
+                elif side == BetSide.LAY and runner.available_to_back:
+                    bet = bm.place_lay(
+                        runner, stake, market_id=race.market_id,
+                        max_price=self._max_lay_price,
+                    )
+                    if bet is not None:
+                        bet.tick_index = self._tick_idx
+                        self._bet_times[len(bm.bets) - 1] = time_to_off
+                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "skipped_reason": None}
+                    else:
+                        action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "aggressive_lay_failed"}
+                else:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "no_opposite_side_liquidity"}
+            else:
+                # ── Passive path (join the queue at own-side best) ────
+                order = bm.passive_book.place(
+                    runner, stake, side, race.market_id, self._tick_idx,
                 )
-                if bet is not None:
-                    bet.tick_index = self._tick_idx
-                    self._bet_times[len(bm.bets) - 1] = time_to_off
+                if order is not None:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": True, "skipped_reason": None}
+                else:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "passive_place_failed"}
+
+        self._last_action_debug = action_debug
 
     # ── Settlement & reward ───────────────────────────────────────────────
 

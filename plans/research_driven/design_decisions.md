@@ -175,6 +175,36 @@ upstream and this entry needs revising. Not foreseen, but flagged.
 
 ---
 
+## 2026-04-10 — Discrete aggression flag, not continuous
+
+**What:** The per-slot aggression flag added in P3a (session 28) is a
+binary discrete choice: 0 = passive (join the queue at own-side best),
+1 = aggressive (cross the spread, existing behaviour). It is NOT a
+continuous value in `[0, 1]`.
+
+**Why:** A continuous aggression value has no meaningful interpretation
+in the interior of `[0, 1]` until queue-offset pricing is added (which
+is deliberately parked as out of scope — see `not_doing.md`). The only
+semantically grounded points are the two endpoints: "join my-side
+best" and "cross the spread". A continuous dim would increase
+exploration burden for a behaviour that doesn't exist yet, and the
+policy would almost certainly collapse it to a bang-bang decision
+anyway. The discrete flag has a clean semantic, is trivially
+interpretable in eval logs, and doesn't foreclose a future
+continuous-offset extension. Tradeoff: if queue-offset pricing is
+added later, the action space changes again (another checkpoint
+invalidation). Accepted because that extension is not funded by
+current data or eval results.
+
+**When to revisit:** If a concrete eval result from session 30 or
+later shows that the policy would benefit from a finer-grained
+aggression knob (e.g. the policy repeatedly oscillates between the
+two extremes in a way that a continuous value would smooth), add a
+continuous offset as a new action dim. The trigger is a measured
+eval anomaly, not a theoretical preference.
+
+---
+
 ## 2026-04-07 — R-2 self-depletion is a sim-side bug, not a research-driven feature
 
 **What:** The matcher's failure to subtract its own previously-

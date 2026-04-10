@@ -433,7 +433,7 @@ class TestPPOTimeLSTMPolicy:
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM + (POSITION_DIM * 14)
         return PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
-            action_dim=28,
+            action_dim=42,
             max_runners=14,
             hyperparams=hp,
         )
@@ -443,7 +443,7 @@ class TestPPOTimeLSTMPolicy:
         obs = torch.randn(1, policy.obs_dim)
         out = policy.forward(obs)
         assert isinstance(out, PolicyOutput)
-        assert out.action_mean.shape == (1, 28)
+        assert out.action_mean.shape == (1, 42)
         assert out.value.shape == (1, 1)
 
     def test_forward_with_hidden_state(self):
@@ -459,7 +459,7 @@ class TestPPOTimeLSTMPolicy:
         policy = self._make_policy()
         obs = torch.randn(2, 5, policy.obs_dim)
         out = policy.forward(obs)
-        assert out.action_mean.shape == (2, 28)
+        assert out.action_mean.shape == (2, 42)
 
     def test_architecture_name(self):
         assert PPOTimeLSTMPolicy.architecture_name == "ppo_time_lstm_v1"
@@ -471,7 +471,7 @@ class TestPPOTimeLSTMPolicy:
         policy = self._make_policy()
         obs = torch.randn(1, policy.obs_dim)
         dist, value, hidden = policy.get_action_distribution(obs)
-        assert dist.mean.shape == (1, 28)
+        assert dist.mean.shape == (1, 42)
         assert value.shape == (1, 1)
 
     def test_init_hidden_shape(self):
@@ -526,7 +526,7 @@ class TestArchitectureRegistry:
         policy = create_policy(
             "ppo_time_lstm_v1",
             obs_dim=obs_dim,
-            action_dim=28,
+            action_dim=42,
             max_runners=14,
             hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},
         )

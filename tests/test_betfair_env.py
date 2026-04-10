@@ -9,6 +9,7 @@ import pytest
 
 from data.episode_builder import Day, PriceSize, Race, RunnerMeta, RunnerSnap, Tick
 from env.betfair_env import (
+    ACTIONS_PER_RUNNER as _APR,
     AGENT_STATE_DIM,
     MARKET_DIM,
     MARKET_VELOCITY_KEYS,
@@ -204,12 +205,20 @@ def _make_day(
 
 @pytest.fixture
 def config() -> dict:
-    """Minimal config for testing."""
+    """Minimal config for testing.
+
+    ``force_aggressive=True`` preserves pre-P3 test behaviour: all bets
+    go through the aggressive path regardless of the aggression flag
+    value, matching the pre-session-28 single-path dispatch.
+    """
     return {
         "training": {
             "max_runners": 14,
             "starting_budget": 100.0,
             "max_bets_per_race": 20,
+        },
+        "actions": {
+            "force_aggressive": True,
         },
         "reward": {
             "early_pick_bonus_min": 1.2,
@@ -299,7 +308,7 @@ class TestObservationSpace:
 
 class TestActionSpace:
     def test_action_shape(self, env):
-        assert env.action_space.shape == (14 * 2,)
+        assert env.action_space.shape == (14 * _APR,)
 
     def test_action_bounds(self, env):
         assert np.all(env.action_space.low == -1.0)
@@ -318,8 +327,8 @@ class TestActionMasking:
         env = BetfairEnv(day, config)
         obs, _ = env.reset()
 
-        # All-back action with full stake
-        action = np.ones(14 * 2, dtype=np.float32)
+        # All-back action with full stake (aggressive)
+        action = np.ones(14 * _APR, dtype=np.float32)
 
         for _ in range(5):
             obs, reward, terminated, truncated, info = env.step(action)
@@ -335,10 +344,11 @@ class TestActionMasking:
         env = BetfairEnv(day, config)
         env.reset()
 
-        # Back runner 0 with 10% stake on every tick
-        action = np.zeros(14 * 2, dtype=np.float32)
+        # Back runner 0 with 10% stake on every tick, aggressive
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0    # back signal for runner slot 0
         action[14] = -0.8  # stake fraction → (-0.8+1)/2 = 0.1 → 10%
+        action[28] = 1.0   # aggressive
 
         bets_after: list[int] = []
         for _ in range(6):
@@ -362,7 +372,7 @@ class TestReward:
     def test_reward_zero_during_race(self, env):
         """Reward should be 0 for non-settlement ticks."""
         env.reset()
-        action = np.zeros(14 * 2, dtype=np.float32)  # do nothing
+        action = np.zeros(14 * _APR, dtype=np.float32)  # do nothing
         obs, reward, _, _, _ = env.step(action)
         assert reward == 0.0  # still within race, no settlement
 
@@ -374,7 +384,7 @@ class TestReward:
         env.reset()
 
         # Back runner 101 (slot 0) with 10% stake
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0    # back signal
         action[14] = -0.8  # stake → 10%
 
@@ -400,7 +410,7 @@ class TestReward:
         env.reset()
 
         # Back runner 101 (slot 0) — the winner
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8  # 10% stake
 
@@ -422,7 +432,7 @@ class TestReward:
         env.reset()
 
         # Back runner 101 (slot 0) — NOT the winner (102 wins)
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -459,7 +469,7 @@ class TestReward:
         env.reset()
 
         # Place a bet on every pre-race tick
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -501,7 +511,7 @@ class TestReward:
         env.reset()
 
         # Back runner 101
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -546,7 +556,7 @@ class TestReward:
         env = BetfairEnv(day, config_with_precision)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -590,7 +600,7 @@ class TestReward:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -633,7 +643,7 @@ class TestReward:
 
         # Back the LOSER (runner 102, winner is 101). Stake, any action signal
         # > 0.33 → back. Fraction 0.1 of budget.
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[1] = 1.0    # back runner index 1 (= selection 102)
         action[15] = -0.8  # small stake
         for _ in range(2):
@@ -680,7 +690,7 @@ class TestReward:
         env.reset()
 
         # Back the LOSER early (runner 102). Bet.pnl will be negative.
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[1] = 1.0    # back runner 102
         action[15] = -0.8
         for _ in range(2):
@@ -709,7 +719,7 @@ class TestReward:
         env = BetfairEnv(day, config_with_precision)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.5
 
@@ -733,7 +743,7 @@ class TestReward:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.5
 
@@ -754,7 +764,7 @@ class TestEpisodeLifecycle:
     def test_episode_terminates_after_all_races(self, env, day):
         """Episode should terminate after all races and ticks are processed."""
         env.reset()
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         total_ticks = sum(len(r.ticks) for r in day.races)
 
         terminated = False
@@ -769,7 +779,7 @@ class TestEpisodeLifecycle:
     def test_races_completed_count(self, env, day):
         """races_completed should increment as races finish."""
         env.reset()
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
 
         completed_counts = []
         terminated = False
@@ -782,7 +792,7 @@ class TestEpisodeLifecycle:
     def test_race_records_populated(self, env, day):
         """race_records should have one entry per settled race."""
         env.reset()
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
 
         terminated = False
         while not terminated:
@@ -797,7 +807,7 @@ class TestEpisodeLifecycle:
         """reset() should clear all state from the previous episode."""
         # Run one episode
         env.reset()
-        action = np.ones(14 * 2, dtype=np.float32)
+        action = np.ones(14 * _APR, dtype=np.float32)
         terminated = False
         while not terminated:
             _, _, terminated, _, _ = env.step(action)
@@ -822,7 +832,7 @@ class TestBudgetManagement:
         env.reset()
 
         # Back runner 101 (winner) in race 1
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8  # 10% stake
 
@@ -843,7 +853,7 @@ class TestBudgetManagement:
         env.reset()
 
         # Stake fraction = (-0.8 + 1) / 2 = 0.1 → 10% of £100 = £10
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0    # back
         action[14] = -0.8  # stake → 10%
 
@@ -861,7 +871,7 @@ class TestBudgetManagement:
         env.reset()
 
         # action[14] = 1.0 → (1+1)/2 = 1.0 → 100% of budget
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = 1.0
 
@@ -876,7 +886,7 @@ class TestBudgetManagement:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -895,7 +905,7 @@ class TestBudgetManagement:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -929,7 +939,7 @@ class TestEdgeCases:
         env.reset()
 
         # Back runner 101
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -946,7 +956,7 @@ class TestEdgeCases:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         _, _, terminated, _, info = env.step(action)
 
         assert terminated
@@ -955,7 +965,7 @@ class TestEdgeCases:
     def test_do_nothing_episode(self, env, day):
         """Taking no-action should produce zero bets and zero P&L."""
         env.reset()
-        action = np.zeros(14 * 2, dtype=np.float32)  # all zeros = do nothing
+        action = np.zeros(14 * _APR, dtype=np.float32)  # all zeros = do nothing
 
         terminated = False
         while not terminated:
@@ -976,7 +986,7 @@ class TestEdgeCases:
         env.reset()
 
         # Lay runner 101 (slot 0)
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = -1.0   # lay signal
         action[14] = -0.8  # 10% stake
 
@@ -1016,7 +1026,7 @@ class TestEdgeCases:
         env.reset()
 
         # Try to back runner 101 (removed)
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0    # back slot 0 (runner 101, which is removed)
         action[14] = -0.8
 
@@ -1049,7 +1059,7 @@ class TestInfoDict:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1072,7 +1082,7 @@ class TestInfoDict:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1101,7 +1111,7 @@ class TestBudgetPerRace:
         env.reset()
 
         # Back winner with large stake to change budget significantly
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0    # back
         action[14] = 0.6   # stake fraction = (0.6+1)/2 = 0.8 → 80% of budget
 
@@ -1121,7 +1131,7 @@ class TestBudgetPerRace:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1138,7 +1148,7 @@ class TestBudgetPerRace:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)  # do nothing
+        action = np.zeros(14 * _APR, dtype=np.float32)  # do nothing
 
         terminated = False
         while not terminated:
@@ -1186,7 +1196,7 @@ class TestBudgetPerRace:
         env.reset()
 
         # Bet on every tick
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1216,7 +1226,7 @@ class TestMaxBetsPerRace:
         env.reset()
 
         # Try to back on every tick (should be capped at 3)
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1237,7 +1247,7 @@ class TestMaxBetsPerRace:
         env = BetfairEnv(day, config_5)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1254,7 +1264,7 @@ class TestMaxBetsPerRace:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1288,7 +1298,7 @@ class TestPositionTracking:
         assert np.all(pos_vec == 0.0)
 
         # Place a back bet
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0    # back runner 0
         action[14] = -0.8  # 10% stake
 
@@ -1306,7 +1316,7 @@ class TestPositionTracking:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8  # 10% stake
 
@@ -1349,7 +1359,7 @@ class TestPositionTracking:
         env = BetfairEnv(day, config)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = -0.8
 
@@ -1394,7 +1404,7 @@ class TestBettingConstraints:
         env = BetfairEnv(day, cfg)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0    # back signal on runner 0
         action[14] = 1.0   # full stake
 
@@ -1409,7 +1419,7 @@ class TestBettingConstraints:
         env = BetfairEnv(day, cfg)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = 1.0
 
@@ -1424,7 +1434,7 @@ class TestBettingConstraints:
         env = BetfairEnv(day, cfg)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = -1.0   # lay signal
         action[14] = 1.0
 
@@ -1441,7 +1451,7 @@ class TestBettingConstraints:
         env = BetfairEnv(day, cfg)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = 1.0
 
@@ -1456,7 +1466,7 @@ class TestBettingConstraints:
         env = BetfairEnv(day, cfg)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = 1.0
 
@@ -1472,7 +1482,7 @@ class TestBettingConstraints:
         env = BetfairEnv(day, cfg)
         env.reset()
 
-        action = np.zeros(14 * 2, dtype=np.float32)
+        action = np.zeros(14 * _APR, dtype=np.float32)
         action[0] = 1.0
         action[14] = 1.0
 

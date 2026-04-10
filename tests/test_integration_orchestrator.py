@@ -71,12 +71,12 @@ class TestEvaluatorIntegration:
     def test_evaluate_on_real_day(self, real_days, integration_config, tmp_path):
         """Evaluate a model on real data — metrics should be populated."""
         from agents.architecture_registry import create_policy
-        from env.betfair_env import AGENT_STATE_DIM, MARKET_DIM, RUNNER_DIM, VELOCITY_DIM
+        from env.betfair_env import ACTIONS_PER_RUNNER, AGENT_STATE_DIM, MARKET_DIM, RUNNER_DIM, VELOCITY_DIM
 
         store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
         max_runners = integration_config["training"]["max_runners"]
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
-        action_dim = max_runners * 2
+        action_dim = max_runners * ACTIONS_PER_RUNNER
 
         policy = create_policy(
             name="ppo_lstm_v1",

@@ -16,6 +16,7 @@ from agents.policy_network import PPOLSTMPolicy
 from data.episode_builder import load_day
 from data.feature_engineer import engineer_day
 from env.betfair_env import (
+    ACTIONS_PER_RUNNER,
     AGENT_STATE_DIM,
     MARKET_DIM,
     MARKET_KEYS,
@@ -64,7 +65,7 @@ def engineered_day(real_day):
 def policy(config: dict) -> PPOLSTMPolicy:
     max_runners = config["training"]["max_runners"]
     obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
-    action_dim = max_runners * 2
+    action_dim = max_runners * ACTIONS_PER_RUNNER
     return create_policy(
         config["training"]["architecture"],
         obs_dim=obs_dim,
@@ -143,7 +144,7 @@ class TestRealDataForwardPass:
         obs = _build_obs_vector(tick_features, max_runners)
 
         out = policy(obs)
-        assert out.action_mean.shape == (1, max_runners * 2)
+        assert out.action_mean.shape == (1, max_runners * ACTIONS_PER_RUNNER)
         assert out.value.shape == (1, 1)
         assert not torch.isnan(out.action_mean).any()
         assert not torch.isnan(out.value).any()
@@ -233,8 +234,8 @@ class TestRealDataForwardPass:
         action = dist.sample()
         log_prob = dist.log_prob(action)
 
-        assert action.shape == (1, max_runners * 2)
-        assert log_prob.shape == (1, max_runners * 2)
+        assert action.shape == (1, max_runners * ACTIONS_PER_RUNNER)
+        assert log_prob.shape == (1, max_runners * ACTIONS_PER_RUNNER)
         assert not torch.isnan(log_prob).any()
 
 
@@ -249,7 +250,7 @@ class TestRegistryWithConfig:
         """Create policy using config values end-to-end."""
         max_runners = config["training"]["max_runners"]
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * max_runners) + AGENT_STATE_DIM
-        action_dim = max_runners * 2
+        action_dim = max_runners * ACTIONS_PER_RUNNER
 
         policy = create_policy(
             config["training"]["architecture"],
