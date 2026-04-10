@@ -221,6 +221,33 @@ The policy now emits one of three regimes per slot per tick:
 order ID, and keep that mapping alive for the cancel path. Today
 there is presumably no need for this — orders are fire-and-forget.
 
+### A1. Budget reserved at passive placement (lands in session 26 — P4b)
+
+The simulator now deducts stake (back) or liability (lay) from
+`BetManager.budget` / `_open_liability` **at the moment a passive
+order is placed**, not at fill time. Fill is a no-op on budget — it
+only converts the reservation to a `Bet`. This establishes a clear
+invariant:
+
+> available_budget = budget − open_liability − passive_reservations
+
+`ai-betfair`'s position-keeping (§C below) must mirror this:
+
+- When a passive order request is sent to the exchange, deduct the
+  reservation from the *local* budget view immediately — do not wait
+  for the order-stream fill event.
+- When a passive order fills (order-stream confirms `sizeMatched`),
+  no second budget deduction should occur. Only the open-order entry
+  is removed and the Bet is recorded.
+- When a passive order lapses / is cancelled, release the reservation
+  back to available budget.
+
+`info["passive_fills"]` is now populated per tick — a list of
+`(selection_id, price, filled_stake)` tuples for orders that
+converted on that tick. The replay and live dashboard may read this
+to highlight fill events without having to diff `passive_orders`
+across ticks.
+
 ### B. Live queue tracking is *easier* than simulated, not harder
 
 The simulator has to estimate queue position from
@@ -335,6 +362,7 @@ backtest-only utility.
 | P1 features | Vendor `features.py`, schema bump on loader | ½ session |
 | P2 spread cost | Re-tune low-bet-count alerts (deployment note only) | Trivial |
 | P3 + P4 passive/cancel/queue | Action translation, order-ID mapping, live queue from order stream, latency model | 2–3 sessions |
+| P4b budget-at-placement (session 26) | Reserve budget at order send, not at fill confirm; release on cancel/lapse | Folded into §3 above |
 | P5 UI annotation | Mirror on live dashboard | ½ session |
 
 Total `ai-betfair` work, assuming everything in `proposals.md` lands

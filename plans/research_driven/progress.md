@@ -74,7 +74,8 @@ Format:
 - `info["passive_fills"]` is ready; replay UI can start visualising fill events.
 
 **Cross-repo follow-ups:**
-- None — no obs schema, action space, or matcher API changes.
+- `downstream_knockon.md` §3 A1 updated: `ai-betfair` must reserve budget at passive order send (not at fill confirm) and release on cancel/lapse. No obs schema, action space, or matcher change.
+- `info["passive_fills"]` is now available for the live dashboard to consume (list of `(selection_id, price, filled_stake)` per tick).
 
 ---
 
