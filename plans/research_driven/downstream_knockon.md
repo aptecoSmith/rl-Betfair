@@ -242,10 +242,17 @@ invariant:
 - When a passive order lapses / is cancelled, release the reservation
   back to available budget.
 
-`info["passive_fills"]` is now populated per tick — a list of
-`(selection_id, price, filled_stake)` tuples for orders that
-converted on that tick. The replay and live dashboard may read this
-to highlight fill events without having to diff `passive_orders`
+`info["passive_orders"]` (added session 25) is populated every tick
+— a list of serialised open passive orders for the current race.
+The live dashboard can consume this to show resting orders on the
+ladder. Each entry has `selection_id`, `side`, `price`,
+`queue_ahead_at_placement`, `traded_volume_since_placement`,
+`matched_stake`, and `cancelled`.
+
+`info["passive_fills"]` (added session 26) is populated per tick —
+a list of `(selection_id, price, filled_stake)` tuples for orders
+that converted on that tick. The replay and live dashboard may read
+this to highlight fill events without having to diff `passive_orders`
 across ticks.
 
 ### B. Live queue tracking is *easier* than simulated, not harder
