@@ -170,7 +170,9 @@ class TestTradedVolumeAccumulates:
 
     def test_volume_accumulates_over_k_ticks(self):
         mgr = _mgr()
-        snap = _runner(selection_id=1001, ltp=4.0, back_levels=[(3.9, 42.0)],
+        # Queue-ahead=500 so the order never fills during the test
+        # (total traded delta = 60 << 500).
+        snap = _runner(selection_id=1001, ltp=4.0, back_levels=[(3.9, 500.0)],
                        total_matched=1000.0)
         mgr.passive_book.place(snap, stake=10.0, side=BetSide.BACK,
                                market_id="1.23", tick_index=0)
@@ -178,7 +180,7 @@ class TestTradedVolumeAccumulates:
         # Three ticks with cumulative total_matched: 1020, 1045, 1060.
         for cum_vol in [1020.0, 1045.0, 1060.0]:
             tick = _tick([_runner(selection_id=1001, ltp=4.0,
-                                  back_levels=[(3.9, 42.0)],
+                                  back_levels=[(3.9, 500.0)],
                                   total_matched=cum_vol)])
             mgr.passive_book.on_tick(tick)
 
@@ -321,23 +323,23 @@ class TestNoAggressiveRegression:
         assert bet.matched_stake == pytest.approx(30.0)
 
 
-# ── Test 8: Budget unaffected by passive placement ────────────────────────────
+# ── Test 8: Budget reserved at passive placement (session 26) ─────────────────
 
 
-class TestBudgetUnaffectedByPassivePlacement:
-    """Passive placement must NOT reserve budget (that is session 26's job)."""
+class TestBudgetReservedAtPassivePlacement:
+    """Session 26 lands budget reservation: placement immediately reduces budget."""
 
-    def test_available_budget_unchanged_after_passive_place(self):
+    def test_available_budget_drops_by_stake_on_back_place(self):
         mgr = _mgr()
         budget_before = mgr.available_budget
         snap = _runner(ltp=4.0, back_levels=[(3.9, 42.0)])
         mgr.passive_book.place(snap, stake=50.0, side=BetSide.BACK,
                                market_id="1.23", tick_index=0)
-        assert mgr.available_budget == pytest.approx(budget_before)
+        assert mgr.available_budget == pytest.approx(budget_before - 50.0)
 
-    def test_budget_field_unchanged_after_passive_place(self):
+    def test_budget_field_drops_by_stake_on_back_place(self):
         mgr = _mgr()
         snap = _runner(ltp=4.0, back_levels=[(3.9, 42.0)])
         mgr.passive_book.place(snap, stake=50.0, side=BetSide.BACK,
                                market_id="1.23", tick_index=0)
-        assert mgr.budget == pytest.approx(mgr.starting_budget)
+        assert mgr.budget == pytest.approx(mgr.starting_budget - 50.0)

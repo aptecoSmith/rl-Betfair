@@ -67,14 +67,12 @@ Format per row:
 
 ### Owed by Phase 2 sessions
 
-- [ ] **Visualise resting passive orders** (source: P3+P4 session,
-      see `proposals.md`)
-  - Resting orders should be visible on the ladder snapshot they
-    are sitting in (e.g. an outline around the price level), and
-    the order's "queue ahead" estimator value should be inspectable.
-  - Acceptance: open a race with a P3-trained policy, find a
-    resting passive order, and confirm the operator can read its
-    queue-ahead value.
+- [ ] **Visualise resting passive orders and fill events** (source: P4a session 25 / P4b session 26)
+  - `info["passive_orders"]` exposes open resting orders per tick (added session 25).
+  - `info["passive_fills"]` exposes `(selection_id, price, filled_stake)` tuples for orders that converted this tick (added session 26).
+  - Resting orders should be visible on the ladder snapshot (e.g. an outline around the price level); queue-ahead value should be inspectable.
+  - Fill events should be highlighted briefly when they occur so the operator can see the rest-then-fill sequence.
+  - Acceptance: open a race with passive orders; find a tick where `passive_fills` is non-empty; confirm the fill event is visible and the order disappears from `passive_orders` on the same tick.
 
 - [ ] **Cancel events in the bet log** (source: P3+P4 session)
   - When the agent cancels a resting order, the bet log should

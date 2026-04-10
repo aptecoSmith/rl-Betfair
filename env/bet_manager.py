@@ -81,10 +81,7 @@ class PassiveOrder:
     Queue position is estimated by snapshotting the own-side top-of-book size
     at placement time (``queue_ahead_at_placement``) and accumulating traded
     volume on that runner since placement (``traded_volume_since_placement``).
-    Fill logic is not implemented here — that lands in session 26.
-
-    Fields marked "reserved for session 26/29" are populated as 0 / False
-    now so the struct is stable across sessions.
+    Fill logic lands in session 26; cancellation in session 29.
     """
 
     selection_id: int
@@ -94,8 +91,9 @@ class PassiveOrder:
     queue_ahead_at_placement: float       # own-side top-level size at placement
     placed_tick_index: int
     market_id: str
+    ltp_at_placement: float = 0.0         # LTP when order was placed (for Bet.ltp_at_placement on fill)
     traded_volume_since_placement: float = 0.0
-    matched_stake: float = 0.0            # reserved for session 26
+    matched_stake: float = 0.0            # set to requested_stake on fill (session 26)
     cancelled: bool = False               # reserved for session 29
 
     def to_dict(self) -> dict:
@@ -107,6 +105,7 @@ class PassiveOrder:
             "queue_ahead_at_placement": self.queue_ahead_at_placement,
             "placed_tick_index": self.placed_tick_index,
             "market_id": self.market_id,
+            "ltp_at_placement": self.ltp_at_placement,
             "traded_volume_since_placement": self.traded_volume_since_placement,
             "matched_stake": self.matched_stake,
             "cancelled": self.cancelled,
@@ -118,14 +117,15 @@ class PassiveOrderBook:
 
     Owned by :class:`BetManager` as ``self.passive_book``. Responsible for:
     - Snapshotting queue-ahead at placement time.
+    - Reserving budget at placement (back: deduct stake; lay: reserve liability).
     - Accumulating traded-volume deltas per runner across ticks.
+    - Converting orders to ``Bet`` objects once the fill threshold is crossed.
 
-    Fill logic, budget reservation, and cancellation all land in later
-    sessions (26 and 29). This class is deliberately minimal.
+    The ``_bet_manager`` back-reference is set by ``BetManager.__post_init__``
+    so that this class can access and mutate budget fields and the bets list
+    without circular import issues.
 
-    The matcher stays stateless and is only consulted to apply the same
-    junk-filter as aggressive orders, so refused passive placements are
-    consistent with refused aggressive placements.
+    Cancellation lands in session 29.
     """
 
     def __init__(self, matcher: ExchangeMatcher = DEFAULT_MATCHER) -> None:
@@ -135,11 +135,35 @@ class PassiveOrderBook:
         # Populated on first on_tick call; reset when the PassiveOrderBook
         # is replaced (fresh BetManager per race).
         self._last_total_matched: dict[int, float] = {}
+        # Back-reference to the owning BetManager, set by BetManager.__post_init__.
+        # Used for budget reservation at placement and Bet creation at fill.
+        self._bet_manager: "BetManager | None" = None
+        # Passive self-depletion: tracks own-side stake already filled at each
+        # (selection_id, side, price) level within this race.  This shifts the
+        # fill threshold for subsequent passive orders resting at the same price,
+        # simulating the fact that the first order consumed part of the queue.
+        # Keyed on own-side (resting) price levels — DISTINCT from
+        # BetManager._matched_at_level, which tracks aggressive (opposite-side)
+        # fill consumption at the time of aggressive placement.
+        self._passive_matched_at_level: dict[tuple[int, "BetSide", float], float] = {}
+        # Fill events emitted by the most recent on_tick call.  Reset at the
+        # start of each on_tick; read by BetfairEnv._get_info for
+        # info["passive_fills"].  Each entry: (selection_id, price, filled_stake).
+        self._last_fills: list[tuple[int, float, float]] = []
 
     @property
     def orders(self) -> list[PassiveOrder]:
-        """All passive orders in this race (including filled/cancelled in future sessions)."""
+        """Open passive orders (excludes already-filled orders)."""
         return list(self._orders)
+
+    @property
+    def last_fills(self) -> list[tuple[int, float, float]]:
+        """Fill events from the most recent ``on_tick`` call.
+
+        Each entry is ``(selection_id, price, filled_stake)``.  Reset at the
+        start of every ``on_tick``; an empty list means no fills this tick.
+        """
+        return list(self._last_fills)
 
     def place(
         self,
@@ -149,7 +173,7 @@ class PassiveOrderBook:
         market_id: str,
         tick_index: int,
     ) -> PassiveOrder | None:
-        """Record a resting order at the own-side best price.
+        """Record a resting order at the own-side best price and reserve budget.
 
         For a passive back the order rests in the available_to_back queue
         (the price other backers are offering); for a passive lay it rests
@@ -158,10 +182,18 @@ class PassiveOrderBook:
         The best post-filter price is found via the same junk filter the
         aggressive matcher uses. If no valid level exists (empty ladder or
         all levels outside ±``max_price_deviation_pct`` from LTP), returns
-        ``None`` — passive placement into filtered-out levels silently
-        succeeds in no simulator; it must fail explicitly here.
+        ``None``.
 
-        Budget is **not** affected. That is session 26's job.
+        Budget is reserved immediately on placement:
+
+        - **Back**: ``stake`` is deducted from ``BetManager.budget``.  If
+          ``stake > available_budget``, the order is refused (returns ``None``).
+        - **Lay**: ``stake × (price − 1)`` is added to
+          ``BetManager._open_liability``.  If the liability would exceed
+          ``available_budget``, the order is refused.
+
+        On fill the reservation is converted in-place — no second deduction.
+        On cancel (session 29) the reservation is released.
         """
         ltp = runner.last_traded_price
         if ltp is None or ltp <= 0.0:
@@ -198,6 +230,20 @@ class PassiveOrderBook:
         else:
             top_level = max(filtered, key=lambda lv: lv.price)
 
+        # Budget reservation — must happen before the order is appended so
+        # that a failed reservation leaves the book unchanged.
+        bm = self._bet_manager
+        if bm is not None:
+            if side is BetSide.BACK:
+                if stake > bm.available_budget:
+                    return None
+                bm.budget -= stake
+            else:  # LAY
+                liability = stake * (top_level.price - 1.0)
+                if liability > bm.available_budget:
+                    return None
+                bm._open_liability += liability
+
         order = PassiveOrder(
             selection_id=runner.selection_id,
             side=side,
@@ -206,6 +252,7 @@ class PassiveOrderBook:
             queue_ahead_at_placement=top_level.size,
             placed_tick_index=tick_index,
             market_id=market_id,
+            ltp_at_placement=ltp,
         )
         self._orders.append(order)
         # Seed the volume baseline so the first on_tick call computes the
@@ -218,20 +265,31 @@ class PassiveOrderBook:
         return order
 
     def on_tick(self, tick: "Tick") -> None:
-        """Accumulate traded-volume deltas for all open passive orders.
+        """Accumulate traded-volume deltas and convert filled orders to Bets.
 
-        For each runner in the tick, computes the delta of
-        ``RunnerSnap.total_matched`` since the last time we saw this runner
-        and adds it to ``traded_volume_since_placement`` for every passive
-        order on that runner.
+        Two-phase per tick:
 
-        Volume from runners that don't match any passive order's
-        ``selection_id`` is ignored, so passive orders on runner A are
-        unaffected by trading on runner B.
+        1. **Volume accumulation** — for each runner with open passive orders,
+           compute the ``total_matched`` delta since the previous tick and add
+           it to every matching order's ``traded_volume_since_placement``.
+
+        2. **Fill check** — for each open order, skip if the resting price has
+           drifted outside the LTP ±``max_price_deviation_pct`` junk filter
+           (the order stays open and will re-evaluate next tick).  Otherwise,
+           compute the fill threshold:
+           ``queue_ahead_at_placement + passive_self_depletion_at_this_price``.
+           If ``traded_volume_since_placement ≥ threshold``, the order fills:
+           a ``Bet`` is created (price = queue price, not opposite-side top),
+           appended to ``BetManager.bets``, and the order is removed from the
+           open list.  Fill events are recorded in ``_last_fills``.
+
+        Budget is **not** changed on fill — the stake/liability was already
+        reserved at placement.
         """
+        self._last_fills = []
         runner_by_sid = {r.selection_id: r for r in tick.runners}
 
-        # Collect which selection_ids have open passive orders.
+        # ── Phase 1: accumulate traded-volume deltas ──────────────────────
         active_sids: set[int] = {o.selection_id for o in self._orders}
 
         for sid in active_sids:
@@ -246,6 +304,70 @@ class PassiveOrderBook:
                 for order in self._orders:
                     if order.selection_id == sid:
                         order.traded_volume_since_placement += delta
+
+        # ── Phase 2: fill check ───────────────────────────────────────────
+        if self._bet_manager is None:
+            return
+
+        # Iterate over a snapshot of the list so removals don't skip entries.
+        # The self-depletion accumulator is updated eagerly inside the loop so
+        # that the second order at the same price immediately sees the first
+        # order's filled stake in its threshold calculation.
+        for order in list(self._orders):
+            snap = runner_by_sid.get(order.selection_id)
+            if snap is None:
+                continue
+
+            # Junk filter: if the resting price has drifted outside the LTP
+            # tolerance, skip this tick.  The order stays open and re-evaluates
+            # on the next tick (session 26 constraint 5 — no auto-cancel here).
+            ltp = snap.last_traded_price
+            if ltp is None or ltp <= 0.0:
+                continue
+            lo = ltp * (1.0 - self._matcher.max_price_deviation_pct)
+            hi = ltp * (1.0 + self._matcher.max_price_deviation_pct)
+            if not (lo <= order.price <= hi):
+                continue
+
+            # Passive self-depletion: shift the threshold by how much stake
+            # has already been filled at this own-side price level this race.
+            # Updated eagerly so subsequent orders in this same tick see the
+            # correct cumulative value.
+            key = (order.selection_id, order.side, order.price)
+            already_filled = self._passive_matched_at_level.get(key, 0.0)
+            fill_threshold = order.queue_ahead_at_placement + already_filled
+
+            if order.traded_volume_since_placement < fill_threshold:
+                continue
+
+            # ── Fill ────────────────────────────────────────────────────
+            order.matched_stake = order.requested_stake
+
+            # Convert to a Bet.  Fill price is the queue price (order.price),
+            # not the opposite-side top — this is the key invariant of passive
+            # orders (cheaper than crossing the spread).  Budget unchanged:
+            # the stake/liability was already reserved at placement.
+            bet = Bet(
+                selection_id=order.selection_id,
+                side=order.side,
+                requested_stake=order.requested_stake,
+                matched_stake=order.requested_stake,
+                average_price=order.price,
+                market_id=order.market_id,
+                ltp_at_placement=order.ltp_at_placement,
+            )
+            self._bet_manager.bets.append(bet)
+
+            # Eagerly update passive self-depletion accumulator.
+            self._passive_matched_at_level[key] = already_filled + order.requested_stake
+
+            # Emit fill event for info["passive_fills"] and the replay UI.
+            self._last_fills.append(
+                (order.selection_id, order.price, order.requested_stake)
+            )
+
+            # Remove from open order list.
+            self._orders.remove(order)
 
 
 @dataclass(slots=True)
@@ -267,6 +389,10 @@ class BetManager:
     bets: list[Bet] = field(default_factory=list)
     _open_liability: float = 0.0
     matcher: ExchangeMatcher = field(default=DEFAULT_MATCHER)
+    # Aggressive self-depletion: tracks opposite-side stake already consumed at
+    # each (selection_id, side, price) level in this race by aggressive bets.
+    # Distinct from PassiveOrderBook._passive_matched_at_level, which tracks
+    # own-side levels consumed by passive fills.
     _matched_at_level: dict[tuple[int, BetSide, float], float] = field(
         init=False, default_factory=dict, repr=False
     )
@@ -275,6 +401,9 @@ class BetManager:
     def __post_init__(self) -> None:
         self.budget = self.starting_budget
         self.passive_book = PassiveOrderBook(matcher=self.matcher)
+        # Wire the back-reference so PassiveOrderBook can access budget fields
+        # and the bets list for placement-time reservation and fill conversion.
+        self.passive_book._bet_manager = self
 
     # ── Public properties ────────────────────────────────────────────────
 

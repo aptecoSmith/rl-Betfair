@@ -617,6 +617,7 @@ class BetfairEnv(gymnasium.Env):
             "race_records": list(self._race_records),
             "debug_features": debug_features,
             "passive_orders": [o.to_dict() for o in bm.passive_book.orders],
+            "passive_fills": bm.passive_book.last_fills,
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────

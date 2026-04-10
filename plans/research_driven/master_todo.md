@@ -145,12 +145,15 @@ isolation.
   - [x] 14 assertions across 8 test classes; all pass.
   - Matcher unchanged.
 
-- [ ] **Session 26 — P4b: passive-fill triggering + budget
+- [x] **Session 26 — P4b: passive-fill triggering + budget
       reservation** (`sessions/session_26_p4b_passive_fill.md`)
-  - Fill when traded volume exceeds queue-ahead.
-  - Budget reserved at placement, converted (not double-
-    subtracted) on fill.
-  - Passive self-depletion applies (extends session 18).
+  - [x] Fill when traded volume exceeds queue-ahead + passive self-depletion.
+  - [x] Budget reserved at placement (back: deduct stake; lay: reserve liability).
+  - [x] No double-subtraction on fill — reservation converts in-place.
+  - [x] Passive self-depletion accumulator (`_passive_matched_at_level`) distinct from aggressive accumulator.
+  - [x] `info["passive_fills"]` emitted per tick.
+  - [x] 19 assertions across 9 test classes; all pass.
+  - [x] Junk filter blocks fill on drifted ticks; fill resumes when LTP returns.
 
 - [ ] **Session 27 — P4c: race-off cleanup**
       (`sessions/session_27_p4c_race_off_cleanup.md`)

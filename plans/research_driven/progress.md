@@ -34,6 +34,50 @@ Format:
 
 ---
 
+## 2026-04-10 — Session 26 — P4b: passive-fill triggering + budget reservation
+
+**Shipped:**
+- `env/bet_manager.py` — `PassiveOrder` gains `ltp_at_placement` field. `PassiveOrderBook` extended with:
+  - `_bet_manager` back-reference (set by `BetManager.__post_init__`).
+  - `_passive_matched_at_level` dict: own-side self-depletion accumulator (keyed on `(selection_id, side, price)`); distinct from `BetManager._matched_at_level` which tracks opposite-side aggressive fills.
+  - `_last_fills` list: fill events from the most recent tick, reset at start of each `on_tick`.
+  - `place()` now reserves budget at placement: back orders deduct `stake` from `BetManager.budget`; lay orders add `stake × (price − 1)` to `BetManager._open_liability`. Order refused (returns `None`) if reservation would exceed `available_budget`.
+  - `on_tick()` now has a two-phase structure: Phase 1 accumulates traded volume (unchanged); Phase 2 processes fills — applies junk filter (order stays open if resting price drifted outside LTP ±50%), computes `fill_threshold = queue_ahead + passive_self_depletion`, creates `Bet` objects for crossed thresholds, updates passive self-depletion accumulator eagerly (so the second order at the same price sees the first fill's stake immediately), emits fill events, removes filled orders from `_orders`.
+  - `last_fills` property: read by `BetfairEnv._get_info`.
+- `env/betfair_env.py` — `info["passive_fills"]` added: list of `(selection_id, price, filled_stake)` tuples emitted this tick.
+- `tests/research_driven/test_p4a_queue_snapshot.py` — Updated `TestBudgetUnaffectedByPassivePlacement` → `TestBudgetReservedAtPassivePlacement` and increased queue-ahead in `test_volume_accumulates_over_k_ticks` to 500 (was 42; delta of 60 would have triggered a fill under the new logic).
+
+**Example rest-then-fill sequence (manual test):** Passive back at 3.9 with queue-ahead=200. After 150 traded → still open. After 60 more (total delta 210 ≥ 200) → fills. `Bet.average_price = 3.9`, not the lay-side top. `available_budget` unchanged between placement and fill.
+
+**Tests added:**
+- `tests/research_driven/test_p4b_passive_fill.py` — 19 assertions across 9 test classes (all 10 session spec scenarios covered):
+  - `TestRestAndFill` (2): fills after threshold; fill price = queue price.
+  - `TestRestAndNotFill` (1): stays open when volume insufficient.
+  - `TestBudgetReservationAtPlacement` (3): back deducts stake; lay reserves liability; refused when insufficient budget.
+  - `TestNoDoubleSubtractionOnFill` (1): available_budget unchanged between placement and fill.
+  - `TestPassiveSelfDepletion` (1): second order at same price delayed by first fill's stake.
+  - `TestFillPriceIsQueuePrice` (2): back fill = back queue price; lay fill = lay queue price.
+  - `TestFilledPassivesSettleWithRace` (3): wins, loses, contributes to `realised_pnl`.
+  - `TestJunkFilteredRestPriceDoesNotFill` (2): junk LTP suppresses fill; fill resumes when LTP returns.
+  - `TestAggressiveRegression` (2): aggressive bets unaffected; passive self-depletion does not affect aggressive matcher.
+  - `TestRewardInvariant` (2): passive fill P&L equals equivalent aggressive fill P&L; mixed passive+aggressive settlement correct.
+
+**Did not ship:**
+- Cancel action — session 29.
+- Race-off cleanup — session 27.
+- Partial fills — not requested.
+- Action-space change — session 28.
+
+**Notes for next session (27 — P4c race-off cleanup):**
+- Unfilled passives at race end need to be cancelled (budget reservations released, no P&L impact). `PassiveOrder.cancelled` field already exists.
+- The `BetManager.passive_book` is replaced when a new `BetManager` is created per race; session 27 must call a cleanup method before replacement.
+- `info["passive_fills"]` is ready; replay UI can start visualising fill events.
+
+**Cross-repo follow-ups:**
+- None — no obs schema, action space, or matcher API changes.
+
+---
+
 ## 2026-04-10 — Session 25 — P4a: queue-snapshot bookkeeping (state only)
 
 **Structure choice:** **(B) — `PassiveOrderBook` as a separate class owned by `BetManager` as `self.passive_book`.** This keeps aggressive code on `BetManager` directly and passive code on `passive_book`, making the separation visible at a glance to reviewers. Fill logic in session 26 attaches cleanly to `PassiveOrderBook` without touching `BetManager`'s aggressive paths.
