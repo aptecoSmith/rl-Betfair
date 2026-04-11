@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
+
+
+def _opt_float(val: object) -> float | None:
+    """Convert to float, returning None for NaN / None / missing."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return None if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_int(val: object) -> int | None:
+    """Convert to int, returning None for NaN / None / missing."""
+    f = _opt_float(val)
+    return int(f) if f is not None else None
 
 from api.schemas import (
     BetEvent,
@@ -101,14 +119,28 @@ def get_model_bets(model_id: str, request: Request):
             market_info[str(market_id)] = {
                 "venue": str(first.get("venue", "")),
                 "market_start_time": str(first.get("market_start_time", "")),
+                "market_type": str(first.get("market_type", "")),
+                "each_way_divisor": _opt_float(first.get("each_way_divisor")),
+                "number_of_each_way_places": _opt_int(first.get("number_of_each_way_places")),
             }
 
-    bets = [
-        ExplorerBet(
+    bets = []
+    for b in bet_records:
+        mi = market_info.get(b.market_id, {})
+        # Use bet record's EW fields if present; fall back to tick data
+        # for old bet logs that predate the ew-metadata-pipeline.
+        is_ew = b.is_each_way
+        ew_div = b.each_way_divisor
+        n_places = b.number_of_places
+        if not is_ew and mi.get("market_type", "").upper() == "EACH_WAY":
+            is_ew = True
+            ew_div = ew_div or mi.get("each_way_divisor")
+            n_places = n_places or mi.get("number_of_each_way_places")
+        bets.append(ExplorerBet(
             date=b.date,
             race_id=b.market_id,
-            venue=market_info.get(b.market_id, {}).get("venue", ""),
-            race_time=market_info.get(b.market_id, {}).get("market_start_time", ""),
+            venue=mi.get("venue", ""),
+            race_time=mi.get("market_start_time", ""),
             tick_timestamp=b.tick_timestamp,
             seconds_to_off=b.seconds_to_off,
             runner_id=b.runner_id,
@@ -119,14 +151,12 @@ def get_model_bets(model_id: str, request: Request):
             matched_size=b.matched_size,
             outcome=b.outcome,
             pnl=b.pnl,
-            is_each_way=b.is_each_way,
-            each_way_divisor=b.each_way_divisor,
-            number_of_places=b.number_of_places,
+            is_each_way=is_ew,
+            each_way_divisor=ew_div,
+            number_of_places=n_places,
             settlement_type=b.settlement_type,
             effective_place_odds=b.effective_place_odds,
-        )
-        for b in bet_records
-    ]
+        ))
 
     total_bets = len(bets)
     total_pnl = round(sum(b.pnl for b in bets), 2)

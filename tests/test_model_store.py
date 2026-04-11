@@ -380,8 +380,65 @@ class TestEvaluationBetsParquet:
             "seconds_to_off", "runner_id", "runner_name", "action",
             "price", "stake", "matched_size", "outcome", "pnl",
             "opportunity_window_s",
+            "is_each_way", "each_way_divisor", "number_of_places",
+            "settlement_type", "effective_place_odds",
         }
         assert set(df.columns) == expected_cols
+
+    def test_ew_fields_round_trip(self, store: ModelStore):
+        """EW metadata survives write → read via Parquet."""
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+
+        bet = EvaluationBetRecord(
+            run_id=rid, date="2026-03-21", market_id="1.200000001",
+            tick_timestamp="2026-03-21T14:00:00", seconds_to_off=300.0,
+            runner_id=12345, runner_name="Horse1", action="back",
+            price=7.4, stake=11.50, matched_size=11.50,
+            outcome="won", pnl=41.952,
+            is_each_way=True,
+            each_way_divisor=5.0,
+            number_of_places=3,
+            settlement_type="ew_winner",
+            effective_place_odds=2.28,
+        )
+        store.write_bet_logs_parquet(rid, "2026-03-21", [bet])
+        stored = store.get_evaluation_bets(rid)
+        assert len(stored) == 1
+        b = stored[0]
+        assert b.is_each_way is True
+        assert b.each_way_divisor == pytest.approx(5.0)
+        assert b.number_of_places == 3
+        assert b.settlement_type == "ew_winner"
+        assert b.effective_place_odds == pytest.approx(2.28)
+
+    def test_old_parquet_without_ew_fields(self, store: ModelStore):
+        """Bet logs written before ew-metadata-pipeline default gracefully."""
+        import pandas as pd
+
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+
+        # Simulate an old parquet without EW columns
+        run_dir = store.bet_logs_dir / rid
+        run_dir.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([{
+            "run_id": rid, "date": "2026-03-21", "market_id": "1.200000001",
+            "tick_timestamp": "2026-03-21T14:00:00", "seconds_to_off": 300.0,
+            "runner_id": 12345, "runner_name": "Horse1", "action": "back",
+            "price": 4.0, "stake": 10.0, "matched_size": 10.0,
+            "outcome": "won", "pnl": 30.0, "opportunity_window_s": 0.0,
+        }])
+        df.to_parquet(run_dir / "2026-03-21.parquet", index=False)
+
+        stored = store.get_evaluation_bets(rid)
+        assert len(stored) == 1
+        b = stored[0]
+        assert b.is_each_way is False
+        assert b.each_way_divisor is None
+        assert b.number_of_places is None
+        assert b.settlement_type == "standard"
+        assert b.effective_place_odds is None
 
 
 # ── Garage ───────────────────────────────────────────────────────────────────

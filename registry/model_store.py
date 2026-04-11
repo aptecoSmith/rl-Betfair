@@ -617,6 +617,11 @@ class ModelStore:
                 "outcome": r.outcome,
                 "pnl": r.pnl,
                 "opportunity_window_s": r.opportunity_window_s,
+                "is_each_way": r.is_each_way,
+                "each_way_divisor": r.each_way_divisor,
+                "number_of_places": r.number_of_places,
+                "settlement_type": r.settlement_type,
+                "effective_place_odds": r.effective_place_odds,
             }
             for r in records
         ])
@@ -673,6 +678,7 @@ class ModelStore:
         df = pd.concat(dfs, ignore_index=True)
         df = df.sort_values(["date", "tick_timestamp"]).reset_index(drop=True)
         has_opp_window = "opportunity_window_s" in df.columns
+        has_ew = "is_each_way" in df.columns
         return [
             EvaluationBetRecord(
                 run_id=str(row["run_id"]),
@@ -690,6 +696,25 @@ class ModelStore:
                 pnl=float(row["pnl"]),
                 opportunity_window_s=(
                     float(row["opportunity_window_s"]) if has_opp_window else 0.0
+                ),
+                is_each_way=bool(row["is_each_way"]) if has_ew else False,
+                each_way_divisor=(
+                    float(row["each_way_divisor"])
+                    if has_ew and pd.notna(row.get("each_way_divisor"))
+                    else None
+                ),
+                number_of_places=(
+                    int(row["number_of_places"])
+                    if has_ew and pd.notna(row.get("number_of_places"))
+                    else None
+                ),
+                settlement_type=(
+                    str(row["settlement_type"]) if has_ew else "standard"
+                ),
+                effective_place_odds=(
+                    float(row["effective_place_odds"])
+                    if has_ew and pd.notna(row.get("effective_place_odds"))
+                    else None
                 ),
             )
             for _, row in df.iterrows()

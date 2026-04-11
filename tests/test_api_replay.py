@@ -448,3 +448,64 @@ class TestBetExplorer:
             assert data["bets"] == []
             assert data["bet_precision"] == 0.0
             assert data["pnl_per_bet"] == 0.0
+
+    def test_ew_fallback_from_tick_data(self):
+        """Old bet logs (no EW columns) get is_each_way from tick data."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            date = "2026-03-26"
+            market_id = "1.222"
+
+            # Create tick data with EACH_WAY market type
+            rows = []
+            for i in range(3):
+                rows.append({
+                    "market_id": market_id,
+                    "timestamp": f"2026-03-26T14:00:{i:02d}",
+                    "sequence_number": i,
+                    "snap_json": _make_snap_json([{"sid": 101}]),
+                    "winner_selection_id": 101,
+                    "venue": "Cork",
+                    "market_start_time": "2026-03-26T12:15:00",
+                    "market_type": "EACH_WAY",
+                    "market_name": "12:15 Cork",
+                    "number_of_active_runners": 1,
+                    "traded_volume": 5000.0,
+                    "in_play": False,
+                    "each_way_divisor": 5.0,
+                    "number_of_each_way_places": 3,
+                    "temperature": None, "precipitation": None,
+                    "wind_speed": None, "wind_direction": None,
+                    "humidity": None, "weather_code": None,
+                })
+            data_dir = Path(tmp) / "processed"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(rows).to_parquet(data_dir / f"{date}.parquet", index=False)
+
+            # Create model + eval run with OLD format bet logs (no EW columns)
+            mid = store.create_model(0, "ppo_lstm_v1", "Test", {"lr": 0.001})
+            rid = store.create_evaluation_run(mid, "2026-03-25", [date])
+            run_dir = store.bet_logs_dir / rid
+            run_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{
+                "run_id": rid, "date": date, "market_id": market_id,
+                "tick_timestamp": "2026-03-26T14:00:01",
+                "seconds_to_off": 300.0, "runner_id": 101,
+                "runner_name": "Jackmoon", "action": "back",
+                "price": 7.4, "stake": 11.50, "matched_size": 11.50,
+                "outcome": "won", "pnl": 41.952,
+                "opportunity_window_s": 60.0,
+            }]).to_parquet(run_dir / f"{date}.parquet", index=False)
+
+            config = {"paths": {"processed_data": str(data_dir)}}
+            client = _make_app(store, config)
+
+            resp = client.get(f"/replay/{mid}/bets")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["total_bets"] == 1
+            bet = data["bets"][0]
+            # EW fields should be populated from tick data fallback
+            assert bet["is_each_way"] is True
+            assert bet["each_way_divisor"] == 5.0
+            assert bet["number_of_places"] == 3
