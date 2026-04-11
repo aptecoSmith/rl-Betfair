@@ -190,6 +190,54 @@ class PassiveOrderBook:
         """Number of orders cancelled in this race."""
         return len(self._cancelled_orders)
 
+    def cancel_oldest_for(
+        self,
+        selection_id: int,
+        reason: str = "policy cancel",
+    ) -> PassiveOrder | None:
+        """Cancel the oldest open passive order on *selection_id*.
+
+        Budget reservation is released via the same path as ``cancel_all``.
+        Returns the cancelled order, or ``None`` if no open order existed
+        (idempotent — spurious cancels are fine).
+        """
+        sid_orders = self._orders_by_sid.get(selection_id)
+        if not sid_orders:
+            return None
+
+        # Oldest = first element (FIFO insert order).
+        order = sid_orders[0]
+        order.cancelled = True
+        order.cancel_reason = reason
+
+        # Release budget reservation.
+        bm = self._bet_manager
+        if bm is not None:
+            if order.side is BetSide.BACK:
+                bm.budget += order.requested_stake
+            else:  # LAY
+                liability = order.requested_stake * (order.price - 1.0)
+                bm._open_liability -= liability
+
+        # Emit cancellation event.
+        self._last_cancels.append({
+            "selection_id": order.selection_id,
+            "price": order.price,
+            "requested_stake": order.requested_stake,
+            "reason": reason,
+        })
+
+        # Keep in history for replay UI.
+        self._cancelled_orders.append(order)
+
+        # Remove from tracking structures.
+        sid_orders.pop(0)
+        if not sid_orders:
+            del self._orders_by_sid[selection_id]
+        self._orders.remove(order)
+
+        return order
+
     def cancel_all(self, reason: str = "race-off") -> None:
         """Cancel all open passive orders, releasing budget reservations.
 

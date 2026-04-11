@@ -69,11 +69,12 @@ OBS_SCHEMA_VERSION: int = 4
 #   Version 1 — added aggression flag per slot (session 28 / P3a)
 #               Layout: [signal × N | stake × N | aggression × N]
 #               Previously: [signal × N | stake × N] (no version tracked)
-ACTION_SCHEMA_VERSION: int = 1
+#   Version 2 — added cancel flag per slot (session 29 / P3b)
+#               Layout: [signal × N | stake × N | aggression × N | cancel × N]
+ACTION_SCHEMA_VERSION: int = 2
 
-# Number of action values per runner slot. Increase when new per-slot
-# action dimensions are added (e.g. cancel flag in session 29).
-ACTIONS_PER_RUNNER: int = 3  # signal, stake, aggression
+# Number of action values per runner slot.
+ACTIONS_PER_RUNNER: int = 4  # signal, stake, aggression, cancel
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
@@ -181,6 +182,7 @@ _BACK_THRESHOLD = 0.33
 _LAY_THRESHOLD = -0.33
 _MIN_STAKE = 2.00  # Betfair Exchange minimum stake (£2)
 _AGGRESSION_THRESHOLD = 0.0  # > 0 → aggressive (cross spread), ≤ 0 → passive (join queue)
+_CANCEL_THRESHOLD = 0.0      # > 0 → cancel oldest open passive on this runner
 
 
 # ── Schema validation ────────────────────────────────────────────────────────
@@ -238,7 +240,7 @@ def validate_action_schema(checkpoint: dict) -> None:
             "Checkpoint has no action_schema_version key (pre-P3 format). "
             f"Expected ACTION_SCHEMA_VERSION={ACTION_SCHEMA_VERSION}. "
             "Refusing to load — the action vector layout changed in "
-            "session 28 (P3a: aggression flag). Retrain from scratch."
+            "sessions 28–29 (P3a/b: aggression + cancel flags). Retrain from scratch."
         )
     if saved != ACTION_SCHEMA_VERSION:
         raise ValueError(
@@ -823,10 +825,11 @@ class BetfairEnv(gymnasium.Env):
     def _process_action(self, action: np.ndarray, tick: Tick, race: Race) -> None:
         """Interpret the action array and place bets via the BetManager.
 
-        Per-slot layout: ``[signal, stake, aggression]``.
+        Per-slot layout: ``[signal, stake, aggression, cancel]``.
 
         - signal > 0.33 → BACK, < −0.33 → LAY, else → skip.
         - aggression > 0 → aggressive (cross spread), ≤ 0 → passive (join queue).
+        - cancel > 0 → cancel oldest open passive on this runner (runs before place).
         - ``actions.force_aggressive`` config overrides aggression to always-aggressive.
         """
         bm = self.bet_manager
@@ -836,17 +839,31 @@ class BetfairEnv(gymnasium.Env):
         action_debug: dict[int, dict] = {}
 
         for slot_idx in range(self.max_runners):
-            # Enforce max bets per race
-            if bm.race_bet_count(race.market_id) >= self.max_bets_per_race:
-                break
-
             sid = slot_map.get(slot_idx)
             if sid is None:
                 continue
             runner = runner_by_sid.get(sid)
             if runner is None or runner.status != "ACTIVE":
                 continue
+
+            # ── Cancel phase (runs first, before any placement) ──────
+            cancel_raw = float(action[3 * self.max_runners + slot_idx])
+            cancelled_order = None
+            if cancel_raw > _CANCEL_THRESHOLD:
+                cancelled_order = bm.passive_book.cancel_oldest_for(
+                    sid, reason="policy cancel",
+                )
+
+            # Enforce max bets per race (checked after cancel so cancel
+            # can free a slot, but before place so we don't exceed it).
+            if bm.race_bet_count(race.market_id) >= self.max_bets_per_race:
+                if cancelled_order is not None:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": True, "skipped_reason": "max_bets_reached"}
+                continue
+
             if not runner.available_to_back and not runner.available_to_lay:
+                if cancelled_order is not None:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": True, "skipped_reason": "no_liquidity"}
                 continue
 
             action_signal = float(action[slot_idx])
@@ -856,12 +873,16 @@ class BetfairEnv(gymnasium.Env):
             stake_fraction = np.clip((stake_raw + 1.0) / 2.0, 0.0, 1.0)
             stake = stake_fraction * bm.budget
             if stake < _MIN_STAKE:
+                if cancelled_order is not None:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": True, "skipped_reason": None}
                 continue
 
             time_to_off = (race.market_start_time - tick.timestamp).total_seconds()
 
             # Constraint: minimum time before off
             if self._min_seconds_before_off > 0 and time_to_off < self._min_seconds_before_off:
+                if cancelled_order is not None:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": True, "skipped_reason": None}
                 continue
 
             # Determine aggression: config override or policy decision
@@ -872,7 +893,12 @@ class BetfairEnv(gymnasium.Env):
             elif action_signal < _LAY_THRESHOLD:
                 side = BetSide.LAY
             else:
-                continue  # no bet signal
+                # No bet signal — but may have cancelled
+                if cancelled_order is not None:
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": True, "skipped_reason": None}
+                continue
+
+            did_cancel = cancelled_order is not None
 
             if is_aggressive:
                 # ── Aggressive path (cross the spread) ───────────────
@@ -884,9 +910,9 @@ class BetfairEnv(gymnasium.Env):
                     if bet is not None:
                         bet.tick_index = self._tick_idx
                         self._bet_times[len(bm.bets) - 1] = time_to_off
-                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "skipped_reason": None}
+                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": None}
                     else:
-                        action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "aggressive_back_failed"}
+                        action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_back_failed"}
                 elif side == BetSide.LAY and runner.available_to_back:
                     bet = bm.place_lay(
                         runner, stake, market_id=race.market_id,
@@ -895,20 +921,20 @@ class BetfairEnv(gymnasium.Env):
                     if bet is not None:
                         bet.tick_index = self._tick_idx
                         self._bet_times[len(bm.bets) - 1] = time_to_off
-                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "skipped_reason": None}
+                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": None}
                     else:
-                        action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "aggressive_lay_failed"}
+                        action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_lay_failed"}
                 else:
-                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "no_opposite_side_liquidity"}
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "no_opposite_side_liquidity"}
             else:
                 # ── Passive path (join the queue at own-side best) ────
                 order = bm.passive_book.place(
                     runner, stake, side, race.market_id, self._tick_idx,
                 )
                 if order is not None:
-                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": True, "skipped_reason": None}
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": True, "cancelled": did_cancel, "skipped_reason": None}
                 else:
-                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "skipped_reason": "passive_place_failed"}
+                    action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "passive_place_failed"}
 
         self._last_action_debug = action_debug
 

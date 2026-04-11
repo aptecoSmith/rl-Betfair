@@ -83,7 +83,7 @@ class TestTimeFeaturesOnRealData:
 
     def test_env_full_episode_with_time_features(self, real_day, config):
         """BetfairEnv runs a full episode with new obs_dim."""
-        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, ACTIONS_PER_RUNNER
 
         env = BetfairEnv(real_day, config)
         obs, info = env.reset()
@@ -105,7 +105,7 @@ class TestTimeLSTMTraining:
 
     def test_forward_pass_on_real_obs(self, real_day, config):
         """Forward pass with real observation produces valid output."""
-        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, ACTIONS_PER_RUNNER
         from agents.policy_network import PPOTimeLSTMPolicy
 
         env = BetfairEnv(real_day, config)
@@ -115,12 +115,12 @@ class TestTimeLSTMTraining:
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         policy = PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
-            action_dim=42,
+            action_dim=14 * ACTIONS_PER_RUNNER,
             max_runners=14,
             hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},
         )
         out = policy.forward(obs_t)
-        assert out.action_mean.shape == (1, 42)
+        assert out.action_mean.shape == (1, 14 * ACTIONS_PER_RUNNER)
         assert out.value.shape == (1, 1)
         assert not torch.any(torch.isnan(out.action_mean))
         assert not torch.any(torch.isnan(out.value))
@@ -133,7 +133,7 @@ class TestTimeLSTMTraining:
         seconds_since_last_tick feature, and verify that after processing
         through the TimeLSTMPolicy, the hidden states differ.
         """
-        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, ACTIONS_PER_RUNNER
         from agents.policy_network import PPOTimeLSTMPolicy
 
         torch.manual_seed(42)
@@ -144,7 +144,7 @@ class TestTimeLSTMTraining:
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         policy = PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
-            action_dim=42,
+            action_dim=14 * ACTIONS_PER_RUNNER,
             max_runners=14,
             hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},
         )
@@ -186,14 +186,14 @@ class TestTimeLSTMTraining:
 
     def test_training_completes(self, real_day, config):
         """A minimal training loop should complete without errors."""
-        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM
+        from env.betfair_env import BetfairEnv, MARKET_DIM, VELOCITY_DIM, RUNNER_DIM, AGENT_STATE_DIM, ACTIONS_PER_RUNNER
         from agents.policy_network import PPOTimeLSTMPolicy
 
         env = BetfairEnv(real_day, config)
         obs_dim = MARKET_DIM + VELOCITY_DIM + (RUNNER_DIM * 14) + AGENT_STATE_DIM
         policy = PPOTimeLSTMPolicy(
             obs_dim=obs_dim,
-            action_dim=42,
+            action_dim=14 * ACTIONS_PER_RUNNER,
             max_runners=14,
             hyperparams={"lstm_hidden_size": 64, "mlp_hidden_size": 32, "mlp_layers": 1},
         )

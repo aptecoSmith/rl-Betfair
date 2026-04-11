@@ -34,6 +34,63 @@ Format:
 
 ---
 
+## 2026-04-11 — Session 29 — P3b: cancel action
+
+**Shipped:**
+- `env/bet_manager.py` — `PassiveOrderBook` gains
+  `cancel_oldest_for(selection_id, reason)` method. Cancels the oldest
+  open passive order on a given runner, releases budget reservation
+  (back: restores stake; lay: reduces `_open_liability`), emits
+  cancellation event to `_last_cancels`, appends to `_cancelled_orders`
+  history. Returns the cancelled order or `None` (idempotent — spurious
+  cancels are a no-op, not an error).
+- `env/betfair_env.py` — Action space extended from
+  `max_runners × 3` to `max_runners × ACTIONS_PER_RUNNER` (4: signal,
+  stake, aggression, cancel). New constants: `ACTION_SCHEMA_VERSION = 2`,
+  `ACTIONS_PER_RUNNER = 4`, `_CANCEL_THRESHOLD = 0.0`. Cancel dispatch
+  runs **before** placement in `_process_action`, enabling atomic
+  cancel-then-place in the same tick. `info["action_debug"]` per-slot
+  dict gains `"cancelled": bool` field alongside existing
+  `passive_placed`, `aggressive_placed`, `skipped_reason`.
+- `tests/test_integration_session_2_8.py` — Hardcoded `action_dim=42`
+  replaced with `14 * ACTIONS_PER_RUNNER` to track the constant.
+- `tests/research_driven/test_p3a_aggression_flag.py` — Hardcoded
+  action space shape assertion replaced with `ACTIONS_PER_RUNNER`-based
+  computation.
+
+**Tests added:**
+- `tests/research_driven/test_p3b_cancel.py` — 13 tests across
+  10 classes: action space shape (4-dim), cancel releases budget
+  (back + lay), cancel no-op when empty, cancel oldest of two,
+  cancel + place in same tick (atomic move), cancelled passive zero P&L,
+  efficiency-penalty interaction (cancelled passives count), cancel
+  does not affect aggressive bets, schema-bump refuses v1 checkpoints
+  (3 sub-tests), raw + shaped ≈ total_reward invariant.
+
+**Did not ship:**
+- Retrain — session 30 (P3c). Action-space change invalidates all
+  existing checkpoints; fresh re-train is the deliberate cost.
+- Manual test — deferred. The replay UI cancel visualisation is tracked
+  in `ui_additions.md` and is not a prerequisite for the training code.
+
+**Notes for next session:**
+- Sessions 28 and 29 are now both shipped. P3 (passive orders + cancel)
+  is complete. The next session (30) is the Phase 2 retrain and
+  decision gate.
+- All existing checkpoints are invalidated by the v2 schema bump.
+  Loader refuses them loudly.
+- Cancel + place in same tick gives the policy an atomic "move this
+  rest to a new price" behaviour without needing a `modify` verb.
+- Policy-driven cancels use reason string `"policy cancel"` to
+  distinguish from race-off cancels (`"race-off"`). Both share the
+  underlying budget-release path.
+
+**Cross-repo follow-ups:**
+- `ai-betfair` will need the updated 4-dim action space when the new
+  policy ships (gated by session 30 decision + phantom-fill prerequisite).
+
+---
+
 ## 2026-04-10 — Session 28 — P3a: aggression flag in action space
 
 **Shipped:**

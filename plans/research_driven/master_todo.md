@@ -178,12 +178,15 @@ See `hard_constraints.md` #9.
     pre-P3 policy exactly (regression backstop).
   - 16 tests in `test_p3a_aggression_flag.py`; all pass.
 
-- [ ] **Session 29 — P3b: cancel action**
+- [x] **Session 29 — P3b: cancel action**
       (`sessions/session_29_p3b_cancel.md`)
-  - Per-slot cancel flag; "cancel oldest open passive on this
+  - [x] Per-slot cancel flag; "cancel oldest open passive on this
     runner" semantics.
-  - Cancel + place in the same tick = atomic move.
-  - No `modify` action (parked, ND-1 in `not_doing.md`).
+  - [x] Cancel + place in the same tick = atomic move.
+  - [x] No `modify` action (parked, ND-1 in `not_doing.md`).
+  - [x] `ACTION_SCHEMA_VERSION = 2`; `ACTIONS_PER_RUNNER = 4`.
+  - [x] `cancel_oldest_for(selection_id, reason)` on `PassiveOrderBook`.
+  - [x] 13 tests in `test_p3b_cancel.py`; all pass.
 
 - [ ] **Session 30 — P3c: Phase 2 re-train + diversity check +
       decision gate** (`sessions/session_30_p3c_retrain.md`)

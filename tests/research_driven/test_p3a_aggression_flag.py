@@ -235,7 +235,7 @@ class TestActionSpaceShape:
         r = _runner(1001, 4.0, back_levels=[(3.8, 50)], lay_levels=[(4.2, 50)])
         env = _make_env([[r], [r]])
         assert env.action_space.shape == (env.max_runners * ACTIONS_PER_RUNNER,)
-        assert env.action_space.shape == (3 * 3,)  # 3 runners × 3 values
+        assert env.action_space.shape == (3 * ACTIONS_PER_RUNNER,)
 
 
 class TestAggressiveDispatch:
