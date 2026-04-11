@@ -264,3 +264,74 @@ spread is irrelevant.
 - `hard_constraints.md` #1 already notes the exception: "pure-cost terms are the
   one exception to this rule".  No change to hard_constraints.md needed, but this
   lessons_learnt entry is the cross-reference cited there.
+
+---
+
+## 2026-04-10 — Session 28 — Hardcoded `* 2` action dims were everywhere
+
+**What happened:** Adding the aggression flag changed the per-slot
+action count from 2 to 3 (`ACTIONS_PER_RUNNER`). The action-space
+definition in `betfair_env.py` was a one-line fix, but the knock-on
+was enormous: `max_runners * 2` was hardcoded in 15+ test files,
+2 scripts, the population manager, and all 3 policy architecture
+classes. The policy architectures also hardcoded `output_dim=2` in
+their actor heads and manually assembled the flat action vector as
+`[signal, stake]` with explicit index slicing (`actor_out[:, :, 0]`,
+`actor_out[:, :, 1]`). Every one of these was an `IndexError` or
+shape-mismatch at runtime — no static analysis caught them.
+
+**Why it was surprising:** The expectation was that adding a new
+per-slot action dimension would be localised to `betfair_env.py` and
+the test file. In reality the "action dim = max_runners * 2"
+assumption was baked into ~30 locations across the codebase, and the
+policy network's actor head hardcoded the number of output values
+per runner. The most insidious failures were in integration tests
+that build action arrays with `np.zeros(14 * 2, ...)` — these
+produced correctly-shaped arrays that only failed when
+`_process_action` tried to read index 28+ from a 28-element vector.
+
+**What changes because of it:**
+- Introduced `ACTIONS_PER_RUNNER` constant in `betfair_env.py` and
+  replaced all `* 2` references with it. Future action-space
+  extensions (session 29 cancel flag) should only need to bump this
+  constant + update the dispatch and actor assembly.
+- Policy architectures now compute `_per_runner_action_dim =
+  action_dim // max_runners` and use it for the actor head output dim
+  and for generic action assembly (`parts = [actor_out[:, :, i] for i
+  in range(self._per_runner_action_dim)]`). No more hardcoded
+  index slicing.
+- Existing tests that were written for aggressive-only dispatch now
+  use `actions.force_aggressive: true` in their config fixtures.
+  This is the regression backstop from constraint 2 — it keeps
+  pre-P3 tests byte-identical without rewriting every action array.
+- `test_betfair_env.py` has 44 action-array constructions that were
+  all `np.zeros(14 * 2, ...)`. Bulk-replaced to `14 * _APR`.
+  If this pattern recurs, consider a test helper that builds
+  correctly-shaped action arrays from a dict of slot intentions
+  (like `_build_action` in the new P3a test file).
+
+---
+
+## 2026-04-10 — Session 28 — `force_aggressive` as a test migration strategy
+
+**What happened:** Rather than rewriting every existing test to set
+the new aggression slot to 1.0 (aggressive), the test config fixture
+was updated to include `actions.force_aggressive: true`. This made
+all pre-session-28 tests behave identically to before — the
+aggression flag value is ignored and all bets go through the
+aggressive path. Only the new P3a-specific tests exercise the
+passive dispatch.
+
+**Why it was surprising:** It wasn't surprising per se, but it was a
+non-obvious application of the `force_aggressive` config. The plan
+described it as a "regression backstop for operators who want to
+reproduce the pre-P3 policy". It turned out to be equally valuable
+as a test migration strategy — ~40 existing tests needed zero logic
+changes, only action-array size updates.
+
+**What changes because of it:** Future action-space extensions should
+consider adding a similar config bypass from the start. When session
+29 adds the cancel flag, it can follow the same pattern: existing
+tests use `force_aggressive` and ignore the new cancel slot; only
+the new P3b tests exercise cancel dispatch. This avoids an
+O(n-tests) rewrite on every action-space bump.
