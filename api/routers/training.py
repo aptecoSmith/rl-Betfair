@@ -300,6 +300,10 @@ async def start_training(request: Request, body: StartTrainingRequest):
         if unknown:
             raise HTTPException(400, f"Unknown architectures: {unknown}")
 
+    # Budget override validation
+    if body.starting_budget is not None and body.starting_budget <= 0:
+        raise HTTPException(400, "starting_budget must be positive")
+
     # Send start command to worker
     cmd = make_start_cmd(
         n_generations=body.n_generations,
@@ -314,6 +318,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
         max_back_price=body.max_back_price,
         max_lay_price=body.max_lay_price,
         min_seconds_before_off=body.min_seconds_before_off,
+        starting_budget=body.starting_budget,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

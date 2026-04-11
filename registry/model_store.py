@@ -82,6 +82,7 @@ class EvaluationDayRecord:
     profitable: bool
     mean_opportunity_window_s: float = 0.0
     median_opportunity_window_s: float = 0.0
+    starting_budget: float = 100.0
 
 
 @dataclass
@@ -108,6 +109,7 @@ class EvaluationBetRecord:
     number_of_places: int | None = None
     settlement_type: str = "standard"
     effective_place_odds: float | None = None
+    starting_budget: float = 100.0
 
 
 @dataclass
@@ -195,6 +197,13 @@ class ModelStore:
                     )
                 except Exception:
                     pass  # column already exists
+            # Migration: add starting_budget column (default 100.0 for existing rows)
+            try:
+                conn.execute(
+                    "ALTER TABLE evaluation_days ADD COLUMN starting_budget REAL NOT NULL DEFAULT 100.0"
+                )
+            except Exception:
+                pass  # column already exists
             conn.commit()
         finally:
             conn.close()
@@ -566,8 +575,9 @@ class ModelStore:
                 INSERT INTO evaluation_days
                     (run_id, date, day_pnl, bet_count, winning_bets,
                      bet_precision, pnl_per_bet, early_picks, profitable,
-                     mean_opportunity_window_s, median_opportunity_window_s)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mean_opportunity_window_s, median_opportunity_window_s,
+                     starting_budget)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.run_id,
@@ -581,6 +591,7 @@ class ModelStore:
                     1 if record.profitable else 0,
                     record.mean_opportunity_window_s,
                     record.median_opportunity_window_s,
+                    record.starting_budget,
                 ),
             )
             conn.commit()
@@ -622,6 +633,7 @@ class ModelStore:
                 "number_of_places": r.number_of_places,
                 "settlement_type": r.settlement_type,
                 "effective_place_odds": r.effective_place_odds,
+                "starting_budget": r.starting_budget,
             }
             for r in records
         ])
@@ -656,6 +668,10 @@ class ModelStore:
                         r["median_opportunity_window_s"]
                         if "median_opportunity_window_s" in col_names else 0.0
                     ),
+                    starting_budget=(
+                        r["starting_budget"]
+                        if "starting_budget" in col_names else 100.0
+                    ),
                 )
                 for r in rows
             ]
@@ -679,6 +695,7 @@ class ModelStore:
         df = df.sort_values(["date", "tick_timestamp"]).reset_index(drop=True)
         has_opp_window = "opportunity_window_s" in df.columns
         has_ew = "is_each_way" in df.columns
+        has_budget = "starting_budget" in df.columns
         return [
             EvaluationBetRecord(
                 run_id=str(row["run_id"]),
@@ -715,6 +732,9 @@ class ModelStore:
                     float(row["effective_place_odds"])
                     if has_ew and pd.notna(row.get("effective_place_odds"))
                     else None
+                ),
+                starting_budget=(
+                    float(row["starting_budget"]) if has_budget else 100.0
                 ),
             )
             for _, row in df.iterrows()

@@ -12,7 +12,7 @@ When a session completes:
 
 ## Phase 1 — Per-plan budget & recording
 
-- [ ] **Session 01 — Per-plan starting_budget override**
+- [x] **Session 01 — Per-plan starting_budget override**
 
   Allow training plans to carry an optional `starting_budget` field.
   The orchestrator uses the plan's value if set, else falls back to
@@ -32,7 +32,7 @@ When a session completes:
   - Plan without budget → env receives global config value.
   - API rejects budget ≤ 0.
 
-- [ ] **Session 02 — Record starting_budget per evaluation run**
+- [x] **Session 02 — Record starting_budget per evaluation run**
 
   Without this, we can't retroactively compute percentage return for
   models trained at different budgets.
@@ -50,7 +50,7 @@ When a session completes:
 
 ## Phase 2 — Percentage display
 
-- [ ] **Session 03 — Percentage return in scoreboard**
+- [x] **Session 03 — Percentage return in scoreboard**
 
   Add `mean_daily_return_pct` to the scoring pipeline and API.
 
@@ -70,7 +70,7 @@ When a session completes:
   - Model at budget=100, mean_pnl=10.0 → return_pct = 10.0%.
   - Both rank identically on composite score (already true).
 
-- [ ] **Session 04 — Model detail + bet explorer budget context**
+- [x] **Session 04 — Model detail + bet explorer budget context**
 
   - Model detail page — show "Budget: £10/race" in metrics grid.
   - Bet explorer stats bar — show budget context.
@@ -82,7 +82,7 @@ When a session completes:
 
 ## Phase 3 — Discard policy update
 
-- [ ] **Session 05 — Percentage-based discard threshold**
+- [x] **Session 05 — Percentage-based discard threshold**
 
   - `config.yaml` — add `min_mean_return_pct: 0.0` alongside
     existing `min_mean_pnl`.

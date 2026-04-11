@@ -79,6 +79,22 @@ export class ModelDetail implements OnInit {
     return m.metrics_history.reduce((sum, d) => sum + d.bet_count, 0);
   });
 
+  readonly recordedBudget = computed(() => {
+    const m = this.model();
+    if (!m || m.metrics_history.length === 0) return null;
+    const budget = m.metrics_history[0].starting_budget;
+    return budget != null ? budget : null;
+  });
+
+  readonly meanDailyReturnPct = computed(() => {
+    const m = this.model();
+    if (!m || m.metrics_history.length === 0) return null;
+    const budget = m.metrics_history[0].starting_budget ?? 100;
+    if (budget <= 0) return null;
+    const meanPnl = m.metrics_history.reduce((s, d) => s + d.day_pnl, 0) / m.metrics_history.length;
+    return (meanPnl / budget) * 100;
+  });
+
   readonly genColour = computed(() => {
     const m = this.model();
     if (!m) return GEN_COLOURS[0];

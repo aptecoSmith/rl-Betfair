@@ -381,7 +381,7 @@ class TestEvaluationBetsParquet:
             "price", "stake", "matched_size", "outcome", "pnl",
             "opportunity_window_s",
             "is_each_way", "each_way_divisor", "number_of_places",
-            "settlement_type", "effective_place_odds",
+            "settlement_type", "effective_place_odds", "starting_budget",
         }
         assert set(df.columns) == expected_cols
 
@@ -563,3 +563,74 @@ class TestPurgeDiscarded:
         assert m_garaged_disc not in purged
         assert store.get_model(m_active) is not None
         assert store.get_model(m_garaged_disc) is not None
+
+
+# ── Starting budget on eval records (Session 02) ─────────────────────────────
+
+
+class TestEvaluationDayBudget:
+    """Test starting_budget field on EvaluationDayRecord."""
+
+    def test_day_record_with_custom_budget(self, store: ModelStore):
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+        day = EvaluationDayRecord(
+            run_id=rid, date="2026-03-21", day_pnl=1.0, bet_count=3,
+            winning_bets=1, bet_precision=0.33, pnl_per_bet=0.33,
+            early_picks=0, profitable=True, starting_budget=10.0,
+        )
+        store.record_evaluation_day(day)
+        days = store.get_evaluation_days(rid)
+        assert len(days) == 1
+        assert days[0].starting_budget == pytest.approx(10.0)
+
+    def test_day_record_defaults_to_100(self, store: ModelStore):
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+        day = EvaluationDayRecord(
+            run_id=rid, date="2026-03-21", day_pnl=5.0, bet_count=5,
+            winning_bets=2, bet_precision=0.4, pnl_per_bet=1.0,
+            early_picks=0, profitable=True,
+        )
+        assert day.starting_budget == 100.0
+        store.record_evaluation_day(day)
+        days = store.get_evaluation_days(rid)
+        assert days[0].starting_budget == pytest.approx(100.0)
+
+    def test_bet_parquet_includes_budget(self, store: ModelStore):
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+        bet = EvaluationBetRecord(
+            run_id=rid, date="2026-03-21", market_id="1.2",
+            tick_timestamp="2026-03-21T14:00:00", seconds_to_off=300.0,
+            runner_id=123, runner_name="Test", action="back",
+            price=3.0, stake=5.0, matched_size=5.0,
+            outcome="won", pnl=10.0, starting_budget=10.0,
+        )
+        store.write_bet_logs_parquet(rid, "2026-03-21", [bet])
+        bets = store.get_evaluation_bets(rid)
+        assert len(bets) == 1
+        assert bets[0].starting_budget == pytest.approx(10.0)
+
+    def test_old_parquet_without_budget_defaults(self, store: ModelStore):
+        """Old parquets without starting_budget column → default 100.0."""
+        import pandas as pd
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-03-20", ["2026-03-21"])
+        run_dir = store.bet_logs_dir / rid
+        run_dir.mkdir(parents=True, exist_ok=True)
+        # Write a parquet without starting_budget column
+        df = pd.DataFrame([{
+            "run_id": rid, "date": "2026-03-21", "market_id": "1.2",
+            "tick_timestamp": "2026-03-21T14:00:00", "seconds_to_off": 300.0,
+            "runner_id": 123, "runner_name": "Test", "action": "back",
+            "price": 3.0, "stake": 5.0, "matched_size": 5.0,
+            "outcome": "won", "pnl": 10.0, "opportunity_window_s": 0.0,
+            "is_each_way": False, "each_way_divisor": None,
+            "number_of_places": None, "settlement_type": "standard",
+            "effective_place_odds": None,
+        }])
+        df.to_parquet(run_dir / "2026-03-21.parquet", index=False)
+        bets = store.get_evaluation_bets(rid)
+        assert len(bets) == 1
+        assert bets[0].starting_budget == pytest.approx(100.0)

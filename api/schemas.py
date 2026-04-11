@@ -17,6 +17,7 @@ class DayMetric(BaseModel):
     pnl_per_bet: float
     early_picks: int
     profitable: bool
+    starting_budget: float = 100.0
 
 
 class ScoreboardEntry(BaseModel):
@@ -33,6 +34,8 @@ class ScoreboardEntry(BaseModel):
     test_days: int
     profitable_days: int
     early_picks: int = 0
+    mean_daily_return_pct: float | None = None
+    recorded_budget: float | None = None
     garaged: bool = False
     garaged_at: str | None = None
     created_at: str | None = None
@@ -261,6 +264,7 @@ class BetExplorerResponse(BaseModel):
     total_pnl: float
     bet_precision: float
     pnl_per_bet: float
+    starting_budget: float | None = None
     bets: list[ExplorerBet]
 
 
@@ -388,6 +392,8 @@ class StartTrainingRequest(BaseModel):
     max_back_price: float | None = None
     max_lay_price: float | None = None
     min_seconds_before_off: int | None = None
+    # Per-run budget override — None = use config/plan default
+    starting_budget: float | None = None
 
 
 class ArchitectureInfo(BaseModel):

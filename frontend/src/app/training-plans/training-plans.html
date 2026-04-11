@@ -39,6 +39,9 @@
                 @if (plan.arch_mix) {
                   <div><span class="k">Arch mix</span> <span class="v">configured</span></div>
                 }
+                @if (plan.starting_budget != null) {
+                  <div><span class="k">Budget</span> <span class="v">£{{ plan.starting_budget }}/race</span></div>
+                }
                 @if (plan.seed != null) {
                   <div><span class="k">Seed</span> <span class="v">{{ plan.seed }}</span></div>
                 }
@@ -102,6 +105,7 @@
       <dl class="plan-fields">
         <dt>population_size</dt><dd>{{ plan.population_size }}</dd>
         <dt>architectures</dt><dd>{{ plan.architectures.join(', ') }}</dd>
+        <dt>budget</dt><dd>{{ plan.starting_budget != null ? '£' + plan.starting_budget + '/race' : '(default)' }}</dd>
         <dt>seed</dt><dd>{{ plan.seed ?? '(none)' }}</dd>
         <dt>min_arch_samples</dt><dd>{{ plan.min_arch_samples }}</dd>
         <dt>notes</dt><dd>{{ plan.notes || '(none)' }}</dd>
@@ -167,6 +171,12 @@
         <div class="form-field">
           <label>seed (optional)</label>
           <input type="number" [ngModel]="editorSeed()" (ngModelChange)="editorSeed.set($event)" data-testid="editor-seed" />
+        </div>
+        <div class="form-field">
+          <label>budget per race (optional)</label>
+          <input type="number" min="0.01" step="any" placeholder="default: 100"
+                 [ngModel]="editorStartingBudget()" (ngModelChange)="editorStartingBudget.set($event)"
+                 data-testid="editor-starting-budget" />
         </div>
       </div>
 

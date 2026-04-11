@@ -57,6 +57,12 @@
           {{ filteredStats().totalPnl | currency:'GBP':'symbol':'1.2-2' }}
         </span>
       </div>
+      @if (betData()?.starting_budget; as budget) {
+        <div class="stat">
+          <span class="stat-label">Budget</span>
+          <span class="stat-value">£{{ budget }}/race</span>
+        </div>
+      }
     </div>
 
     <!-- ── Filters ── -->

@@ -134,6 +134,11 @@ class TrainingPlan:
     #: typically want a lower LR distribution than LSTMs, which is why
     #: the override exists.
     arch_lr_ranges: dict[str, dict] | None = None
+    #: Optional per-plan budget override.  When set, the orchestrator
+    #: uses this value instead of ``config.yaml:training.starting_budget``.
+    #: Enables training at different budget levels (e.g. £10/race) while
+    #: keeping the global default for plans that don't specify one.
+    starting_budget: float | None = None
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:
@@ -150,6 +155,7 @@ class TrainingPlan:
             "notes": self.notes,
             "outcomes": [o.to_dict() for o in self.outcomes],
             "arch_lr_ranges": self.arch_lr_ranges,
+            "starting_budget": self.starting_budget,
         }
 
     @classmethod
@@ -171,6 +177,7 @@ class TrainingPlan:
                 GenerationOutcome.from_dict(o) for o in raw.get("outcomes", [])
             ],
             arch_lr_ranges=raw.get("arch_lr_ranges"),
+            starting_budget=raw.get("starting_budget"),
         )
 
     @staticmethod
@@ -185,6 +192,7 @@ class TrainingPlan:
         min_arch_samples: int = DEFAULT_MIN_ARCH_SAMPLES_PER_PLAN,
         notes: str = "",
         arch_lr_ranges: dict[str, dict] | None = None,
+        starting_budget: float | None = None,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -199,6 +207,7 @@ class TrainingPlan:
             min_arch_samples=min_arch_samples,
             notes=notes,
             arch_lr_ranges=arch_lr_ranges,
+            starting_budget=starting_budget,
         )
 
 

@@ -132,6 +132,11 @@ class TrainingOrchestrator:
         self.training_plan = training_plan
         self.plan_registry = plan_registry
 
+        # Per-plan starting_budget override: patch config so all
+        # downstream consumers (env, evaluator, scoreboard) pick it up.
+        if training_plan is not None and training_plan.starting_budget is not None:
+            config.setdefault("training", {})["starting_budget"] = training_plan.starting_budget
+
         # GPU auto-detection (config.training.device overrides auto-detect)
         config_device = config.get("training", {}).get("device")
         if device is not None:

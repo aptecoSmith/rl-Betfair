@@ -132,6 +132,18 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
     a "park this configuration so we can run it later" call.
     """
     reg = _registry(request)
+    # Validate starting_budget if provided
+    raw_budget = payload.get("starting_budget")
+    if raw_budget is not None:
+        try:
+            budget_val = float(raw_budget)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "starting_budget must be a number")
+        if budget_val <= 0:
+            raise HTTPException(422, "starting_budget must be positive")
+    else:
+        budget_val = None
+
     try:
         plan = TrainingPlan.new(
             name=str(payload.get("name", "unnamed")),
@@ -142,6 +154,7 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
             arch_mix=payload.get("arch_mix"),
             min_arch_samples=int(payload.get("min_arch_samples", 5)),
             notes=str(payload.get("notes", "")),
+            starting_budget=budget_val,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")

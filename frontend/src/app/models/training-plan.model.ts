@@ -55,6 +55,7 @@ export interface TrainingPlan {
   min_arch_samples: number;
   notes: string;
   outcomes: GenerationOutcome[];
+  starting_budget?: number | null;
 }
 
 export interface ValidationIssue {
@@ -85,6 +86,7 @@ export interface TrainingPlanPayload {
   seed?: number | null;
   min_arch_samples?: number;
   notes?: string;
+  starting_budget?: number | null;
 }
 
 export interface GeneCoverageEntry {

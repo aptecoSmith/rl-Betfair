@@ -43,6 +43,7 @@ def make_start_cmd(
     max_back_price: float | None = None,
     max_lay_price: float | None = None,
     min_seconds_before_off: int | None = None,
+    starting_budget: float | None = None,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -58,6 +59,7 @@ def make_start_cmd(
         "max_back_price": max_back_price,
         "max_lay_price": max_lay_price,
         "min_seconds_before_off": min_seconds_before_off,
+        "starting_budget": starting_budget,
     })
 
 

@@ -69,6 +69,7 @@ export class TrainingPlans implements OnInit {
   readonly editorMinArchSamples = signal(5);
   readonly editorNotes = signal('');
   readonly editorHpRanges = signal<Record<string, HpRangeOverride>>({});
+  readonly editorStartingBudget = signal<number | null>(null);
   readonly editorArchLrRanges = signal<Record<string, HpRangeOverride>>({});
   readonly editorBiasToggle = signal(false);
   readonly editorSaving = signal(false);
@@ -166,6 +167,7 @@ export class TrainingPlans implements OnInit {
     }
     this.editorHpRanges.set(ranges);
     this.editorArchLrRanges.set({});
+    this.editorStartingBudget.set(null);
     this.editorName.set('');
     this.editorErrors.set([]);
     this.editorTopError.set(null);
@@ -298,6 +300,7 @@ export class TrainingPlans implements OnInit {
       seed: this.editorSeed(),
       min_arch_samples: this.editorMinArchSamples(),
       notes: this.editorNotes(),
+      starting_budget: this.editorStartingBudget(),
     };
     this.editorSaving.set(true);
     this.api.createTrainingPlan(payload).subscribe({

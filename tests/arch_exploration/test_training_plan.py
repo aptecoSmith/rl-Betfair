@@ -331,3 +331,168 @@ def test_api_get_unknown_plan_returns_404(registry, hp_ranges):
     client = _make_test_app(registry, hp_ranges)
     resp = client.get("/api/training-plans/does-not-exist")
     assert resp.status_code == 404
+
+
+# -- 8. Per-plan starting_budget (Session 01) ---------------------------------
+
+
+def test_plan_with_budget_round_trips(registry, hp_ranges):
+    """Plan with starting_budget persists and reloads correctly."""
+    plan = TrainingPlan.new(
+        name="budget-test",
+        population_size=10,
+        architectures=["ppo_lstm_v1"],
+        hp_ranges=hp_ranges,
+        min_arch_samples=5,
+        starting_budget=10.0,
+    )
+    assert plan.starting_budget == 10.0
+
+    registry.save(plan)
+    reloaded = registry.load(plan.plan_id)
+    assert reloaded.starting_budget == 10.0
+
+
+def test_plan_without_budget_defaults_to_none(registry, hp_ranges):
+    """Plans that don't specify a budget have starting_budget=None."""
+    plan = TrainingPlan.new(
+        name="no-budget",
+        population_size=10,
+        architectures=["ppo_lstm_v1"],
+        hp_ranges=hp_ranges,
+        min_arch_samples=5,
+    )
+    assert plan.starting_budget is None
+
+    registry.save(plan)
+    reloaded = registry.load(plan.plan_id)
+    assert reloaded.starting_budget is None
+
+
+def test_plan_budget_in_to_dict(hp_ranges):
+    """to_dict() includes starting_budget."""
+    plan = TrainingPlan.new(
+        name="dict-test",
+        population_size=10,
+        architectures=["ppo_lstm_v1"],
+        hp_ranges=hp_ranges,
+        starting_budget=25.0,
+    )
+    d = plan.to_dict()
+    assert d["starting_budget"] == 25.0
+
+
+def test_plan_from_dict_without_budget_field(hp_ranges):
+    """Old JSON without starting_budget → defaults to None (backward compat)."""
+    plan = TrainingPlan.new(
+        name="old-plan",
+        population_size=10,
+        architectures=["ppo_lstm_v1"],
+        hp_ranges=hp_ranges,
+    )
+    d = plan.to_dict()
+    del d["starting_budget"]  # simulate old JSON
+    reloaded = TrainingPlan.from_dict(d)
+    assert reloaded.starting_budget is None
+
+
+def test_api_create_plan_with_budget(registry, hp_ranges):
+    """API accepts starting_budget and persists it."""
+    client = _make_test_app(registry, hp_ranges)
+    payload = {
+        "name": "budget-api",
+        "population_size": 10,
+        "architectures": ["ppo_lstm_v1", "ppo_time_lstm_v1"],
+        "hp_ranges": hp_ranges,
+        "min_arch_samples": 5,
+        "starting_budget": 10.0,
+    }
+    resp = client.post("/api/training-plans", json=payload)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["plan"]["starting_budget"] == 10.0
+
+    # Verify persisted
+    plan_id = resp.json()["plan"]["plan_id"]
+    reloaded = registry.load(plan_id)
+    assert reloaded.starting_budget == 10.0
+
+
+def test_api_rejects_negative_budget(registry, hp_ranges):
+    """API returns 422 for budget <= 0."""
+    client = _make_test_app(registry, hp_ranges)
+    payload = {
+        "name": "bad-budget",
+        "population_size": 10,
+        "architectures": ["ppo_lstm_v1"],
+        "hp_ranges": hp_ranges,
+        "starting_budget": -5.0,
+    }
+    resp = client.post("/api/training-plans", json=payload)
+    assert resp.status_code == 422
+
+
+def test_api_rejects_zero_budget(registry, hp_ranges):
+    """API returns 422 for budget == 0."""
+    client = _make_test_app(registry, hp_ranges)
+    payload = {
+        "name": "zero-budget",
+        "population_size": 10,
+        "architectures": ["ppo_lstm_v1"],
+        "hp_ranges": hp_ranges,
+        "starting_budget": 0,
+    }
+    resp = client.post("/api/training-plans", json=payload)
+    assert resp.status_code == 422
+
+
+def test_orchestrator_uses_plan_budget(hp_ranges):
+    """TrainingOrchestrator patches config when plan has starting_budget."""
+    import copy
+    config = {
+        "training": {
+            "starting_budget": 100.0,
+            "max_runners": 14,
+            "max_bets_per_race": 20,
+            "architecture": "ppo_lstm_v1",
+        },
+        "population": {"size": 5, "n_elite": 1, "selection_top_pct": 0.5, "mutation_rate": 0.1},
+        "hyperparameters": {"search_ranges": hp_ranges},
+        "paths": {"processed_data": "/tmp/fake"},
+    }
+    plan = TrainingPlan.new(
+        name="budget-orch",
+        population_size=5,
+        architectures=["ppo_lstm_v1"],
+        hp_ranges=hp_ranges,
+        starting_budget=10.0,
+    )
+    test_config = copy.deepcopy(config)
+    from training.run_training import TrainingOrchestrator
+    orch = TrainingOrchestrator(test_config, model_store=None, training_plan=plan)
+    assert orch.config["training"]["starting_budget"] == 10.0
+
+
+def test_orchestrator_uses_global_budget_when_plan_has_none(hp_ranges):
+    """TrainingOrchestrator keeps global budget when plan doesn't override."""
+    import copy
+    config = {
+        "training": {
+            "starting_budget": 100.0,
+            "max_runners": 14,
+            "max_bets_per_race": 20,
+            "architecture": "ppo_lstm_v1",
+        },
+        "population": {"size": 5, "n_elite": 1, "selection_top_pct": 0.5, "mutation_rate": 0.1},
+        "hyperparameters": {"search_ranges": hp_ranges},
+        "paths": {"processed_data": "/tmp/fake"},
+    }
+    plan = TrainingPlan.new(
+        name="no-budget-orch",
+        population_size=5,
+        architectures=["ppo_lstm_v1"],
+        hp_ranges=hp_ranges,
+    )
+    test_config = copy.deepcopy(config)
+    from training.run_training import TrainingOrchestrator
+    orch = TrainingOrchestrator(test_config, model_store=None, training_plan=plan)
+    assert orch.config["training"]["starting_budget"] == 100.0

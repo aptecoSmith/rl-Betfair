@@ -46,6 +46,8 @@ def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
         test_days=model.test_days,
         profitable_days=model.profitable_days,
         early_picks=model.total_early_picks,
+        mean_daily_return_pct=model.mean_daily_return_pct,
+        recorded_budget=model.recorded_budget,
         garaged=rec.garaged if rec else False,
         garaged_at=rec.garaged_at if rec else None,
         created_at=rec.created_at if rec else None,
@@ -121,6 +123,7 @@ def get_model_detail(model_id: str, request: Request):
                 pnl_per_bet=d.pnl_per_bet,
                 early_picks=d.early_picks,
                 profitable=d.profitable,
+                starting_budget=d.starting_budget,
             )
             for d in days
         ]

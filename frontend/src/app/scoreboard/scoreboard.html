@@ -22,6 +22,7 @@
           <th>Bet Precision</th>
           <th>Sharpe</th>
           <th>Mean Daily P&amp;L</th>
+          <th>Return %</th>
           <th>Early Picks</th>
           <th>Efficiency</th>
           <th>Trained</th>
@@ -54,6 +55,9 @@
             <td>{{ model.bet_precision | percent:'1.0-0' }}</td>
             <td>{{ model.sharpe | number:'1.2-2' }}</td>
             <td>{{ model.mean_daily_pnl | currency:'GBP':'symbol':'1.2-2' }}</td>
+            <td [class.positive]="(model.mean_daily_return_pct ?? 0) > 0" [class.negative]="(model.mean_daily_return_pct ?? 0) < 0">
+              {{ model.mean_daily_return_pct != null ? (model.mean_daily_return_pct >= 0 ? '+' : '') + (model.mean_daily_return_pct | number:'1.1-1') + '%' : '—' }}
+            </td>
             <td>{{ model.early_picks }}</td>
             <td>{{ model.efficiency | number:'1.3-3' }}</td>
             <td class="timestamp-col" [title]="model.created_at ?? ''">{{ formatTimestamp(model.created_at) }}</td>
@@ -63,7 +67,7 @@
         }
         @empty {
           <tr>
-            <td colspan="14" class="empty-state" data-testid="empty-state">No models found</td>
+            <td colspan="15" class="empty-state" data-testid="empty-state">No models found</td>
           </tr>
         }
       </tbody>

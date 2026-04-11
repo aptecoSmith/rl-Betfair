@@ -7,6 +7,7 @@ export interface DayMetric {
   pnl_per_bet: number;
   early_picks: number;
   profitable: boolean;
+  starting_budget?: number;
 }
 
 export interface ModelDetailResponse {

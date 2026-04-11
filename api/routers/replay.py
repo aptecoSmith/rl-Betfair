@@ -164,12 +164,17 @@ def get_model_bets(model_id: str, request: Request):
     bet_precision = round(winning / total_bets, 4) if total_bets > 0 else 0.0
     pnl_per_bet = round(total_pnl / total_bets, 4) if total_bets > 0 else 0.0
 
+    # Read recorded budget from evaluation day records
+    day_records = store.get_evaluation_days(run.run_id)
+    recorded_budget = day_records[0].starting_budget if day_records else None
+
     return BetExplorerResponse(
         model_id=model_id,
         total_bets=total_bets,
         total_pnl=total_pnl,
         bet_precision=bet_precision,
         pnl_per_bet=pnl_per_bet,
+        starting_budget=recorded_budget,
         bets=bets,
     )
 

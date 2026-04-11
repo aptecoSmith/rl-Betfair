@@ -27,5 +27,6 @@ export interface BetExplorerResponse {
   total_pnl: number;
   bet_precision: number;
   pnl_per_bet: number;
+  starting_budget?: number | null;
   bets: ExplorerBet[];
 }

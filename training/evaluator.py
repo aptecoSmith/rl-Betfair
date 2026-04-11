@@ -354,6 +354,7 @@ class Evaluator:
             pnl_per_bet=pnl_per_bet,
             early_picks=early_picks,
             profitable=day_pnl > 0,
+            starting_budget=env.starting_budget,
         )
 
         t_metrics_done = time.perf_counter()
@@ -408,6 +409,7 @@ class Evaluator:
                 number_of_places=bet.number_of_places,
                 settlement_type=bet.settlement_type,
                 effective_place_odds=bet.effective_place_odds,
+                starting_budget=env.starting_budget,
             ))
 
         # Compute opportunity window aggregates for the day record

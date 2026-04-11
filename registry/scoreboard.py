@@ -51,6 +51,8 @@ class ModelScore:
     total_early_picks: int = 0
     early_picks_per_day: float = 0.0
     mean_opportunity_window_s: float = 0.0
+    mean_daily_return_pct: float | None = None
+    recorded_budget: float | None = None
 
 
 class Scoreboard:
@@ -105,12 +107,22 @@ class Scoreboard:
         bet_precision = float(np.mean(precisions))
         pnl_per_bet = float(np.mean(pnl_per_bets))
 
+        # Use the recorded budget from day records (they should all be
+        # the same for a given model's evaluation run). Fall back to the
+        # global config budget for backward compat with old records that
+        # default to 100.0.
+        recorded_budget = days[0].starting_budget if days else self.starting_budget
+        budget_for_norm = recorded_budget if recorded_budget > 0 else self.starting_budget
+
         # Normalise components to roughly [-1, 1] range
         sharpe_norm = np.clip(sharpe / 3.0, -1.0, 1.0)  # sharpe >3 is exceptional
-        pnl_norm = np.clip(mean_pnl / self.starting_budget, -1.0, 1.0)
+        pnl_norm = np.clip(mean_pnl / budget_for_norm, -1.0, 1.0)
 
         # Normalise pnl_per_bet for efficiency calc
-        pnl_per_bet_norm = np.clip(pnl_per_bet / (self.starting_budget * 0.1), -1.0, 1.0)
+        pnl_per_bet_norm = np.clip(pnl_per_bet / (budget_for_norm * 0.1), -1.0, 1.0)
+
+        # Percentage return
+        mean_daily_return_pct = (mean_pnl / budget_for_norm) * 100
 
         efficiency = bet_precision * 0.5 + float(pnl_per_bet_norm) * 0.5
 
@@ -143,6 +155,8 @@ class Scoreboard:
             total_early_picks=total_early_picks,
             early_picks_per_day=early_picks_per_day,
             mean_opportunity_window_s=mean_opp_window,
+            mean_daily_return_pct=mean_daily_return_pct,
+            recorded_budget=recorded_budget,
         )
 
     def score_model(self, model_id: str) -> ModelScore | None:
@@ -191,12 +205,14 @@ class Scoreboard:
 
         A model is a discard candidate only if ALL of these are true:
         - win_rate < min_win_rate
-        - mean_daily_pnl < min_mean_pnl
+        - P&L below threshold (percentage-based if ``min_mean_return_pct``
+          is set, else falls back to absolute ``min_mean_pnl``)
         - sharpe < min_sharpe
         """
         dp = config.get("discard_policy", {})
         min_wr = dp.get("min_win_rate", 0.35)
         min_pnl = dp.get("min_mean_pnl", 0.0)
+        min_return_pct = dp.get("min_mean_return_pct")
         min_sharpe = dp.get("min_sharpe", -0.5)
 
         candidates = []
@@ -205,7 +221,12 @@ class Scoreboard:
             s = self.score_model(m.model_id)
             if s is None:
                 continue
-            if s.win_rate < min_wr and s.mean_daily_pnl < min_pnl and s.sharpe < min_sharpe:
+            # P&L check: prefer percentage threshold if configured
+            if min_return_pct is not None and s.mean_daily_return_pct is not None:
+                pnl_below = s.mean_daily_return_pct < min_return_pct
+            else:
+                pnl_below = s.mean_daily_pnl < min_pnl
+            if s.win_rate < min_wr and pnl_below and s.sharpe < min_sharpe:
                 candidates.append(m.model_id)
 
         return candidates

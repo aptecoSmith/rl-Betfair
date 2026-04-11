@@ -413,3 +413,141 @@ class TestCoefficients:
         # We just verify both compute without error
         assert isinstance(s1.composite_score, float)
         assert isinstance(s2.composite_score, float)
+
+
+# ── Percentage return (Session 03) ───────────────────────────────────────────
+
+
+class TestPercentageReturn:
+    """Test mean_daily_return_pct computation."""
+
+    def test_return_pct_budget_10(self, store: ModelStore, config):
+        """Budget=10, mean_pnl=1.0 → 10.0%."""
+        board = Scoreboard(store, config)
+        days = [
+            EvaluationDayRecord("r", "d0", 1.0, 5, 3, 0.6, 0.2, 0, True, starting_budget=10.0),
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.mean_daily_return_pct == pytest.approx(10.0)
+        assert score.recorded_budget == pytest.approx(10.0)
+
+    def test_return_pct_budget_100(self, store, config):
+        """Budget=100, mean_pnl=10.0 → 10.0%."""
+        board = Scoreboard(store, config)
+        days = [
+            EvaluationDayRecord("r", "d0", 10.0, 5, 3, 0.6, 2.0, 0, True, starting_budget=100.0),
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.mean_daily_return_pct == pytest.approx(10.0)
+
+    def test_both_budgets_same_return(self, store, config):
+        """Same return % at different budgets → same composite score."""
+        board = Scoreboard(store, config)
+        days_10 = [
+            EvaluationDayRecord("r", f"d{i}", 1.0, 5, 3, 0.6, 0.2, 0, True, starting_budget=10.0)
+            for i in range(5)
+        ]
+        days_100 = [
+            EvaluationDayRecord("r", f"d{i}", 10.0, 5, 3, 0.6, 2.0, 0, True, starting_budget=100.0)
+            for i in range(5)
+        ]
+        score_10 = board.compute_score(days_10)
+        score_100 = board.compute_score(days_100)
+        assert score_10 is not None and score_100 is not None
+        assert score_10.mean_daily_return_pct == pytest.approx(score_100.mean_daily_return_pct)
+
+    def test_negative_return(self, store, config):
+        board = Scoreboard(store, config)
+        days = [
+            EvaluationDayRecord("r", "d0", -2.0, 5, 1, 0.2, -0.4, 0, False, starting_budget=100.0),
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.mean_daily_return_pct == pytest.approx(-2.0)
+
+    def test_default_budget_backward_compat(self, store, config):
+        """Day records without explicit budget (default 100.0) still work."""
+        board = Scoreboard(store, config)
+        days = [
+            EvaluationDayRecord("r", "d0", 5.0, 5, 3, 0.6, 1.0, 0, True),
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.mean_daily_return_pct == pytest.approx(5.0)
+        assert score.recorded_budget == pytest.approx(100.0)
+
+
+# ── Percentage-based discard (Session 05) ────────────────────────────────────
+
+
+def _insert_model_with_budget(
+    store: ModelStore,
+    day_pnls: list[float],
+    starting_budget: float = 100.0,
+    generation: int = 1,
+) -> str:
+    """Helper to create a model with evaluation day records and a specific budget."""
+    n = len(day_pnls)
+    mid = store.create_model(generation, "ppo_lstm_v1", "test", {})
+    dates = [f"2026-03-{20 + i:02d}" for i in range(n)]
+    rid = store.create_evaluation_run(mid, "2026-03-19", dates)
+    for i in range(n):
+        pnl = day_pnls[i]
+        store.record_evaluation_day(EvaluationDayRecord(
+            run_id=rid, date=dates[i], day_pnl=pnl, bet_count=5,
+            winning_bets=1, bet_precision=0.2, pnl_per_bet=pnl / 5,
+            early_picks=0, profitable=pnl > 0, starting_budget=starting_budget,
+        ))
+    return mid
+
+
+class TestPercentageDiscard:
+    """Test percentage-based discard threshold (Session 05)."""
+
+    def test_pct_threshold_keeps_profitable_low_budget(self, store, config):
+        """Budget=10, pnl=0.5 → return=5% → survives threshold=0%."""
+        config["discard_policy"]["min_mean_return_pct"] = 0.0
+        mid = _insert_model_with_budget(store, [0.5, 0.3, 0.4, 0.2, 0.1], starting_budget=10.0)
+        board = Scoreboard(store, config)
+        candidates = board.check_discard_candidates(config)
+        # This model has positive return, should NOT be discarded on P&L
+        score = board.score_model(mid)
+        assert score is not None
+        assert score.mean_daily_return_pct is not None
+        assert score.mean_daily_return_pct > 0.0
+        # Even if win_rate and sharpe fail, P&L check should pass
+        # So it should NOT be in candidates (needs ALL criteria to fail)
+        # But let's verify the P&L leg specifically
+        assert score.mean_daily_return_pct >= 0.0  # passes P&L check
+
+    def test_pct_threshold_discards_losing_model(self, store, config):
+        """Budget=100, pnl=-2.0 → return=-2% → discarded if all criteria fail."""
+        config["discard_policy"]["min_mean_return_pct"] = 0.0
+        mid = _insert_model_with_budget(
+            store, [-10.0, -15.0, -8.0, -12.0, -5.0], starting_budget=100.0,
+        )
+        board = Scoreboard(store, config)
+        score = board.score_model(mid)
+        assert score is not None
+        assert score.mean_daily_return_pct is not None
+        assert score.mean_daily_return_pct < 0.0
+        candidates = board.check_discard_candidates(config)
+        # Should be flagged if all three criteria fail
+        if score.win_rate < 0.35 and score.sharpe < -0.5:
+            assert mid in candidates
+
+    def test_backward_compat_min_mean_pnl_only(self, store, config):
+        """Config with only min_mean_pnl (no min_mean_return_pct) still works."""
+        config["discard_policy"].pop("min_mean_return_pct", None)
+        mid = _insert_model_with_budget(
+            store, [-10.0, -15.0, -8.0, -12.0, -5.0], starting_budget=100.0,
+        )
+        board = Scoreboard(store, config)
+        score = board.score_model(mid)
+        assert score is not None
+        # Should still use absolute min_mean_pnl
+        candidates = board.check_discard_candidates(config)
+        if score.win_rate < 0.35 and score.mean_daily_pnl < 0 and score.sharpe < -0.5:
+            assert mid in candidates

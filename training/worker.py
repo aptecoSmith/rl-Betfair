@@ -178,6 +178,10 @@ class TrainingWorker:
             if len(architectures) == 1:
                 run_config.setdefault("training", {})["architecture"] = architectures[0]
 
+        # Starting budget override
+        if params.get("starting_budget") is not None:
+            run_config.setdefault("training", {})["starting_budget"] = params["starting_budget"]
+
         # Betting constraints
         bc_cfg = run_config.setdefault("training", {}).setdefault("betting_constraints", {})
         if params.get("max_back_price") is not None:

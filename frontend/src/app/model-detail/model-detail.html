@@ -226,6 +226,20 @@
             <span class="metric-label">Total Bets</span>
             <span class="metric-value">{{ totalBets() }}</span>
           </div>
+          @if (recordedBudget(); as budget) {
+            <div class="metric-card">
+              <span class="metric-label">Budget</span>
+              <span class="metric-value">£{{ budget }}/race</span>
+            </div>
+          }
+          @if (meanDailyReturnPct() !== null) {
+            <div class="metric-card">
+              <span class="metric-label">Mean Daily Return</span>
+              <span class="metric-value" [class.profit]="meanDailyReturnPct()! >= 0" [class.loss]="meanDailyReturnPct()! < 0">
+                {{ meanDailyReturnPct()! >= 0 ? '+' : '' }}{{ meanDailyReturnPct() | number:'1.1-1' }}%
+              </span>
+            </div>
+          }
         </div>
       </section>
     }
