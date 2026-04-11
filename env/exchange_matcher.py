@@ -76,12 +76,18 @@ class MatchResult:
     skipped_reason:
         Human-readable reason the bet was refused or partially filled,
         or ``None`` on a clean full fill.  Useful for logging / debug.
+    top_level_size:
+        Raw size on the best ladder level *before* self-depletion.
+        ``0.0`` when no valid level was found.  Diagnostic field —
+        compare against ``matched_stake`` to verify the fill didn't
+        exceed available liquidity.
     """
 
     matched_stake: float
     unmatched_stake: float
     average_price: float
     skipped_reason: str | None = None
+    top_level_size: float = 0.0
 
     @property
     def fully_matched(self) -> bool:
@@ -245,6 +251,7 @@ class ExchangeMatcher:
             return MatchResult(
                 0.0, stake, 0.0,
                 f"best price {top.price:.2f} exceeds max_price cap {max_price:.2f}",
+                top_level_size=top.size,
             )
 
         # Single-price fill: take up to the available size after subtracting
@@ -255,6 +262,7 @@ class ExchangeMatcher:
             return MatchResult(
                 0.0, stake, 0.0,
                 "self-depletion exhausted level",
+                top_level_size=top.size,
             )
         matched = min(stake, adjusted_size)
         unmatched = stake - matched
@@ -263,6 +271,7 @@ class ExchangeMatcher:
             unmatched_stake=unmatched,
             average_price=top.price,
             skipped_reason=None,
+            top_level_size=top.size,
         )
 
 
