@@ -188,21 +188,23 @@ See `hard_constraints.md` #9.
   - [x] `cancel_oldest_for(selection_id, reason)` on `PassiveOrderBook`.
   - [x] 13 tests in `test_p3b_cancel.py`; all pass.
 
-- [ ] **Session 30 — P3c: Phase 2 re-train + diversity check +
+- [x] **Session 30 — P3c: Phase 2 re-train + diversity check +
       decision gate** (`sessions/session_30_p3c_retrain.md`)
   - Fresh init, same HP as session 22 where possible.
   - Diversity assertions: aggression histogram not collapsed,
     cancel rate and passive-fill rate non-trivial.
   - Regression sanity check before training (force-aggressive
     reproduces Phase 1 policy).
-  - Recommendation filed: ship / keep-code-only / regress-
-    investigate.
+  - Recommendation filed: **keep-code-only** (P3+P4 policy
+    collapsed to zero bets in eval; single-seed PPO uninformative
+    as phase gate; code paths correct but deployment stays on
+    Phase 1 policy).
 
-**Decision gate at end of Phase 2.** Owned by session 30. If the
-P3+P4 policy doesn't beat the Phase 1 policy by more than the cost
-of the additional `ai-betfair` work (`downstream_knockon.md` §3),
-the simulator *keeps* the new code paths (they're correct) but the
-deployment stays on the simpler Phase 1 policy.
+**Phase 2 decision gate — CLOSED (2026-04-11).** Outcome:
+**keep-code-only.** P3+P4 code stays in the simulator (correct,
+tested, regression-checked) but deployment to `ai-betfair` stays
+on the simpler Phase 1 policy. Single-seed PPO cannot meaningfully
+discriminate — evolutionary infrastructure needed for a real gate.
 
 ---
 

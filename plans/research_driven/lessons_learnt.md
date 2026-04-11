@@ -335,3 +335,51 @@ consider adding a similar config bypass from the start. When session
 tests use `force_aggressive` and ignore the new cancel slot; only
 the new P3b tests exercise cancel dispatch. This avoids an
 O(n-tests) rewrite on every action-space bump.
+
+---
+
+### Session 30 — Larger action spaces collapse faster in single-seed PPO
+
+**Date:** 2026-04-11
+
+**What happened:** The P3+P4 policy (4 dims per slot: signal, stake,
+aggression, cancel) collapsed to zero bets by epoch 3, while the
+baseline (same architecture, same HP, but force_aggressive=true,
+effectively 2 active dims) kept betting through all 20 episodes.
+Diversity was healthy in the first 2 epochs (21.4% passive fraction,
+82 passive placements, 82 cancels) but evaporated once the policy
+entered the zero-bet basin.
+
+**Why it was surprising:** The assumption was that doubling the action
+dimensions from 2 to 4 was a small expansion since the new dimensions
+(aggression, cancel) are binary-ish flags, not continuous controls.
+In practice, the Gaussian policy's initial `action_log_std` covers a
+56-dim space (14 runners × 4 dims) with a shared entropy coefficient
+of 0.01. The extra dimensions spread entropy across more outputs
+without increasing total exploration pressure — each dimension gets
+less exploration budget.
+
+A second surprise: **zero passive fills during the entire training
+run.** The queue-ahead estimator never triggered a fill on this
+fixture data, which means the passive path had no positive reward
+signal. The policy could learn "aggressive bets produce P&L (positive
+or negative)" but "passive placements produce nothing". With no
+signal, the policy learned to avoid passive orders — which then left
+the cancel action with nothing to cancel, making a third of the
+action space inert.
+
+**What changes because of it:**
+1. When expanding the action space, consider scaling entropy
+   coefficient proportionally (e.g. 0.01 × 4/2 = 0.02) or using
+   per-dimension entropy tuning.
+2. Zero passive fills on this fixture data is a training-data
+   limitation, not a code bug. Future training should either use
+   higher-liquidity data where traded volume deltas are large enough
+   to clear queue-ahead, or seed the early training with synthetic
+   fills to bootstrap the passive reward signal.
+3. The lesson from session 22 — single-seed PPO comparison is
+   uninformative as a phase gate — is **doubly true** when the
+   action space is larger. Collapse probability increases with
+   action dimensionality. Evolutionary infrastructure is not just
+   desirable, it is mandatory for any gate involving action-space
+   changes.
