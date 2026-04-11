@@ -219,12 +219,11 @@ information in the obs vector doesn't hurt.
   - Parked: tick cadence check failed (6–10s median). Original
     ≤2s threshold was too narrow — see session 31b.
 
-- [ ] **Session 31b — P1e: order-book churn rate (revised)**
+- [x] **Session 31b — P1e: order-book churn rate (revised)**
       (`sessions/session_31b_p1e_book_churn.md`)
-  - Same feature, reframed for actual data cadence. Measures
-    "how much did the book rearrange between the ticks the agent
-    can act on?" — meaningful at any cadence, not just sub-second.
-  - No cadence gate. Same pattern as sessions 19–21.
+  - Per-tick normalised churn: how much the visible book rearranged
+    between consecutive ticks. OBS_SCHEMA_VERSION 4 → 5.
+  - 16 tests, all pass. RUNNER_DIM 114 → 115.
 
 ---
 

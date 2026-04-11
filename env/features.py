@@ -260,3 +260,69 @@ def compute_obi(back_levels, lay_levels, n: int) -> float:
     if total == 0.0:
         return 0.0
     return (back_sum - lay_sum) / total
+
+
+def compute_book_churn(
+    prev_back,
+    prev_lay,
+    curr_back,
+    curr_lay,
+    n: int,
+) -> float:
+    """Normalised churn between two consecutive ladder snapshots.
+
+    Measures how much the visible order book rearranged between two ticks.
+    Builds a ``{price: size}`` map for each snapshot (top-N per side), then
+    sums the absolute size differences across all prices present in either
+    snapshot.  Normalised by total current visible volume.
+
+    Parameters
+    ----------
+    prev_back, prev_lay:
+        Previous tick's ladder levels (objects with ``.price`` and ``.size``).
+    curr_back, curr_lay:
+        Current tick's ladder levels.
+    n:
+        Number of levels per side to include.
+
+    Returns
+    -------
+    float
+        Non-negative.  ``0.0`` when both snapshots are identical, when the
+        current book is empty, or when there is no previous snapshot (caller
+        should pass empty lists for prev).
+    """
+    def _to_map(levels, limit):
+        m: dict[float, float] = {}
+        for lv in levels[:limit]:
+            m[lv.price] = m.get(lv.price, 0.0) + lv.size
+        return m
+
+    prev_map = _to_map(prev_back, n)
+    prev_lay_map = _to_map(prev_lay, n)
+    # Merge prev sides — prefix prices to avoid back/lay collision at same price
+    prev_all: dict[tuple, float] = {}
+    for p, s in prev_map.items():
+        prev_all[("B", p)] = s
+    for p, s in prev_lay_map.items():
+        prev_all[("L", p)] = s
+
+    curr_map = _to_map(curr_back, n)
+    curr_lay_map = _to_map(curr_lay, n)
+    curr_all: dict[tuple, float] = {}
+    for p, s in curr_map.items():
+        curr_all[("B", p)] = s
+    for p, s in curr_lay_map.items():
+        curr_all[("L", p)] = s
+
+    # Sum absolute differences across all prices in either snapshot
+    all_keys = set(prev_all) | set(curr_all)
+    abs_delta = 0.0
+    for key in all_keys:
+        abs_delta += abs(curr_all.get(key, 0.0) - prev_all.get(key, 0.0))
+
+    # Normalise by total current visible volume
+    total_vol = sum(curr_all.values())
+    if total_vol == 0.0:
+        return 0.0
+    return abs_delta / total_vol

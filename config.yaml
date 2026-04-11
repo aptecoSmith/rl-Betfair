@@ -170,6 +170,7 @@ features:
   microprice_top_n: 3
   traded_delta_window_s: 60
   mid_drift_window_s: 60
+  book_churn_top_n: 3
 training_worker:
   host: localhost
   port: 8002

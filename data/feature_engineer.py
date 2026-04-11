@@ -39,6 +39,7 @@ from data.episode_builder import (
 )
 from env.features import (
     betfair_tick_size,
+    compute_book_churn,
     compute_mid_drift,
     compute_microprice,
     compute_obi,
@@ -726,6 +727,9 @@ class TickHistory:
     _windowed_history: dict = field(default_factory=dict, init=False, repr=False)
     _prev_total_matched: dict = field(default_factory=dict, init=False, repr=False)
     _windowed_maxlen: int = field(init=False, repr=False)
+    # ── P1e book-churn state (Session 31b) ──────────────────────────────────
+    # Per-runner previous-tick ladder: sid → (back_levels, lay_levels)
+    _prev_ladders: dict = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         max_w = max(self.traded_delta_window_s, self.mid_drift_window_s)
@@ -901,6 +905,7 @@ def engineer_tick(
     tick_history: TickHistory,
     obi_top_n: int = 3,
     microprice_top_n: int = 3,
+    book_churn_top_n: int = 3,
 ) -> dict[str, object]:
     """Compute ALL features for a single tick.
 
@@ -973,6 +978,22 @@ def engineer_tick(
             hist, tick_history.mid_drift_window_s, now_ts, betfair_tick_size,
         )
 
+        # ── P1e book churn (Session 31b) ───────────────────────────────────
+        prev = tick_history._prev_ladders.get(sid)
+        if prev is not None:
+            feats["book_churn"] = compute_book_churn(
+                prev[0], prev[1],
+                snap.available_to_back, snap.available_to_lay,
+                book_churn_top_n,
+            )
+        else:
+            feats["book_churn"] = 0.0
+        # Store current ladder for next tick's churn computation.
+        tick_history._prev_ladders[sid] = (
+            list(snap.available_to_back),
+            list(snap.available_to_lay),
+        )
+
         runners_out[sid] = feats
 
     # Update history (after reading velocity — velocity uses prior state)
@@ -994,6 +1015,7 @@ def engineer_race(
     microprice_top_n: int = 3,
     traded_delta_window_s: float = 60.0,
     mid_drift_window_s: float = 60.0,
+    book_churn_top_n: int = 3,
 ) -> list[dict[str, object]]:
     """Compute features for every tick in a race.
 
@@ -1012,6 +1034,7 @@ def engineer_race(
             tick, race, history,
             obi_top_n=obi_top_n,
             microprice_top_n=microprice_top_n,
+            book_churn_top_n=book_churn_top_n,
         ))
     return results
 
@@ -1022,6 +1045,7 @@ def engineer_day(
     microprice_top_n: int = 3,
     traded_delta_window_s: float = 60.0,
     mid_drift_window_s: float = 60.0,
+    book_churn_top_n: int = 3,
 ) -> list[list[dict[str, object]]]:
     """Compute features for every tick in every race of a day.
 
@@ -1036,6 +1060,7 @@ def engineer_day(
             microprice_top_n=microprice_top_n,
             traded_delta_window_s=traded_delta_window_s,
             mid_drift_window_s=mid_drift_window_s,
+            book_churn_top_n=book_churn_top_n,
         )
         elapsed = time.perf_counter() - t0
         logger.debug(

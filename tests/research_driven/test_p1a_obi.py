@@ -312,7 +312,7 @@ class TestEnvObi:
             VELOCITY_DIM,
         )
 
-        assert RUNNER_DIM == 114, f"Expected RUNNER_DIM=114 (after P1c), got {RUNNER_DIM}"
+        assert RUNNER_DIM == 115, f"Expected RUNNER_DIM=115 (after P1e), got {RUNNER_DIM}"
 
         cfg = _minimal_config()
         max_runners = cfg["training"]["max_runners"]

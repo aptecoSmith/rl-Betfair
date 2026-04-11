@@ -132,8 +132,9 @@ is real and gets fixed independently.
 ### What changes in the simulator
 
 New per-runner features in the observation vector: `obi_topN`,
-`weighted_microprice`, `traded_delta_T`, `mid_drift_T`. The
-checkpoint schema version bumps. Old checkpoints stop loading.
+`weighted_microprice`, `traded_delta_T`, `mid_drift_T`, `book_churn`
+(session 31b / P1e). The checkpoint schema version bumps (now v5).
+Old checkpoints stop loading.
 
 ### What `ai-betfair` must do
 

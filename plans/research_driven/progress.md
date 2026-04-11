@@ -65,6 +65,54 @@ Format:
 
 ---
 
+## 2026-04-11 — Session 31b — P1e: order-book churn rate (revised)
+
+**Shipped:**
+- `env/features.py` — `compute_book_churn(prev_back, prev_lay, curr_back,
+  curr_lay, n)` pure function. Builds `{(side, price): size}` maps for
+  each snapshot, sums absolute size differences across all prices in either
+  snapshot, normalised by total current visible volume. Returns 0.0 when
+  current book is empty.
+- `data/feature_engineer.py` — `TickHistory` gains `_prev_ladders` dict
+  (per-runner previous-tick ladder). `engineer_tick` computes `book_churn`
+  after P1c windowed features and stores the current ladder for the next
+  tick. `book_churn_top_n` param propagated through `engineer_race` and
+  `engineer_day`.
+- `env/betfair_env.py` — `OBS_SCHEMA_VERSION` bumped 4 → 5.
+  `RUNNER_KEYS` gains `"book_churn"` (RUNNER_DIM 114 → 115).
+  `_prev_ladders_rt` dict added for runtime debug-features computation;
+  reset at episode start and race boundaries. `_update_runtime_windowed`
+  stores current ladder into `_prev_ladders_rt`. `_get_info` computes
+  and exposes `book_churn` in `debug_features`.
+  Config key: `features.book_churn_top_n` (default 3).
+- `config.yaml` — `features.book_churn_top_n: 3` added.
+- Updated schema version assertions in `test_p1a_obi.py`,
+  `test_p1b_microprice.py`, `test_p1c_windowed.py`.
+
+**Tests added:**
+- `tests/research_driven/test_p1e_book_churn.py` — 16 tests across
+  9 classes: identical ladders (2), size increased (1), level
+  disappeared (1), level appeared (2), empty book (3), respects N (2),
+  env smoke (1), env determinism (1), schema-bump refuses v4 (3).
+
+**Did not ship:**
+- Windowed average of book_churn — intentionally deferred per session
+  spec. Start with per-tick value; windowing is a follow-up if needed.
+
+**Notes for next session:**
+- All existing checkpoints are invalidated by the v5 schema bump.
+- The feature is per-tick (not windowed). If the network struggles
+  to use the raw per-tick signal, a windowed average using the
+  session 21 pattern can be added as a follow-up.
+
+**Cross-repo follow-ups:**
+- `ai-betfair` needs `compute_book_churn` vendored via `rl_bridge`
+  and wired into the live obs builder (same pattern as OBI /
+  microprice / traded_delta / mid_drift). Tracked in
+  `downstream_knockon.md`.
+
+---
+
 ## 2026-04-11 — Session 29 — P3b: cancel action
 
 **Shipped:**

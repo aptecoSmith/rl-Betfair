@@ -42,6 +42,7 @@ from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
 from env.features import (
     betfair_tick_size,
+    compute_book_churn,
     compute_mid_drift,
     compute_microprice,
     compute_obi,
@@ -60,7 +61,8 @@ logger = logging.getLogger(__name__)
 #   Version 2 — added obi_topN per runner (session 19 / P1a)
 #   Version 3 — added weighted_microprice per runner (session 20 / P1b)
 #   Version 4 — added traded_delta, mid_drift per runner (session 21 / P1c)
-OBS_SCHEMA_VERSION: int = 4
+#   Version 5 — added book_churn per runner (session 31b / P1e)
+OBS_SCHEMA_VERSION: int = 5
 
 # ── Action schema version ────────────────────────────────────────────────────
 # Bump this integer whenever the action vector layout changes.
@@ -167,6 +169,8 @@ RUNNER_KEYS: list[str] = [
     # ── P1c features (2, Session 21) ──
     "traded_delta",
     "mid_drift",
+    # ── P1e features (1, Session 31b) ──
+    "book_churn",
 ]
 
 AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
@@ -175,7 +179,7 @@ POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
-RUNNER_DIM = len(RUNNER_KEYS)             # 114 (was 112, +2 traded_delta/mid_drift P1c)
+RUNNER_DIM = len(RUNNER_KEYS)             # 115 (was 114, +1 book_churn P1e)
 
 # Action thresholds
 _BACK_THRESHOLD = 0.33
@@ -357,6 +361,7 @@ class BetfairEnv(gymnasium.Env):
         self._microprice_top_n: int = feat_cfg.get("microprice_top_n", 3)
         self._traded_delta_window_s: float = float(feat_cfg.get("traded_delta_window_s", 60.0))
         self._mid_drift_window_s: float = float(feat_cfg.get("mid_drift_window_s", 60.0))
+        self._book_churn_top_n: int = feat_cfg.get("book_churn_top_n", 3)
 
         # Reward parameters — start from shared config, then overlay any
         # per-agent overrides passed in by the trainer. The shared config
@@ -441,6 +446,10 @@ class BetfairEnv(gymnasium.Env):
         self._windowed_maxlen: int = _wmax
         self._windowed_history: dict = {}   # sid → deque[(ts, mp, vol_delta)]
         self._prev_total_matched_rt: dict = {}  # sid → float
+        # ── P1e book-churn runtime state (Session 31b) ──────────────────────
+        # Per-runner previous-tick ladder snapshot for computing churn.
+        # Value: (prev_back_levels, prev_lay_levels) — raw level lists.
+        self._prev_ladders_rt: dict = {}  # sid → (back_levels, lay_levels)
 
     # ── Pre-computation ───────────────────────────────────────────────────
 
@@ -473,6 +482,7 @@ class BetfairEnv(gymnasium.Env):
                     microprice_top_n=self._microprice_top_n,
                     traded_delta_window_s=self._traded_delta_window_s,
                     mid_drift_window_s=self._mid_drift_window_s,
+                    book_churn_top_n=self._book_churn_top_n,
                 )
             if feature_cache is not None:
                 feature_cache[self.day.date] = day_features
@@ -648,11 +658,23 @@ class BetfairEnv(gymnasium.Env):
                 mid_drift = compute_mid_drift(
                     hist, self._mid_drift_window_s, now_ts, betfair_tick_size,
                 )
+                # P1e: book churn — how much the visible book changed since last tick.
+                prev = self._prev_ladders_rt.get(runner.selection_id)
+                if prev is not None:
+                    book_churn = compute_book_churn(
+                        prev[0], prev[1],
+                        runner.available_to_back, runner.available_to_lay,
+                        self._book_churn_top_n,
+                    )
+                else:
+                    book_churn = 0.0
+
                 debug_features[runner.selection_id] = {
                     "obi_topN": obi,
                     "weighted_microprice": mp,
                     "traded_delta": traded_delta,
                     "mid_drift": mid_drift,
+                    "book_churn": book_churn,
                 }
 
         return {
@@ -709,6 +731,8 @@ class BetfairEnv(gymnasium.Env):
         # P1c runtime windowed history — reset to empty at episode start.
         self._windowed_history = {}
         self._prev_total_matched_rt = {}
+        # P1e book-churn — reset prev ladders at episode start.
+        self._prev_ladders_rt = {}
 
         if self._total_races == 0:
             return self._terminal_obs(), self._get_info()
@@ -763,6 +787,7 @@ class BetfairEnv(gymnasium.Env):
                 self._bet_times = {}
                 self._windowed_history = {}
                 self._prev_total_matched_rt = {}
+                self._prev_ladders_rt = {}
 
         # 4. Check if episode is over
         terminated = self._race_idx >= self._total_races
@@ -819,6 +844,11 @@ class BetfairEnv(gymnasium.Env):
             vol_delta = 0.0 if prev is None else max(0.0, snap.total_matched - prev)
             self._prev_total_matched_rt[sid] = snap.total_matched
             self._windowed_history[sid].append((now_ts, mp, vol_delta))
+            # P1e: store current ladder as prev for next tick's book-churn computation.
+            self._prev_ladders_rt[sid] = (
+                list(snap.available_to_back),
+                list(snap.available_to_lay),
+            )
 
     # ── Action processing ─────────────────────────────────────────────────
 

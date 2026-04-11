@@ -47,6 +47,14 @@ Format per row:
   - Acceptance: open one race, confirm `traded_delta` stays near zero on quiet ticks
     and spikes around visible volume surges; `mid_drift` tracks the microprice trajectory.
 
+- [ ] **Show `book_churn` in the per-runner panel** (source: session 31b / P1e,
+      `env/betfair_env.py` `_get_info` → `debug_features`)
+  - `info["debug_features"][selection_id]["book_churn"]` is now populated every
+    tick. Wire it into the per-runner row in the replay UI.
+  - Acceptance: open a race, find a sequence of ticks where the visible book
+    visibly rearranges (prices appearing/disappearing, sizes changing); confirm
+    `book_churn` is higher on those ticks than on quiet ticks.
+
 - [ ] **Show spread cost as a separate line in per-race shaped
       reward** (source: session 23 / P2, `env/betfair_env.py` → `info["spread_cost"]`)
   - `info["spread_cost"]` is now populated every episode (cumulative, ≤ 0).
