@@ -383,3 +383,44 @@ action space inert.
    action dimensionality. Evolutionary infrastructure is not just
    desirable, it is mandatory for any gate involving action-space
    changes.
+
+---
+
+## 2026-04-11 — Session 31 — Historical tick cadence too coarse for book-churn feature
+
+**What happened:** The P1e session required a tick-cadence check
+before writing any code. Three sample races were measured:
+
+| Date | Market ID | Venue | Ticks | Median gap | Mean gap |
+|---|---|---|---|---|---|
+| 2026-03-31 | 1.256008422 | Bangor-on-Dee | 274 | 7.17s | 8.21s |
+| 2026-04-01 | 1.256051607 | Wincanton | 248 | 10.14s | 9.79s |
+| 2026-04-02 | 1.256095748 | Chepstow | 349 | 6.42s | 6.95s |
+
+All three have median inter-tick gaps of 6–10 seconds — well above
+the 2-second threshold set in the session plan. At this cadence,
+most add/cancel cycles (which typically complete in 1–3 seconds on
+live Betfair) happen entirely between ticks and are invisible in
+the data. The churn rate would be near-zero everywhere, measuring
+noise rather than signal.
+
+**Why it was surprising:** The tick cadence was not previously
+measured explicitly. The data pipeline subscribes to the Betfair
+streaming API, which can push updates at sub-second intervals on
+active markets. The gap is not in the API — it's in the recording
+cadence of the data collector (StreamRecorder), which batches
+snapshots at a lower frequency. This means the parquet has enough
+resolution for *price-level* changes (which persist across ticks)
+but not for *transient order flow* (which comes and goes between
+ticks).
+
+**What changes because of it:**
+- Session 31 is **parked** — no code changes, no schema bump, no
+  feature added.
+- The churn feature remains valid in principle for a live system
+  that can observe the full streaming tick-by-tick order book. If
+  the data collector is upgraded to higher-frequency recording in
+  the future, this session can be un-parked.
+- Any future P1 feature that depends on sub-tick order flow (e.g.
+  order-arrival rate, cancellation rate) faces the same limitation
+  and should run the cadence check first.

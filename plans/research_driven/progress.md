@@ -34,6 +34,37 @@ Format:
 
 ---
 
+## 2026-04-11 — Session 31 — P1e: order-book churn rate (PARKED)
+
+**Shipped:**
+- Nothing — session parked at step 1 (tick cadence check).
+
+**Tests added:**
+- None.
+
+**Did not ship:**
+- `compute_book_churn()` in `env/features.py` — not written. The
+  historical parquet tick cadence (6–10s median inter-tick gaps
+  across 3 sample races) is too coarse to resolve the sub-tick
+  order flow the feature was designed to capture. Writing the
+  feature would produce near-zero values everywhere, measuring
+  noise rather than the intended signal (add/cancel cycles that
+  complete in 1–3 seconds between ticks).
+
+**Notes for next session:**
+- The churn feature is valid in principle for a live system with
+  full streaming tick-by-tick data. If the data collector
+  (StreamRecorder) is upgraded to higher-frequency recording, this
+  session can be un-parked.
+- Any future P1 feature that depends on sub-tick order flow faces
+  the same limitation — run the cadence check first.
+- No schema bump, no obs changes, no code changes.
+
+**Cross-repo follow-ups:**
+- None.
+
+---
+
 ## 2026-04-11 — Session 29 — P3b: cancel action
 
 **Shipped:**

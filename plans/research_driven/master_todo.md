@@ -214,16 +214,15 @@ Additional obs features that don't change the action space. Cheap
 and worth adding regardless of Phase 2 retrain results — more
 information in the obs vector doesn't hurt.
 
-- [ ] **Session 31 — P1e: order-book churn rate**
+- [x] **Session 31 — P1e: order-book churn rate (PARKED)**
       (`sessions/session_31_p1e_book_churn.md`)
-  - The one research signal we didn't build: rate of order-book
-    adds/cancels (unstable liquidity, fake walls, market-maker
-    repositioning).
-  - Gated on tick cadence check only: if the parquet has > 2s
-    between ticks on average, the feature can't resolve the
-    signal and should be parked.
-  - Same pattern as sessions 19–21 (pure function in
-    `features.py`, state on env, schema bump).
+  - **Parked:** tick cadence check failed — median inter-tick gaps
+    of 6–10s across 3 sample races, well above the 2s threshold.
+    The feature can't resolve sub-tick order flow at this recording
+    cadence. No code changes, no schema bump.
+  - Can be un-parked if the data collector is upgraded to
+    higher-frequency recording.
+  - See `lessons_learnt.md` 2026-04-11 entry.
 
 ---
 
