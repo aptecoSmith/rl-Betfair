@@ -55,6 +55,7 @@ from agents.population_manager import (
 )
 from agents.ppo_trainer import PPOTrainer, TrainingStats
 from data.episode_builder import Day
+from env.betfair_env import ACTION_SCHEMA_VERSION, OBS_SCHEMA_VERSION
 from registry.model_store import ModelStore
 from registry.scoreboard import ModelScore, Scoreboard
 from training.evaluator import Evaluator
@@ -340,7 +341,9 @@ class TrainingOrchestrator:
                             survivor_agents.append(agent)
                         except Exception:
                             logger.warning(
-                                "Could not load survivor %s, skipping", mid,
+                                "Could not load survivor %s, skipping",
+                                mid,
+                                exc_info=True,
                             )
                 agents = survivor_agents + gen_result.children
             else:
@@ -489,6 +492,8 @@ class TrainingOrchestrator:
                 if self.model_store is not None:
                     self.model_store.save_weights(
                         agent.model_id, agent.policy.state_dict(),
+                        obs_schema_version=OBS_SCHEMA_VERSION,
+                        action_schema_version=ACTION_SCHEMA_VERSION,
                     )
 
                 outer_tracker.tick()

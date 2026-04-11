@@ -251,6 +251,27 @@ async def purge_discarded(request: Request):
     return AdminDeleteResponse(deleted=bool(purged), detail=detail)
 
 
+@router.post("/purge-incompatible", response_model=AdminDeleteResponse)
+async def purge_incompatible(request: Request, dry_run: bool = False):
+    """Delete all active models whose obs_schema_version != current.
+
+    Pass ``?dry_run=true`` to see which models *would* be deleted without
+    actually removing them.
+    """
+    from env.betfair_env import OBS_SCHEMA_VERSION
+
+    store = request.app.state.store
+    ids = store.purge_incompatible(OBS_SCHEMA_VERSION, dry_run=dry_run)
+    action = "Would purge" if dry_run else "Purged"
+    detail = (
+        f"{action} {len(ids)} incompatible model(s) (obs_schema != {OBS_SCHEMA_VERSION})"
+        if ids
+        else f"No incompatible models found (all match obs_schema {OBS_SCHEMA_VERSION})"
+    )
+    logger.info(detail)
+    return AdminDeleteResponse(deleted=bool(ids), detail=detail)
+
+
 def _get_all_evaluation_runs(store, model_id: str) -> list[dict]:
     """Get all evaluation runs for a model (not just latest)."""
     conn = store._get_conn()

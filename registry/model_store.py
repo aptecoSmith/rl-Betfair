@@ -375,6 +375,82 @@ class ModelStore:
                 purged.append(mid)
         return purged
 
+    def purge_incompatible(
+        self,
+        required_obs_version: int,
+        *,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """Delete all active models whose weights don't match *required_obs_version*.
+
+        Checks the ``obs_schema_version`` key in each checkpoint without fully
+        loading the weights into a policy.  Models with missing weights, missing
+        schema keys, or a version mismatch are considered incompatible.
+
+        Garaged models are **skipped** (un-garage them first if you want them
+        purged).
+
+        Returns list of deleted (or would-be-deleted if *dry_run*) model IDs.
+        """
+        import torch
+
+        models = self.list_models(status="active")
+        incompatible: list[str] = []
+        for m in models:
+            if m.garaged:
+                continue
+            if not m.weights_path or not Path(m.weights_path).exists():
+                incompatible.append(m.model_id)
+                continue
+            try:
+                raw = torch.load(m.weights_path, weights_only=True)
+                version = raw.get("obs_schema_version") if isinstance(raw, dict) else None
+                if version != required_obs_version:
+                    incompatible.append(m.model_id)
+            except Exception:
+                incompatible.append(m.model_id)
+
+        if dry_run:
+            return incompatible
+
+        deleted: list[str] = []
+        for mid in incompatible:
+            if self.delete_model(mid):
+                deleted.append(mid)
+        return deleted
+
+    def stamp_weights(
+        self,
+        model_id: str,
+        obs_schema_version: int,
+        action_schema_version: int | None = None,
+    ) -> bool:
+        """Add schema-version metadata to an existing checkpoint in place.
+
+        If the checkpoint already has the correct version, this is a no-op.
+        Returns True if the file was rewritten.
+        """
+        import torch
+
+        model = self.get_model(model_id)
+        if model is None or not model.weights_path:
+            return False
+        p = Path(model.weights_path)
+        if not p.exists():
+            return False
+
+        raw = torch.load(str(p), weights_only=True)
+        if isinstance(raw, dict) and raw.get("obs_schema_version") == obs_schema_version:
+            return False  # already stamped
+
+        # Extract bare weights
+        weights = raw["weights"] if isinstance(raw, dict) and "weights" in raw else raw
+        payload: dict = {"weights": weights, "obs_schema_version": obs_schema_version}
+        if action_schema_version is not None:
+            payload["action_schema_version"] = action_schema_version
+        torch.save(payload, str(p))
+        return True
+
     # -- Weights I/O ----------------------------------------------------------
 
     def save_weights(
