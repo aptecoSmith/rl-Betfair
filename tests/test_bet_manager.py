@@ -723,6 +723,7 @@ class TestEachWaySettlementCorrected:
         return mgr.settle_race(
             self.WINNERS, market_id="m1", commission=commission,
             each_way_divisor=4.0, winner_selection_id=self.WINNER_ID,
+            number_of_places=3,
         )
 
     # ── 1. Back bet, horse wins ─────────────────────────────────────────
@@ -736,6 +737,13 @@ class TestEachWaySettlementCorrected:
         assert mgr.bets[0].outcome is BetOutcome.WON
         # Budget: 100 - 10 (placement) + 10 (stake back) + 53.4375
         assert mgr.budget == pytest.approx(153.4375)
+        # EW metadata
+        bet = mgr.bets[0]
+        assert bet.is_each_way is True
+        assert bet.each_way_divisor == 4.0
+        assert bet.number_of_places == 3
+        assert bet.settlement_type == "ew_winner"
+        assert bet.effective_place_odds == pytest.approx(3.25)
 
     # ── 2. Back bet, horse places ───────────────────────────────────────
 
@@ -746,6 +754,11 @@ class TestEachWaySettlementCorrected:
         # Place leg: 5 × 2.25 × 0.95 = 10.6875
         assert pnl == pytest.approx(5.6875)
         assert mgr.bets[0].outcome is BetOutcome.WON
+        # EW metadata
+        bet = mgr.bets[0]
+        assert bet.is_each_way is True
+        assert bet.settlement_type == "ew_placed"
+        assert bet.effective_place_odds == pytest.approx(3.25)
 
     # ── 3. Back bet, horse unplaced ─────────────────────────────────────
 
@@ -754,6 +767,13 @@ class TestEachWaySettlementCorrected:
         pnl = self._settle(mgr)
         assert pnl == pytest.approx(-10.0)
         assert mgr.bets[0].outcome is BetOutcome.LOST
+        # EW metadata — unplaced
+        bet = mgr.bets[0]
+        assert bet.is_each_way is True
+        assert bet.each_way_divisor == 4.0
+        assert bet.number_of_places == 3
+        assert bet.settlement_type == "ew_unplaced"
+        assert bet.effective_place_odds is None
 
     # ── 4. Lay bet, horse wins ──────────────────────────────────────────
 
@@ -825,6 +845,47 @@ class TestEachWaySettlementCorrected:
         pnl = self._settle(mgr, commission=0.0)
         # Win leg: -5. Place leg: 5 × 2.25 = 11.25
         assert pnl == pytest.approx(6.25)
+
+    # ── 11. Non-EW bets have standard metadata ─────────────────────────
+
+    def test_non_ew_bets_have_standard_metadata(self):
+        """Non-EW settlement should leave is_each_way=False and
+        settlement_type='standard'."""
+        mgr = self._mgr_with_back(1001)
+        # Settle without EW params → standard win settlement
+        mgr.settle_race({1001}, market_id="m1", commission=0.05)
+        bet = mgr.bets[0]
+        assert bet.is_each_way is False
+        assert bet.each_way_divisor is None
+        assert bet.number_of_places is None
+        assert bet.settlement_type == "standard"
+        assert bet.effective_place_odds is None
+
+    def test_non_ew_loser_has_standard_metadata(self):
+        """Non-EW losing bet should also have standard metadata."""
+        mgr = self._mgr_with_back(9999)
+        mgr.settle_race({1001}, market_id="m1", commission=0.05)
+        bet = mgr.bets[0]
+        assert bet.is_each_way is False
+        assert bet.settlement_type == "standard"
+
+    # ── 12. Lay bets have EW metadata ──────────────────────────────────
+
+    def test_lay_winner_ew_metadata(self):
+        mgr = self._mgr_with_lay(1001)
+        self._settle(mgr)
+        bet = mgr.bets[0]
+        assert bet.is_each_way is True
+        assert bet.settlement_type == "ew_winner"
+        assert bet.effective_place_odds == pytest.approx(3.25)
+
+    def test_lay_unplaced_ew_metadata(self):
+        mgr = self._mgr_with_lay(9999)
+        self._settle(mgr)
+        bet = mgr.bets[0]
+        assert bet.is_each_way is True
+        assert bet.settlement_type == "ew_unplaced"
+        assert bet.effective_place_odds is None
 
 
 # ── Commission tests ────────────────────────────────────────────────────────

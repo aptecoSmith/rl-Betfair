@@ -1016,6 +1016,7 @@ class BetfairEnv(gymnasium.Env):
                 commission=self._commission,
                 each_way_divisor=race.each_way_divisor,
                 winner_selection_id=race.winner_selection_id,
+                number_of_places=race.number_of_each_way_places,
             )
 
         # Accumulate day P&L (sum of per-race P&Ls)

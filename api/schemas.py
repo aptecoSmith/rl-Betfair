@@ -247,6 +247,12 @@ class ExplorerBet(BaseModel):
     matched_size: float
     outcome: str
     pnl: float
+    # EW metadata
+    is_each_way: bool = False
+    each_way_divisor: float | None = None
+    number_of_places: int | None = None
+    settlement_type: str = "standard"
+    effective_place_odds: float | None = None
 
 
 class BetExplorerResponse(BaseModel):

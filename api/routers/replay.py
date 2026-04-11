@@ -119,6 +119,11 @@ def get_model_bets(model_id: str, request: Request):
             matched_size=b.matched_size,
             outcome=b.outcome,
             pnl=b.pnl,
+            is_each_way=b.is_each_way,
+            each_way_divisor=b.each_way_divisor,
+            number_of_places=b.number_of_places,
+            settlement_type=b.settlement_type,
+            effective_place_odds=b.effective_place_odds,
         )
         for b in bet_records
     ]

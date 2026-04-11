@@ -66,6 +66,12 @@ class Bet:
     tick_index: int = -1  # index into Race.ticks where bet was placed (-1 = not recorded)
     ltp_at_placement: float = 0.0  # runner's last traded price when the bet was placed (Session 23 — used by spread_cost shaping)
     available_at_price: float = 0.0  # raw size at fill price before self-depletion (diagnostic — verify matched_stake ≤ this)
+    # EW metadata — populated by settle_race() for each-way races
+    is_each_way: bool = False
+    each_way_divisor: float | None = None        # e.g. 4.0 for 1/4 odds
+    number_of_places: int | None = None          # e.g. 3
+    settlement_type: str = "standard"            # "standard" | "ew_winner" | "ew_placed" | "ew_unplaced"
+    effective_place_odds: float | None = None    # (price-1)/divisor + 1, for display
 
     @property
     def liability(self) -> float:
@@ -711,6 +717,7 @@ class BetManager:
         commission: float = 0.0,
         each_way_divisor: float | None = None,
         winner_selection_id: int | None = None,
+        number_of_places: int | None = None,
     ) -> float:
         """Settle all unsettled bets for a race and return the race P&L.
 
@@ -730,6 +737,8 @@ class BetManager:
                 each_way_divisor is set).  Distinguishes winner (both
                 legs pay) from placed-only (place leg pays, win leg
                 loses).
+            number_of_places: Number of EW places paid (e.g. 3).
+                Stored on each settled Bet for downstream display.
 
         Returns:
             Net P&L for the settled bets (after commission).
@@ -798,10 +807,21 @@ class BetManager:
 
                     self._open_liability -= liability
 
+                bet.is_each_way = True
+                bet.each_way_divisor = each_way_divisor
+                bet.number_of_places = number_of_places
+                bet.effective_place_odds = (bet.average_price - 1.0) / each_way_divisor + 1.0
+                bet.settlement_type = "ew_winner" if is_winner else "ew_placed"
                 bet.outcome = BetOutcome.WON if bet.pnl > 0 else BetOutcome.LOST
 
             else:
                 # ── Non-EW path OR unplaced runner ───────────────────
+                if ew:
+                    bet.is_each_way = True
+                    bet.each_way_divisor = each_way_divisor
+                    bet.number_of_places = number_of_places
+                    bet.settlement_type = "ew_unplaced"
+
                 if bet.side is BetSide.BACK:
                     if in_winners:
                         gross_profit = bet.matched_stake * (bet.average_price - 1.0)

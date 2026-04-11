@@ -102,6 +102,12 @@ class EvaluationBetRecord:
     outcome: str  # "won" | "lost" | "void"
     pnl: float
     opportunity_window_s: float = 0.0
+    # EW metadata
+    is_each_way: bool = False
+    each_way_divisor: float | None = None
+    number_of_places: int | None = None
+    settlement_type: str = "standard"
+    effective_place_odds: float | None = None
 
 
 @dataclass

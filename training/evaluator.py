@@ -403,6 +403,11 @@ class Evaluator:
                 outcome=bet.outcome.value,
                 pnl=bet.pnl,
                 opportunity_window_s=opp_window,
+                is_each_way=bet.is_each_way,
+                each_way_divisor=bet.each_way_divisor,
+                number_of_places=bet.number_of_places,
+                settlement_type=bet.settlement_type,
+                effective_place_odds=bet.effective_place_odds,
             ))
 
         # Compute opportunity window aggregates for the day record
