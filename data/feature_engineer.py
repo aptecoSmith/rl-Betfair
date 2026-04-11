@@ -579,9 +579,8 @@ def market_tick_features(
         divisor = float(race.each_way_divisor)
         feats["each_way_divisor"] = divisor
         # Place odds as a fraction of win odds (1/4 = 0.25, 1/5 = 0.20).
-        # Betfair EACH_WAY markets already quote the place-adjusted price,
-        # so this is informational for the agent rather than used in
-        # settlement — but it lets the policy reason about relative value.
+        # Place odds fraction — the agent can use this to reason about EW
+        # value. Settlement applies this divisor via BetManager.settle_race().
         feats["place_odds_fraction"] = 1.0 / divisor
         feats["has_each_way_terms"] = 1.0
     else:

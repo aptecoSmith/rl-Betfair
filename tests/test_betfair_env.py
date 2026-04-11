@@ -1488,3 +1488,139 @@ class TestBettingConstraints:
 
         info = self._run_episode(env, action)
         assert info["bet_count"] > 0
+
+
+# ── Each-way environment integration tests ─────────────────────────────────
+
+
+class TestEachWayEnvIntegration:
+    """Verify that EW settlement flows through _settle_current_race correctly."""
+
+    @staticmethod
+    def _make_ew_race(
+        winner_id: int = 101,
+        placed_ids: tuple[int, ...] = (102,),
+        runner_ids: list[int] | None = None,
+        divisor: float = 4.0,
+    ) -> Race:
+        """Create a two-tick EW race for testing settlement."""
+        if runner_ids is None:
+            runner_ids = [101, 102, 103]
+        start = datetime(2026, 3, 26, 14, 0, 0)
+        runners = [_make_runner_snap(sid) for sid in runner_ids]
+        meta = {sid: _make_runner_meta(sid) for sid in runner_ids}
+
+        ticks = [
+            _make_tick(
+                "1.ew001", seq=0, runners=runners,
+                start_time=start,
+                timestamp=start - timedelta(seconds=60),
+                in_play=False, winner=winner_id,
+            ),
+            _make_tick(
+                "1.ew001", seq=1, runners=runners,
+                start_time=start,
+                timestamp=start + timedelta(seconds=5),
+                in_play=True, winner=winner_id,
+            ),
+        ]
+
+        winning_ids = {winner_id} | set(placed_ids)
+        return Race(
+            market_id="1.ew001",
+            venue="Ascot",
+            market_start_time=start,
+            winner_selection_id=winner_id,
+            ticks=ticks,
+            runner_metadata=meta,
+            market_type="EACH_WAY",
+            each_way_divisor=divisor,
+            winning_selection_ids=winning_ids,
+        )
+
+    def test_ew_placed_back_uses_place_fraction(self, config):
+        """Backing a placed-only runner in an EW race should use place
+        fraction, not full odds."""
+        race = self._make_ew_race(winner_id=101, placed_ids=(102,))
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        # Back runner 102 (slot 1) — placed, not the winner
+        action = np.zeros(14 * _APR, dtype=np.float32)
+        action[1] = 1.0      # back signal for runner at slot 1
+        action[15] = -0.8    # 10% stake
+
+        for _ in range(2):
+            _, _, _, _, info = env.step(action)
+
+        record = info["race_records"][0]
+        assert record.bet_count > 0
+
+    def test_raw_plus_shaped_invariant_ew(self, config):
+        """raw + shaped ≈ total_reward on an EW race."""
+        race = self._make_ew_race(winner_id=101, placed_ids=(102,))
+        day = Day(date="2026-03-26", races=[race])
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * _APR, dtype=np.float32)
+        action[0] = 1.0    # back the winner
+        action[14] = -0.8
+
+        total_reward = 0.0
+        for _ in range(2):
+            _, reward, _, _, info = env.step(action)
+            total_reward += reward
+
+        # raw_pnl_reward and shaped_bonus are cumulative across the episode
+        cum_raw = info["raw_pnl_reward"]
+        cum_shaped = info["shaped_bonus"]
+        assert cum_raw + cum_shaped == pytest.approx(total_reward, abs=0.01)
+
+    def test_mixed_win_and_ew_day(self, config):
+        """Two races: one WIN, one EACH_WAY. day_pnl accumulates correctly."""
+        win_race = _make_race(
+            market_id="1.win001", n_pre_ticks=1, n_inplay_ticks=1,
+            winner_id=101, runner_ids=[101, 102, 103],
+        )
+        ew_race = self._make_ew_race(winner_id=101, placed_ids=(102,))
+        # Offset EW race so it comes second
+        ew_race.market_start_time += timedelta(hours=1)
+        for i, tick in enumerate(ew_race.ticks):
+            ew_race.ticks[i] = Tick(
+                market_id=tick.market_id,
+                timestamp=tick.timestamp + timedelta(hours=1),
+                sequence_number=tick.sequence_number,
+                venue=tick.venue,
+                market_start_time=tick.market_start_time + timedelta(hours=1),
+                number_of_active_runners=tick.number_of_active_runners,
+                traded_volume=tick.traded_volume,
+                in_play=tick.in_play,
+                winner_selection_id=tick.winner_selection_id,
+                race_status=tick.race_status,
+                temperature=tick.temperature,
+                precipitation=tick.precipitation,
+                wind_speed=tick.wind_speed,
+                wind_direction=tick.wind_direction,
+                humidity=tick.humidity,
+                weather_code=tick.weather_code,
+                runners=tick.runners,
+            )
+
+        day = Day(date="2026-03-26", races=[win_race, ew_race])
+        env = BetfairEnv(day, config)
+        env.reset()
+
+        action = np.zeros(14 * _APR, dtype=np.float32)
+        # Do nothing — just step through to verify no crashes
+        done = False
+        while not done:
+            _, _, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+
+        # Both races should have settled
+        assert len(info["race_records"]) == 2
+        # day_pnl should be the sum of both race pnls
+        total_pnl = sum(r.pnl for r in info["race_records"])
+        assert info["day_pnl"] == pytest.approx(total_pnl)

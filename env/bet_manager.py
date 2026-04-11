@@ -65,6 +65,7 @@ class Bet:
     pnl: float = 0.0
     tick_index: int = -1  # index into Race.ticks where bet was placed (-1 = not recorded)
     ltp_at_placement: float = 0.0  # runner's last traded price when the bet was placed (Session 23 — used by spread_cost shaping)
+    available_at_price: float = 0.0  # raw size at fill price before self-depletion (diagnostic — verify matched_stake ≤ this)
 
     @property
     def liability(self) -> float:
@@ -606,6 +607,7 @@ class BetManager:
             average_price=result.average_price,
             market_id=market_id,
             ltp_at_placement=runner.last_traded_price or 0.0,
+            available_at_price=result.top_level_size,
         )
         # Back bets: the stake is the cost (paid up-front).
         self.budget -= result.matched_stake
@@ -691,6 +693,7 @@ class BetManager:
             average_price=result.average_price,
             market_id=market_id,
             ltp_at_placement=runner.last_traded_price or 0.0,
+            available_at_price=result.top_level_size,
         )
         # Reserve the liability from the budget.
         self._open_liability += liability
@@ -706,19 +709,27 @@ class BetManager:
         winning_selection_ids: int | set[int],
         market_id: str = "",
         commission: float = 0.0,
+        each_way_divisor: float | None = None,
+        winner_selection_id: int | None = None,
     ) -> float:
         """Settle all unsettled bets for a race and return the race P&L.
 
         Args:
             winning_selection_ids: Selection ID(s) that won/placed.
                 For WIN markets pass the single winner.  For EACH_WAY
-                (place) markets pass a set containing WINNER + PLACED IDs.
-                Betfair EACH_WAY odds already include the place fraction
-                so PLACED runners pay at the quoted price.
+                markets pass a set containing WINNER + PLACED IDs.
                 Accepts a single int for backward compatibility.
             market_id: If provided, only settle bets for this market.
             commission: Betfair commission rate applied to net profit
                 (e.g. 0.05 for 5%).  Only deducted from winning bets.
+            each_way_divisor: When not None, activates EW settlement.
+                Place odds = (price - 1) / divisor + 1.  The stake is
+                split internally into two equal half-legs (win + place).
+                Commission is applied per-leg on each leg's gross profit.
+            winner_selection_id: The single race winner (required when
+                each_way_divisor is set).  Distinguishes winner (both
+                legs pay) from placed-only (place leg pays, win leg
+                loses).
 
         Returns:
             Net P&L for the settled bets (after commission).
@@ -729,6 +740,8 @@ class BetManager:
         else:
             winners = winning_selection_ids
 
+        ew = each_way_divisor is not None
+
         race_pnl = 0.0
 
         for bet in self.bets:
@@ -737,37 +750,83 @@ class BetManager:
             if market_id and bet.market_id != market_id:
                 continue
 
-            won_selection = bet.selection_id in winners
+            in_winners = bet.selection_id in winners
+            is_winner = ew and bet.selection_id == winner_selection_id
+            is_placed = ew and in_winners and not is_winner
 
-            if bet.side is BetSide.BACK:
-                if won_selection:
-                    # Winner/placed: profit = stake × (price − 1), get stake back.
-                    gross_profit = bet.matched_stake * (bet.average_price - 1.0)
-                    net_profit = gross_profit * (1.0 - commission)
-                    self.budget += bet.matched_stake + net_profit
-                    bet.pnl = net_profit
-                    bet.outcome = BetOutcome.WON
-                else:
-                    # Loser: stake already deducted, nothing returned.
-                    bet.pnl = -bet.matched_stake
-                    bet.outcome = BetOutcome.LOST
+            if ew and in_winners:
+                # ── Each-way settlement (winner or placed) ───────────
+                half = bet.matched_stake / 2.0
+                price = bet.average_price
+                place_profit_per_unit = (price - 1.0) / each_way_divisor
 
-            elif bet.side is BetSide.LAY:
-                liability = bet.matched_stake * (bet.average_price - 1.0)
-                if won_selection:
-                    # Runner won/placed → layer loses liability.
-                    self.budget -= liability
+                if bet.side is BetSide.BACK:
+                    if is_winner:
+                        # Both legs pay.
+                        win_gross = half * (price - 1.0)
+                        place_gross = half * place_profit_per_unit
+                        win_net = win_gross * (1.0 - commission)
+                        place_net = place_gross * (1.0 - commission)
+                        bet.pnl = win_net + place_net
+                        # Stake was deducted at placement; return both
+                        # half-stakes plus net profits.
+                        self.budget += bet.matched_stake + bet.pnl
+                    else:
+                        # Placed only — win leg loses, place leg pays.
+                        place_gross = half * place_profit_per_unit
+                        place_net = place_gross * (1.0 - commission)
+                        bet.pnl = -half + place_net
+                        # Win half-stake already deducted; return place
+                        # half-stake + place net profit.
+                        self.budget += half + place_net
+
+                elif bet.side is BetSide.LAY:
+                    liability = bet.matched_stake * (price - 1.0)
+                    win_liability = half * (price - 1.0)
+                    place_liability = half * place_profit_per_unit
+
+                    if is_winner:
+                        # Layer loses both legs.
+                        bet.pnl = -(win_liability + place_liability)
+                        self.budget -= (win_liability + place_liability)
+                    else:
+                        # Placed only — layer wins win leg, loses place leg.
+                        win_gross = half
+                        win_net = win_gross * (1.0 - commission)
+                        bet.pnl = win_net - place_liability
+                        self.budget += win_net - place_liability
+
                     self._open_liability -= liability
-                    bet.pnl = -liability
-                    bet.outcome = BetOutcome.LOST
-                else:
-                    # Runner lost → layer keeps the backer's stake.
-                    gross_profit = bet.matched_stake
-                    net_profit = gross_profit * (1.0 - commission)
-                    self.budget += net_profit
-                    self._open_liability -= liability
-                    bet.pnl = net_profit
-                    bet.outcome = BetOutcome.WON
+
+                bet.outcome = BetOutcome.WON if bet.pnl > 0 else BetOutcome.LOST
+
+            else:
+                # ── Non-EW path OR unplaced runner ───────────────────
+                if bet.side is BetSide.BACK:
+                    if in_winners:
+                        gross_profit = bet.matched_stake * (bet.average_price - 1.0)
+                        net_profit = gross_profit * (1.0 - commission)
+                        self.budget += bet.matched_stake + net_profit
+                        bet.pnl = net_profit
+                        bet.outcome = BetOutcome.WON
+                    else:
+                        bet.pnl = -bet.matched_stake
+                        bet.outcome = BetOutcome.LOST
+
+                elif bet.side is BetSide.LAY:
+                    liability = bet.matched_stake * (bet.average_price - 1.0)
+                    if in_winners:
+                        self.budget -= liability
+                        self._open_liability -= liability
+                        bet.pnl = -liability
+                        bet.outcome = BetOutcome.LOST
+                    else:
+                        gross_profit = bet.matched_stake
+                        net_profit = gross_profit * (1.0 - commission)
+                        self.budget += net_profit
+                        self._open_liability -= liability
+                        bet.pnl = net_profit
+                        bet.outcome = BetOutcome.WON
 
             race_pnl += bet.pnl
 

@@ -1011,7 +1011,11 @@ class BetfairEnv(gymnasium.Env):
             race_pnl = bm.void_race(market_id=race.market_id)
         else:
             race_pnl = bm.settle_race(
-                winning_ids, market_id=race.market_id, commission=self._commission,
+                winning_ids,
+                market_id=race.market_id,
+                commission=self._commission,
+                each_way_divisor=race.each_way_divisor,
+                winner_selection_id=race.winner_selection_id,
             )
 
         # Accumulate day P&L (sum of per-race P&Ls)

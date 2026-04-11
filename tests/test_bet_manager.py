@@ -691,6 +691,142 @@ class TestEachWaySettlement:
         assert pnl == pytest.approx(20.0)
 
 
+# ── Each-way corrected settlement tests ────────────────────────────────────
+
+
+class TestEachWaySettlementCorrected:
+    """Tests for correct EW settlement with split-stake, place fraction,
+    and per-leg commission.
+
+    Fixture: stake=10, price=10.0, divisor=4.0, commission=0.05.
+    Place odds = (10-1)/4 + 1 = 3.25.  Half stake = 5.
+    """
+
+    WINNERS = {1001, 2001, 3001}  # winner=1001, placed=2001,3001
+    WINNER_ID = 1001
+
+    def _mgr_with_back(self, sid: int, price: float = 10.0,
+                       stake: float = 10.0) -> BetManager:
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=sid, lay_levels=[(price, 100.0)])
+        mgr.place_back(runner, stake=stake, market_id="m1")
+        return mgr
+
+    def _mgr_with_lay(self, sid: int, price: float = 10.0,
+                      stake: float = 10.0) -> BetManager:
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(selection_id=sid, back_levels=[(price, 100.0)])
+        mgr.place_lay(runner, stake=stake, market_id="m1")
+        return mgr
+
+    def _settle(self, mgr: BetManager, commission: float = 0.05) -> float:
+        return mgr.settle_race(
+            self.WINNERS, market_id="m1", commission=commission,
+            each_way_divisor=4.0, winner_selection_id=self.WINNER_ID,
+        )
+
+    # ── 1. Back bet, horse wins ─────────────────────────────────────────
+
+    def test_back_winner(self):
+        mgr = self._mgr_with_back(1001)
+        pnl = self._settle(mgr)
+        # Win leg: 5 × 9 × 0.95 = 42.75
+        # Place leg: 5 × 2.25 × 0.95 = 10.6875
+        assert pnl == pytest.approx(53.4375)
+        assert mgr.bets[0].outcome is BetOutcome.WON
+        # Budget: 100 - 10 (placement) + 10 (stake back) + 53.4375
+        assert mgr.budget == pytest.approx(153.4375)
+
+    # ── 2. Back bet, horse places ───────────────────────────────────────
+
+    def test_back_placed(self):
+        mgr = self._mgr_with_back(2001)
+        pnl = self._settle(mgr)
+        # Win leg: lose 5
+        # Place leg: 5 × 2.25 × 0.95 = 10.6875
+        assert pnl == pytest.approx(5.6875)
+        assert mgr.bets[0].outcome is BetOutcome.WON
+
+    # ── 3. Back bet, horse unplaced ─────────────────────────────────────
+
+    def test_back_unplaced(self):
+        mgr = self._mgr_with_back(9999)
+        pnl = self._settle(mgr)
+        assert pnl == pytest.approx(-10.0)
+        assert mgr.bets[0].outcome is BetOutcome.LOST
+
+    # ── 4. Lay bet, horse wins ──────────────────────────────────────────
+
+    def test_lay_winner(self):
+        mgr = self._mgr_with_lay(1001)
+        pnl = self._settle(mgr)
+        # Win liability: 5 × 9 = 45. Place liability: 5 × 2.25 = 11.25
+        assert pnl == pytest.approx(-56.25)
+        assert mgr.bets[0].outcome is BetOutcome.LOST
+
+    # ── 5. Lay bet, horse places ────────────────────────────────────────
+
+    def test_lay_placed(self):
+        mgr = self._mgr_with_lay(2001)
+        pnl = self._settle(mgr)
+        # Win leg: layer wins, gross=5, net=5×0.95=4.75
+        # Place leg: layer loses liability=5×2.25=11.25
+        assert pnl == pytest.approx(-6.50)
+        assert mgr.bets[0].outcome is BetOutcome.LOST
+
+    # ── 6. Lay bet, horse unplaced ──────────────────────────────────────
+
+    def test_lay_unplaced(self):
+        mgr = self._mgr_with_lay(9999)
+        pnl = self._settle(mgr)
+        # Gross=10, net=10×0.95=9.50 — same as non-EW
+        assert pnl == pytest.approx(9.50)
+        assert mgr.bets[0].outcome is BetOutcome.WON
+
+    # ── 7. Win market regression (existing tests still exercise this) ───
+    # Covered by TestEachWaySettlement and TestSettlement above.
+
+    # ── 8. EW with divisor=None falls back to win logic ─────────────────
+
+    def test_divisor_none_fallback(self):
+        mgr = self._mgr_with_back(1001)
+        # No EW params → standard win settlement
+        pnl = mgr.settle_race(
+            {1001}, market_id="m1", commission=0.05,
+        )
+        # Standard: 10 × 9 × 0.95 = 85.5
+        assert pnl == pytest.approx(85.5)
+        assert mgr.bets[0].outcome is BetOutcome.WON
+
+    # ── 9. Short-odds placed runner — back bet still loses ──────────────
+
+    def test_short_odds_placed_back_loses(self):
+        """stake=10, price=2.0, divisor=5.0. Place odds=1.2.
+        Place leg profit = 5 × 0.2 × 0.95 = 0.95.
+        Net = -5 + 0.95 = -4.05.  Outcome = LOST."""
+        mgr = self._mgr_with_back(2001, price=2.0)
+        pnl = mgr.settle_race(
+            self.WINNERS, market_id="m1", commission=0.05,
+            each_way_divisor=5.0, winner_selection_id=self.WINNER_ID,
+        )
+        assert pnl == pytest.approx(-4.05)
+        assert mgr.bets[0].outcome is BetOutcome.LOST
+
+    # ── 10. Commission=0 variants ───────────────────────────────────────
+
+    def test_back_winner_zero_commission(self):
+        mgr = self._mgr_with_back(1001)
+        pnl = self._settle(mgr, commission=0.0)
+        # Win leg: 5 × 9 = 45. Place leg: 5 × 2.25 = 11.25
+        assert pnl == pytest.approx(56.25)
+
+    def test_back_placed_zero_commission(self):
+        mgr = self._mgr_with_back(2001)
+        pnl = self._settle(mgr, commission=0.0)
+        # Win leg: -5. Place leg: 5 × 2.25 = 11.25
+        assert pnl == pytest.approx(6.25)
+
+
 # ── Commission tests ────────────────────────────────────────────────────────
 
 

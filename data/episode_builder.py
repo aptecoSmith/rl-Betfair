@@ -195,7 +195,8 @@ class Race:
     number_of_each_way_places: int | None = None
     # Set of selection IDs that won the market.  For WIN markets this is
     # just {winner_selection_id}.  For EACH_WAY (place) markets this
-    # includes WINNER + PLACED runners — all of them pay out on a back bet.
+    # includes WINNER + PLACED runners. Settlement distinguishes winner
+    # from placed using each_way_divisor — see BetManager.settle_race().
     winning_selection_ids: set[int] = field(default_factory=set)
 
 
@@ -619,8 +620,9 @@ def _build_day(
 
             # Build winning_selection_ids from the last tick's runner statuses.
             # For WIN markets: only WINNER.  For EACH_WAY: WINNER + PLACED.
-            # Betfair EACH_WAY markets are place markets — the quoted odds
-            # already reflect the place fraction, so PLACED pays at full price.
+            # For EACH_WAY markets, WINNER + PLACED runners are both included.
+            # Settlement applies the place fraction via each_way_divisor —
+            # see BetManager.settle_race().
             winning_ids: set[int] = set()
             last_tick = ticks[-1]
             for runner in last_tick.runners:
