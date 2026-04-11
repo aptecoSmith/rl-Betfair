@@ -56,6 +56,25 @@ slot rows). Re-train and compare.
 **Estimated session footprint.** 1 session, possibly 2 if the
 backfill is non-trivial.
 
+### P1e — Order-book churn rate (extension, added 2026-04-11)
+
+The one research signal from `research.txt` line 85 ("Orders
+being added/cancelled") that P1a–P1d didn't cover. Captures the
+rate of liquidity being offered and withdrawn between ticks —
+the *intent* signal that snapshots (OBI, microprice) and flow
+(traded_delta) both miss. High churn = unstable book, fake walls,
+market-maker repositioning. Low churn = what-you-see-is-what-you-
+get.
+
+**Gated on two things:**
+1. Session 30's retrain must not have concluded "P1 features are
+   not contributing" (if they're useless, adding more won't help).
+2. The parquet's tick cadence must be ≤ 2s on average (if coarser,
+   most add/cancel cycles are invisible and the feature is noise).
+
+Same cost profile as P1a–P1c: no matcher/reward/action change,
+pure obs growth. Session 31 in `master_todo.md`.
+
 ---
 
 ## P2 — Symmetric "spread cost" in shaped reward
