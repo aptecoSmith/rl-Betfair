@@ -18,6 +18,7 @@
           <th>Model ID</th>
           <th>Gen</th>
           <th>Architecture</th>
+          <th>Filter</th>
           <th>Win Rate</th>
           <th>Bet Precision</th>
           <th>Sharpe</th>
@@ -51,6 +52,14 @@
               </span>
             </td>
             <td>{{ model.architecture_name }}</td>
+            <td>
+              <span class="filter-badge"
+                    [class.filter-win]="model.market_type_filter === 'WIN'"
+                    [class.filter-ew]="model.market_type_filter === 'EACH_WAY'"
+                    [class.filter-both]="model.market_type_filter === 'BOTH' || model.market_type_filter === 'FREE_CHOICE' || !model.market_type_filter">
+                {{ model.market_type_filter || 'BOTH' }}
+              </span>
+            </td>
             <td>{{ model.win_rate | percent:'1.0-0' }}</td>
             <td>{{ model.bet_precision | percent:'1.0-0' }}</td>
             <td>{{ model.sharpe | number:'1.2-2' }}</td>
@@ -67,7 +76,7 @@
         }
         @empty {
           <tr>
-            <td colspan="15" class="empty-state" data-testid="empty-state">No models found</td>
+            <td colspan="16" class="empty-state" data-testid="empty-state">No models found</td>
           </tr>
         }
       </tbody>

@@ -15,6 +15,12 @@
         @if (m.architecture_description) {
           <span class="arch-desc">{{ m.architecture_description }}</span>
         }
+        <span class="filter-badge"
+              [class.filter-win]="m.hyperparameters['market_type_filter'] === 'WIN'"
+              [class.filter-ew]="m.hyperparameters['market_type_filter'] === 'EACH_WAY'"
+              [class.filter-both]="!m.hyperparameters['market_type_filter'] || m.hyperparameters['market_type_filter'] === 'BOTH' || m.hyperparameters['market_type_filter'] === 'FREE_CHOICE'">
+          {{ m.hyperparameters['market_type_filter'] || 'BOTH' }}
+        </span>
       }
     </div>
     @if (model(); as m) {

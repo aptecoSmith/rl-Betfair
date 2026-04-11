@@ -36,6 +36,7 @@ class ScoreboardEntry(BaseModel):
     early_picks: int = 0
     mean_daily_return_pct: float | None = None
     recorded_budget: float | None = None
+    market_type_filter: str | None = None
     garaged: bool = False
     garaged_at: str | None = None
     created_at: str | None = None

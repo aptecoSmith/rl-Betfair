@@ -12,7 +12,7 @@ When a session completes:
 
 ## Phase 1 — Gene + environment filter
 
-- [ ] **Session 01 — Add gene + env filtering**
+- [x] **Session 01 — Add gene + env filtering**
 
   1. **config.yaml** — add to `hyperparameters.search_ranges`:
      ```yaml
@@ -54,7 +54,7 @@ When a session completes:
     parent's filter.
   - Mutation of market_type_filter → jumps to adjacent choice.
 
-- [ ] **Session 02 — Evaluator filtering**
+- [x] **Session 02 — Evaluator filtering**
 
   `training/evaluator.py` — apply the same `market_type_filter`
   when evaluating a model. The filter value comes from the model's
@@ -72,7 +72,7 @@ When a session completes:
 
 ## Phase 2 — Display
 
-- [ ] **Session 03 — Scoreboard + model detail display**
+- [x] **Session 03 — Scoreboard + model detail display**
 
   1. **api/schemas.py** — add `market_type_filter: str | None` to
      `ScoreboardEntry`.  Default `None` (backward compat for old

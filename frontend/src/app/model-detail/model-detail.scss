@@ -87,6 +87,30 @@
       font-size: 0.8rem;
       color: #808098;
     }
+
+    .filter-badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      vertical-align: middle;
+
+      &.filter-win {
+        background: rgba(33, 150, 243, 0.2);
+        color: #64b5f6;
+      }
+      &.filter-ew {
+        background: rgba(255, 152, 0, 0.2);
+        color: #ffb74d;
+      }
+      &.filter-both {
+        background: rgba(158, 158, 158, 0.15);
+        color: #9e9e9e;
+      }
+    }
   }
 
   .score-display {

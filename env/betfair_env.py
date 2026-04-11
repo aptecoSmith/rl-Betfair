@@ -342,6 +342,7 @@ class BetfairEnv(gymnasium.Env):
         feature_cache: dict[str, list] | None = None,
         reward_overrides: dict | None = None,
         emit_debug_features: bool = True,
+        market_type_filter: str = "BOTH",
     ) -> None:
         super().__init__()
         self.day = day
@@ -356,7 +357,21 @@ class BetfairEnv(gymnasium.Env):
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
         actions_cfg = config.get("actions", {})
         self._force_aggressive: bool = actions_cfg.get("force_aggressive", False)
-        self._total_races = len(day.races)
+
+        # Market type filter: WIN/EACH_WAY filter races; BOTH/FREE_CHOICE keep all.
+        self.market_type_filter = market_type_filter.upper() if market_type_filter else "BOTH"
+        if self.market_type_filter not in ("BOTH", "FREE_CHOICE"):
+            self.day = Day(
+                date=day.date,
+                races=[
+                    r for r in day.races
+                    if (r.market_type or "").upper() == self.market_type_filter
+                ],
+            )
+            # Filtered subsets can't share the full-day feature cache.
+            feature_cache = None
+
+        self._total_races = len(self.day.races)
         feat_cfg = config.get("features", {})
         self._obi_top_n: int = feat_cfg.get("obi_top_n", 3)
         self._microprice_top_n: int = feat_cfg.get("microprice_top_n", 3)

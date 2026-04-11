@@ -24,6 +24,7 @@
             <th>Model ID</th>
             <th>Gen</th>
             <th>Architecture</th>
+            <th>Filter</th>
             <th>Status</th>
             <th>Win Rate</th>
             <th>Sharpe</th>
@@ -50,6 +51,14 @@
                 </span>
               </td>
               <td>{{ model.architecture_name }}</td>
+              <td>
+                <span class="filter-badge"
+                      [class.filter-win]="model.market_type_filter === 'WIN'"
+                      [class.filter-ew]="model.market_type_filter === 'EACH_WAY'"
+                      [class.filter-both]="model.market_type_filter === 'BOTH' || model.market_type_filter === 'FREE_CHOICE' || !model.market_type_filter">
+                  {{ model.market_type_filter || 'BOTH' }}
+                </span>
+              </td>
               <td>
                 <span class="status-badge" [class.active]="model.status === 'active'" [class.discarded]="model.status === 'discarded'">
                   {{ model.status }}

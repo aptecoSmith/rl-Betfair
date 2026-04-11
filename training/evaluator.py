@@ -147,6 +147,7 @@ class Evaluator:
         policy: BasePolicy,
         test_days: list[Day],
         train_cutoff_date: str,
+        market_type_filter: str = "BOTH",
     ) -> tuple[str | None, list[EvaluationDayRecord]]:
         """Run the policy on each test day and record results.
 
@@ -197,6 +198,7 @@ class Evaluator:
             day_start = time.perf_counter()
             day_record, bet_records = self._evaluate_day(
                 policy, day, run_id or "",
+                market_type_filter=market_type_filter,
             )
             day_elapsed = time.perf_counter() - day_start
             logger.info(
@@ -229,11 +231,13 @@ class Evaluator:
         policy: BasePolicy,
         day: Day,
         run_id: str,
+        market_type_filter: str = "BOTH",
     ) -> tuple[EvaluationDayRecord, list[EvaluationBetRecord]]:
         """Run one episode (one day) in eval mode and collect metrics."""
         t_env_start = time.perf_counter()
         env = BetfairEnv(day, self.config, feature_cache=self.feature_cache,
-                         emit_debug_features=False)
+                         emit_debug_features=False,
+                         market_type_filter=market_type_filter)
         obs, info = env.reset()
         t_env_ready = time.perf_counter()
 

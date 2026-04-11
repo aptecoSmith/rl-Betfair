@@ -14,6 +14,7 @@ export interface ScoreboardEntry {
   early_picks: number;
   mean_daily_return_pct: number | null;
   recorded_budget: number | null;
+  market_type_filter: string | null;
   garaged: boolean;
   garaged_at: string | null;
   created_at: string | null;

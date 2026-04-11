@@ -48,6 +48,7 @@ def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
         early_picks=model.total_early_picks,
         mean_daily_return_pct=model.mean_daily_return_pct,
         recorded_budget=model.recorded_budget,
+        market_type_filter=(rec.hyperparameters or {}).get("market_type_filter", "BOTH") if rec else "BOTH",
         garaged=rec.garaged if rec else False,
         garaged_at=rec.garaged_at if rec else None,
         created_at=rec.created_at if rec else None,

@@ -410,11 +410,13 @@ class TrainingOrchestrator:
             )
             try:
                 agent = self.pop_manager.load_agent(model_rec.model_id)
+                mtf = (agent.hyperparameters or {}).get("market_type_filter", "BOTH")
                 self.evaluator.evaluate(
                     model_id=model_rec.model_id,
                     policy=agent.policy,
                     test_days=test_days,
                     train_cutoff_date=train_cutoff,
+                    market_type_filter=mtf,
                 )
             except Exception:
                 logger.exception(
@@ -552,11 +554,13 @@ class TrainingOrchestrator:
                 device=self.device,
                 feature_cache=self.feature_cache,
             )
+            mtf = (agent.hyperparameters or {}).get("market_type_filter", "BOTH")
             evaluator.evaluate(
                 model_id=agent.model_id,
                 policy=agent.policy,
                 test_days=test_days,
                 train_cutoff_date=train_cutoff,
+                market_type_filter=mtf,
             )
 
         if max_eval_workers > 1:

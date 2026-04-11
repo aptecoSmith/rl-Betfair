@@ -163,6 +163,13 @@ hyperparameters:
       type: float
       min: 0.0
       max: 2.0
+    market_type_filter:
+      type: str_choice
+      choices:
+        - WIN
+        - EACH_WAY
+        - BOTH
+        - FREE_CHOICE
     architecture_name:
       type: str_choice
       choices:

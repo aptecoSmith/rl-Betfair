@@ -216,6 +216,7 @@ class PPOTrainer:
         # these genes were sampled but silently dropped here, so every
         # agent trained with identical reward shaping.
         self.reward_overrides = _reward_overrides_from_hp(hp)
+        self.market_type_filter = hp.get("market_type_filter", "BOTH")
 
         self.optimiser = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
 
@@ -309,6 +310,7 @@ class PPOTrainer:
             self.config,
             feature_cache=self.feature_cache,
             reward_overrides=self.reward_overrides,
+            market_type_filter=self.market_type_filter,
         )
         obs, info = env.reset()
 
