@@ -184,7 +184,7 @@ RUNNER_DIM = len(RUNNER_KEYS)             # 115 (was 114, +1 book_churn P1e)
 # Action thresholds
 _BACK_THRESHOLD = 0.33
 _LAY_THRESHOLD = -0.33
-_MIN_STAKE = 2.00  # Betfair Exchange minimum stake (£2)
+_MIN_STAKE = 2.00  # Betfair Exchange minimum stake (£2) — must match bet_manager.MIN_BET_STAKE
 _AGGRESSION_THRESHOLD = 0.0  # > 0 → aggressive (cross spread), ≤ 0 → passive (join queue)
 _CANCEL_THRESHOLD = 0.0      # > 0 → cancel oldest open passive on this runner
 

@@ -586,16 +586,43 @@ class TestEdgeCases:
 
     def test_very_large_lay_capped(self):
         """Lay stake much larger than budget can support."""
-        mgr = BetManager(starting_budget=10.0)
+        mgr = BetManager(starting_budget=100.0)
         runner = _runner(back_levels=[(11.0, 1000.0)])
-        # Liability per £1 = 10.0. Budget = 10 → max stake = 1.0
+        # Liability per £1 = 10.0. Budget = 100 → max stake = 10.0
 
         bet = mgr.place_lay(runner, stake=500.0)
 
         assert bet is not None
-        assert bet.matched_stake == pytest.approx(1.0)
-        assert bet.liability == pytest.approx(10.0)
+        assert bet.matched_stake == pytest.approx(10.0)
+        assert bet.liability == pytest.approx(100.0)
         assert mgr.available_budget == pytest.approx(0.0)
+
+    def test_lay_below_min_stake_rejected(self):
+        """Lay bet rejected when budget-capped stake falls below MIN_BET_STAKE."""
+        from env.bet_manager import MIN_BET_STAKE
+        mgr = BetManager(starting_budget=10.0)
+        runner = _runner(back_levels=[(11.0, 1000.0)])
+        # Liability per £1 = 10.0. Budget = 10 → max stake = 1.0 < MIN_BET_STAKE
+        bet = mgr.place_lay(runner, stake=500.0)
+        assert bet is None
+
+    def test_back_below_min_stake_rejected(self):
+        """Back bet rejected when partial fill is below MIN_BET_STAKE."""
+        from env.bet_manager import MIN_BET_STAKE
+        mgr = BetManager(starting_budget=100.0)
+        # Only £1.50 available at this price — partial fill below minimum
+        runner = _runner(lay_levels=[(3.0, 1.50)])
+        bet = mgr.place_back(runner, stake=10.0)
+        assert bet is None
+
+    def test_back_at_min_stake_accepted(self):
+        """Back bet accepted when fill equals MIN_BET_STAKE exactly."""
+        from env.bet_manager import MIN_BET_STAKE
+        mgr = BetManager(starting_budget=100.0)
+        runner = _runner(lay_levels=[(3.0, MIN_BET_STAKE)])
+        bet = mgr.place_back(runner, stake=10.0)
+        assert bet is not None
+        assert bet.matched_stake == pytest.approx(MIN_BET_STAKE)
 
     def test_full_episode_flow(self):
         """Simulate a mini day: 2 races, budget carries."""

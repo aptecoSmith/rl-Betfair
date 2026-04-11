@@ -39,6 +39,12 @@ if TYPE_CHECKING:
     from data.episode_builder import Tick
 
 
+# Betfair Exchange minimum stake — bets below this are rejected.
+# Real Betfair minimum is £2; this constant is used in BetManager to
+# reject partial fills that fall below the threshold.
+MIN_BET_STAKE = 2.00
+
+
 class BetSide(str, Enum):
     BACK = "back"
     LAY = "lay"
@@ -602,7 +608,7 @@ class BetManager:
             max_price=max_price,
             already_matched_at_top=already_matched,
         )
-        if result.matched_stake <= 0.0:
+        if result.matched_stake < MIN_BET_STAKE:
             return None
 
         bet = Bet(
@@ -667,7 +673,7 @@ class BetManager:
             max_price=max_price,
             already_matched_at_top=already_matched,
         )
-        if result.matched_stake <= 0.0:
+        if result.matched_stake < MIN_BET_STAKE:
             return None
 
         liability = result.matched_stake * (result.average_price - 1.0)
@@ -678,7 +684,7 @@ class BetManager:
             if result.average_price <= 1.0:
                 return None
             max_stake = self.available_budget / (result.average_price - 1.0)
-            if max_stake <= 0.0:
+            if max_stake < MIN_BET_STAKE:
                 return None
             result = self.matcher.match_lay(
                 runner.available_to_back,
@@ -687,7 +693,7 @@ class BetManager:
                 max_price=max_price,
                 already_matched_at_top=already_matched,
             )
-            if result.matched_stake <= 0.0:
+            if result.matched_stake < MIN_BET_STAKE:
                 return None
             liability = result.matched_stake * (result.average_price - 1.0)
 
