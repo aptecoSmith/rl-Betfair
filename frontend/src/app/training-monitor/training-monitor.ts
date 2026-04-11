@@ -1,4 +1,4 @@
-import { Component, inject, computed, effect, signal, OnDestroy, ViewChild, ElementRef, AfterViewChecked } from '@angular/core';
+import { Component, inject, computed, effect, signal, OnDestroy, viewChild, ElementRef } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { DecimalPipe, JsonPipe } from '@angular/common';
@@ -33,8 +33,9 @@ export interface AgentGridItem {
   templateUrl: './training-monitor.html',
   styleUrl: './training-monitor.scss',
 })
-export class TrainingMonitor implements OnDestroy, AfterViewChecked {
-  @ViewChild('logContainer') logContainer?: ElementRef<HTMLDivElement>;
+export class TrainingMonitor implements OnDestroy {
+  readonly logContainer = viewChild<ElementRef<HTMLDivElement>>('logContainer');
+  readonly autoScroll = signal(true);
   private readonly training = inject(TrainingService);
   private readonly api = inject(ApiService);
   private readonly selectionState = inject(SelectionStateService);
@@ -191,6 +192,18 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
       this.isStopping.set(false);
       this.isFinishing.set(false);
     }
+  });
+
+  private autoScrollEffect = effect(() => {
+    const len = this.activityLog().length;
+    if (len === 0 || !this.autoScroll()) return;
+    const container = this.logContainer();
+    if (!container) return;
+    const el = container.nativeElement;
+    // Defer to next microtask so the DOM has rendered the new entry
+    queueMicrotask(() => {
+      el.scrollTop = el.scrollHeight;
+    });
   });
 
   constructor() {
@@ -416,16 +429,22 @@ export class TrainingMonitor implements OnDestroy, AfterViewChecked {
     });
   }
 
-  ngAfterViewChecked(): void {
-    if (this.logContainer) {
-      const el = this.logContainer.nativeElement;
-      el.scrollTop = el.scrollHeight;
+  onLogScroll(): void {
+    const container = this.logContainer();
+    if (!container) return;
+    const el = container.nativeElement;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    if (!atBottom) {
+      this.autoScroll.set(false);
+    } else {
+      this.autoScroll.set(true);
     }
   }
 
   ngOnDestroy(): void {
     this.agentEffect.destroy();
     this.stopResetEffect.destroy();
+    this.autoScrollEffect.destroy();
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
   }

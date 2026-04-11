@@ -60,11 +60,19 @@
 
       <!-- Activity log -->
       <div class="activity-log-section">
-        <button class="btn-toggle-log" (click)="showActivityLog = !showActivityLog">
-          {{ showActivityLog ? 'Hide' : 'Show' }} Activity Log ({{ activityLog().length }})
-        </button>
+        <div class="log-controls">
+          <button class="btn-toggle-log" (click)="showActivityLog = !showActivityLog">
+            {{ showActivityLog ? 'Hide' : 'Show' }} Activity Log ({{ activityLog().length }})
+          </button>
+          @if (showActivityLog) {
+            <label class="auto-scroll-label">
+              <input type="checkbox" [checked]="autoScroll()" (change)="autoScroll.set($any($event.target).checked)" />
+              Auto-scroll
+            </label>
+          }
+        </div>
         @if (showActivityLog && activityLog().length > 0) {
-          <div class="activity-log" #logContainer>
+          <div class="activity-log" #logContainer (scroll)="onLogScroll()">
             @for (entry of activityLog(); track $index) {
               <div class="log-entry">
                 <span class="log-time">{{ entry.time }}</span>

@@ -164,6 +164,32 @@
   margin-top: 0.75rem;
 }
 
+.log-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.auto-scroll-label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.6875rem;
+  color: #808098;
+  cursor: pointer;
+  user-select: none;
+
+  input[type="checkbox"] {
+    accent-color: #6c63ff;
+    cursor: pointer;
+  }
+
+  &:hover {
+    color: #c0c0d8;
+  }
+}
+
 .btn-toggle-log {
   background: none;
   border: 1px solid #3a3a5c;
@@ -172,7 +198,6 @@
   padding: 0.2rem 0.6rem;
   border-radius: 4px;
   cursor: pointer;
-  margin-bottom: 0.5rem;
 
   &:hover {
     color: #c0c0d8;

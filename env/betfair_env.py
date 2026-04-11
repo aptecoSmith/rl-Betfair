@@ -332,6 +332,7 @@ class BetfairEnv(gymnasium.Env):
         "drawdown_shaping_weight",
         "spread_cost_weight",
         "commission",
+        "inactivity_penalty",
     })
 
     def __init__(
@@ -404,6 +405,7 @@ class BetfairEnv(gymnasium.Env):
         # NOT zero-mean (see design pass and lessons_learnt.md Session 23 entry).
         # Default 0.0 keeps all pre-session runs byte-identical.
         self._spread_cost_weight = reward_cfg.get("spread_cost_weight", 0.0)
+        self._inactivity_penalty = reward_cfg.get("inactivity_penalty", 0.0)
         self._commission = reward_cfg.get("commission", 0.05)
 
         # Pre-compute features and runner mappings
@@ -1079,12 +1081,15 @@ class BetfairEnv(gymnasium.Env):
                     race_spread_cost += bet.matched_stake * abs(bet.average_price - ltp) / ltp
         spread_cost_term = -self._spread_cost_weight * race_spread_cost
 
+        inactivity_term = -self._inactivity_penalty if race_bet_count == 0 else 0.0
+
         shaped = (
             early_pick_bonus
             + precision_reward
             - efficiency_cost
             + drawdown_term
             + spread_cost_term
+            + inactivity_term
         )
         reward = race_pnl + shaped
 

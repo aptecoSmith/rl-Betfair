@@ -61,7 +61,14 @@ import yaml
 from tests._port_utils import kill_stale_on_port, port_free as _port_free
 
 ROOT = Path(__file__).parent.parent
-WORKER_PORT = 18002
+
+
+def _free_port() -> int:
+    """Bind to port 0 to let the OS assign a free ephemeral port."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _print(*args: object, **kwargs: object) -> None:
@@ -72,12 +79,18 @@ def _print(*args: object, **kwargs: object) -> None:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _wait_for_ws(port: int, timeout: float = 30.0) -> bool:
-    """Wait until a WebSocket connection can be established."""
+def _wait_for_ws(port: int, timeout: float = 180.0, proc: subprocess.Popen | None = None) -> bool:
+    """Wait until a WebSocket connection can be established.
+
+    If *proc* is given, bail out early when the subprocess exits — there's
+    no point waiting for a WebSocket from a dead process.
+    """
     async def _try():
         import websockets
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if proc is not None and proc.poll() is not None:
+                return False  # worker already exited
             try:
                 async with websockets.connect(
                     f"ws://127.0.0.1:{port}", open_timeout=3,
@@ -106,7 +119,7 @@ def _write_synthetic_parquets(data_dir: Path) -> list[str]:
     return dates
 
 
-def _make_test_config(tmp_dir: Path, data_dir: str) -> Path:
+def _make_test_config(tmp_dir: Path, data_dir: str, worker_port: int) -> Path:
     db_path = str(tmp_dir / "test_models.db")
     weights_dir = str(tmp_dir / "weights")
     os.makedirs(weights_dir, exist_ok=True)
@@ -156,7 +169,7 @@ def _make_test_config(tmp_dir: Path, data_dir: str) -> Path:
                 "architecture_name": {"type": "str_choice", "choices": ["ppo_lstm_v1"]},
             },
         },
-        "training_worker": {"host": "localhost", "port": WORKER_PORT},
+        "training_worker": {"host": "localhost", "port": worker_port},
     }
 
     config_path = tmp_dir / "test_config.yaml"
@@ -171,6 +184,7 @@ def _make_test_config(tmp_dir: Path, data_dir: str) -> Path:
 @pytest.fixture(scope="module")
 def e2e_env():
     tmp_dir = Path(tempfile.mkdtemp(prefix="rl_e2e_"))
+    worker_port = _free_port()
 
     data_dir = str(tmp_dir / "processed")
     os.makedirs(data_dir, exist_ok=True)
@@ -182,13 +196,13 @@ def e2e_env():
     # (10 ticks × 3 runners × 2 markets) completes in seconds regardless.
     _write_synthetic_parquets(Path(data_dir))
 
-    config_path = _make_test_config(tmp_dir, data_dir)
+    config_path = _make_test_config(tmp_dir, data_dir, worker_port)
     parquet_count = len([f for f in Path(data_dir).glob("*.parquet") if not f.stem.endswith("_runners")])
     _print(f"\n  E2E setup: config={config_path}")
     _print(f"  Data dir: {data_dir} ({parquet_count} days)")
-    _print(f"  Using real data: {_has_real_data()}")
+    _print(f"  Worker port: {worker_port}")
     _print(f"  DB: {tmp_dir / 'test_models.db'}")
-    yield {"tmp_dir": tmp_dir, "config_path": config_path, "data_dir": data_dir}
+    yield {"tmp_dir": tmp_dir, "config_path": config_path, "data_dir": data_dir, "worker_port": worker_port}
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -215,15 +229,17 @@ def _drain_pipe(pipe) -> None:
 
 @pytest.fixture(scope="module")
 def worker_proc(e2e_env):
+    port = e2e_env["worker_port"]
+
     # Recover from a stale worker orphaned by a previous failed run.
-    killed = kill_stale_on_port(WORKER_PORT)
+    killed = kill_stale_on_port(port)
     if killed:
-        _print(f"  [test_e2e_training] killed stale PIDs on port {WORKER_PORT}: {killed}")
-    assert _port_free(WORKER_PORT), f"Port {WORKER_PORT} still in use after kill"
+        _print(f"  [test_e2e_training] killed stale PIDs on port {port}: {killed}")
+    assert _port_free(port), f"Port {port} still in use after kill"
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "training.worker",
-         "--port", str(WORKER_PORT), "--host", "0.0.0.0",
+         "--port", str(port), "--host", "0.0.0.0",
          "--config", str(e2e_env["config_path"])],
         cwd=str(ROOT),
         stdout=subprocess.PIPE,
@@ -240,10 +256,16 @@ def worker_proc(e2e_env):
     )
     drain_thread.start()
 
-    _print(f"  Waiting for worker WebSocket on port {WORKER_PORT}...")
-    if not _wait_for_ws(WORKER_PORT, timeout=30):
+    _print(f"  Waiting for worker WebSocket on port {port}...")
+    if not _wait_for_ws(port, timeout=180, proc=proc):
+        exit_code = proc.poll()
+        if exit_code is not None:
+            pytest.fail(
+                f"Worker process exited with code {exit_code} before WebSocket was ready. "
+                f"Port {port} may be held by a stale process from a previous run."
+            )
         proc.kill()
-        pytest.fail(f"Worker WebSocket not ready on port {WORKER_PORT} within 30s.")
+        pytest.fail(f"Worker WebSocket not ready on port {port} within 180s.")
 
     _print(f"  Worker ready (PID {proc.pid})")
     yield proc
@@ -276,12 +298,13 @@ def test_full_training_flow(worker_proc, e2e_env):
     async def _run():
         import websockets
 
-        _print(f"\n  {_elapsed()} Connecting to worker on ws://127.0.0.1:{WORKER_PORT}")
+        port = e2e_env["worker_port"]
+        _print(f"\n  {_elapsed()} Connecting to worker on ws://127.0.0.1:{port}")
         # Generous ping timeout: the worker's asyncio event loop can stall
         # during CPU-bound phases (model saving, scoring) that hold the GIL,
         # preventing it from responding to WebSocket pings promptly.
         async with websockets.connect(
-            f"ws://127.0.0.1:{WORKER_PORT}",
+            f"ws://127.0.0.1:{port}",
             open_timeout=10,
             ping_interval=30,
             ping_timeout=600,

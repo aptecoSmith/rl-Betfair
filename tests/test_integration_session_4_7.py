@@ -44,6 +44,7 @@ def real_day():
 
 class TestOpportunityWindowRealData:
 
+    @pytest.mark.timeout(120)
     def test_opportunity_windows_computed(self, config, real_day):
         """At least some bets have non-zero opportunity windows."""
         from agents.architecture_registry import create_policy

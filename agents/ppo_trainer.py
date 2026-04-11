@@ -66,6 +66,7 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     "reward_precision_bonus": ("precision_bonus",),
     "reward_drawdown_shaping": ("drawdown_shaping_weight",),
     "reward_spread_cost_weight": ("spread_cost_weight",),
+    "inactivity_penalty": ("inactivity_penalty",),
 }
 
 

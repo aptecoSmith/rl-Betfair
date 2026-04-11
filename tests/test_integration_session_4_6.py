@@ -114,6 +114,7 @@ class TestRolloutOnRealData:
             assert not np.isnan(t.log_prob), "NaN in log_prob"
             assert not np.isnan(t.value), "NaN in value"
 
+    @pytest.mark.timeout(120)
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA GPU")
     def test_ppo_update_no_nans_on_real_data(self, config, real_day):
         """PPO update on real data with pinned memory produces no NaNs."""
