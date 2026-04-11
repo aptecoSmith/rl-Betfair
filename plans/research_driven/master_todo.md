@@ -216,13 +216,15 @@ information in the obs vector doesn't hurt.
 
 - [x] **Session 31 — P1e: order-book churn rate (PARKED)**
       (`sessions/session_31_p1e_book_churn.md`)
-  - **Parked:** tick cadence check failed — median inter-tick gaps
-    of 6–10s across 3 sample races, well above the 2s threshold.
-    The feature can't resolve sub-tick order flow at this recording
-    cadence. No code changes, no schema bump.
-  - Can be un-parked if the data collector is upgraded to
-    higher-frequency recording.
-  - See `lessons_learnt.md` 2026-04-11 entry.
+  - Parked: tick cadence check failed (6–10s median). Original
+    ≤2s threshold was too narrow — see session 31b.
+
+- [ ] **Session 31b — P1e: order-book churn rate (revised)**
+      (`sessions/session_31b_p1e_book_churn.md`)
+  - Same feature, reframed for actual data cadence. Measures
+    "how much did the book rearrange between the ticks the agent
+    can act on?" — meaningful at any cadence, not just sub-second.
+  - No cadence gate. Same pattern as sessions 19–21.
 
 ---
 
