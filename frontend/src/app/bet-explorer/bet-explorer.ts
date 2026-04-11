@@ -9,11 +9,41 @@ import { ExplorerBet, BetExplorerResponse } from '../models/bet-explorer.model';
 
 type SortField = 'tick_timestamp' | 'seconds_to_off' | 'price' | 'stake' | 'pnl';
 type SortDir = 'asc' | 'desc';
+type BetType = 'BOTH' | 'WIN' | 'EW';
 
 interface RaceOption {
   race_id: string;
   label: string;
   race_time: string;
+}
+
+interface RaceGroup {
+  race_id: string;
+  date: string;
+  race_time: string;
+  venue: string;
+  bets: ExplorerBet[];
+  betCount: number;
+  totalPnl: number;
+  totalStake: number;
+  ewDivisor: number | null;
+  numberOfPlaces: number | null;
+}
+
+interface VenueGroup {
+  venue: string;
+  races: RaceGroup[];
+  betCount: number;
+  totalStake: number;
+  totalPnl: number;
+}
+
+interface EwLegs {
+  win_stake: number;
+  place_stake: number;
+  place_odds: number;
+  win_pnl: number | null;
+  place_pnl: number | null;
 }
 
 @Component({
@@ -43,10 +73,15 @@ export class BetExplorer implements OnInit {
   readonly filterRunner = signal('');
   readonly filterAction = signal('');
   readonly filterOutcome = signal('');
+  readonly filterBetType = signal<BetType>('BOTH');
 
   // ── Sort ──
   readonly sortField = signal<SortField>('tick_timestamp');
   readonly sortDir = signal<SortDir>('asc');
+
+  // ── Expand/collapse ──
+  readonly expandedVenues = signal<Set<string>>(new Set());
+  readonly expandedRaces = signal<Set<string>>(new Set());
 
   // ── Derived ──
   readonly allBets = computed(() => this.betData()?.bets ?? []);
@@ -75,12 +110,15 @@ export class BetExplorer implements OnInit {
     const runner = this.filterRunner().toLowerCase();
     const action = this.filterAction();
     const outcome = this.filterOutcome();
+    const betType = this.filterBetType();
 
     if (date) bets = bets.filter(b => b.date === date);
     if (race) bets = bets.filter(b => b.race_id === race);
     if (runner) bets = bets.filter(b => b.runner_name.toLowerCase().includes(runner));
     if (action) bets = bets.filter(b => b.action === action);
     if (outcome) bets = bets.filter(b => b.outcome === outcome);
+    if (betType === 'EW') bets = bets.filter(b => b.is_each_way === true);
+    if (betType === 'WIN') bets = bets.filter(b => !b.is_each_way);
 
     return bets;
   });
@@ -106,7 +144,69 @@ export class BetExplorer implements OnInit {
     const winning = bets.filter(b => b.pnl > 0).length;
     const betPrecision = totalBets > 0 ? winning / totalBets : 0;
     const pnlPerBet = totalBets > 0 ? totalPnl / totalBets : 0;
-    return { totalBets, totalPnl, betPrecision, pnlPerBet };
+    const ewBets = bets.filter(b => b.is_each_way === true).length;
+    const winBets = totalBets - ewBets;
+    return { totalBets, totalPnl, betPrecision, pnlPerBet, ewBets, winBets };
+  });
+
+  /** Group sorted bets into venue → race hierarchy. */
+  readonly venueGroups = computed<VenueGroup[]>(() => {
+    const bets = this.sortedBets();
+
+    // Build race groups keyed by race_id
+    const raceMap = new Map<string, RaceGroup>();
+    const raceOrder: string[] = [];
+
+    for (const bet of bets) {
+      let rg = raceMap.get(bet.race_id);
+      if (!rg) {
+        rg = {
+          race_id: bet.race_id,
+          date: bet.date,
+          race_time: bet.race_time,
+          venue: bet.venue,
+          bets: [],
+          betCount: 0,
+          totalPnl: 0,
+          totalStake: 0,
+          ewDivisor: null,
+          numberOfPlaces: null,
+        };
+        raceMap.set(bet.race_id, rg);
+        raceOrder.push(bet.race_id);
+      }
+      rg.bets.push(bet);
+      rg.betCount++;
+      rg.totalPnl += bet.pnl;
+      rg.totalStake += bet.stake;
+      if (bet.each_way_divisor != null) rg.ewDivisor = bet.each_way_divisor;
+      if (bet.number_of_places != null) rg.numberOfPlaces = bet.number_of_places;
+    }
+
+    // Group races by venue
+    const venueMap = new Map<string, RaceGroup[]>();
+    const venueOrder: string[] = [];
+
+    for (const raceId of raceOrder) {
+      const rg = raceMap.get(raceId)!;
+      const venue = rg.venue || 'Unknown';
+      if (!venueMap.has(venue)) {
+        venueMap.set(venue, []);
+        venueOrder.push(venue);
+      }
+      venueMap.get(venue)!.push(rg);
+    }
+
+    return venueOrder.map(venue => {
+      const races = venueMap.get(venue)!;
+      return {
+        venue,
+        races,
+        betCount: races.reduce((s, r) => s + r.betCount, 0),
+        totalStake: races.reduce((s, r) => s + r.totalStake, 0),
+        totalPnl: races.reduce((s, r) => s + r.totalPnl, 0),
+      };
+    });
   });
 
   ngOnInit(): void {
@@ -115,18 +215,17 @@ export class BetExplorer implements OnInit {
   }
 
   private restoreState(): void {
-    // Restore model selection from shared state
     const modelId = this.selectionState.selectedModelId();
     if (modelId) {
       this.selectedModelId.set(modelId);
       this.loadBets(modelId);
-      // Restore filters
       const filters = this.selectionState.betExplorerFilters();
       this.filterDate.set(filters.date);
       this.filterRace.set(filters.race);
       this.filterRunner.set(filters.runner);
       this.filterAction.set(filters.action);
       this.filterOutcome.set(filters.outcome);
+      this.filterBetType.set((filters.betType as BetType) || 'BOTH');
     }
   }
 
@@ -152,6 +251,15 @@ export class BetExplorer implements OnInit {
       next: (res) => {
         this.betData.set(res);
         this.loading.set(false);
+        // Auto-expand all venues and races on load
+        const venues = new Set<string>();
+        const races = new Set<string>();
+        for (const b of res.bets) {
+          venues.add(b.venue || 'Unknown');
+          races.add(b.race_id);
+        }
+        this.expandedVenues.set(venues);
+        this.expandedRaces.set(races);
       },
       error: (err) => {
         this.error.set(err.error?.detail ?? 'Failed to load bets');
@@ -159,6 +267,28 @@ export class BetExplorer implements OnInit {
       },
     });
   }
+
+  // ── Expand/collapse ──
+
+  toggleVenue(venue: string): void {
+    this.expandedVenues.update(set => {
+      const next = new Set(set);
+      if (next.has(venue)) next.delete(venue);
+      else next.add(venue);
+      return next;
+    });
+  }
+
+  toggleRace(raceId: string): void {
+    this.expandedRaces.update(set => {
+      const next = new Set(set);
+      if (next.has(raceId)) next.delete(raceId);
+      else next.add(raceId);
+      return next;
+    });
+  }
+
+  // ── Sort ──
 
   toggleSort(field: SortField): void {
     if (this.sortField() === field) {
@@ -173,6 +303,8 @@ export class BetExplorer implements OnInit {
     if (this.sortField() !== field) return '';
     return this.sortDir() === 'asc' ? ' ▲' : ' ▼';
   }
+
+  // ── Filters ──
 
   setFilterDate(value: string): void {
     this.filterDate.set(value);
@@ -199,12 +331,18 @@ export class BetExplorer implements OnInit {
     this.syncFiltersToService();
   }
 
+  setFilterBetType(value: string): void {
+    this.filterBetType.set(value as BetType);
+    this.syncFiltersToService();
+  }
+
   clearFilters(): void {
     this.filterDate.set('');
     this.filterRace.set('');
     this.filterRunner.set('');
     this.filterAction.set('');
     this.filterOutcome.set('');
+    this.filterBetType.set('BOTH');
     this.syncFiltersToService();
   }
 
@@ -215,8 +353,52 @@ export class BetExplorer implements OnInit {
       runner: this.filterRunner(),
       action: this.filterAction(),
       outcome: this.filterOutcome(),
+      betType: this.filterBetType(),
     });
   }
+
+  // ── EW helpers ──
+
+  /** Settlement type badge: WON / PLACED / LOST */
+  settlementBadge(bet: ExplorerBet): string {
+    const st = bet.settlement_type?.toUpperCase();
+    if (st === 'WON' || st === 'PLACED' || st === 'LOST') return st;
+    return bet.outcome === 'won' ? 'WON' : 'LOST';
+  }
+
+  /** Compute EW leg breakdown from bet fields. Returns null for non-EW bets. */
+  getEwLegs(bet: ExplorerBet): EwLegs | null {
+    if (!bet.is_each_way || !bet.each_way_divisor) return null;
+
+    const halfStake = bet.stake / 2;
+    const placeOdds = bet.effective_place_odds ?? ((bet.price - 1) / bet.each_way_divisor + 1);
+
+    // Derive per-leg P&L from settlement_type
+    const st = (bet.settlement_type ?? '').toLowerCase();
+    let winPnl: number | null = null;
+    let placePnl: number | null = null;
+
+    if (st === 'won') {
+      winPnl = halfStake * (bet.price - 1);
+      placePnl = halfStake * (placeOdds - 1);
+    } else if (st === 'placed') {
+      winPnl = -halfStake;
+      placePnl = halfStake * (placeOdds - 1);
+    } else if (st === 'lost') {
+      winPnl = -halfStake;
+      placePnl = -halfStake;
+    }
+
+    return { win_stake: halfStake, place_stake: halfStake, place_odds: placeOdds, win_pnl: winPnl, place_pnl: placePnl };
+  }
+
+  /** Format EW terms for a race header, e.g. "EW 1/4, 3 places" */
+  ewTerms(rg: RaceGroup): string | null {
+    if (rg.ewDivisor == null || rg.numberOfPlaces == null) return null;
+    return `EW 1/${rg.ewDivisor}, ${rg.numberOfPlaces} places`;
+  }
+
+  // ── Formatters ──
 
   shortId(id: string): string {
     return id.substring(0, 8);
@@ -245,10 +427,7 @@ export class BetExplorer implements OnInit {
   }
 }
 
-/** Returns a compact fill-side label for a bet.
- *  Back bets are filled at the best lay (L→B).
- *  Lay bets are filled at the best back (B→L).
- */
+/** Returns a compact fill-side label for a bet. */
 export function fillSideAnnotation(action: string): string {
   return action === 'back' ? 'L→B' : 'B→L';
 }

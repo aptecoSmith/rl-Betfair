@@ -12,7 +12,8 @@ export class SelectionStateService {
     runner: string;
     action: string;
     outcome: string;
-  }>({ date: '', race: '', runner: '', action: '', outcome: '' });
+    betType: string;
+  }>({ date: '', race: '', runner: '', action: '', outcome: '', betType: 'BOTH' });
 
   // ── Race Replay ──
   readonly replayDate = signal<string | null>(null);

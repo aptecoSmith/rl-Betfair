@@ -518,6 +518,7 @@ describe('BetExplorer', () => {
       runner: 'Test',
       action: 'back',
       outcome: 'won',
+      betType: 'BOTH',
     });
     fixture = TestBed.createComponent(BetExplorer);
     component = fixture.componentInstance;

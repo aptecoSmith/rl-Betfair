@@ -27,6 +27,7 @@ describe('SelectionStateService', () => {
     expect(filters.runner).toBe('');
     expect(filters.action).toBe('');
     expect(filters.outcome).toBe('');
+    expect(filters.betType).toBe('BOTH');
   });
 
   it('should initialise replayDate as null', () => {
@@ -58,6 +59,7 @@ describe('SelectionStateService', () => {
       runner: 'Test Horse',
       action: 'back',
       outcome: 'won',
+      betType: 'BOTH',
     });
     const filters = service.betExplorerFilters();
     expect(filters.date).toBe('2026-03-01');
@@ -113,6 +115,7 @@ describe('SelectionStateService', () => {
       runner: '',
       action: '',
       outcome: '',
+      betType: 'BOTH',
     });
     service.replayDate.set('2026-03-15');
     service.replayRaceId.set('race-99');

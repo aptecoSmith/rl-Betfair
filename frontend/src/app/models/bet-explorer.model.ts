@@ -13,6 +13,12 @@ export interface ExplorerBet {
   matched_size: number;
   outcome: string;
   pnl: number;
+  // EW fields — populated once ew-metadata-pipeline lands
+  is_each_way?: boolean;
+  each_way_divisor?: number | null;
+  number_of_places?: number | null;
+  settlement_type?: string;
+  effective_place_odds?: number | null;
 }
 
 export interface BetExplorerResponse {

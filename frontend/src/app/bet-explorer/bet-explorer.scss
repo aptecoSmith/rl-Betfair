@@ -163,50 +163,277 @@
   &-sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
 }
 
-// ── Table ──
+// ── Venue groups ──
 
-.table-wrapper {
-  overflow-x: auto;
+.grouped-bets {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
-.bets-table {
-  width: 100%;
-  border-collapse: collapse;
+.venue-group {
+  border: 1px solid #2a2d3a;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.venue-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.75rem;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 0.15s;
+
+  &:hover { background: rgba(255, 255, 255, 0.05); }
+}
+
+.chevron {
+  color: #606078;
+  font-size: 0.75rem;
+  width: 1rem;
+  flex-shrink: 0;
+}
+
+.venue-name {
+  color: #e0e0e0;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.venue-meta {
+  color: #808098;
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+
+.venue-stake {
+  color: #60a5fa;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.82rem;
+}
+
+.venue-pnl {
+  font-weight: 700;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
   font-size: 0.85rem;
+  min-width: 4.5rem;
+  text-align: right;
+  &.positive { color: #6fcf97; }
+  &.negative { color: #eb5757; }
+}
 
-  th {
-    text-align: left;
-    padding: 0.6rem 0.75rem;
-    border-bottom: 2px solid #333;
-    color: #aaa;
-    font-weight: 600;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
+// ── Race slots ──
 
-    &.sortable {
-      cursor: pointer;
-      user-select: none;
+.race-slot {
+  border-top: 1px solid #22253a;
+}
 
-      &:hover { color: #ddd; }
-    }
+.race-slot-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem 0.6rem 1.75rem;
+  cursor: pointer;
+  transition: background 0.15s;
+
+  &:hover { background: rgba(255, 255, 255, 0.03); }
+}
+
+.race-date {
+  color: #808098;
+  font-size: 0.78rem;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+.race-time {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-weight: 700;
+  color: #fbbf24;
+  font-size: 0.82rem;
+}
+
+.ew-terms-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 3px;
+  padding: 0.05rem 0.4rem;
+}
+
+.race-meta {
+  color: #606078;
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+.race-pnl {
+  font-weight: 700;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.85rem;
+  min-width: 4.5rem;
+  text-align: right;
+  &.positive { color: #6fcf97; }
+  &.negative { color: #eb5757; }
+}
+
+// ── Bet cards ──
+
+.race-bets {
+  padding: 0.25rem 0.75rem 0.5rem 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+// ── Shared grid for column alignment ──
+
+$bet-grid: 3rem 1fr 4.5rem 4.5rem 4.5rem 4rem 2rem 2rem 3.5rem 4.5rem 1.5rem;
+
+.bet-card-header {
+  display: grid;
+  grid-template-columns: $bet-grid;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.65rem;
+  color: #606078;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  border-bottom: 1px solid #2a2d3a;
+  margin-bottom: 0.15rem;
+}
+
+.col-action { text-align: center; }
+.col-runner { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-stake { text-align: right; }
+.col-price { text-align: right; }
+.col-matched { text-align: right; }
+.col-time { text-align: right; }
+.col-fill {}
+.col-type { text-align: center; }
+.col-outcome { text-align: center; }
+.col-pnl { text-align: right; }
+.col-replay {}
+
+.bet-card {
+  border-radius: 5px;
+  font-size: 0.82rem;
+
+  &.back {
+    background: rgba(111, 207, 151, 0.05);
+    border-left: 3px solid #6fcf97;
   }
 
-  td {
-    padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid #2a2a3a;
-    white-space: nowrap;
-  }
-
-  tbody tr:hover {
-    background: rgba(255, 255, 255, 0.03);
+  &.lay {
+    background: rgba(248, 113, 113, 0.05);
+    border-left: 3px solid #f87171;
   }
 }
 
-.bet-row {
-  &.won { border-left: 3px solid #81c784; }
-  &.lost { border-left: 3px solid #e57373; }
+.bet-card-main {
+  display: grid;
+  grid-template-columns: $bet-grid;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+}
+
+.action-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-align: center;
+
+  &.back { background: rgba(33, 150, 243, 0.2); color: #64b5f6; }
+  &.lay { background: rgba(244, 67, 54, 0.2); color: #ef9a9a; }
+}
+
+.bet-runner {
+  color: #e0e0e0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bet-stake {
+  color: #60a5fa;
+  text-align: right;
+}
+
+.bet-price {
+  color: #fbbf24;
+  text-align: right;
+}
+
+.bet-matched {
+  color: #606078;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.bet-time-to-off {
+  color: #606078;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.fill-side {
+  font-size: 0.72rem;
+  color: #606078;
+}
+
+.bet-type-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: #808098;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  padding: 0.05rem 0.3rem;
+  text-align: center;
+
+  &.ew {
+    color: #a78bfa;
+    background: rgba(167, 139, 250, 0.15);
+  }
+}
+
+.settlement-badge {
+  font-weight: 800;
+  font-size: 0.68rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  text-align: center;
+
+  &.won {
+    color: #6fcf97;
+    background: rgba(111, 207, 151, 0.12);
+  }
+
+  &.placed {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.12);
+  }
+
+  &.lost {
+    color: #eb5757;
+    background: rgba(235, 87, 87, 0.12);
+  }
+}
+
+.bet-pnl {
+  font-weight: 700;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.78rem;
+  text-align: right;
+  &.positive { color: #4ade80; }
+  &.negative { color: #f87171; }
 }
 
 .btn-replay {
@@ -219,6 +446,7 @@
   padding: 2px 6px;
   line-height: 1;
   transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
 
   &:hover {
     background: #2196f3;
@@ -226,54 +454,63 @@
   }
 }
 
+// ── Each-way leg breakdown ──
+
+.ew-legs {
+  margin-left: 2rem;
+  padding: 0.25rem 0.6rem 0.4rem 0.75rem;
+  border-left: 2px solid #2a2d3a;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.ew-leg {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.72rem;
+  color: #8888a0;
+}
+
+.ew-leg-label {
+  min-width: 4.5rem;
+  font-weight: 600;
+  color: #9090b0;
+}
+
+.ew-leg-stake {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  min-width: 3.5rem;
+}
+
+.ew-leg-odds {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  min-width: 4rem;
+}
+
+.ew-leg-pnl {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-weight: 700;
+  min-width: 4rem;
+  text-align: right;
+  &.positive { color: #4ade80; }
+  &.negative { color: #f87171; }
+}
+
+// ── Shared utilities ──
+
 .mono {
-  font-family: monospace;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
   font-size: 0.8rem;
 }
 
-.runner-name {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.action-badge {
-  display: inline-block;
-  padding: 0.1rem 0.4rem;
-  border-radius: 3px;
-  font-size: 0.7rem;
-  font-weight: 700;
-
-  &.back { background: rgba(33, 150, 243, 0.2); color: #64b5f6; }
-  &.lay { background: rgba(244, 67, 54, 0.2); color: #ef9a9a; }
-}
-
-.outcome-badge {
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: capitalize;
-
-  &.won { color: #81c784; }
-  &.lost { color: #e57373; }
-}
-
-.fill-side-badge {
-  font-family: monospace;
-  font-size: 0.75rem;
-  color: #888;
-  white-space: nowrap;
-}
-
-.pnl-cell {
-  font-weight: 600;
-
-  &.positive { color: #81c784; }
-  &.negative { color: #e57373; }
-}
+.positive { color: #6fcf97; }
+.negative { color: #eb5757; }
 
 .empty-row {
   text-align: center;
-  padding: 2rem !important;
+  padding: 2rem;
   color: #666;
   font-style: italic;
 }

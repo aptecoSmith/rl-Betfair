@@ -32,6 +32,14 @@
         <span class="stat-value">{{ filteredStats().totalBets }}</span>
       </div>
       <div class="stat">
+        <span class="stat-label">Win Bets</span>
+        <span class="stat-value">{{ filteredStats().winBets }}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">EW Bets</span>
+        <span class="stat-value">{{ filteredStats().ewBets }}</span>
+      </div>
+      <div class="stat">
         <span class="stat-label">Bet Precision</span>
         <span class="stat-value">{{ filteredStats().betPrecision | percent:'1.1-1' }}</span>
       </div>
@@ -98,83 +106,135 @@
           <option value="lost">Lost</option>
         </select>
       </div>
+      <div class="filter">
+        <label>Bet Type</label>
+        <select data-testid="filter-bet-type" [value]="filterBetType()"
+                (change)="setFilterBetType($any($event.target).value)">
+          <option value="BOTH">All</option>
+          <option value="WIN">Win only</option>
+          <option value="EW">Each-way only</option>
+        </select>
+      </div>
       <button class="btn btn-secondary btn-sm" (click)="clearFilters()" data-testid="clear-filters">
         Clear
       </button>
     </div>
 
-    <!-- ── Bets table ── -->
-    <div class="table-wrapper" data-testid="bets-table-wrapper">
-      <table class="bets-table" data-testid="bets-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Venue</th>
-            <th>Race</th>
-            <th>Runner</th>
-            <th>Action</th>
-            <th title="Which side of the book the fill came from">Fill</th>
-            <th class="sortable" (click)="toggleSort('tick_timestamp')" data-testid="sort-time-to-off">
-              Time to Off{{ sortIndicator('tick_timestamp') }}
-            </th>
-            <th class="sortable" (click)="toggleSort('price')" data-testid="sort-price">
-              Price{{ sortIndicator('price') }}
-            </th>
-            <th class="sortable" (click)="toggleSort('stake')" data-testid="sort-stake">
-              Stake{{ sortIndicator('stake') }}
-            </th>
-            <th>Matched</th>
-            <th>Outcome</th>
-            <th class="sortable" (click)="toggleSort('pnl')" data-testid="sort-pnl">
-              P&L{{ sortIndicator('pnl') }}
-            </th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (bet of sortedBets(); track $index) {
-            <tr class="bet-row" [class.won]="bet.outcome === 'won'" [class.lost]="bet.outcome === 'lost'"
-                data-testid="bet-row">
-              <td>{{ bet.date }}</td>
-              <td>{{ bet.venue }}</td>
-              <td class="mono">{{ formatRaceTime(bet.race_time) }}</td>
-              <td class="runner-name">{{ bet.runner_name }}</td>
-              <td>
-                <span class="action-badge" [class.back]="bet.action === 'back'" [class.lay]="bet.action === 'lay'">
-                  {{ bet.action | uppercase }}
-                </span>
-              </td>
-              <td class="mono fill-side-badge" [attr.title]="bet.action === 'back' ? 'Filled at lay-side top-of-book' : 'Filled at back-side top-of-book'">{{ fillSideAnnotation(bet.action) }}</td>
-              <td class="mono">{{ formatSecondsToOff(bet.seconds_to_off) }}</td>
-              <td class="mono">{{ bet.price | number:'1.2-2' }}</td>
-              <td class="mono">£{{ bet.stake | number:'1.2-2' }}</td>
-              <td class="mono">£{{ bet.matched_size | number:'1.2-2' }}</td>
-              <td>
-                <span class="outcome-badge" [class.won]="bet.outcome === 'won'" [class.lost]="bet.outcome === 'lost'">
-                  {{ bet.outcome }}
-                </span>
-              </td>
-              <td class="mono pnl-cell" [class.positive]="bet.pnl > 0" [class.negative]="bet.pnl < 0">
-                {{ bet.pnl > 0 ? '+' : '' }}{{ bet.pnl | number:'1.2-2' }}
-              </td>
-              <td>
-                <button class="btn-replay" (click)="navigateToReplay(bet)" title="Replay this race">&#9654;</button>
-              </td>
-            </tr>
-          }
-          @if (sortedBets().length === 0) {
-            <tr>
-              <td colspan="13" class="empty-row" data-testid="empty-row">
-                @if (allBets().length === 0) {
-                  No bets found for this model.
-                } @else {
-                  No bets match the current filters.
+    <!-- ── Grouped bets: venue → race → bet cards ── -->
+    <div class="grouped-bets" data-testid="grouped-bets">
+      @for (vg of venueGroups(); track vg.venue) {
+        <div class="venue-group">
+          <!-- Venue header -->
+          <div class="venue-header" (click)="toggleVenue(vg.venue)">
+            <span class="chevron">{{ expandedVenues().has(vg.venue) ? '▾' : '▸' }}</span>
+            <span class="venue-name">{{ vg.venue }}</span>
+            <span class="venue-meta">{{ vg.betCount }} bet{{ vg.betCount !== 1 ? 's' : '' }}</span>
+            <span class="venue-stake">£{{ vg.totalStake | number:'1.2-2' }} staked</span>
+            <span class="venue-pnl" [class.positive]="vg.totalPnl >= 0" [class.negative]="vg.totalPnl < 0">
+              {{ vg.totalPnl >= 0 ? '+' : '' }}£{{ vg.totalPnl | number:'1.2-2' }}
+            </span>
+          </div>
+
+          <!-- Races within venue -->
+          @if (expandedVenues().has(vg.venue)) {
+            @for (rg of vg.races; track rg.race_id) {
+              <div class="race-slot">
+                <div class="race-slot-header" (click)="toggleRace(rg.race_id)">
+                  <span class="chevron">{{ expandedRaces().has(rg.race_id) ? '▾' : '▸' }}</span>
+                  <span class="race-date">{{ rg.date }}</span>
+                  <span class="race-time">{{ formatRaceTime(rg.race_time) }}</span>
+                  @if (ewTerms(rg); as terms) {
+                    <span class="ew-terms-badge">{{ terms }}</span>
+                  }
+                  <span class="race-meta">{{ rg.betCount }} bet{{ rg.betCount !== 1 ? 's' : '' }}</span>
+                  <span class="race-pnl" [class.positive]="rg.totalPnl >= 0" [class.negative]="rg.totalPnl < 0">
+                    {{ rg.totalPnl >= 0 ? '+' : '' }}£{{ rg.totalPnl | number:'1.2-2' }}
+                  </span>
+                </div>
+
+                <!-- Bet cards within race -->
+                @if (expandedRaces().has(rg.race_id)) {
+                  <div class="race-bets">
+                    <!-- Column headers -->
+                    <div class="bet-card-header">
+                      <span class="col-action">Action</span>
+                      <span class="col-runner">Runner</span>
+                      <span class="col-stake">Stake</span>
+                      <span class="col-price">Price</span>
+                      <span class="col-matched">Matched</span>
+                      <span class="col-time">Time to Off</span>
+                      <span class="col-fill">Fill</span>
+                      <span class="col-type">Type</span>
+                      <span class="col-outcome">Outcome</span>
+                      <span class="col-pnl">P&L</span>
+                      <span class="col-replay"></span>
+                    </div>
+                    @for (bet of rg.bets; track $index) {
+                      <div class="bet-card" [class.back]="bet.action === 'back'" [class.lay]="bet.action === 'lay'">
+                        <div class="bet-card-main">
+                          <span class="action-badge" [class.back]="bet.action === 'back'" [class.lay]="bet.action === 'lay'">
+                            {{ bet.action | uppercase }}
+                          </span>
+                          <span class="bet-runner">{{ bet.runner_name }}</span>
+                          <span class="bet-stake mono">£{{ bet.stake | number:'1.2-2' }}</span>
+                          <span class="bet-price mono">@ {{ bet.price | number:'1.2-2' }}</span>
+                          <span class="bet-matched mono" title="Matched size">£{{ bet.matched_size | number:'1.2-2' }}</span>
+                          <span class="bet-time-to-off mono" title="Time to off">{{ formatSecondsToOff(bet.seconds_to_off) }}</span>
+                          <span class="fill-side mono" [title]="bet.action === 'back' ? 'Filled at lay-side top-of-book' : 'Filled at back-side top-of-book'">{{ fillSideAnnotation(bet.action) }}</span>
+                          <span class="bet-type-badge" [class.ew]="bet.is_each_way">{{ bet.is_each_way ? 'EW' : 'WIN' }}</span>
+                          <span class="settlement-badge"
+                                [class.won]="settlementBadge(bet) === 'WON'"
+                                [class.placed]="settlementBadge(bet) === 'PLACED'"
+                                [class.lost]="settlementBadge(bet) === 'LOST'">
+                            {{ settlementBadge(bet) }}
+                          </span>
+                          <span class="bet-pnl mono" [class.positive]="bet.pnl > 0" [class.negative]="bet.pnl < 0">
+                            {{ bet.pnl >= 0 ? '+' : '' }}{{ bet.pnl | number:'1.2-2' }}
+                          </span>
+                          <button class="btn-replay" (click)="navigateToReplay(bet)" title="Replay this race">&#9654;</button>
+                        </div>
+                        <!-- EW leg breakdown -->
+                        @if (getEwLegs(bet); as legs) {
+                          <div class="ew-legs">
+                            <div class="ew-leg">
+                              <span class="ew-leg-label">Win leg</span>
+                              <span class="ew-leg-stake mono">£{{ legs.win_stake | number:'1.2-2' }}</span>
+                              <span class="ew-leg-odds mono">@ {{ bet.price | number:'1.2-2' }}</span>
+                              @if (legs.win_pnl !== null) {
+                                <span class="ew-leg-pnl mono" [class.positive]="legs.win_pnl >= 0" [class.negative]="legs.win_pnl < 0">
+                                  {{ legs.win_pnl >= 0 ? '+' : '' }}£{{ legs.win_pnl | number:'1.2-2' }}
+                                </span>
+                              }
+                            </div>
+                            <div class="ew-leg">
+                              <span class="ew-leg-label">Place leg</span>
+                              <span class="ew-leg-stake mono">£{{ legs.place_stake | number:'1.2-2' }}</span>
+                              <span class="ew-leg-odds mono">@ {{ legs.place_odds | number:'1.2-2' }}</span>
+                              @if (legs.place_pnl !== null) {
+                                <span class="ew-leg-pnl mono" [class.positive]="legs.place_pnl >= 0" [class.negative]="legs.place_pnl < 0">
+                                  {{ legs.place_pnl >= 0 ? '+' : '' }}£{{ legs.place_pnl | number:'1.2-2' }}
+                                </span>
+                              }
+                            </div>
+                          </div>
+                        }
+                      </div>
+                    }
+                  </div>
                 }
-              </td>
-            </tr>
+              </div>
+            }
           }
-        </tbody>
-      </table>
+        </div>
+      } @empty {
+        <div class="empty-row" data-testid="empty-row">
+          @if (allBets().length === 0) {
+            No bets found for this model.
+          } @else {
+            No bets match the current filters.
+          }
+        </div>
+      }
     </div>
 
     <div class="results-count" data-testid="results-count">
