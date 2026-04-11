@@ -206,25 +206,22 @@ deployment stays on the simpler Phase 1 policy.
 
 ---
 
-## Phase 3 — P1 extensions (conditional on Phase 2 results)
+## Phase 3 — P1 extensions
 
-Only run if session 30's retrain suggests the P1 feature set is
-underperforming or if the agent isn't using the features
-effectively. These are additional obs features that don't change
-the action space.
+Additional obs features that don't change the action space. Cheap
+and worth adding regardless of Phase 2 retrain results — more
+information in the obs vector doesn't hurt.
 
 - [ ] **Session 31 — P1e: order-book churn rate**
       (`sessions/session_31_p1e_book_churn.md`)
   - The one research signal we didn't build: rate of order-book
     adds/cancels (unstable liquidity, fake walls, market-maker
     repositioning).
-  - Gated on tick cadence check: if the parquet has > 2s between
-    ticks on average, the feature can't resolve the signal and
-    should be parked.
+  - Gated on tick cadence check only: if the parquet has > 2s
+    between ticks on average, the feature can't resolve the
+    signal and should be parked.
   - Same pattern as sessions 19–21 (pure function in
     `features.py`, state on env, schema bump).
-  - **Do not run if session 30 concluded "P1 features are not
-    contributing".** Park instead.
 
 ---
 

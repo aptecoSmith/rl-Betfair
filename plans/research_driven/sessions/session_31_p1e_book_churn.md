@@ -6,11 +6,7 @@
 - `../hard_constraints.md` — constraints 12, 13.
 - `../analysis.md` §3
 - `../proposals.md` P1
-- `../progress.md` — confirm session 30 has landed and its
-  recommendation is recorded. **Read the recommendation before
-  deciding whether to run this session.** If session 30 concluded
-  "P1 features are not contributing" then adding another P1
-  feature is unlikely to help — park this session instead.
+- `../progress.md` — confirm session 30 has landed.
 - `env/features.py` — contains OBI, microprice, traded_delta,
   mid_drift from sessions 19–21.
 - `env/betfair_env.py` — observation builder.
@@ -167,8 +163,6 @@ All CPU, all fast.
 
 ## Do not
 
-- Do not run this session if session 30's recommendation is
-  "P1 features are not contributing". Park it instead.
 - Do not skip the tick-cadence check. Writing a feature that
   can't resolve the signal it's meant to capture is wasted
   work.

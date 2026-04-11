@@ -66,11 +66,10 @@ the *intent* signal that snapshots (OBI, microprice) and flow
 market-maker repositioning. Low churn = what-you-see-is-what-you-
 get.
 
-**Gated on two things:**
-1. Session 30's retrain must not have concluded "P1 features are
-   not contributing" (if they're useless, adding more won't help).
-2. The parquet's tick cadence must be ≤ 2s on average (if coarser,
-   most add/cancel cycles are invisible and the feature is noise).
+**Gated on tick cadence only:** the parquet's tick cadence must be
+≤ 2s on average (if coarser, most add/cancel cycles are invisible
+and the feature is noise). No dependency on session 30's retrain
+outcome — more obs information doesn't hurt and this is cheap.
 
 Same cost profile as P1a–P1c: no matcher/reward/action change,
 pure obs growth. Session 31 in `master_todo.md`.
