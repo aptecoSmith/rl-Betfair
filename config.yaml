@@ -38,9 +38,9 @@ training:
   max_runners: 14
   max_bets_per_race: 20
   require_gpu: true
-  reevaluate_garaged_default: true
+  reevaluate_garaged_default: false
   betting_constraints:
-    max_back_price: 100.0
+    max_back_price: 50.0
     max_lay_price: null
     min_seconds_before_off: 0
   retraining:
