@@ -15,6 +15,7 @@ from agents.population_manager import (
     HyperparamSpec,
     PopulationManager,
     parse_search_ranges,
+    perturb_from_seed,
     sample_hyperparams,
     validate_hyperparams,
 )
@@ -416,3 +417,82 @@ class TestEdgeCases:
         pm = PopulationManager(small_config, model_store=None)
         from env.betfair_env import ACTIONS_PER_RUNNER
         assert pm.action_dim == 14 * ACTIONS_PER_RUNNER
+
+
+# ── Seed-based population (Sprint 4, Session 04) ─────────────────────────────
+
+
+class TestPerturbFromSeed:
+    """Tests for ``perturb_from_seed``."""
+
+    def test_all_values_within_bounds(self, hp_specs):
+        seed_point = sample_hyperparams(hp_specs, random.Random(0))
+        for i in range(20):
+            hp = perturb_from_seed(seed_point, hp_specs, random.Random(i), sigma=0.1)
+            for spec in hp_specs:
+                val = hp[spec.name]
+                if spec.type in ("float", "float_log"):
+                    assert spec.min <= val <= spec.max, f"{spec.name}={val} out of bounds"
+                elif spec.type == "int":
+                    assert int(spec.min) <= val <= int(spec.max)
+                elif spec.type in ("int_choice", "str_choice"):
+                    assert val in spec.choices
+
+    def test_values_close_to_seed(self, hp_specs):
+        """Perturbed values should cluster around the seed."""
+        seed_point = {
+            "learning_rate": 1e-4,
+            "ppo_clip_epsilon": 0.2,
+            "entropy_coefficient": 0.02,
+            "lstm_hidden_size": 256,
+            "mlp_hidden_size": 128,
+            "mlp_layers": 2,
+            "early_pick_bonus_min": 1.1,
+            "early_pick_bonus_max": 1.35,
+            "reward_efficiency_penalty": 0.02,
+            "reward_precision_bonus": 1.5,
+        }
+        clips = []
+        for i in range(50):
+            hp = perturb_from_seed(seed_point, hp_specs, random.Random(i), sigma=0.1)
+            clips.append(hp["ppo_clip_epsilon"])
+        avg = sum(clips) / len(clips)
+        # Average should be close to seed value 0.2 (range is 0.1–0.3)
+        assert abs(avg - 0.2) < 0.05, f"Average clip {avg} too far from seed 0.2"
+
+    def test_spread_proportional_to_sigma(self, hp_specs):
+        seed_point = sample_hyperparams(hp_specs, random.Random(0))
+        # Small sigma → tight cluster
+        small = [perturb_from_seed(seed_point, hp_specs, random.Random(i), sigma=0.01)["ppo_clip_epsilon"] for i in range(50)]
+        # Large sigma → wider cluster
+        large = [perturb_from_seed(seed_point, hp_specs, random.Random(i), sigma=0.3)["ppo_clip_epsilon"] for i in range(50)]
+
+        import statistics
+        std_small = statistics.stdev(small)
+        std_large = statistics.stdev(large)
+        assert std_large > std_small, "Larger sigma should produce more spread"
+
+
+class TestInitialiseFromSeed:
+    """Tests for seed_point parameter on initialise_population."""
+
+    def test_seed_point_population(self, small_config):
+        pm = PopulationManager(small_config, model_store=None)
+        seed_point = sample_hyperparams(pm.hp_specs, random.Random(42))
+        seed_point["architecture_name"] = "ppo_lstm_v1"
+        agents = pm.initialise_population(
+            generation=0, seed=99, seed_point=seed_point,
+        )
+        assert len(agents) == 5
+        # All agents should have valid hyperparameters
+        for a in agents:
+            assert isinstance(a.policy, BasePolicy)
+
+    def test_no_seed_point_unchanged(self, small_config):
+        """Without seed_point, behaviour should be identical to before."""
+        pm = PopulationManager(small_config, model_store=None)
+        a = pm.initialise_population(generation=0, seed=42)
+        b = pm.initialise_population(generation=0, seed=42)
+        # Same seed → same hyperparameters
+        for ag_a, ag_b in zip(a, b):
+            assert ag_a.hyperparameters == ag_b.hyperparameters

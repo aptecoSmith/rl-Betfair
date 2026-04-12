@@ -60,7 +60,7 @@ When a session completes:
   - With 50 models all in one region → seed is biased away.
   - Coverage report is serialisable to JSON.
 
-- [ ] **Session 04 — Seed point → perturbed population**
+- [x] **Session 04 — Seed point → perturbed population**
 
   - `agents/population_manager.py` — add
     `initialise_from_seed(seed_point, population_size, sigma=0.1)`:

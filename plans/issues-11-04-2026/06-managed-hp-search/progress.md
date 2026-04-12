@@ -50,3 +50,16 @@ key in `test_genetic_operators.py`), 12 skipped.
   well-covered numeric genes via vanilla sampling, choice genes via uniform pick.
 - 3 new tests: empty history produces valid seed, clustered history biases away
   from cluster, CoverageReport is JSON-serialisable.
+
+## Session 04 — Seed point → perturbed population (2026-04-12)
+
+**What landed:**
+- `perturb_from_seed(seed_point, specs, rng, sigma)` in
+  `agents/population_manager.py` — Gaussian perturbation for numeric genes
+  (clamped to bounds), adjacent-choice jump for choice genes.
+- `initialise_population()` now accepts optional `seed_point` and `seed_sigma`
+  parameters. When `seed_point` is provided, all agents are perturbed around it
+  instead of being sampled uniformly. Backward compatible: no seed → random
+  sampling as before.
+- 5 new tests: bounds check, closeness to seed, spread proportional to sigma,
+  seed_point population creates valid agents, no-seed-point unchanged.

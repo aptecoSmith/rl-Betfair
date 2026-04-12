@@ -144,6 +144,70 @@ def sample_hyperparams(
     return params
 
 
+def perturb_from_seed(
+    seed_point: dict,
+    specs: list[HyperparamSpec],
+    rng: random.Random | None = None,
+    sigma: float = 0.1,
+) -> dict:
+    """Create one perturbed hyperparameter set around a seed point.
+
+    For each gene, noise is proportional to ``sigma`` times the gene's
+    range.  Choice genes mostly keep the seed value, with a small
+    probability of jumping to an adjacent choice.
+
+    Parameters
+    ----------
+    seed_point:
+        Centre of the perturbation (gene name → value).
+    specs:
+        Hyperparameter specifications.
+    rng:
+        Seeded random generator for reproducibility.
+    sigma:
+        Perturbation strength as a fraction of the gene's range.
+    """
+    rng = rng or random.Random()
+    hp: dict = {}
+    for spec in specs:
+        seed_val = seed_point.get(spec.name)
+
+        if spec.type == "float":
+            spread = sigma * (spec.max - spec.min)
+            val = rng.gauss(float(seed_val), spread)
+            hp[spec.name] = max(spec.min, min(spec.max, val))
+
+        elif spec.type == "float_log":
+            log_min = math.log(spec.min)
+            log_max = math.log(spec.max)
+            log_seed = math.log(float(seed_val))
+            spread = sigma * (log_max - log_min)
+            val = math.exp(rng.gauss(log_seed, spread))
+            hp[spec.name] = max(spec.min, min(spec.max, val))
+
+        elif spec.type == "int":
+            lo, hi = int(spec.min), int(spec.max)
+            spread = max(1, sigma * (hi - lo))
+            val = round(rng.gauss(float(seed_val), spread))
+            hp[spec.name] = max(lo, min(hi, val))
+
+        elif spec.type in ("int_choice", "str_choice"):
+            # Keep seed value with high probability; small chance of
+            # jumping to an adjacent choice.
+            if rng.random() < sigma and len(spec.choices) > 1:
+                idx = spec.choices.index(seed_val) if seed_val in spec.choices else 0
+                delta = rng.choice([-1, 1])
+                idx = max(0, min(len(spec.choices) - 1, idx + delta))
+                hp[spec.name] = spec.choices[idx]
+            else:
+                hp[spec.name] = seed_val
+        else:
+            hp[spec.name] = seed_val
+
+    _repair_reward_gene_pairs(hp)
+    return hp
+
+
 def validate_hyperparams(params: dict, specs: list[HyperparamSpec]) -> None:
     """Raise ``ValueError`` if any hyperparameter is out of range."""
     spec_map = {s.name: s for s in specs}
@@ -245,6 +309,8 @@ class PopulationManager:
         generation: int = 0,
         seed: int | None = None,
         plan: "TrainingPlan | None" = None,
+        seed_point: dict | None = None,
+        seed_sigma: float = 0.1,
     ) -> list[AgentRecord]:
         """Create N agents with randomised hyperparameters.
 
@@ -262,6 +328,14 @@ class PopulationManager:
             counts.  Passing ``plan=None`` keeps the legacy
             ``config.yaml``-driven path so ``start_training.sh`` still
             works unchanged (Session 4 invariant).
+        seed_point:
+            Optional centre point for the initial population.  When
+            provided, each agent's hyperparameters are perturbed around
+            this seed (via :func:`perturb_from_seed`) instead of being
+            sampled uniformly.
+        seed_sigma:
+            Perturbation strength (fraction of gene range) when
+            ``seed_point`` is given.  Default 0.1 (±10%).
 
         Returns
         -------
@@ -308,7 +382,10 @@ class PopulationManager:
         )
 
         for slot_idx in range(pop_size):
-            hp = sample_hyperparams(hp_specs_for_run, rng)
+            if seed_point is not None:
+                hp = perturb_from_seed(seed_point, hp_specs_for_run, rng, sigma=seed_sigma)
+            else:
+                hp = sample_hyperparams(hp_specs_for_run, rng)
             # Resolve architecture: arch_mix > sampled gene > plan choices > default.
             if arch_slots is not None:
                 arch_name = arch_slots[slot_idx]
