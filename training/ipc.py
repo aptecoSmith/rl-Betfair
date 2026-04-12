@@ -20,6 +20,13 @@ CMD_STOP = "stop"
 CMD_FINISH = "finish"
 CMD_STATUS = "status"
 
+# Stop granularity levels (most → least aggressive)
+STOP_IMMEDIATE = "immediate"
+STOP_EVAL_CURRENT = "eval_current"
+STOP_EVAL_ALL = "eval_all"
+
+VALID_STOP_GRANULARITIES = {STOP_IMMEDIATE, STOP_EVAL_CURRENT, STOP_EVAL_ALL}
+
 # Events (Worker → API)
 EVT_EVENT = "event"        # wraps a training progress event
 EVT_STATUS = "status"      # full state snapshot
@@ -65,8 +72,8 @@ def make_start_cmd(
     })
 
 
-def make_stop_cmd() -> str:
-    return json.dumps({"type": CMD_STOP})
+def make_stop_cmd(granularity: str = STOP_IMMEDIATE) -> str:
+    return json.dumps({"type": CMD_STOP, "granularity": granularity})
 
 
 def make_finish_cmd() -> str:

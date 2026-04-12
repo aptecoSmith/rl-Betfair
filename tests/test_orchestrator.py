@@ -945,3 +945,175 @@ class TestGenerationErrorHandling:
         ]
         assert len(error_events) == 1
         assert "test explosion" in error_events[0]["summary"]["error"]
+
+
+# ── Tests: Stop granularity events ─────────────────────────────────────────
+
+
+class TestSkipTrainingEvent:
+    """skip_training_event causes training to be skipped, jumping to eval."""
+
+    def test_skip_training_jumps_to_eval(self, tmp_path):
+        import threading
+        config = _make_full_config()
+        config["population"]["size"] = 2
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+
+        skip_training = threading.Event()
+        skip_training.set()  # Set before run starts
+
+        orch = TrainingOrchestrator(
+            config, model_store=store,
+            finish_event=threading.Event(),
+            skip_training_event=skip_training,
+        )
+        # finish_event must also be set for eval_all semantics
+        orch.finish_event.set()
+
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        result = orch.run(
+            train_days=[train], test_days=[test],
+            n_generations=1, n_epochs=1, seed=42,
+        )
+        gen = result.generations[0]
+        # Training was skipped — no training stats
+        assert len(gen.training_stats) == 0
+        # But evaluation still ran (agents should have scores)
+        assert len(gen.scores) > 0
+
+
+class TestStopAfterCurrentEvalEvent:
+    """stop_after_current_eval_event stops after one eval completes."""
+
+    def test_stops_after_first_eval(self, tmp_path):
+        import queue
+        import threading
+        config = _make_full_config()
+        config["population"]["size"] = 4
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+
+        stop_after_eval = threading.Event()
+        q = queue.Queue()
+        orch = TrainingOrchestrator(
+            config, model_store=store, progress_queue=q,
+            stop_after_current_eval_event=stop_after_eval,
+        )
+
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        # Set the event right away so it stops after the first eval
+        stop_after_eval.set()
+
+        result = orch.run(
+            train_days=[train], test_days=[test],
+            n_generations=1, n_epochs=1, seed=42,
+        )
+
+        # Should have evaluated fewer than the full population
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        eval_complete = [
+            e for e in events
+            if e.get("event") == "phase_complete" and e.get("phase") == "evaluating"
+        ]
+        assert len(eval_complete) == 1
+        assert eval_complete[0]["summary"]["agents_evaluated"] < 4
+
+    def test_stop_after_eval_set_before_run_evaluates_one(self, tmp_path):
+        """If stop_after_current_eval is set before run starts,
+        training completes normally but only 1 agent is evaluated."""
+        import queue
+        import threading
+        config = _make_full_config()
+        config["population"]["size"] = 4
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+
+        stop_after_eval = threading.Event()
+        stop_after_eval.set()
+        q = queue.Queue()
+
+        orch = TrainingOrchestrator(
+            config, model_store=store, progress_queue=q,
+            stop_after_current_eval_event=stop_after_eval,
+        )
+
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        result = orch.run(
+            train_days=[train], test_days=[test],
+            n_generations=1, n_epochs=1, seed=42,
+        )
+        # Training completed but only 1 agent was evaluated
+        gen = result.generations[0]
+        assert len(gen.training_stats) == 4  # all trained
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        eval_complete = [
+            e for e in events
+            if e.get("event") == "phase_complete" and e.get("phase") == "evaluating"
+        ]
+        assert len(eval_complete) == 1
+        assert eval_complete[0]["summary"]["agents_evaluated"] == 1
+
+
+class TestStopOverridesEvalAll:
+    """stop_event overrides eval_all mid-evaluation (escalation)."""
+
+    def test_stop_overrides_during_eval(self, tmp_path):
+        import threading
+        config = _make_full_config()
+        config["population"]["size"] = 2
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+
+        stop_event = threading.Event()
+        stop_event.set()  # Immediate stop
+
+        orch = TrainingOrchestrator(
+            config, model_store=store,
+            stop_event=stop_event,
+        )
+
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        result = orch.run(
+            train_days=[train], test_days=[test],
+            n_generations=1, n_epochs=1, seed=42,
+        )
+        # Should have 0 generations because stop was set before training
+        assert len(result.generations) == 0
+
+
+class TestEvalTiming:
+    """eval_rate_s and unevaluated_count properties."""
+
+    def test_eval_rate_computed(self, tmp_path):
+        config = _make_full_config()
+        config["population"]["size"] = 2
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        orch = TrainingOrchestrator(config, model_store=store)
+
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        orch.run(
+            train_days=[train], test_days=[test],
+            n_generations=1, n_epochs=1, seed=42,
+        )
+        # After a full run, eval_rate_s should be set
+        assert orch.eval_rate_s is not None
+        assert orch.eval_rate_s > 0
+        # All agents evaluated
+        assert orch.unevaluated_count == 0
+
+    def test_eval_rate_none_before_run(self, tmp_path):
+        config = _make_full_config()
+        orch = TrainingOrchestrator(config)
+        assert orch.eval_rate_s is None
+        assert orch.unevaluated_count == 0

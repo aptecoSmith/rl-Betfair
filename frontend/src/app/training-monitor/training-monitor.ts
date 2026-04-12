@@ -57,6 +57,12 @@ export class TrainingMonitor implements OnDestroy {
   readonly startError = signal<string | null>(null);
   readonly trainingInfo = signal<any>(null);
   readonly apiUnavailable = signal(false);
+
+  // Stop dialog state
+  readonly showStopDialog = signal(false);
+  readonly stopGranularity = signal<'eval_all' | 'eval_current' | 'immediate'>('eval_all');
+  /** The currently active stop granularity (null = no stop in progress). */
+  readonly activeStopGranularity = signal<string | null>(null);
   nGenerations = 3;
   nEpochs = 3;
   populationSize = 50;
@@ -101,6 +107,33 @@ export class TrainingMonitor implements OnDestroy {
   // Market type filter restriction — empty set means "all choices"
   selectedMarketTypeFilters = new Set<string>();
   readonly MARKET_TYPE_CHOICES = ['WIN', 'EACH_WAY', 'BOTH', 'FREE_CHOICE'];
+
+  /** Time estimate for eval_all: unevaluated_count × eval_rate_s. */
+  readonly evalAllEstimate = computed(() => {
+    const s = this.status();
+    const count = s.unevaluated_count;
+    const rate = s.eval_rate_s;
+    if (count == null || rate == null || count === 0) return null;
+    return this.formatSeconds(count * rate);
+  });
+
+  /** Time estimate for eval_current: roughly 1 × eval_rate_s. */
+  readonly evalCurrentEstimate = computed(() => {
+    const s = this.status();
+    const rate = s.eval_rate_s;
+    if (rate == null) return null;
+    return this.formatSeconds(rate);
+  });
+
+  /** Which stop options are available (escalation: no de-escalation). */
+  readonly availableStopOptions = computed(() => {
+    const active = this.activeStopGranularity();
+    if (!active) return ['eval_all', 'eval_current', 'immediate'] as const;
+    // Escalation only: eval_all → eval_current → immediate
+    if (active === 'eval_all') return ['eval_current', 'immediate'] as const;
+    if (active === 'eval_current') return ['immediate'] as const;
+    return [] as const; // immediate — can't escalate further
+  });
 
   readonly rewardHistory = this.training.rewardHistory;
   readonly lossHistory = this.training.lossHistory;
@@ -194,6 +227,8 @@ export class TrainingMonitor implements OnDestroy {
     if (!this.isRunning()) {
       this.isStopping.set(false);
       this.isFinishing.set(false);
+      this.activeStopGranularity.set(null);
+      this.showStopDialog.set(false);
     }
   });
 
@@ -430,13 +465,31 @@ export class TrainingMonitor implements OnDestroy {
   }
 
   onStopTraining(): void {
+    // Open dialog instead of immediately stopping
+    this.showStopDialog.set(true);
+    // Default to the most conservative available option
+    const opts = this.availableStopOptions();
+    if (opts.length > 0) {
+      this.stopGranularity.set(opts[0] as any);
+    }
+  }
+
+  onCancelStopDialog(): void {
+    this.showStopDialog.set(false);
+  }
+
+  onConfirmStop(): void {
+    const granularity = this.stopGranularity();
+    this.showStopDialog.set(false);
     this.isStopping.set(true);
-    this.api.stopTraining().subscribe({
+    this.activeStopGranularity.set(granularity);
+    this.api.stopTraining(granularity).subscribe({
       next: () => {
-        // Keep isStopping true until the run actually ends (WebSocket will set isRunning to false)
+        // Keep isStopping true until the run ends via WebSocket
       },
       error: () => {
         this.isStopping.set(false);
+        this.activeStopGranularity.set(null);
       },
     });
   }
@@ -471,6 +524,15 @@ export class TrainingMonitor implements OnDestroy {
     this.autoScrollEffect.destroy();
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+  }
+
+  private formatSeconds(totalSecs: number): string {
+    if (totalSecs < 60) return `~${Math.ceil(totalSecs)}s`;
+    const mins = Math.ceil(totalSecs / 60);
+    if (mins < 60) return `~${mins} min`;
+    const hours = Math.floor(mins / 60);
+    const remainMins = mins % 60;
+    return remainMins > 0 ? `~${hours}h ${remainMins}m` : `~${hours}h`;
   }
 
   private formatElapsed(ms: number): string {

@@ -443,6 +443,101 @@ class TestGeneticsEndpoint:
         assert data["n_elite"] == 5
 
 
+class TestStopGranularity:
+    """Tests for the stop endpoint with granularity parameter."""
+
+    def test_stop_defaults_to_immediate(self):
+        """POST /training/stop without granularity defaults to immediate."""
+        client, app = _make_app({"running": True, "latest_event": None, "latest_process": None, "latest_item": None})
+        # Mock worker_ws to capture the sent command
+        from unittest.mock import AsyncMock
+        import asyncio
+        ws_mock = AsyncMock()
+        ws_mock.send = AsyncMock()
+        app.state.worker_ws = ws_mock
+
+        # The pending response future will capture what was sent
+        sent_messages = []
+        original_send = ws_mock.send
+        async def capture_send(msg):
+            sent_messages.append(json.loads(msg))
+            # Resolve the pending future
+            fut = app.state.worker_pending_response
+            if fut and not fut.done():
+                fut.set_result({"type": "status", "running": True})
+        ws_mock.send = capture_send
+
+        resp = client.post("/training/stop")
+        assert resp.status_code == 200
+        # Verify the IPC message contained granularity=immediate
+        assert len(sent_messages) == 1
+        assert sent_messages[0]["granularity"] == "immediate"
+
+    def test_stop_with_eval_all(self):
+        """POST /training/stop?granularity=eval_all sends correct IPC."""
+        client, app = _make_app({"running": True, "latest_event": None, "latest_process": None, "latest_item": None})
+        from unittest.mock import AsyncMock
+        ws_mock = AsyncMock()
+        sent_messages = []
+        async def capture_send(msg):
+            sent_messages.append(json.loads(msg))
+            fut = app.state.worker_pending_response
+            if fut and not fut.done():
+                fut.set_result({"type": "status", "running": True})
+        ws_mock.send = capture_send
+        app.state.worker_ws = ws_mock
+
+        resp = client.post("/training/stop?granularity=eval_all")
+        assert resp.status_code == 200
+        assert sent_messages[0]["granularity"] == "eval_all"
+
+    def test_stop_with_invalid_granularity(self):
+        """POST /training/stop?granularity=bogus returns 422."""
+        client, app = _make_app({"running": True, "latest_event": None, "latest_process": None, "latest_item": None})
+        resp = client.post("/training/stop?granularity=bogus")
+        assert resp.status_code == 422
+
+
+class TestStatusEvalFields:
+    """Status endpoint includes unevaluated_count and eval_rate_s."""
+
+    def test_status_includes_eval_fields_when_evaluating(self):
+        state = {
+            "running": True,
+            "latest_event": {
+                "event": "progress",
+                "phase": "evaluating",
+                "unevaluated_count": 5,
+                "eval_rate_s": 45.2,
+            },
+            "latest_process": None,
+            "latest_item": None,
+        }
+        client, app = _make_app(state)
+        app.state.worker_connected = True
+        resp = client.get("/training/status")
+        data = resp.json()
+        assert data["unevaluated_count"] == 5
+        assert data["eval_rate_s"] == 45.2
+
+    def test_status_eval_fields_null_when_training(self):
+        state = {
+            "running": True,
+            "latest_event": {
+                "event": "progress",
+                "phase": "training",
+            },
+            "latest_process": None,
+            "latest_item": None,
+        }
+        client, app = _make_app(state)
+        app.state.worker_connected = True
+        resp = client.get("/training/status")
+        data = resp.json()
+        assert data["unevaluated_count"] is None
+        assert data["eval_rate_s"] is None
+
+
 class TestStartWithOverrides:
     def test_start_rejects_unknown_architecture(self):
         """POST /training/start with unknown architecture returns 400."""

@@ -19,6 +19,8 @@ function idleStatus(): TrainingStatus {
     detail: null,
     last_agent_score: null,
     worker_connected: false,
+    unevaluated_count: null,
+    eval_rate_s: null,
   };
 }
 
@@ -46,6 +48,8 @@ function runningStatus(): TrainingStatus {
     detail: 'Episode 312 | reward=+1.24 | loss=0.0042',
     last_agent_score: 0.82,
     worker_connected: true,
+    unevaluated_count: null,
+    eval_rate_s: null,
   };
 }
 
@@ -438,5 +442,67 @@ describe('TrainingMonitor', () => {
 
     // Default from the component class (50) should be used
     expect(component.populationSize).toBe(50);
+  });
+
+  // ── Stop dialog tests ──
+
+  it('opens stop dialog on Stop Training click', () => {
+    setup(runningStatus());
+    component.onStopTraining();
+    expect(component.showStopDialog()).toBe(true);
+  });
+
+  it('cancel closes dialog without side effects', () => {
+    setup(runningStatus());
+    component.onStopTraining();
+    component.onCancelStopDialog();
+    expect(component.showStopDialog()).toBe(false);
+    expect(component.isStopping()).toBe(false);
+  });
+
+  it('all three options available when no stop in progress', () => {
+    setup(runningStatus());
+    expect(component.availableStopOptions()).toEqual(['eval_all', 'eval_current', 'immediate']);
+  });
+
+  it('escalation: after eval_all, only eval_current and immediate available', () => {
+    setup(runningStatus());
+    component.activeStopGranularity.set('eval_all');
+    expect(component.availableStopOptions()).toEqual(['eval_current', 'immediate']);
+  });
+
+  it('escalation: after eval_current, only immediate available', () => {
+    setup(runningStatus());
+    component.activeStopGranularity.set('eval_current');
+    expect(component.availableStopOptions()).toEqual(['immediate']);
+  });
+
+  it('escalation: after immediate, no options available', () => {
+    setup(runningStatus());
+    component.activeStopGranularity.set('immediate');
+    expect(component.availableStopOptions()).toEqual([]);
+  });
+
+  it('eval all time estimate computed from status fields', () => {
+    setup({
+      ...runningStatus(),
+      unevaluated_count: 8,
+      eval_rate_s: 90,
+    });
+    expect(component.evalAllEstimate()).toBe('~12 min');
+  });
+
+  it('eval all estimate null when no data', () => {
+    setup(runningStatus());
+    expect(component.evalAllEstimate()).toBeNull();
+  });
+
+  it('eval current estimate computed from eval_rate_s', () => {
+    setup({
+      ...runningStatus(),
+      eval_rate_s: 120,
+      unevaluated_count: 5,
+    });
+    expect(component.evalCurrentEstimate()).toBe('~2 min');
   });
 });

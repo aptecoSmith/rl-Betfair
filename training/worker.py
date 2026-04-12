@@ -54,6 +54,9 @@ from training.ipc import (
     CMD_START,
     CMD_STOP,
     CMD_STATUS,
+    STOP_EVAL_ALL,
+    STOP_EVAL_CURRENT,
+    STOP_IMMEDIATE,
     make_error_msg,
     make_event_msg,
     make_started_msg,
@@ -127,6 +130,8 @@ class TrainingWorker:
         self.running = False
         self.stop_event = threading.Event()
         self.finish_event = threading.Event()
+        self.skip_training_event = threading.Event()
+        self.stop_after_current_eval_event = threading.Event()
         self.progress_queue: thread_queue.Queue | _AsyncBridgeQueue = thread_queue.Queue()
         self.training_thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -278,8 +283,20 @@ class TrainingWorker:
             if not self.running:
                 await ws.send(make_error_msg("No training run in progress"))
                 return
-            self.stop_event.set()
-            console.print("[yellow]Stop requested — halting after current agent[/yellow]")
+            granularity = msg.get("granularity", STOP_IMMEDIATE)
+            if granularity == STOP_IMMEDIATE:
+                self.stop_event.set()
+                console.print("[yellow]Stop requested (immediate) — halting after current agent[/yellow]")
+            elif granularity == STOP_EVAL_CURRENT:
+                self.stop_after_current_eval_event.set()
+                console.print("[yellow]Stop requested (eval_current) — finishing current evaluation then stopping[/yellow]")
+            elif granularity == STOP_EVAL_ALL:
+                self.finish_event.set()
+                self.skip_training_event.set()
+                console.print("[yellow]Stop requested (eval_all) — skipping training, evaluating all models[/yellow]")
+            else:
+                await ws.send(make_error_msg(f"Invalid stop granularity: {granularity}"))
+                return
             # Send status back so the API's pending Future resolves
             await ws.send(self._state_msg())
 
@@ -347,6 +364,8 @@ class TrainingWorker:
         # Reset
         self.stop_event.clear()
         self.finish_event.clear()
+        self.skip_training_event.clear()
+        self.stop_after_current_eval_event.clear()
         self.running = True
         self.latest_event = None
         self.latest_process = None
@@ -384,6 +403,8 @@ class TrainingWorker:
                     progress_queue=self.progress_queue,
                     stop_event=self.stop_event,
                     finish_event=self.finish_event,
+                    skip_training_event=self.skip_training_event,
+                    stop_after_current_eval_event=self.stop_after_current_eval_event,
                 )
 
                 orch.run(

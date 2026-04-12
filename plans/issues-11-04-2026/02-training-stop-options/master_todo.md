@@ -11,7 +11,7 @@ When a session completes:
 
 ## Phase 1 — Backend granularity
 
-- [ ] **Session 01 — IPC + worker: stop granularity parameter**
+- [x] **Session 01 — IPC + worker: stop granularity parameter**
 
   Extend the stop command to carry a `granularity` field.
 
@@ -32,7 +32,7 @@ When a session completes:
   - Worker receives stop with granularity=eval_current →
     stop_after_current_eval_event set.
 
-- [ ] **Session 02 — Orchestrator: handle new events**
+- [x] **Session 02 — Orchestrator: handle new events**
 
   `training/run_training.py` — add checks for the new events:
 
@@ -56,7 +56,7 @@ When a session completes:
 
 ## Phase 2 — API + frontend
 
-- [ ] **Session 03 — API endpoint: granularity parameter**
+- [x] **Session 03 — API endpoint: granularity parameter**
 
   - `api/routers/training.py` — update `POST /training/stop` to
     accept `granularity` query param (default: `"immediate"` for
@@ -72,7 +72,7 @@ When a session completes:
   - API stop without granularity → defaults to immediate.
   - Status endpoint returns unevaluated_count.
 
-- [ ] **Session 04 — Frontend: stop dialog**
+- [x] **Session 04 — Frontend: stop dialog**
 
   Replace the current "Stop Training" button with a button that
   opens a dialog offering three choices:

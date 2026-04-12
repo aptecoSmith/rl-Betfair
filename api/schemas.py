@@ -134,6 +134,8 @@ class TrainingStatus(BaseModel):
     detail: str | None = None
     last_agent_score: float | None = None
     worker_connected: bool = False
+    unevaluated_count: int | None = None
+    eval_rate_s: float | None = None
 
 
 # ── WebSocket Events ────────────────────────────────────────────────

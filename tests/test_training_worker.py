@@ -182,10 +182,18 @@ class TestIpcProtocol:
         assert msg["n_generations"] == 2
         assert msg["population_size"] == 10
 
-    def test_make_stop_cmd(self):
+    def test_make_stop_cmd_default_immediate(self):
         from training.ipc import make_stop_cmd
         msg = json.loads(make_stop_cmd())
         assert msg["type"] == "stop"
+        assert msg["granularity"] == "immediate"
+
+    def test_make_stop_cmd_with_granularity(self):
+        from training.ipc import make_stop_cmd, STOP_EVAL_ALL, STOP_EVAL_CURRENT
+        msg = json.loads(make_stop_cmd(granularity=STOP_EVAL_ALL))
+        assert msg["granularity"] == "eval_all"
+        msg = json.loads(make_stop_cmd(granularity=STOP_EVAL_CURRENT))
+        assert msg["granularity"] == "eval_current"
 
     def test_make_status_cmd(self):
         from training.ipc import make_status_cmd
@@ -226,6 +234,101 @@ class TestIpcProtocol:
         msg = parse_message('{"type": "status", "running": false}')
         assert msg["type"] == "status"
         assert msg["running"] is False
+
+
+class TestStopGranularityDispatch:
+    """Test that stop commands with different granularities set the correct events."""
+
+    def _make_worker(self, tmp_path):
+        """Create a minimal TrainingWorker for testing event dispatch."""
+        from training.worker import TrainingWorker
+        config = {
+            "training": {"architecture": "ppo_lstm_v1"},
+            "population": {"size": 2},
+            "paths": {
+                "processed_data": str(tmp_path / "data"),
+                "model_weights": str(tmp_path / "weights"),
+                "registry_db": str(tmp_path / "test.db"),
+            },
+            "hyperparameters": {"search_ranges": {}},
+            "training_worker": {"host": "localhost", "port": 19998},
+        }
+        return TrainingWorker(config=config, host="localhost", port=19998)
+
+    def test_stop_immediate_sets_stop_event(self, tmp_path):
+        worker = self._make_worker(tmp_path)
+        worker.running = True
+
+        async def _dispatch():
+            from unittest.mock import AsyncMock
+            ws = AsyncMock()
+            await worker._dispatch({"type": "stop", "granularity": "immediate"}, ws)
+            assert worker.stop_event.is_set()
+            assert not worker.finish_event.is_set()
+            assert not worker.skip_training_event.is_set()
+            assert not worker.stop_after_current_eval_event.is_set()
+
+        asyncio.run(_dispatch())
+
+    def test_stop_eval_all_sets_finish_and_skip_training(self, tmp_path):
+        worker = self._make_worker(tmp_path)
+        worker.running = True
+
+        async def _dispatch():
+            from unittest.mock import AsyncMock
+            ws = AsyncMock()
+            await worker._dispatch({"type": "stop", "granularity": "eval_all"}, ws)
+            assert worker.finish_event.is_set()
+            assert worker.skip_training_event.is_set()
+            assert not worker.stop_event.is_set()
+            assert not worker.stop_after_current_eval_event.is_set()
+
+        asyncio.run(_dispatch())
+
+    def test_stop_eval_current_sets_stop_after_current_eval(self, tmp_path):
+        worker = self._make_worker(tmp_path)
+        worker.running = True
+
+        async def _dispatch():
+            from unittest.mock import AsyncMock
+            ws = AsyncMock()
+            await worker._dispatch({"type": "stop", "granularity": "eval_current"}, ws)
+            assert worker.stop_after_current_eval_event.is_set()
+            assert not worker.stop_event.is_set()
+            assert not worker.finish_event.is_set()
+            assert not worker.skip_training_event.is_set()
+
+        asyncio.run(_dispatch())
+
+    def test_stop_without_granularity_defaults_to_immediate(self, tmp_path):
+        worker = self._make_worker(tmp_path)
+        worker.running = True
+
+        async def _dispatch():
+            from unittest.mock import AsyncMock
+            ws = AsyncMock()
+            await worker._dispatch({"type": "stop"}, ws)
+            assert worker.stop_event.is_set()
+
+        asyncio.run(_dispatch())
+
+    def test_new_run_clears_all_events(self, tmp_path):
+        worker = self._make_worker(tmp_path)
+        worker.stop_event.set()
+        worker.finish_event.set()
+        worker.skip_training_event.set()
+        worker.stop_after_current_eval_event.set()
+
+        # Simulate the reset that _start_training does
+        worker.stop_event.clear()
+        worker.finish_event.clear()
+        worker.skip_training_event.clear()
+        worker.stop_after_current_eval_event.clear()
+
+        assert not worker.stop_event.is_set()
+        assert not worker.finish_event.is_set()
+        assert not worker.skip_training_event.is_set()
+        assert not worker.stop_after_current_eval_event.is_set()
 
 
 class TestCrashFileLogging:

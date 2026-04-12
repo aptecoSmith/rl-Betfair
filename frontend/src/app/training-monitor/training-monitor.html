@@ -93,10 +93,89 @@
         <button class="btn btn-stop"
                 data-testid="stop-btn"
                 (click)="onStopTraining()"
-                [disabled]="isStopping() || isFinishing()">
+                [disabled]="isFinishing()">
           {{ isStopping() ? 'Stopping...' : 'Stop Training' }}
         </button>
       </div>
+
+      <!-- Stop Training Dialog -->
+      @if (showStopDialog()) {
+        <div class="dialog-backdrop" (click)="onCancelStopDialog()">
+          <div class="dialog-card" (click)="$event.stopPropagation()" data-testid="stop-dialog">
+            <div class="dialog-header">
+              <h3>Stop Training</h3>
+              <button class="dialog-close" (click)="onCancelStopDialog()">&times;</button>
+            </div>
+            <div class="dialog-body">
+              <p class="dialog-prompt">Choose how to wind down:</p>
+
+              @if (availableStopOptions().includes('eval_all')) {
+                <label class="stop-option" [class.selected]="stopGranularity() === 'eval_all'">
+                  <input type="radio" name="stopGranularity" value="eval_all"
+                         [checked]="stopGranularity() === 'eval_all'"
+                         (change)="stopGranularity.set('eval_all')" />
+                  <div class="option-content">
+                    <div class="option-title">Evaluate all generated models</div>
+                    <div class="option-desc">
+                      Stop breeding. Evaluate every model in the current population that hasn't been evaluated yet.
+                    </div>
+                    <div class="option-time">
+                      Estimated time: {{ evalAllEstimate() || 'calculating...' }}
+                      @if (status().unevaluated_count != null) {
+                        <span class="option-count">({{ status().unevaluated_count }} models remaining)</span>
+                      }
+                    </div>
+                  </div>
+                </label>
+              }
+
+              @if (availableStopOptions().includes('eval_current')) {
+                <label class="stop-option" [class.selected]="stopGranularity() === 'eval_current'">
+                  <input type="radio" name="stopGranularity" value="eval_current"
+                         [checked]="stopGranularity() === 'eval_current'"
+                         (change)="stopGranularity.set('eval_current')" />
+                  <div class="option-content">
+                    <div class="option-title">Finish current evaluation only</div>
+                    <div class="option-desc">
+                      Complete the model currently being evaluated, then stop. Other unevaluated models are skipped.
+                    </div>
+                    <div class="option-time">
+                      Estimated time: {{ evalCurrentEstimate() || '~2 min' }}
+                    </div>
+                  </div>
+                </label>
+              }
+
+              @if (availableStopOptions().includes('immediate')) {
+                <label class="stop-option" [class.selected]="stopGranularity() === 'immediate'">
+                  <input type="radio" name="stopGranularity" value="immediate"
+                         [checked]="stopGranularity() === 'immediate'"
+                         (change)="stopGranularity.set('immediate')" />
+                  <div class="option-content">
+                    <div class="option-title">Stop immediately</div>
+                    <div class="option-desc">
+                      Abort now. Current evaluation results are discarded.
+                    </div>
+                    <div class="option-time">Estimated time: &lt; 10 seconds</div>
+                  </div>
+                </label>
+              }
+
+              @if (availableStopOptions().length === 0) {
+                <p class="dialog-prompt">Already stopping at the most aggressive level.</p>
+              }
+            </div>
+            <div class="dialog-footer">
+              <button class="btn btn-secondary" (click)="onCancelStopDialog()">Cancel</button>
+              <button class="btn btn-stop" (click)="onConfirmStop()"
+                      [disabled]="availableStopOptions().length === 0"
+                      data-testid="stop-confirm">
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      }
     </div>
   } @else {
     <!-- ── Idle State: Wizard ─────────────────────────────── -->

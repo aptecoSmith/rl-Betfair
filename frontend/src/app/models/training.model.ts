@@ -16,6 +16,8 @@ export interface TrainingStatus {
   detail: string | null;
   last_agent_score: number | null;
   worker_connected: boolean;
+  unevaluated_count: number | null;
+  eval_rate_s: number | null;
 }
 
 export interface ActivityLogEntry {
@@ -40,4 +42,6 @@ export interface WSEvent {
   summary?: Record<string, unknown>;
   generation?: number;
   last_agent_score?: number;
+  unevaluated_count?: number;
+  eval_rate_s?: number;
 }

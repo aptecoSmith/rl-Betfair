@@ -1045,6 +1045,133 @@
   }
 }
 
+/* ── Stop Dialog ───────────────────────────────────────────── */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.dialog-card {
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 10px;
+  width: 560px;
+  max-width: 95vw;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #2a2a4a;
+
+  h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #ffffff;
+  }
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  color: #808098;
+  font-size: 1.25rem;
+  cursor: pointer;
+  padding: 0.25rem;
+  line-height: 1;
+
+  &:hover {
+    color: #e0e0e0;
+  }
+}
+
+.dialog-body {
+  padding: 1rem 1.25rem;
+}
+
+.dialog-prompt {
+  font-size: 0.8125rem;
+  color: #a0a0b8;
+  margin: 0 0 1rem;
+}
+
+.stop-option {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  background: #12122a;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 0.625rem;
+  transition: all 0.15s;
+
+  &:hover {
+    border-color: #3a3a5c;
+    background: #1e1e38;
+  }
+
+  &.selected {
+    border-color: #eb5757;
+    background: rgba(235, 87, 87, 0.06);
+  }
+
+  input[type="radio"] {
+    margin-top: 0.15rem;
+    accent-color: #eb5757;
+    cursor: pointer;
+  }
+}
+
+.option-content {
+  flex: 1;
+}
+
+.option-title {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: #e0e0e0;
+  margin-bottom: 0.25rem;
+}
+
+.option-desc {
+  font-size: 0.75rem;
+  color: #808098;
+  line-height: 1.5;
+  margin-bottom: 0.35rem;
+}
+
+.option-time {
+  font-size: 0.6875rem;
+  color: #a78bfa;
+  font-weight: 600;
+}
+
+.option-count {
+  font-weight: 400;
+  color: #808098;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid #2a2a4a;
+}
+
 .btn-primary {
   background: linear-gradient(135deg, #6c63ff, #a78bfa);
   color: #ffffff;

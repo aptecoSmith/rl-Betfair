@@ -191,6 +191,8 @@ export class TrainingService implements OnDestroy {
         detail: event.phase === 'run_stopped' ? 'Training stopped by user' : (event.detail ?? null),
         last_agent_score: null,
         worker_connected: this.status().worker_connected,
+        unevaluated_count: null,
+        eval_rate_s: null,
       });
       return;
     }
@@ -207,6 +209,8 @@ export class TrainingService implements OnDestroy {
       item: event.item ?? prev.item,
       detail: event.detail ?? prev.detail,
       last_agent_score: event.last_agent_score ?? prev.last_agent_score,
+      unevaluated_count: event.unevaluated_count ?? prev.unevaluated_count,
+      eval_rate_s: event.eval_rate_s ?? prev.eval_rate_s,
     }));
   }
 

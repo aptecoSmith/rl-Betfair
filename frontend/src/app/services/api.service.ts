@@ -197,8 +197,10 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/training/genetics`);
   }
 
-  stopTraining(): Observable<{ detail: string }> {
-    return this.http.post<{ detail: string }>(`${this.baseUrl}/training/stop`, {});
+  stopTraining(granularity: string = 'immediate'): Observable<{ detail: string }> {
+    return this.http.post<{ detail: string }>(
+      `${this.baseUrl}/training/stop?granularity=${granularity}`, {},
+    );
   }
 
   finishTraining(): Observable<{ detail: string }> {

@@ -120,6 +120,8 @@ class TrainingOrchestrator:
         device: str | None = None,
         stop_event: threading.Event | None = None,
         finish_event: threading.Event | None = None,
+        skip_training_event: threading.Event | None = None,
+        stop_after_current_eval_event: threading.Event | None = None,
         training_plan: "TrainingPlan | None" = None,
         plan_registry: "PlanRegistry | None" = None,
     ) -> None:
@@ -128,6 +130,8 @@ class TrainingOrchestrator:
         self.progress_queue = progress_queue
         self.stop_event = stop_event
         self.finish_event = finish_event
+        self.skip_training_event = skip_training_event
+        self.stop_after_current_eval_event = stop_after_current_eval_event
         # Optional Session-4 planner integration.  Both default to None
         # so config.yaml-based launches keep working unchanged.
         self.training_plan = training_plan
@@ -175,6 +179,10 @@ class TrainingOrchestrator:
         self.feature_cache: dict[str, list] = {}
 
         self._stopped = False
+        # Eval timing: track how long each agent eval takes (for time estimates)
+        self._eval_times: list[float] = []
+        self._eval_total_agents: int = 0
+        self._eval_completed_agents: int = 0
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(
             config, model_store, progress_queue=progress_queue, device=self.device,
@@ -195,6 +203,14 @@ class TrainingOrchestrator:
     def _check_finish(self) -> bool:
         """Return True if an early finish has been requested."""
         return self.finish_event is not None and self.finish_event.is_set()
+
+    def _check_skip_training(self) -> bool:
+        """Return True if training should be skipped (eval_all granularity)."""
+        return self.skip_training_event is not None and self.skip_training_event.is_set()
+
+    def _check_stop_after_current_eval(self) -> bool:
+        """Return True if we should stop after the current eval completes."""
+        return self.stop_after_current_eval_event is not None and self.stop_after_current_eval_event.is_set()
 
     def run(
         self,
@@ -485,7 +501,10 @@ class TrainingOrchestrator:
             outer_tracker.reset_timer()
 
             for agent in agents:
-                if self._check_stop() or self._check_finish():
+                if self._check_stop() or self._check_finish() or self._check_skip_training():
+                    if self._check_skip_training() and not self._check_stop():
+                        logger.info("Skip-training event set — jumping to evaluation")
+                        self._emit_info("Skipping remaining training — evaluating existing models...")
                     break
                 self._publish_progress(
                     "training", outer_tracker,
@@ -552,6 +571,10 @@ class TrainingOrchestrator:
         )
         eval_tracker.reset_timer()
 
+        # Reset eval timing for time estimates
+        self._eval_total_agents = len(agents)
+        self._eval_completed_agents = 0
+
         # Determine parallelism: CPU-bound rollout benefits from threads
         # (torch releases GIL during forward pass). Cap at available cores.
         max_eval_workers = min(
@@ -578,6 +601,7 @@ class TrainingOrchestrator:
                 market_type_filter=mtf,
             )
 
+        agents_evaluated = 0
         if max_eval_workers > 1:
             logger.info(
                 "Parallel evaluation: %d agents across %d workers",
@@ -588,23 +612,36 @@ class TrainingOrchestrator:
                 for future in futures:
                     future.result()  # raises if eval failed
                     eval_tracker.tick()
+                    agents_evaluated += 1
         else:
             for agent in agents:
+                # stop_event always overrides (escalation)
+                if self._check_stop():
+                    break
                 self._publish_progress(
                     "evaluating", eval_tracker,
                     detail=f"Evaluating agent {agent.model_id[:12]}",
                 )
+                eval_start = time.time()
                 with perf_log(
                     logger,
                     f"Eval agent {agent.model_id[:12]}",
                     log_gpu=(self.device == "cuda"),
                 ):
                     _eval_agent(agent)
+                self._eval_times.append(time.time() - eval_start)
+                self._eval_completed_agents += 1
                 eval_tracker.tick()
+                agents_evaluated += 1
+                # After completing this agent's eval, check if we should stop
+                if self._check_stop_after_current_eval():
+                    logger.info("Stop-after-current-eval — stopping after agent %s", agent.model_id[:12])
+                    self._emit_info("Stopping after current evaluation...")
+                    break
 
         self._emit_phase_complete("evaluating", {
             "generation": generation,
-            "agents_evaluated": len(agents),
+            "agents_evaluated": agents_evaluated,
         })
 
         # ── Phase: Scoring ───────────────────────────────────────────────
@@ -774,6 +811,18 @@ class TrainingOrchestrator:
                 self.training_plan.plan_id, generation,
             )
 
+    @property
+    def eval_rate_s(self) -> float | None:
+        """Average seconds per model evaluation, or None if no data."""
+        if not self._eval_times:
+            return None
+        return sum(self._eval_times) / len(self._eval_times)
+
+    @property
+    def unevaluated_count(self) -> int:
+        """Number of models not yet evaluated in the current generation."""
+        return max(0, self._eval_total_agents - self._eval_completed_agents)
+
     # -- Progress event helpers ------------------------------------------------
 
     def _emit_info(self, message: str) -> None:
@@ -825,6 +874,10 @@ class TrainingOrchestrator:
             "detail": detail,
             "timestamp": time.time(),
         }
+        # Include eval stats so the frontend can compute time estimates
+        if phase == "evaluating":
+            event["unevaluated_count"] = self.unevaluated_count
+            event["eval_rate_s"] = self.eval_rate_s
         self._put_event(event)
 
     def _put_event(self, event: dict) -> None:

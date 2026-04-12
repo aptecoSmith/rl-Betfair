@@ -31,6 +31,8 @@ from training.ipc import (
     make_stop_cmd,
     parse_message,
     EVT_ERROR,
+    VALID_STOP_GRANULARITIES,
+    STOP_EVAL_ALL,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +130,8 @@ def get_training_status(request: Request):
         detail=latest.get("detail"),
         last_agent_score=latest.get("last_agent_score"),
         worker_connected=worker_connected,
+        unevaluated_count=latest.get("unevaluated_count"),
+        eval_rate_s=latest.get("eval_rate_s"),
     )
 
 
@@ -347,24 +351,39 @@ async def start_training(request: Request, body: StartTrainingRequest):
 
 
 @router.post("/training/stop", response_model=StopTrainingResponse)
-async def stop_training(request: Request):
+async def stop_training(request: Request, granularity: str = "immediate"):
     """Request a graceful stop of the current training run.
 
-    The run will halt after the current agent completes its training/evaluation.
+    The ``granularity`` query parameter controls how aggressively the run
+    winds down:
+
+    - ``immediate`` (default): halt after the current agent finishes.
+    - ``eval_current``: finish the agent currently being evaluated, then stop.
+    - ``eval_all``: skip remaining training, evaluate every model, then stop.
     """
     state = _state(request)
     if not state["running"]:
         raise HTTPException(409, "No training run is in progress")
 
+    if granularity not in VALID_STOP_GRANULARITIES:
+        raise HTTPException(
+            422,
+            f"Invalid granularity '{granularity}'. "
+            f"Must be one of: {', '.join(sorted(VALID_STOP_GRANULARITIES))}",
+        )
+
     # Send stop command to worker
-    resp = await _send_to_worker(request, make_stop_cmd())
+    resp = await _send_to_worker(request, make_stop_cmd(granularity=granularity))
 
     if resp.get("type") == EVT_ERROR:
         raise HTTPException(409, resp.get("message", "Worker rejected stop request"))
 
-    return StopTrainingResponse(
-        detail="Stop requested — training will halt after the current agent completes",
-    )
+    detail_map = {
+        "immediate": "Stop requested — training will halt after the current agent completes",
+        "eval_current": "Stop requested — finishing current evaluation then stopping",
+        "eval_all": "Stop requested — skipping training, evaluating all models then stopping",
+    }
+    return StopTrainingResponse(detail=detail_map[granularity])
 
 
 @router.post("/training/finish", response_model=FinishTrainingResponse)
