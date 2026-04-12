@@ -242,6 +242,20 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/admin/config/constraints`);
   }
 
+  // ── Exploration / coverage dashboard ────────────────────────────
+
+  getExplorationHistory(): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/exploration/history`);
+  }
+
+  getExplorationCoverage(): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/exploration/coverage`);
+  }
+
+  getSuggestedSeed(): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/exploration/suggested-seed`);
+  }
+
   updateBettingConstraints(constraints: {
     max_back_price: number | null;
     max_lay_price: number | null;

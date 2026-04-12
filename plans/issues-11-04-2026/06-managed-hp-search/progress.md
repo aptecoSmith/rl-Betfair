@@ -94,3 +94,24 @@ key in `test_genetic_operators.py`), 12 skipped.
 - Plan list card shows non-random strategies as a badge.
 - Detail view shows the strategy field.
 - Frontend build passes cleanly.
+
+## Session 07 — Coverage dashboard page (2026-04-12)
+
+**What landed:**
+- New `api/routers/exploration.py` with three endpoints:
+  - `GET /api/exploration/history` — all exploration runs.
+  - `GET /api/exploration/coverage` — per-gene coverage report with bucket
+    counts, architecture breakdown, and poorly-covered gene list.
+  - `GET /api/exploration/suggested-seed` — coverage-biased next seed point.
+- New Angular page `/coverage` (`coverage-dashboard` component):
+  - Summary strip: total models, gene coverage %, exploration runs, poorly
+    covered gene count.
+  - Architecture breakdown with under-covered highlighting.
+  - Per-gene coverage histograms (green=covered, yellow=sparse, red=empty)
+    in a responsive grid.
+  - Exploration run history table with strategy badges.
+  - Suggested next seed point display with JSON preview.
+- Nav link "Coverage" added to app header.
+- 4 new API tests: empty history, history with runs, coverage endpoint,
+  suggested seed endpoint.
+- Frontend build passes cleanly.

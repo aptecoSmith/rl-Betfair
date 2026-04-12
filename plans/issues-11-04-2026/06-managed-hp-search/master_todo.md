@@ -122,7 +122,7 @@ When a session completes:
 
 ## Phase 3 — Visualisation: coverage dashboard
 
-- [ ] **Session 07 — Coverage dashboard page**
+- [x] **Session 07 — Coverage dashboard page**
 
   New Angular page: `/coverage`
 

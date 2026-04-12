@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 from registry.model_store import ModelStore
 from registry.scoreboard import Scoreboard
 
-from api.routers import models, training, replay, system, admin, training_plans
+from api.routers import models, training, replay, system, admin, training_plans, exploration
 from training.training_plan import PlanRegistry
 from training.ipc import (
     DEFAULT_WORKER_HOST,
@@ -263,6 +263,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(admin.router)
     app.include_router(training_plans.router)
+    app.include_router(exploration.router)
 
     return app
 
