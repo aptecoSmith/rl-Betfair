@@ -82,7 +82,7 @@ When a session completes:
 
 ## Phase 2 — Orchestration: strategy selection
 
-- [ ] **Session 05 — Training plan exploration strategy**
+- [x] **Session 05 — Training plan exploration strategy**
 
   - `training/training_plan.py` — add `exploration_strategy` field
     to `TrainingPlan`: `"random"` (default), `"sobol"`, `"coverage"`,

@@ -561,6 +561,83 @@ class TestSobolSeedGenerator:
                     assert val in spec.choices
 
 
+# -- 9b. Exploration strategy on TrainingPlan (Sprint 4, Session 05) -----------
+
+
+class TestExplorationStrategy:
+    """Tests for exploration_strategy field on TrainingPlan."""
+
+    def test_default_strategy_is_random(self, hp_ranges):
+        plan = TrainingPlan.new(
+            name="default", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+        )
+        assert plan.exploration_strategy == "random"
+        assert plan.manual_seed_point is None
+
+    def test_strategy_round_trips(self, registry, hp_ranges):
+        plan = TrainingPlan.new(
+            name="sobol-plan", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            exploration_strategy="sobol",
+        )
+        registry.save(plan)
+        reloaded = registry.load(plan.plan_id)
+        assert reloaded.exploration_strategy == "sobol"
+
+    def test_manual_seed_point_round_trips(self, registry, hp_ranges):
+        seed_pt = {"learning_rate": 0.0001, "gamma": 0.99}
+        plan = TrainingPlan.new(
+            name="manual-plan", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            exploration_strategy="manual",
+            manual_seed_point=seed_pt,
+        )
+        registry.save(plan)
+        reloaded = registry.load(plan.plan_id)
+        assert reloaded.exploration_strategy == "manual"
+        assert reloaded.manual_seed_point == seed_pt
+
+    def test_old_plan_without_strategy_defaults(self, hp_ranges):
+        """Old JSON without exploration_strategy → defaults to 'random'."""
+        plan = TrainingPlan.new(
+            name="old", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+        )
+        d = plan.to_dict()
+        del d["exploration_strategy"]
+        del d["manual_seed_point"]
+        reloaded = TrainingPlan.from_dict(d)
+        assert reloaded.exploration_strategy == "random"
+        assert reloaded.manual_seed_point is None
+
+    def test_api_accepts_strategy(self, registry, hp_ranges):
+        client = _make_test_app(registry, hp_ranges)
+        payload = {
+            "name": "api-sobol",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1", "ppo_time_lstm_v1"],
+            "hp_ranges": hp_ranges,
+            "exploration_strategy": "coverage",
+        }
+        resp = client.post("/api/training-plans", json=payload)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["plan"]["exploration_strategy"] == "coverage"
+
+    def test_api_default_strategy(self, registry, hp_ranges):
+        """API without strategy field → defaults to 'random'."""
+        client = _make_test_app(registry, hp_ranges)
+        payload = {
+            "name": "api-default",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1"],
+            "hp_ranges": hp_ranges,
+        }
+        resp = client.post("/api/training-plans", json=payload)
+        assert resp.status_code == 200
+        assert resp.json()["plan"]["exploration_strategy"] == "random"
+
+
 # -- 10. Coverage-biased seed generation (Sprint 4, Session 03) ----------------
 
 

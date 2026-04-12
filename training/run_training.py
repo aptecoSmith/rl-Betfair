@@ -311,8 +311,12 @@ class TrainingOrchestrator:
         if patched:
             logger.info("Backfilled hyperparameters on %d existing model(s)", patched)
 
+        # Resolve exploration strategy → seed point (if any).
+        seed_point = self._resolve_seed_point(run_id)
+
         agents = self.pop_manager.initialise_population(
             generation=0, seed=seed, plan=self.training_plan,
+            seed_point=seed_point,
         )
 
         # Track which architectures the plan ever saw, so we can flag
@@ -822,6 +826,73 @@ class TrainingOrchestrator:
     def unevaluated_count(self) -> int:
         """Number of models not yet evaluated in the current generation."""
         return max(0, self._eval_total_agents - self._eval_completed_agents)
+
+    # -- Exploration strategy --------------------------------------------------
+
+    def _resolve_seed_point(self, run_id: str) -> dict | None:
+        """Resolve the plan's exploration strategy to a seed point (or None).
+
+        Returns ``None`` for ``"random"`` (legacy behaviour).  For all
+        other strategies, records the exploration run in the DB and returns
+        the seed point dict to pass to ``initialise_population()``.
+        """
+        plan = self.training_plan
+        if plan is None or plan.exploration_strategy == "random":
+            return None
+
+        from agents.population_manager import parse_search_ranges
+        from training.training_plan import (
+            generate_coverage_seed,
+            generate_sobol_points,
+            historical_agents_from_model_store,
+        )
+
+        hp_specs = parse_search_ranges(
+            plan.hp_ranges or self.config["hyperparameters"]["search_ranges"]
+        )
+
+        strategy = plan.exploration_strategy
+        seed_point: dict
+        coverage_snapshot: dict | None = None
+
+        if strategy == "sobol":
+            skip = 0
+            if self.model_store is not None:
+                skip = self.model_store.get_exploration_run_count()
+            points = generate_sobol_points(hp_specs, n_points=1, skip=skip)
+            seed_point = points[0]
+            self._emit_info(f"Sobol seed point #{skip + 1}: {seed_point}")
+
+        elif strategy == "coverage":
+            history = historical_agents_from_model_store(self.model_store)
+            seed_point, report = generate_coverage_seed(hp_specs, history)
+            coverage_snapshot = report.to_dict()
+            gaps = len(report.poorly_covered_genes)
+            self._emit_info(
+                f"Coverage seed targeting {gaps} poorly-covered gene(s): {seed_point}"
+            )
+
+        elif strategy == "manual":
+            if not plan.manual_seed_point:
+                self._emit_info("Manual strategy with no seed point — falling back to random")
+                return None
+            seed_point = dict(plan.manual_seed_point)
+            self._emit_info(f"Manual seed point: {seed_point}")
+
+        else:
+            logger.warning("Unknown exploration strategy %r — falling back to random", strategy)
+            return None
+
+        # Record in exploration log.
+        if self.model_store is not None:
+            self.model_store.record_exploration_run(
+                run_id=run_id,
+                seed_point=seed_point,
+                strategy=strategy,
+                coverage_before=coverage_snapshot,
+            )
+
+        return seed_point
 
     # -- Progress event helpers ------------------------------------------------
 

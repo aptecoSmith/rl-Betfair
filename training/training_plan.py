@@ -139,6 +139,15 @@ class TrainingPlan:
     #: Enables training at different budget levels (e.g. £10/race) while
     #: keeping the global default for plans that don't specify one.
     starting_budget: float | None = None
+    #: Exploration strategy for seed-point generation.
+    #: "random" (default) = legacy random sampling.
+    #: "sobol" = quasi-random Sobol sequence.
+    #: "coverage" = biased toward coverage gaps.
+    #: "manual" = use ``manual_seed_point`` directly.
+    exploration_strategy: str = "random"
+    #: When ``exploration_strategy == "manual"``, the operator-supplied
+    #: seed point (gene name → value).  Ignored for other strategies.
+    manual_seed_point: dict | None = None
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:
@@ -156,6 +165,8 @@ class TrainingPlan:
             "outcomes": [o.to_dict() for o in self.outcomes],
             "arch_lr_ranges": self.arch_lr_ranges,
             "starting_budget": self.starting_budget,
+            "exploration_strategy": self.exploration_strategy,
+            "manual_seed_point": self.manual_seed_point,
         }
 
     @classmethod
@@ -178,6 +189,8 @@ class TrainingPlan:
             ],
             arch_lr_ranges=raw.get("arch_lr_ranges"),
             starting_budget=raw.get("starting_budget"),
+            exploration_strategy=raw.get("exploration_strategy", "random"),
+            manual_seed_point=raw.get("manual_seed_point"),
         )
 
     @staticmethod
@@ -193,6 +206,8 @@ class TrainingPlan:
         notes: str = "",
         arch_lr_ranges: dict[str, dict] | None = None,
         starting_budget: float | None = None,
+        exploration_strategy: str = "random",
+        manual_seed_point: dict | None = None,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -208,6 +223,8 @@ class TrainingPlan:
             notes=notes,
             arch_lr_ranges=arch_lr_ranges,
             starting_budget=starting_budget,
+            exploration_strategy=exploration_strategy,
+            manual_seed_point=manual_seed_point,
         )
 
 

@@ -63,3 +63,21 @@ key in `test_genetic_operators.py`), 12 skipped.
   sampling as before.
 - 5 new tests: bounds check, closeness to seed, spread proportional to sigma,
   seed_point population creates valid agents, no-seed-point unchanged.
+
+## Session 05 — Training plan exploration strategy (2026-04-12)
+
+**What landed:**
+- `TrainingPlan` now has `exploration_strategy` (default `"random"`) and
+  `manual_seed_point` fields. Both round-trip through JSON/persistence. Old
+  plans without these fields default to random (backward compat).
+- `TrainingOrchestrator._resolve_seed_point()` wires the strategy before
+  `initialise_population()`:
+  - `"random"` → returns None (legacy path).
+  - `"sobol"` → calls `generate_sobol_points()` with skip = exploration run count.
+  - `"coverage"` → calls `generate_coverage_seed()` from model history.
+  - `"manual"` → uses `plan.manual_seed_point` directly.
+  - All non-random strategies record in `exploration_runs` DB table.
+- API `POST /api/training-plans` accepts `exploration_strategy` and
+  `manual_seed_point`.
+- 6 new tests: default strategy, round-trip, manual seed round-trip, old-plan
+  backward compat, API strategy acceptance, API default strategy.

@@ -155,6 +155,8 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
             min_arch_samples=int(payload.get("min_arch_samples", 5)),
             notes=str(payload.get("notes", "")),
             starting_budget=budget_val,
+            exploration_strategy=str(payload.get("exploration_strategy", "random")),
+            manual_seed_point=payload.get("manual_seed_point"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")
