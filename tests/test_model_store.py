@@ -12,6 +12,7 @@ from registry.model_store import (
     EvaluationBetRecord,
     EvaluationDayRecord,
     EvaluationRunRecord,
+    ExplorationRunRecord,
     ModelRecord,
     ModelStore,
 )
@@ -634,3 +635,98 @@ class TestEvaluationDayBudget:
         bets = store.get_evaluation_bets(rid)
         assert len(bets) == 1
         assert bets[0].starting_budget == pytest.approx(100.0)
+
+
+# ── Exploration runs (Sprint 4, Session 01) ────────────────────────────────────
+
+
+class TestExplorationRuns:
+    """Test exploration_runs table CRUD."""
+
+    def test_insert_and_retrieve(self, store: ModelStore):
+        seed = {"learning_rate": 0.001, "hidden_size": 128}
+        row_id = store.record_exploration_run(
+            run_id="run-abc",
+            seed_point=seed,
+            strategy="sobol",
+        )
+        assert isinstance(row_id, int)
+        history = store.get_exploration_history()
+        assert len(history) == 1
+        rec = history[0]
+        assert rec.id == row_id
+        assert rec.run_id == "run-abc"
+        assert rec.strategy == "sobol"
+        assert rec.seed_point == seed
+        assert rec.coverage_before is None
+        assert rec.region_id is None
+
+    def test_round_trip_json_seed_point(self, store: ModelStore):
+        seed = {
+            "learning_rate": 0.0003,
+            "hidden_size": 256,
+            "architecture": "lstm",
+            "dropout": 0.1,
+        }
+        store.record_exploration_run(
+            run_id="run-json",
+            seed_point=seed,
+            strategy="coverage",
+        )
+        rec = store.get_exploration_history()[0]
+        assert rec.seed_point == seed
+        assert isinstance(rec.seed_point, dict)
+
+    def test_round_trip_json_coverage_before(self, store: ModelStore):
+        coverage = {
+            "learning_rate": {"buckets": 10, "covered": 3, "gaps": [0.001, 0.01]},
+            "hidden_size": {"buckets": 5, "covered": 5, "gaps": []},
+        }
+        store.record_exploration_run(
+            run_id="run-cov",
+            seed_point={"lr": 0.01},
+            strategy="coverage",
+            coverage_before=coverage,
+        )
+        rec = store.get_exploration_history()[0]
+        assert rec.coverage_before == coverage
+
+    def test_filter_by_strategy(self, store: ModelStore):
+        store.record_exploration_run("r1", {"x": 1}, strategy="sobol")
+        store.record_exploration_run("r2", {"x": 2}, strategy="coverage")
+        store.record_exploration_run("r3", {"x": 3}, strategy="sobol")
+
+        sobol = store.get_exploration_history(strategy="sobol")
+        assert len(sobol) == 2
+        assert all(r.strategy == "sobol" for r in sobol)
+
+        cov = store.get_exploration_history(strategy="coverage")
+        assert len(cov) == 1
+        assert cov[0].run_id == "r2"
+
+    def test_run_count(self, store: ModelStore):
+        assert store.get_exploration_run_count() == 0
+        store.record_exploration_run("r1", {"x": 1}, strategy="sobol")
+        store.record_exploration_run("r2", {"x": 2}, strategy="coverage")
+        assert store.get_exploration_run_count() == 2
+
+    def test_region_id_and_notes(self, store: ModelStore):
+        store.record_exploration_run(
+            run_id="r-region",
+            seed_point={"lr": 0.05},
+            strategy="manual",
+            region_id="high-lr-cluster",
+            notes="Testing high learning rate region",
+        )
+        rec = store.get_exploration_history()[0]
+        assert rec.region_id == "high-lr-cluster"
+        assert rec.notes == "Testing high learning rate region"
+
+    def test_multiple_runs_ordered_by_created_at(self, store: ModelStore):
+        for i in range(5):
+            store.record_exploration_run(f"r{i}", {"i": i}, strategy="sobol")
+        history = store.get_exploration_history()
+        assert len(history) == 5
+        # Auto-increment ids should be ascending (creation order)
+        ids = [r.id for r in history]
+        assert ids == sorted(ids)

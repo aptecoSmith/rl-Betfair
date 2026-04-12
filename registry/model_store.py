@@ -11,6 +11,7 @@ Tables
 - ``evaluation_runs``  -- one row per evaluation run
 - ``evaluation_days``  -- one row per test-day per run
 - ``genetic_events``   -- one row per genetic event
+- ``exploration_runs`` -- one row per HP-search exploration run
 
 Usage::
 
@@ -130,6 +131,20 @@ class GeneticEventRecord:
     final_value: str | None = None
     selection_reason: str | None = None
     human_summary: str | None = None
+
+
+@dataclass
+class ExplorationRunRecord:
+    """A hyperparameter-search exploration run."""
+
+    id: int | None  # auto-increment PK (None before insert)
+    run_id: str  # links to a training run / plan
+    created_at: str
+    seed_point: dict  # gene name → value
+    region_id: str | None = None
+    strategy: str = "random"  # "random" | "sobol" | "coverage" | "manual"
+    coverage_before: dict | None = None  # snapshot of coverage at seed time
+    notes: str | None = None
 
 
 # -- ModelStore ----------------------------------------------------------------
@@ -855,6 +870,87 @@ class ModelStore:
         finally:
             conn.close()
 
+    # -- Exploration runs -----------------------------------------------------
+
+    def record_exploration_run(
+        self,
+        run_id: str,
+        seed_point: dict,
+        strategy: str = "random",
+        region_id: str | None = None,
+        coverage_before: dict | None = None,
+        notes: str | None = None,
+    ) -> int:
+        """Insert an exploration run and return its auto-increment id."""
+        conn = self._get_conn()
+        try:
+            now = datetime.now(UTC).isoformat()
+            cursor = conn.execute(
+                """INSERT INTO exploration_runs
+                   (run_id, created_at, seed_point, region_id,
+                    strategy, coverage_before, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    now,
+                    json.dumps(seed_point),
+                    region_id,
+                    strategy,
+                    json.dumps(coverage_before) if coverage_before is not None else None,
+                    notes,
+                ),
+            )
+            conn.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+        finally:
+            conn.close()
+
+    def get_exploration_history(
+        self,
+        strategy: str | None = None,
+    ) -> list[ExplorationRunRecord]:
+        """Return exploration runs, optionally filtered by strategy."""
+        conn = self._get_conn()
+        try:
+            if strategy is not None:
+                rows = conn.execute(
+                    "SELECT * FROM exploration_runs WHERE strategy = ? ORDER BY created_at",
+                    (strategy,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM exploration_runs ORDER BY created_at",
+                ).fetchall()
+            return [self._row_to_exploration_run(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_exploration_run_count(self) -> int:
+        """Return the total number of exploration runs (used for Sobol skip)."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT COUNT(*) AS cnt FROM exploration_runs").fetchone()
+            return row["cnt"]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_exploration_run(row: sqlite3.Row) -> ExplorationRunRecord:
+        return ExplorationRunRecord(
+            id=row["id"],
+            run_id=row["run_id"],
+            created_at=row["created_at"],
+            seed_point=json.loads(row["seed_point"]),
+            region_id=row["region_id"],
+            strategy=row["strategy"],
+            coverage_before=(
+                json.loads(row["coverage_before"])
+                if row["coverage_before"] is not None
+                else None
+            ),
+            notes=row["notes"],
+        )
+
     # -- Helpers --------------------------------------------------------------
 
     @staticmethod
@@ -940,4 +1036,18 @@ CREATE TABLE IF NOT EXISTS genetic_events (
 
 CREATE INDEX IF NOT EXISTS idx_genetic_generation ON genetic_events(generation);
 CREATE INDEX IF NOT EXISTS idx_genetic_child ON genetic_events(child_model_id);
+
+CREATE TABLE IF NOT EXISTS exploration_runs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    seed_point          TEXT NOT NULL DEFAULT '{}',
+    region_id           TEXT,
+    strategy            TEXT NOT NULL DEFAULT 'random',
+    coverage_before     TEXT,
+    notes               TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_exploration_run_id ON exploration_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_exploration_strategy ON exploration_runs(strategy);
 """

@@ -11,7 +11,7 @@ When a session completes:
 
 ## Phase 1 — Infrastructure: tracking + seeding
 
-- [ ] **Session 01 — Exploration log DB table**
+- [x] **Session 01 — Exploration log DB table**
 
   - `registry/model_store.py` — add `exploration_runs` table:
     `id`, `run_id`, `created_at`, `seed_point` (JSON),
