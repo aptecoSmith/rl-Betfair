@@ -19,6 +19,7 @@ from training.training_plan import (
     TrainingPlan,
     bias_sampler,
     compute_coverage,
+    generate_sobol_points,
     is_launchable,
     validate_plan,
 )
@@ -496,3 +497,63 @@ def test_orchestrator_uses_global_budget_when_plan_has_none(hp_ranges):
     from training.run_training import TrainingOrchestrator
     orch = TrainingOrchestrator(test_config, model_store=None, training_plan=plan)
     assert orch.config["training"]["starting_budget"] == 100.0
+
+
+# -- 9. Sobol seed point generator (Sprint 4, Session 02) ---------------------
+
+
+class TestSobolSeedGenerator:
+    """Tests for ``generate_sobol_points``."""
+
+    def test_all_points_within_bounds(self, hp_specs):
+        points = generate_sobol_points(hp_specs, n_points=10)
+        assert len(points) == 10
+        spec_by_name = {s.name: s for s in hp_specs}
+        for pt in points:
+            lr = pt["learning_rate"]
+            assert spec_by_name["learning_rate"].min <= lr <= spec_by_name["learning_rate"].max
+            gamma = pt["gamma"]
+            assert spec_by_name["gamma"].min <= gamma <= spec_by_name["gamma"].max
+            lam = pt["gae_lambda"]
+            assert spec_by_name["gae_lambda"].min <= lam <= spec_by_name["gae_lambda"].max
+            secs = pt["early_pick_min_seconds"]
+            assert 120 <= secs <= 900
+            assert isinstance(secs, int)
+            assert pt["architecture_name"] in ["ppo_lstm_v1", "ppo_time_lstm_v1"]
+
+    def test_points_are_well_spaced(self, hp_specs):
+        """Sobol points should be better-distributed than random."""
+        points = generate_sobol_points(hp_specs, n_points=10)
+        spec_by_name = {s.name: s for s in hp_specs}
+        # Normalise gamma values to [0,1] and check pairwise distances.
+        gmin = spec_by_name["gamma"].min
+        gmax = spec_by_name["gamma"].max
+        normed = [(pt["gamma"] - gmin) / (gmax - gmin) for pt in points]
+        normed.sort()
+        # With 10 quasi-random points in [0,1], the max gap should be
+        # much less than 0.5 (a random sample could have large gaps).
+        gaps = [normed[i + 1] - normed[i] for i in range(len(normed) - 1)]
+        assert max(gaps) < 0.3, f"Max gap {max(gaps)} too large for Sobol"
+
+    def test_skip_produces_different_points(self, hp_specs):
+        a = generate_sobol_points(hp_specs, n_points=5, skip=0)
+        b = generate_sobol_points(hp_specs, n_points=5, skip=5)
+        # At least one numeric gene should differ across all 5 points.
+        a_gammas = [pt["gamma"] for pt in a]
+        b_gammas = [pt["gamma"] for pt in b]
+        assert a_gammas != b_gammas
+
+    def test_round_trip_valid_hyperparameters(self, hp_specs):
+        """Each Sobol point should be usable as hyperparameters."""
+        points = generate_sobol_points(hp_specs, n_points=5)
+        for pt in points:
+            # Every spec should have a corresponding key.
+            for spec in hp_specs:
+                assert spec.name in pt, f"Missing gene {spec.name}"
+                val = pt[spec.name]
+                if spec.type in ("float", "float_log"):
+                    assert isinstance(val, float)
+                elif spec.type == "int":
+                    assert isinstance(val, int)
+                elif spec.type in ("int_choice", "str_choice"):
+                    assert val in spec.choices

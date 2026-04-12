@@ -663,6 +663,89 @@ def sample_with_bias(
     return rng.uniform(lo, hi)
 
 
+# -- Sobol seed-point generation -----------------------------------------------
+
+
+def generate_sobol_points(
+    hp_specs: list[HyperparamSpec],
+    n_points: int = 1,
+    skip: int = 0,
+) -> list[dict]:
+    """Generate quasi-random seed points via a Sobol sequence.
+
+    Maps points from the unit hypercube ``[0, 1]^d`` (where *d* is the
+    number of numeric specs) to the actual hyperparameter ranges.
+    Non-numeric specs (``int_choice``, ``str_choice``) are sampled
+    uniformly via Python's :mod:`random` (seeded from the Sobol point
+    index for reproducibility).
+
+    Parameters
+    ----------
+    hp_specs:
+        Hyperparameter specifications from :func:`parse_search_ranges`.
+    n_points:
+        How many seed points to generate.
+    skip:
+        Number of initial Sobol points to skip (use the exploration-run
+        count so each training session gets a fresh point).
+
+    Returns
+    -------
+    List of *n_points* dicts, each mapping gene name to a sampled value.
+    """
+    import torch
+
+    numeric_specs = [s for s in hp_specs if _is_numeric_spec(s)]
+    choice_specs = [s for s in hp_specs if not _is_numeric_spec(s)]
+
+    dimension = max(len(numeric_specs), 1)
+    engine = torch.quasirandom.SobolEngine(dimension=dimension, scramble=True, seed=42)
+
+    # Advance past previously used points.
+    if skip > 0:
+        engine.fast_forward(skip)
+
+    # Draw raw [0, 1]^d points.
+    raw = engine.draw(n_points)  # shape (n_points, dimension)
+
+    results: list[dict] = []
+    for point_idx in range(n_points):
+        hp: dict = {}
+
+        # Map numeric specs from [0, 1] to actual ranges.
+        for dim_idx, spec in enumerate(numeric_specs):
+            u = raw[point_idx, dim_idx].item()  # value in [0, 1]
+            hp[spec.name] = _unit_to_gene(spec, u)
+
+        # Choice specs: seeded uniform pick (deterministic per point).
+        choice_rng = random.Random(skip + point_idx)
+        for spec in choice_specs:
+            hp[spec.name] = choice_rng.choice(spec.choices)
+
+        results.append(hp)
+    return results
+
+
+def _unit_to_gene(spec: HyperparamSpec, u: float) -> float | int:
+    """Map a value ``u`` in ``[0, 1]`` to the gene's actual range.
+
+    - ``float``: linear interpolation  ``min + u * (max - min)``.
+    - ``float_log``: log-space interpolation.
+    - ``int``: linear interpolation then round to nearest int.
+    """
+    if spec.type == "float":
+        return spec.min + u * (spec.max - spec.min)  # type: ignore[operator]
+    if spec.type == "float_log":
+        log_min = math.log(spec.min)  # type: ignore[arg-type]
+        log_max = math.log(spec.max)  # type: ignore[arg-type]
+        return math.exp(log_min + u * (log_max - log_min))
+    if spec.type == "int":
+        lo = int(spec.min)  # type: ignore[arg-type]
+        hi = int(spec.max)  # type: ignore[arg-type]
+        return max(lo, min(hi, round(lo + u * (hi - lo))))
+    raise ValueError(f"_unit_to_gene only handles numeric specs, got {spec.type!r}")
+
+
 # -- Adapters -----------------------------------------------------------------
 
 

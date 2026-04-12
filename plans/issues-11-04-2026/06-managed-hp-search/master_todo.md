@@ -25,7 +25,7 @@ When a session completes:
   - Insert and retrieve an exploration run.
   - Round-trip JSON seed_point and coverage_before.
 
-- [ ] **Session 02 — Sobol seed point generator**
+- [x] **Session 02 — Sobol seed point generator**
 
   - New module or add to `training/training_plan.py`:
     `generate_sobol_points(hp_specs, n_points, skip=0)`.

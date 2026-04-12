@@ -22,3 +22,20 @@ One entry per completed session.
 
 **Test results:** 1793 passed, 1 pre-existing failure (unrelated `mlp_layers`
 key in `test_genetic_operators.py`), 12 skipped.
+
+## Session 02 — Sobol seed point generator (2026-04-12)
+
+**What landed:**
+- `generate_sobol_points(hp_specs, n_points, skip)` in `training/training_plan.py`.
+- Uses `torch.quasirandom.SobolEngine` (scrambled, seed=42) — no new dependency
+  needed since torch is already present.
+- `_unit_to_gene()` helper maps `[0,1]` to actual gene ranges:
+  - `float`: linear interpolation.
+  - `float_log`: log-space interpolation.
+  - `int`: linear interpolation + round, clamped to bounds.
+  - `int_choice` / `str_choice`: seeded uniform pick (deterministic per point
+    index).
+- `skip` parameter fast-forwards the Sobol engine so each training run gets
+  a fresh point (wired to `get_exploration_run_count()` in Session 05).
+- 4 new tests: bounds check, spacing quality, skip produces different points,
+  round-trip validity.
