@@ -24,7 +24,7 @@ This module replaces that behaviour with a realistic single-price match:
        ends (£1–£1000) without destroying genuine fast-market levels.
 
     3. **Single-price match.** After filtering, the best remaining level
-       (lowest lay price for a back bet, highest back price for a lay
+       (highest back price for a back bet, lowest lay price for a lay
        bet) is used as the sole fill price. The bet matches up to that
        level's available size; anything over is left unmatched (the
        caller may treat that as cancelled).  **No ladder walking.**
@@ -158,40 +158,18 @@ class ExchangeMatcher:
 
     def match_back(
         self,
-        available_to_lay: Iterable[PriceLevel],
-        stake: float,
-        reference_price: float,
-        max_price: float | None = None,
-        already_matched_at_top: float = 0.0,
-    ) -> MatchResult:
-        """Attempt to fill a back bet against the lay side of the book.
-
-        For a back bet the *best* price is the **lowest** lay offer,
-        because a lower lay price means the backer pays less for the
-        same potential payout.
-        """
-        return self._match(
-            list(available_to_lay),
-            stake=stake,
-            reference_price=reference_price,
-            max_price=max_price,
-            lower_is_better=True,
-            already_matched_at_top=already_matched_at_top,
-        )
-
-    def match_lay(
-        self,
         available_to_back: Iterable[PriceLevel],
         stake: float,
         reference_price: float,
         max_price: float | None = None,
         already_matched_at_top: float = 0.0,
     ) -> MatchResult:
-        """Attempt to fill a lay bet against the back side of the book.
+        """Attempt to fill a back bet against the back side of the book.
 
-        For a lay bet the *best* price is the **highest** back offer,
-        because a higher back price means the layer gets more stake
-        in return for the same liability.
+        ``available_to_back`` contains the resting lay orders that a
+        backer can match against (the blue column on the Betfair UI).
+        The *best* price is the **highest** back offer, because a
+        higher price means greater profit if the selection wins.
         """
         return self._match(
             list(available_to_back),
@@ -199,6 +177,30 @@ class ExchangeMatcher:
             reference_price=reference_price,
             max_price=max_price,
             lower_is_better=False,
+            already_matched_at_top=already_matched_at_top,
+        )
+
+    def match_lay(
+        self,
+        available_to_lay: Iterable[PriceLevel],
+        stake: float,
+        reference_price: float,
+        max_price: float | None = None,
+        already_matched_at_top: float = 0.0,
+    ) -> MatchResult:
+        """Attempt to fill a lay bet against the lay side of the book.
+
+        ``available_to_lay`` contains the resting back orders that a
+        layer can match against (the pink column on the Betfair UI).
+        The *best* price is the **lowest** lay offer, because a lower
+        price means less liability for the layer.
+        """
+        return self._match(
+            list(available_to_lay),
+            stake=stake,
+            reference_price=reference_price,
+            max_price=max_price,
+            lower_is_better=True,
             already_matched_at_top=already_matched_at_top,
         )
 

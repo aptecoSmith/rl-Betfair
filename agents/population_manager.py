@@ -686,6 +686,12 @@ class PopulationManager:
 
         for spec in self.hp_specs:
             name = spec.name
+            # Backfill missing keys before the mutation coin-flip so that
+            # newly-added HP specs are always present after mutate(),
+            # even at mutation_rate=0.
+            if name not in hp:
+                hp[name] = _default_for_spec(spec)
+
             if name == "architecture_name" and arch_cooldown_in > 0:
                 # Cooldown blocks the arch mutation this generation.
                 deltas[name] = None
@@ -694,8 +700,7 @@ class PopulationManager:
                 deltas[name] = None
                 continue
 
-            old_val = hp.get(name, _default_for_spec(spec))
-            hp[name] = old_val  # ensure key exists after backfill
+            old_val = hp[name]
 
             if spec.type == "float":
                 sigma = (spec.max - spec.min) * 0.1

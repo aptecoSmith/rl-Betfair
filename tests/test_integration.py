@@ -257,7 +257,7 @@ class TestOrderBookReal:
     def test_back_match_against_real_book(self, day):
         race, tick, runner = self._find_runner_with_liquidity(day)
         result = DEFAULT_MATCHER.match_back(
-            runner.available_to_lay,
+            runner.available_to_back,
             stake=2.0,
             reference_price=runner.last_traded_price,
         )
@@ -271,7 +271,7 @@ class TestOrderBookReal:
     def test_lay_match_against_real_book(self, day):
         race, tick, runner = self._find_runner_with_liquidity(day)
         result = DEFAULT_MATCHER.match_lay(
-            runner.available_to_back,
+            runner.available_to_lay,
             stake=2.0,
             reference_price=runner.last_traded_price,
         )

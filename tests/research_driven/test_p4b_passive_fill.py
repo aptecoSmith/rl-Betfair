@@ -390,10 +390,10 @@ class TestAggressiveRegression:
         p_order = mgr.passive_book.place(snap, stake=20.0, side=BetSide.BACK,
                                          market_id="1.99", tick_index=0)
         assert p_order is not None
-        # Aggressive back — matches on lay side at 4.1.
+        # Aggressive back — matches on back side at 3.9.
         agg = mgr.place_back(snap, stake=15.0, market_id="1.99")
         assert agg is not None
-        assert agg.average_price == pytest.approx(4.1)
+        assert agg.average_price == pytest.approx(3.9)
         assert len(mgr.bets) == 1            # aggressive bet in bets
         assert len(mgr.passive_book.orders) == 1  # passive still open
 
@@ -416,10 +416,10 @@ class TestAggressiveRegression:
         mgr.passive_book.on_tick(t)
         assert len(mgr.bets) == 1
 
-        # Aggressive back should see the full lay-side liquidity (100).
-        agg = mgr.place_back(snap, stake=80.0, market_id="1.99")
+        # Aggressive back should see the full back-side liquidity (50).
+        agg = mgr.place_back(snap, stake=40.0, market_id="1.99")
         assert agg is not None
-        assert agg.matched_stake == pytest.approx(80.0)
+        assert agg.matched_stake == pytest.approx(40.0)
 
 
 # ── Test 10: raw + shaped ≈ total reward invariant ────────────────────────────
@@ -451,7 +451,7 @@ class TestRewardInvariant:
         # Aggressive path at the same price.  We need to artificially construct
         # a runner where the lay top is 3.9 (matching the passive queue price).
         mgr_a = _mgr(budget=500.0)
-        snap_a = _runner(selection_id=1001, ltp=4.0, lay_levels=[(3.9, 100.0)])
+        snap_a = _runner(selection_id=1001, ltp=4.0, back_levels=[(3.9, 100.0)])
         mgr_a.place_back(snap_a, stake=10.0, market_id="1.99")
         pnl_aggressive = mgr_a.settle_race(winning_selection_ids=1001, market_id="1.99")
 
@@ -478,5 +478,6 @@ class TestRewardInvariant:
 
         # Settle: runner 1001 wins.
         pnl = mgr.settle_race(winning_selection_ids=1001, market_id="1.99")
-        expected = 10.0 * (3.9 - 1.0) + 15.0 * (4.1 - 1.0)
+        # Passive fill at 3.9, aggressive fill at 3.9 (both match on back side).
+        expected = 10.0 * (3.9 - 1.0) + 15.0 * (3.9 - 1.0)
         assert pnl == pytest.approx(expected, rel=1e-6)

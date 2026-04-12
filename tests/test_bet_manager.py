@@ -83,7 +83,7 @@ class TestBetManagerInit:
 class TestPlaceBack:
     def test_simple_back(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[(3.0, 50.0)])
+        runner = _runner(back_levels=[(3.0, 50.0)])
 
         bet = mgr.place_back(runner, stake=10.0)
 
@@ -97,7 +97,7 @@ class TestPlaceBack:
 
     def test_back_capped_to_budget(self):
         mgr = BetManager(starting_budget=20.0)
-        runner = _runner(lay_levels=[(3.0, 100.0)])
+        runner = _runner(back_levels=[(3.0, 100.0)])
 
         bet = mgr.place_back(runner, stake=50.0)
 
@@ -108,7 +108,7 @@ class TestPlaceBack:
 
     def test_back_partial_fill(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[(3.0, 5.0)])
+        runner = _runner(back_levels=[(3.0, 5.0)])
 
         bet = mgr.place_back(runner, stake=20.0)
 
@@ -118,7 +118,7 @@ class TestPlaceBack:
 
     def test_back_no_liquidity(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[])
+        runner = _runner(back_levels=[])
 
         bet = mgr.place_back(runner, stake=10.0)
 
@@ -128,7 +128,7 @@ class TestPlaceBack:
 
     def test_back_zero_budget(self):
         mgr = BetManager(starting_budget=0.0)
-        runner = _runner(lay_levels=[(3.0, 50.0)])
+        runner = _runner(back_levels=[(3.0, 50.0)])
 
         bet = mgr.place_back(runner, stake=10.0)
 
@@ -144,20 +144,20 @@ class TestPlaceBack:
         left unmatched (conceptually cancelled).
         """
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[(3.0, 5.0), (3.5, 10.0), (4.0, 20.0)])
+        runner = _runner(back_levels=[(3.0, 20.0), (3.5, 10.0), (4.0, 5.0)])
 
         bet = mgr.place_back(runner, stake=12.0)
 
         assert bet is not None
-        # Only the top-of-book level (3.0 @ 5.0) matches; the remaining
-        # 7.0 of stake is unmatched (no walking to 3.5 or 4.0).
+        # Only the top-of-book level (4.0 @ 5.0, highest price) matches;
+        # the remaining 7.0 of stake is unmatched (no walking to 3.5 or 3.0).
         assert bet.matched_stake == 5.0
-        assert bet.average_price == 3.0
+        assert bet.average_price == 4.0
         assert mgr.budget == pytest.approx(95.0)
 
     def test_back_with_market_id(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[(3.0, 50.0)])
+        runner = _runner(back_levels=[(3.0, 50.0)])
 
         bet = mgr.place_back(runner, stake=10.0, market_id="1.234")
 
@@ -166,7 +166,7 @@ class TestPlaceBack:
 
     def test_multiple_backs_deplete_budget(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[(3.0, 100.0)])
+        runner = _runner(back_levels=[(3.0, 100.0)])
 
         mgr.place_back(runner, stake=40.0)
         mgr.place_back(runner, stake=40.0)
@@ -181,7 +181,7 @@ class TestPlaceBack:
 
     def test_back_zero_stake(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[(3.0, 50.0)])
+        runner = _runner(back_levels=[(3.0, 50.0)])
 
         bet = mgr.place_back(runner, stake=0.0)
         assert bet is None
@@ -193,7 +193,7 @@ class TestPlaceBack:
 class TestPlaceLay:
     def test_simple_lay(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=2001, back_levels=[(4.0, 50.0)])
+        runner = _runner(selection_id=2001, lay_levels=[(4.0, 50.0)])
 
         bet = mgr.place_lay(runner, stake=10.0)
 
@@ -212,7 +212,7 @@ class TestPlaceLay:
         mgr = BetManager(starting_budget=50.0)
         # Price 6.0: liability per £1 stake = 5.0
         # Budget 50 → max stake = 50/5 = 10
-        runner = _runner(back_levels=[(6.0, 100.0)])
+        runner = _runner(lay_levels=[(6.0, 100.0)])
 
         bet = mgr.place_lay(runner, stake=20.0)
 
@@ -223,7 +223,7 @@ class TestPlaceLay:
 
     def test_lay_no_liquidity(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(back_levels=[])
+        runner = _runner(lay_levels=[])
 
         bet = mgr.place_lay(runner, stake=10.0)
 
@@ -232,7 +232,7 @@ class TestPlaceLay:
 
     def test_lay_zero_budget(self):
         mgr = BetManager(starting_budget=0.0)
-        runner = _runner(back_levels=[(3.0, 50.0)])
+        runner = _runner(lay_levels=[(3.0, 50.0)])
 
         bet = mgr.place_lay(runner, stake=10.0)
 
@@ -240,7 +240,7 @@ class TestPlaceLay:
 
     def test_lay_partial_fill(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(back_levels=[(4.0, 3.0)])
+        runner = _runner(lay_levels=[(4.0, 3.0)])
 
         bet = mgr.place_lay(runner, stake=10.0)
 
@@ -251,14 +251,14 @@ class TestPlaceLay:
 
     def test_lay_zero_stake(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(back_levels=[(4.0, 50.0)])
+        runner = _runner(lay_levels=[(4.0, 50.0)])
 
         bet = mgr.place_lay(runner, stake=0.0)
         assert bet is None
 
     def test_multiple_lays_accumulate_liability(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(back_levels=[(3.0, 100.0)])
+        runner = _runner(lay_levels=[(3.0, 100.0)])
 
         # Lay £10 at 3.0 → liability = 10×2 = 20
         mgr.place_lay(runner, stake=10.0)
@@ -305,7 +305,7 @@ class TestBetLiability:
 class TestSettlement:
     def test_back_winner(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
 
         mgr.place_back(runner, stake=10.0, market_id="m1")
         # Budget: 100 − 10 = 90
@@ -320,7 +320,7 @@ class TestSettlement:
 
     def test_back_loser(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
 
         mgr.place_back(runner, stake=10.0, market_id="m1")
 
@@ -333,7 +333,7 @@ class TestSettlement:
 
     def test_lay_winner_loses_liability(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=2001, back_levels=[(4.0, 50.0)])
+        runner = _runner(selection_id=2001, lay_levels=[(4.0, 50.0)])
 
         mgr.place_lay(runner, stake=10.0, market_id="m1")
         # Liability = 10 × (4 − 1) = 30
@@ -349,7 +349,7 @@ class TestSettlement:
 
     def test_lay_loser_keeps_stake(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=2001, back_levels=[(4.0, 50.0)])
+        runner = _runner(selection_id=2001, lay_levels=[(4.0, 50.0)])
 
         mgr.place_lay(runner, stake=10.0, market_id="m1")
 
@@ -363,8 +363,8 @@ class TestSettlement:
 
     def test_settle_multiple_bets_same_race(self):
         mgr = BetManager(starting_budget=100.0)
-        winner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        loser = _runner(selection_id=1002, lay_levels=[(5.0, 50.0)])
+        winner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        loser = _runner(selection_id=1002, back_levels=[(5.0, 50.0)])
 
         mgr.place_back(winner, stake=10.0, market_id="m1")
         mgr.place_back(loser, stake=10.0, market_id="m1")
@@ -378,8 +378,8 @@ class TestSettlement:
 
     def test_settle_only_affects_specified_market(self):
         mgr = BetManager(starting_budget=100.0)
-        r1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        r2 = _runner(selection_id=2001, lay_levels=[(4.0, 50.0)])
+        r1 = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        r2 = _runner(selection_id=2001, back_levels=[(4.0, 50.0)])
 
         mgr.place_back(r1, stake=10.0, market_id="m1")
         mgr.place_back(r2, stake=10.0, market_id="m2")
@@ -393,8 +393,8 @@ class TestSettlement:
 
     def test_settle_without_market_id_settles_all(self):
         mgr = BetManager(starting_budget=100.0)
-        r1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        r2 = _runner(selection_id=1002, lay_levels=[(4.0, 50.0)])
+        r1 = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        r2 = _runner(selection_id=1002, back_levels=[(4.0, 50.0)])
 
         mgr.place_back(r1, stake=10.0, market_id="m1")
         mgr.place_back(r2, stake=10.0, market_id="m1")
@@ -406,7 +406,7 @@ class TestSettlement:
 
     def test_double_settle_is_noop(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
 
         mgr.place_back(runner, stake=10.0, market_id="m1")
         pnl1 = mgr.settle_race(winning_selection_ids=1001, market_id="m1")
@@ -419,8 +419,8 @@ class TestSettlement:
 
     def test_mixed_back_and_lay_settlement(self):
         mgr = BetManager(starting_budget=100.0)
-        r_back = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        r_lay = _runner(selection_id=1002, back_levels=[(4.0, 50.0)])
+        r_back = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        r_lay = _runner(selection_id=1002, lay_levels=[(4.0, 50.0)])
 
         mgr.place_back(r_back, stake=10.0, market_id="m1")
         mgr.place_lay(r_lay, stake=10.0, market_id="m1")
@@ -444,8 +444,8 @@ class TestSettlement:
 class TestBudgetAcrossRaces:
     def test_budget_carries_across_races(self):
         mgr = BetManager(starting_budget=100.0)
-        runner1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        runner2 = _runner(selection_id=2001, lay_levels=[(4.0, 50.0)])
+        runner1 = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        runner2 = _runner(selection_id=2001, back_levels=[(4.0, 50.0)])
 
         # Race 1: back £10, wins
         mgr.place_back(runner1, stake=10.0, market_id="race1")
@@ -460,8 +460,8 @@ class TestBudgetAcrossRaces:
 
     def test_losing_race_reduces_budget_for_next(self):
         mgr = BetManager(starting_budget=100.0)
-        runner1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        runner2 = _runner(selection_id=2001, lay_levels=[(4.0, 50.0)])
+        runner1 = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        runner2 = _runner(selection_id=2001, back_levels=[(4.0, 50.0)])
 
         # Race 1: back £50, loses
         mgr.place_back(runner1, stake=50.0, market_id="race1")
@@ -480,8 +480,8 @@ class TestBudgetAcrossRaces:
 class TestHelpers:
     def test_unsettled_bets(self):
         mgr = BetManager(starting_budget=100.0)
-        r1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        r2 = _runner(selection_id=2001, lay_levels=[(4.0, 50.0)])
+        r1 = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        r2 = _runner(selection_id=2001, back_levels=[(4.0, 50.0)])
 
         mgr.place_back(r1, stake=10.0, market_id="m1")
         mgr.place_back(r2, stake=10.0, market_id="m2")
@@ -497,7 +497,7 @@ class TestHelpers:
 
     def test_unsettled_bets_filtered_by_market(self):
         mgr = BetManager(starting_budget=100.0)
-        r1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        r1 = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
 
         mgr.place_back(r1, stake=10.0, market_id="m1")
         mgr.place_back(r1, stake=10.0, market_id="m2")
@@ -508,7 +508,7 @@ class TestHelpers:
 
     def test_race_bets(self):
         mgr = BetManager(starting_budget=100.0)
-        r = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        r = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
 
         mgr.place_back(r, stake=10.0, market_id="m1")
         mgr.place_back(r, stake=5.0, market_id="m1")
@@ -519,8 +519,8 @@ class TestHelpers:
 
     def test_winning_bets_count(self):
         mgr = BetManager(starting_budget=100.0)
-        winner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        loser = _runner(selection_id=1002, lay_levels=[(4.0, 50.0)])
+        winner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        loser = _runner(selection_id=1002, back_levels=[(4.0, 50.0)])
 
         mgr.place_back(winner, stake=10.0, market_id="m1")
         mgr.place_back(loser, stake=10.0, market_id="m1")
@@ -539,7 +539,7 @@ class TestEdgeCases:
     def test_lay_at_price_1_has_zero_liability(self):
         """Edge: price=1.0 means liability = stake×0 = 0."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(back_levels=[(1.01, 50.0)])
+        runner = _runner(lay_levels=[(1.01, 50.0)])
 
         bet = mgr.place_lay(runner, stake=10.0)
 
@@ -551,8 +551,8 @@ class TestEdgeCases:
         mgr = BetManager(starting_budget=100.0)
         runner = _runner(
             selection_id=1001,
-            back_levels=[(4.0, 50.0)],
-            lay_levels=[(3.0, 50.0)],
+            lay_levels=[(4.0, 50.0)],
+            back_levels=[(3.0, 50.0)],
         )
 
         mgr.place_back(runner, stake=10.0, market_id="m1")
@@ -572,8 +572,8 @@ class TestEdgeCases:
         mgr = BetManager(starting_budget=100.0)
         runner = _runner(
             selection_id=1001,
-            back_levels=[(4.0, 50.0)],
-            lay_levels=[(3.0, 50.0)],
+            lay_levels=[(4.0, 50.0)],
+            back_levels=[(3.0, 50.0)],
         )
 
         mgr.place_back(runner, stake=10.0, market_id="m1")
@@ -587,7 +587,7 @@ class TestEdgeCases:
     def test_very_large_lay_capped(self):
         """Lay stake much larger than budget can support."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(back_levels=[(11.0, 1000.0)])
+        runner = _runner(lay_levels=[(11.0, 1000.0)])
         # Liability per £1 = 10.0. Budget = 100 → max stake = 10.0
 
         bet = mgr.place_lay(runner, stake=500.0)
@@ -601,7 +601,7 @@ class TestEdgeCases:
         """Lay bet rejected when budget-capped stake falls below MIN_BET_STAKE."""
         from env.bet_manager import MIN_BET_STAKE
         mgr = BetManager(starting_budget=10.0)
-        runner = _runner(back_levels=[(11.0, 1000.0)])
+        runner = _runner(lay_levels=[(11.0, 1000.0)])
         # Liability per £1 = 10.0. Budget = 10 → max stake = 1.0 < MIN_BET_STAKE
         bet = mgr.place_lay(runner, stake=500.0)
         assert bet is None
@@ -611,7 +611,7 @@ class TestEdgeCases:
         from env.bet_manager import MIN_BET_STAKE
         mgr = BetManager(starting_budget=100.0)
         # Only £1.50 available at this price — partial fill below minimum
-        runner = _runner(lay_levels=[(3.0, 1.50)])
+        runner = _runner(back_levels=[(3.0, 1.50)])
         bet = mgr.place_back(runner, stake=10.0)
         assert bet is None
 
@@ -619,7 +619,7 @@ class TestEdgeCases:
         """Back bet accepted when fill equals MIN_BET_STAKE exactly."""
         from env.bet_manager import MIN_BET_STAKE
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(lay_levels=[(3.0, MIN_BET_STAKE)])
+        runner = _runner(back_levels=[(3.0, MIN_BET_STAKE)])
         bet = mgr.place_back(runner, stake=10.0)
         assert bet is not None
         assert bet.matched_stake == pytest.approx(MIN_BET_STAKE)
@@ -629,8 +629,8 @@ class TestEdgeCases:
         mgr = BetManager(starting_budget=100.0)
 
         # --- Race 1 ---
-        r1_winner = _runner(selection_id=101, lay_levels=[(2.5, 50.0)])
-        r1_loser = _runner(selection_id=102, lay_levels=[(6.0, 50.0)])
+        r1_winner = _runner(selection_id=101, back_levels=[(2.5, 50.0)])
+        r1_loser = _runner(selection_id=102, back_levels=[(6.0, 50.0)])
 
         mgr.place_back(r1_winner, stake=20.0, market_id="race1")
         mgr.place_back(r1_loser, stake=5.0, market_id="race1")
@@ -642,8 +642,8 @@ class TestEdgeCases:
         assert mgr.budget == pytest.approx(125.0)
 
         # --- Race 2 ---
-        r2_loser1 = _runner(selection_id=201, lay_levels=[(3.0, 50.0)])
-        r2_lay = _runner(selection_id=202, back_levels=[(4.0, 50.0)])
+        r2_loser1 = _runner(selection_id=201, back_levels=[(3.0, 50.0)])
+        r2_lay = _runner(selection_id=202, lay_levels=[(4.0, 50.0)])
 
         mgr.place_back(r2_loser1, stake=30.0, market_id="race2")
         mgr.place_lay(r2_lay, stake=10.0, market_id="race2")
@@ -668,7 +668,7 @@ class TestEachWaySettlement:
     def test_placed_runner_back_wins(self):
         """A back bet on a PLACED runner should pay out at full price."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         # Runner placed (not the winner) — should still pay out
         pnl = mgr.settle_race({2001, 1001}, market_id="m1")
@@ -678,7 +678,7 @@ class TestEachWaySettlement:
     def test_placed_runner_lay_loses(self):
         """A lay bet on a PLACED runner should lose (runner placed)."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        runner = _runner(selection_id=1001, lay_levels=[(4.0, 50.0)])
         mgr.place_lay(runner, stake=10.0, market_id="m1")
         # Runner placed — layer loses
         pnl = mgr.settle_race({2001, 1001}, market_id="m1")
@@ -689,7 +689,7 @@ class TestEachWaySettlement:
     def test_non_placed_runner_loses(self):
         """Back bet on non-placed runner still loses in EACH_WAY."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=3001, lay_levels=[(5.0, 50.0)])
+        runner = _runner(selection_id=3001, back_levels=[(5.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         # Winners are {1001, 2001} — 3001 is a loser
         pnl = mgr.settle_race({1001, 2001}, market_id="m1")
@@ -699,8 +699,8 @@ class TestEachWaySettlement:
     def test_multiple_placed_runners_all_pay(self):
         """Multiple bets on different placed runners should all win."""
         mgr = BetManager(starting_budget=100.0)
-        r1 = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
-        r2 = _runner(selection_id=1002, lay_levels=[(5.0, 50.0)])
+        r1 = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
+        r2 = _runner(selection_id=1002, back_levels=[(5.0, 50.0)])
         mgr.place_back(r1, stake=10.0, market_id="m1")
         mgr.place_back(r2, stake=10.0, market_id="m1")
         # Both placed
@@ -712,7 +712,7 @@ class TestEachWaySettlement:
     def test_single_int_still_works(self):
         """Passing a single int (backward compat) should still work."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         pnl = mgr.settle_race(1001, market_id="m1")
         assert pnl == pytest.approx(20.0)
@@ -735,14 +735,14 @@ class TestEachWaySettlementCorrected:
     def _mgr_with_back(self, sid: int, price: float = 10.0,
                        stake: float = 10.0) -> BetManager:
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=sid, lay_levels=[(price, 100.0)])
+        runner = _runner(selection_id=sid, back_levels=[(price, 100.0)])
         mgr.place_back(runner, stake=stake, market_id="m1")
         return mgr
 
     def _mgr_with_lay(self, sid: int, price: float = 10.0,
                       stake: float = 10.0) -> BetManager:
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=sid, back_levels=[(price, 100.0)])
+        runner = _runner(selection_id=sid, lay_levels=[(price, 100.0)])
         mgr.place_lay(runner, stake=stake, market_id="m1")
         return mgr
 
@@ -924,7 +924,7 @@ class TestCommission:
     def test_back_winner_with_commission(self):
         """Commission should be deducted from profit on a winning back bet."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         # Budget: 90
         pnl = mgr.settle_race(1001, market_id="m1", commission=0.05)
@@ -935,7 +935,7 @@ class TestCommission:
     def test_back_loser_no_commission(self):
         """No commission on losing bets."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         pnl = mgr.settle_race(9999, market_id="m1", commission=0.05)
         assert pnl == pytest.approx(-10.0)
@@ -943,7 +943,7 @@ class TestCommission:
     def test_lay_winner_no_commission_on_loss(self):
         """Lay bet losing (runner won) — no commission, just lose liability."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        runner = _runner(selection_id=1001, lay_levels=[(4.0, 50.0)])
         mgr.place_lay(runner, stake=10.0, market_id="m1")
         pnl = mgr.settle_race(1001, market_id="m1", commission=0.05)
         # Layer loses liability: 10 × 3 = 30 (no commission on losses)
@@ -952,7 +952,7 @@ class TestCommission:
     def test_lay_loser_with_commission(self):
         """Lay bet winning (runner lost) — commission on the profit."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        runner = _runner(selection_id=1001, lay_levels=[(4.0, 50.0)])
         mgr.place_lay(runner, stake=10.0, market_id="m1")
         pnl = mgr.settle_race(9999, market_id="m1", commission=0.05)
         # Gross profit: 10 (backer's stake). Commission: 10 × 0.05 = 0.5. Net: 9.5
@@ -961,7 +961,7 @@ class TestCommission:
     def test_zero_commission(self):
         """With zero commission, results match the old behaviour."""
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         pnl = mgr.settle_race(1001, market_id="m1", commission=0.0)
         assert pnl == pytest.approx(20.0)
@@ -969,7 +969,7 @@ class TestCommission:
     def test_commission_with_placed_runners(self):
         """Commission applies to placed runner payouts too."""
         mgr = BetManager(starting_budget=100.0)
-        r1 = _runner(selection_id=1001, lay_levels=[(5.0, 50.0)])
+        r1 = _runner(selection_id=1001, back_levels=[(5.0, 50.0)])
         mgr.place_back(r1, stake=10.0, market_id="m1")
         # Runner 1001 placed
         pnl = mgr.settle_race({1001, 2001}, market_id="m1", commission=0.10)
@@ -990,7 +990,7 @@ class TestPositionTracking:
 
     def test_get_positions_single_back(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
 
         positions = mgr.get_positions("m1")
@@ -1001,7 +1001,7 @@ class TestPositionTracking:
 
     def test_get_positions_accumulated_back(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         mgr.place_back(runner, stake=5.0, market_id="m1")
 
@@ -1011,7 +1011,7 @@ class TestPositionTracking:
 
     def test_get_positions_lay(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, back_levels=[(4.0, 50.0)])
+        runner = _runner(selection_id=1001, lay_levels=[(4.0, 50.0)])
         mgr.place_lay(runner, stake=10.0, market_id="m1")
 
         positions = mgr.get_positions("m1")
@@ -1025,8 +1025,8 @@ class TestPositionTracking:
         mgr = BetManager(starting_budget=100.0)
         runner = _runner(
             selection_id=1001,
-            back_levels=[(4.0, 50.0)],
-            lay_levels=[(3.0, 50.0)],
+            lay_levels=[(4.0, 50.0)],
+            back_levels=[(3.0, 50.0)],
         )
         mgr.place_back(runner, stake=10.0, market_id="m1")
         mgr.place_lay(runner, stake=5.0, market_id="m1")
@@ -1039,7 +1039,7 @@ class TestPositionTracking:
 
     def test_get_positions_filtered_by_market(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         mgr.place_back(runner, stake=5.0, market_id="m2")
 
@@ -1050,7 +1050,7 @@ class TestPositionTracking:
 
     def test_race_bet_count(self):
         mgr = BetManager(starting_budget=100.0)
-        runner = _runner(selection_id=1001, lay_levels=[(3.0, 50.0)])
+        runner = _runner(selection_id=1001, back_levels=[(3.0, 50.0)])
         mgr.place_back(runner, stake=10.0, market_id="m1")
         mgr.place_back(runner, stake=5.0, market_id="m1")
         mgr.place_back(runner, stake=5.0, market_id="m2")

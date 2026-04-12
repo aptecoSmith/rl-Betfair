@@ -94,20 +94,20 @@ class TestMatchBackSinglePrice:
         """If requested stake > top-of-book size, the remainder is UNMATCHED
         — we do NOT walk to the next level. This is the core behavioural
         difference from the old walking implementation."""
-        levels = _levels((3.0, 5.0), (3.5, 100.0), (4.0, 100.0))
-        r = matcher.match_back(levels, stake=20.0, reference_price=3.0)
+        levels = _levels((3.0, 100.0), (3.5, 100.0), (4.0, 5.0))
+        r = matcher.match_back(levels, stake=20.0, reference_price=3.5)
         assert r.matched_stake == 5.0          # only top level's size
         assert r.unmatched_stake == 15.0
-        assert r.average_price == 3.0          # top-of-book only, not a weighted avg
+        assert r.average_price == 4.0          # top-of-book only, not a weighted avg
 
-    def test_lowest_lay_price_is_best(self, matcher):
-        """For a back bet, the *lowest* lay price wins — a backer wants
-        the cheapest counter. The matcher must pick it even if the input
+    def test_highest_back_price_is_best(self, matcher):
+        """For a back bet, the *highest* back price wins — a backer wants
+        the best odds. The matcher must pick it even if the input
         list isn't sorted that way (defensive sort after filtering)."""
         levels = _levels((4.0, 10.0), (3.5, 8.0), (4.5, 12.0))  # deliberately unsorted
         r = matcher.match_back(levels, stake=5.0, reference_price=4.0)
         assert r.matched_stake == 5.0
-        assert r.average_price == 3.5  # the lowest price in the list
+        assert r.average_price == 4.5  # the highest price in the list
 
     def test_does_not_walk_into_junk_even_if_top_exhausted(self, matcher):
         """Regression test for the phantom-profit bug.
@@ -136,20 +136,19 @@ class TestMatchLaySinglePrice:
 
     def test_partial_fill_when_stake_exceeds_top_size(self, matcher):
         """Same single-price rule on the lay side."""
-        levels = _levels((5.0, 6.0), (4.5, 50.0))
+        levels = _levels((4.5, 6.0), (5.0, 50.0))
         r = matcher.match_lay(levels, stake=20.0, reference_price=5.0)
         assert r.matched_stake == 6.0
         assert r.unmatched_stake == 14.0
-        assert r.average_price == 5.0  # best back = highest; no walk to 4.5
+        assert r.average_price == 4.5  # best lay = lowest; no walk to 5.0
 
-    def test_highest_back_price_is_best(self, matcher):
-        """For a lay bet the *highest* back price wins — layer gets more
-        stake for the same liability. Matcher must pick it regardless of
-        input ordering."""
+    def test_lowest_lay_price_is_best(self, matcher):
+        """For a lay bet the *lowest* lay price wins — layer gets least
+        liability. Matcher must pick it regardless of input ordering."""
         levels = _levels((4.0, 10.0), (4.5, 8.0), (3.5, 12.0))
         r = matcher.match_lay(levels, stake=5.0, reference_price=4.0)
         assert r.matched_stake == 5.0
-        assert r.average_price == 4.5
+        assert r.average_price == 3.5
 
 
 # ── Junk-level filter ────────────────────────────────────────────────────────

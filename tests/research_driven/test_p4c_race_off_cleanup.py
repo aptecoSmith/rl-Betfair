@@ -564,7 +564,7 @@ class TestAggressivePassiveMixedRun:
             total_matched=1000.0,
         )
 
-        # Aggressive back £20 at 4.1.
+        # Aggressive back £20 at 3.9 (best back price).
         agg = mgr.place_back(snap, stake=20.0, market_id="1.99")
         assert agg is not None
 
@@ -598,8 +598,8 @@ class TestAggressivePassiveMixedRun:
         # Settle: runner 1001 wins.
         pnl = mgr.settle_race(winning_selection_ids=1001, market_id="1.99")
 
-        # Expected P&L: aggressive back 20 @ 4.1 + passive fill 10 @ 3.9.
-        expected = 20.0 * (4.1 - 1.0) + 10.0 * (3.9 - 1.0)
+        # Expected P&L: aggressive back 20 @ 3.9 + passive fill 10 @ 3.9.
+        expected = 20.0 * (3.9 - 1.0) + 10.0 * (3.9 - 1.0)
         assert pnl == pytest.approx(expected, rel=1e-6)
 
         # Budget check: started at 500, all matched bets won.
@@ -607,5 +607,5 @@ class TestAggressivePassiveMixedRun:
         # Cancelled passive: budget restored.
         # After settlement budget should be 500 + agg_profit + passive_profit.
         assert mgr.budget == pytest.approx(
-            500.0 + 20.0 * (4.1 - 1.0) + 10.0 * (3.9 - 1.0), rel=1e-6,
+            500.0 + 20.0 * (3.9 - 1.0) + 10.0 * (3.9 - 1.0), rel=1e-6,
         )

@@ -592,9 +592,9 @@ class BetManager:
         # Peek at the top-of-book price so we can look up how much of that
         # level the agent has already consumed in this race.
         top_price = self.matcher.pick_top_price(
-            runner.available_to_lay,
+            runner.available_to_back,
             reference_price=runner.last_traded_price,
-            lower_is_better=True,
+            lower_is_better=False,
         )
         already_matched = (
             self._matched_at_level.get((runner.selection_id, BetSide.BACK, top_price), 0.0)
@@ -602,7 +602,7 @@ class BetManager:
         )
 
         result: MatchResult = self.matcher.match_back(
-            runner.available_to_lay,
+            runner.available_to_back,
             stake=capped,
             reference_price=runner.last_traded_price,
             max_price=max_price,
@@ -656,9 +656,9 @@ class BetManager:
         # Peek at the top-of-book price so we can look up how much of that
         # level the agent has already consumed in this race.
         top_price = self.matcher.pick_top_price(
-            runner.available_to_back,
+            runner.available_to_lay,
             reference_price=runner.last_traded_price,
-            lower_is_better=False,
+            lower_is_better=True,
         )
         already_matched = (
             self._matched_at_level.get((runner.selection_id, BetSide.LAY, top_price), 0.0)
@@ -667,7 +667,7 @@ class BetManager:
 
         # First pass: probe the top-of-book price at the requested stake.
         result: MatchResult = self.matcher.match_lay(
-            runner.available_to_back,
+            runner.available_to_lay,
             stake=stake,
             reference_price=runner.last_traded_price,
             max_price=max_price,
@@ -687,7 +687,7 @@ class BetManager:
             if max_stake < MIN_BET_STAKE:
                 return None
             result = self.matcher.match_lay(
-                runner.available_to_back,
+                runner.available_to_lay,
                 stake=max_stake,
                 reference_price=runner.last_traded_price,
                 max_price=max_price,

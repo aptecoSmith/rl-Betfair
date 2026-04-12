@@ -312,12 +312,12 @@ class TestNoAggressiveRegression:
     def test_passive_placement_does_not_alter_aggressive_fill_size(self):
         """Passive book has no self-depletion effect on the aggressive matcher."""
         mgr = _mgr()
-        snap = _runner(ltp=4.0, lay_levels=[(4.1, 50.0)])
+        snap = _runner(ltp=4.0, back_levels=[(4.1, 50.0)])
 
         # Place passive back first.
         mgr.passive_book.place(snap, stake=30.0, side=BetSide.BACK,
                                market_id="1.23", tick_index=0)
-        # Aggressive back should still see full 50 available on the lay side.
+        # Aggressive back should still see full 50 available on the back side.
         bet = mgr.place_back(snap, stake=30.0, market_id="1.23")
         assert bet is not None
         assert bet.matched_stake == pytest.approx(30.0)

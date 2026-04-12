@@ -65,7 +65,7 @@ class TestTwoBackBetsSamePriceSameRunner:
 
     def _snap(self) -> RunnerSnap:
         # Both bets see the same historical ladder snapshot.
-        return _runner(lay_levels=[(self.PRICE, self.TOB_SIZE)], ltp=self.PRICE)
+        return _runner(back_levels=[(self.PRICE, self.TOB_SIZE)], ltp=self.PRICE)
 
     def test_first_bet_fills_fully(self):
         mgr = self._mgr()
@@ -104,8 +104,8 @@ class TestTwoBackBetsDifferentPricesSameRunner:
 
     def test_different_price_bets_both_fill_independently(self):
         mgr = BetManager(starting_budget=500.0)
-        snap_p1 = _runner(lay_levels=[(self.P1, 50.0)], ltp=self.P1)
-        snap_p2 = _runner(lay_levels=[(self.P2, 50.0)], ltp=self.P2)
+        snap_p1 = _runner(back_levels=[(self.P1, 50.0)], ltp=self.P1)
+        snap_p2 = _runner(back_levels=[(self.P2, 50.0)], ltp=self.P2)
 
         bet1 = mgr.place_back(snap_p1, stake=20.0)
         bet2 = mgr.place_back(snap_p2, stake=20.0)
@@ -129,8 +129,8 @@ class TestTwoBackBetsSamePriceDifferentRunners:
 
     def test_different_runners_both_fill_fully(self):
         mgr = BetManager(starting_budget=500.0)
-        snap_a = _runner(selection_id=101, lay_levels=[(self.PRICE, 21.0)], ltp=self.PRICE)
-        snap_b = _runner(selection_id=202, lay_levels=[(self.PRICE, 21.0)], ltp=self.PRICE)
+        snap_a = _runner(selection_id=101, back_levels=[(self.PRICE, 21.0)], ltp=self.PRICE)
+        snap_b = _runner(selection_id=202, back_levels=[(self.PRICE, 21.0)], ltp=self.PRICE)
 
         bet_a = mgr.place_back(snap_a, stake=15.0)
         bet_b = mgr.place_back(snap_b, stake=15.0)
@@ -174,7 +174,7 @@ class TestSamePriceBackBetsAcrossRaces:
     TOB_SIZE = 21.0
 
     def test_second_race_fills_fully_again(self):
-        snap = _runner(lay_levels=[(self.PRICE, self.TOB_SIZE)], ltp=self.PRICE)
+        snap = _runner(back_levels=[(self.PRICE, self.TOB_SIZE)], ltp=self.PRICE)
 
         # Race A: fill the whole level.
         mgr_a = BetManager(starting_budget=500.0)
@@ -203,7 +203,7 @@ class TestSkippedReasonOnSelfExhaustion:
     def test_exhausted_level_returns_none_from_place_back(self):
         """BetManager returns None when the level is self-exhausted."""
         mgr = BetManager(starting_budget=500.0)
-        snap = _runner(lay_levels=[(self.PRICE, self.TOB_SIZE)], ltp=self.PRICE)
+        snap = _runner(back_levels=[(self.PRICE, self.TOB_SIZE)], ltp=self.PRICE)
 
         # Drain the level completely.
         bet1 = mgr.place_back(snap, stake=10.0)
