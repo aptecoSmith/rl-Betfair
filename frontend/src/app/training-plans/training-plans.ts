@@ -71,6 +71,7 @@ export class TrainingPlans implements OnInit {
   readonly editorHpRanges = signal<Record<string, HpRangeOverride>>({});
   readonly editorStartingBudget = signal<number | null>(null);
   readonly editorArchLrRanges = signal<Record<string, HpRangeOverride>>({});
+  readonly editorExplorationStrategy = signal<string>('random');
   readonly editorBiasToggle = signal(false);
   readonly editorSaving = signal(false);
   readonly editorErrors = signal<ValidationIssue[]>([]);
@@ -301,6 +302,7 @@ export class TrainingPlans implements OnInit {
       min_arch_samples: this.editorMinArchSamples(),
       notes: this.editorNotes(),
       starting_budget: this.editorStartingBudget(),
+      exploration_strategy: this.editorExplorationStrategy(),
     };
     this.editorSaving.set(true);
     this.api.createTrainingPlan(payload).subscribe({

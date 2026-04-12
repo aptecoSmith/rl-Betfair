@@ -42,6 +42,9 @@
                 @if (plan.starting_budget != null) {
                   <div><span class="k">Budget</span> <span class="v">£{{ plan.starting_budget }}/race</span></div>
                 }
+                @if (plan.exploration_strategy && plan.exploration_strategy !== 'random') {
+                  <div><span class="k">Strategy</span> <span class="v">{{ plan.exploration_strategy }}</span></div>
+                }
                 @if (plan.seed != null) {
                   <div><span class="k">Seed</span> <span class="v">{{ plan.seed }}</span></div>
                 }
@@ -106,6 +109,7 @@
         <dt>population_size</dt><dd>{{ plan.population_size }}</dd>
         <dt>architectures</dt><dd>{{ plan.architectures.join(', ') }}</dd>
         <dt>budget</dt><dd>{{ plan.starting_budget != null ? '£' + plan.starting_budget + '/race' : '(default)' }}</dd>
+        <dt>strategy</dt><dd>{{ plan.exploration_strategy ?? 'random' }}</dd>
         <dt>seed</dt><dd>{{ plan.seed ?? '(none)' }}</dd>
         <dt>min_arch_samples</dt><dd>{{ plan.min_arch_samples }}</dd>
         <dt>notes</dt><dd>{{ plan.notes || '(none)' }}</dd>
@@ -178,6 +182,36 @@
                  [ngModel]="editorStartingBudget()" (ngModelChange)="editorStartingBudget.set($event)"
                  data-testid="editor-starting-budget" />
         </div>
+      </div>
+
+      <div class="form-field">
+        <label>exploration strategy</label>
+        <div class="arch-chips" data-testid="strategy-selector">
+          @for (s of ['random', 'sobol', 'coverage', 'manual']; track s) {
+            <button
+              type="button"
+              class="chip"
+              [class.active]="editorExplorationStrategy() === s"
+              (click)="editorExplorationStrategy.set(s)"
+              [attr.data-testid]="'strategy-chip-' + s"
+            >
+              @switch (s) {
+                @case ('random')   { Random }
+                @case ('sobol')    { Sobol (systematic) }
+                @case ('coverage') { Coverage-biased }
+                @case ('manual')   { Manual }
+              }
+            </button>
+          }
+        </div>
+        <p class="hint">
+          @switch (editorExplorationStrategy()) {
+            @case ('random')   { Default random sampling — no seed point coordination. }
+            @case ('sobol')    { Quasi-random Sobol sequence for even coverage across the search space. }
+            @case ('coverage') { Targets gaps in historical coverage — best with 10+ prior training runs. }
+            @case ('manual')   { Supply a specific seed point for the initial population. }
+          }
+        </p>
       </div>
 
       <div class="form-field">

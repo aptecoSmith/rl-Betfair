@@ -103,7 +103,7 @@ When a session completes:
   - Plan with strategy=random → unchanged.
   - Exploration run recorded in DB for all strategies.
 
-- [ ] **Session 06 — Frontend: strategy selector + coverage preview**
+- [x] **Session 06 — Frontend: strategy selector + coverage preview**
 
   - Training plan form — dropdown for exploration strategy:
     "Random", "Sobol (systematic)", "Coverage-biased (adaptive)",

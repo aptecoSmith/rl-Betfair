@@ -81,3 +81,16 @@ key in `test_genetic_operators.py`), 12 skipped.
   `manual_seed_point`.
 - 6 new tests: default strategy, round-trip, manual seed round-trip, old-plan
   backward compat, API strategy acceptance, API default strategy.
+
+## Session 06 — Frontend strategy selector + coverage preview (2026-04-12)
+
+**What landed:**
+- `TrainingPlan` and `TrainingPlanPayload` TypeScript interfaces now include
+  `exploration_strategy` and `manual_seed_point` fields.
+- Editor state signal `editorExplorationStrategy` wired into `savePlan()`.
+- Strategy selector in the training plan editor using the same chip-button
+  pattern as architecture selection — four options: Random, Sobol (systematic),
+  Coverage-biased, Manual. Each shows a contextual hint below.
+- Plan list card shows non-random strategies as a badge.
+- Detail view shows the strategy field.
+- Frontend build passes cleanly.
