@@ -395,6 +395,8 @@ class StartTrainingRequest(BaseModel):
     min_seconds_before_off: int | None = None
     # Per-run budget override — None = use config/plan default
     starting_budget: float | None = None
+    # Per-run market type filter restriction — None = all choices
+    market_type_filters: list[str] | None = None
 
 
 class ArchitectureInfo(BaseModel):

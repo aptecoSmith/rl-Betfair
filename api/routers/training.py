@@ -304,6 +304,15 @@ async def start_training(request: Request, body: StartTrainingRequest):
     if body.starting_budget is not None and body.starting_budget <= 0:
         raise HTTPException(400, "starting_budget must be positive")
 
+    # Market type filter validation
+    if body.market_type_filters is not None:
+        if not body.market_type_filters:
+            raise HTTPException(400, "At least one market type filter must be selected")
+        valid_filters = {"WIN", "EACH_WAY", "BOTH", "FREE_CHOICE"}
+        unknown = [f for f in body.market_type_filters if f not in valid_filters]
+        if unknown:
+            raise HTTPException(400, f"Unknown market type filters: {unknown}")
+
     # Send start command to worker
     cmd = make_start_cmd(
         n_generations=body.n_generations,
@@ -319,6 +328,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
         max_lay_price=body.max_lay_price,
         min_seconds_before_off=body.min_seconds_before_off,
         starting_budget=body.starting_budget,
+        market_type_filters=body.market_type_filters,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

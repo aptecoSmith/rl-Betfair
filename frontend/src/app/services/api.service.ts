@@ -158,6 +158,7 @@ export class ApiService {
     max_back_price?: number | null;
     max_lay_price?: number | null;
     min_seconds_before_off?: number | null;
+    market_type_filters?: string[] | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
@@ -175,6 +176,7 @@ export class ApiService {
       max_back_price: params.max_back_price ?? null,
       max_lay_price: params.max_lay_price ?? null,
       min_seconds_before_off: params.min_seconds_before_off ?? null,
+      market_type_filters: params.market_type_filters ?? null,
     });
   }
 

@@ -178,6 +178,15 @@ class TrainingWorker:
             if len(architectures) == 1:
                 run_config.setdefault("training", {})["architecture"] = architectures[0]
 
+        # Market type filter restriction (same pattern as architecture selection)
+        market_type_filters = params.get("market_type_filters")
+        if market_type_filters is not None and len(market_type_filters) > 0:
+            run_config.setdefault("hyperparameters", {}).setdefault("search_ranges", {})
+            mtf_spec = run_config["hyperparameters"]["search_ranges"].get("market_type_filter", {})
+            mtf_spec["type"] = "str_choice"
+            mtf_spec["choices"] = list(market_type_filters)
+            run_config["hyperparameters"]["search_ranges"]["market_type_filter"] = mtf_spec
+
         # Starting budget override
         if params.get("starting_budget") is not None:
             run_config.setdefault("training", {})["starting_budget"] = params["starting_budget"]

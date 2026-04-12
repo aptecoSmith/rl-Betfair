@@ -239,6 +239,25 @@
                 <p class="help-text">
                   Each field below shows the current admin default. Edit to override for this run only — the admin default stays unchanged. Clear a field to restore the default.
                 </p>
+                <div class="wizard-form">
+                  <div class="form-field">
+                    <span class="field-label">Market type filter</span>
+                    <span class="field-help" style="margin-bottom: 0.5rem; display: block;">
+                      Restrict which market types the population can evolve. Leave all unselected to allow all types.
+                    </span>
+                    <div class="arch-chips">
+                      @for (choice of MARKET_TYPE_CHOICES; track choice) {
+                        <button type="button"
+                                class="chip"
+                                [class.active]="isMarketTypeFilterSelected(choice)"
+                                (click)="toggleMarketTypeFilter(choice)">
+                          {{ choice }}
+                        </button>
+                      }
+                    </div>
+                  </div>
+                </div>
+
                 @if (constraintDefaults(); as cd) {
                   <div class="wizard-form">
                     <label class="form-field">
@@ -398,6 +417,7 @@
                   </div>
                   <div class="review-card">
                     <h4>Constraints</h4>
+                    <p>Market types: {{ selectedMarketTypeFiltersArray().length > 0 ? selectedMarketTypeFiltersArray().join(', ') : 'all' }}</p>
                     <p>Max back: {{ overrideMaxBackPrice ?? (constraintDefaults()?.max_back_price ?? 'unlimited') }}</p>
                     <p>Max lay: {{ overrideMaxLayPrice ?? (constraintDefaults()?.max_lay_price ?? 'unlimited') }}</p>
                     <p>Min seconds before off: {{ overrideMinSecondsBeforeOff ?? (constraintDefaults()?.min_seconds_before_off ?? 0) }}</p>

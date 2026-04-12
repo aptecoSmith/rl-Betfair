@@ -98,6 +98,9 @@ export class TrainingMonitor implements OnDestroy {
   overrideMaxBackPrice: number | null = null;
   overrideMaxLayPrice: number | null = null;
   overrideMinSecondsBeforeOff: number | null = null;
+  // Market type filter restriction — empty set means "all choices"
+  selectedMarketTypeFilters = new Set<string>();
+  readonly MARKET_TYPE_CHOICES = ['WIN', 'EACH_WAY', 'BOTH', 'FREE_CHOICE'];
 
   readonly rewardHistory = this.training.rewardHistory;
   readonly lossHistory = this.training.lossHistory;
@@ -336,6 +339,24 @@ export class TrainingMonitor implements OnDestroy {
     return this.selectedArchitectures.size > 0;
   }
 
+  toggleMarketTypeFilter(value: string): void {
+    const next = new Set(this.selectedMarketTypeFilters);
+    if (next.has(value)) {
+      next.delete(value);
+    } else {
+      next.add(value);
+    }
+    this.selectedMarketTypeFilters = next;
+  }
+
+  isMarketTypeFilterSelected(value: string): boolean {
+    return this.selectedMarketTypeFilters.has(value);
+  }
+
+  selectedMarketTypeFiltersArray(): string[] {
+    return Array.from(this.selectedMarketTypeFilters);
+  }
+
   stepStatus(n: number): 'current' | 'done' | 'future' {
     const current = this.wizardStep();
     if (n === current) return 'current';
@@ -385,6 +406,9 @@ export class TrainingMonitor implements OnDestroy {
       max_back_price: this.overrideMaxBackPrice,
       max_lay_price: this.overrideMaxLayPrice,
       min_seconds_before_off: this.overrideMinSecondsBeforeOff,
+      market_type_filters: this.selectedMarketTypeFilters.size > 0
+        ? Array.from(this.selectedMarketTypeFilters)
+        : null,
     };
     if (!this.useAllData) {
       params.train_dates = this.datesInRange(this.trainDateStart, this.trainDateEnd);
