@@ -126,13 +126,13 @@ export class TrainingMonitor implements OnDestroy {
   });
 
   /** Which stop options are available (escalation: no de-escalation). */
-  readonly availableStopOptions = computed(() => {
+  readonly availableStopOptions = computed((): string[] => {
     const active = this.activeStopGranularity();
-    if (!active) return ['eval_all', 'eval_current', 'immediate'] as const;
+    if (!active) return ['eval_all', 'eval_current', 'immediate'];
     // Escalation only: eval_all → eval_current → immediate
-    if (active === 'eval_all') return ['eval_current', 'immediate'] as const;
-    if (active === 'eval_current') return ['immediate'] as const;
-    return [] as const; // immediate — can't escalate further
+    if (active === 'eval_all') return ['eval_current', 'immediate'];
+    if (active === 'eval_current') return ['immediate'];
+    return []; // immediate — can't escalate further
   });
 
   readonly rewardHistory = this.training.rewardHistory;

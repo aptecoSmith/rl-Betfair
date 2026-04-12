@@ -29,6 +29,8 @@ export class TrainingService implements OnDestroy {
     detail: null,
     last_agent_score: null,
     worker_connected: false,
+    unevaluated_count: null,
+    eval_rate_s: null,
   });
 
   /** Timestamp (epoch ms) of the last non-ping event received. */
