@@ -663,6 +663,59 @@ def sample_with_bias(
     return rng.uniform(lo, hi)
 
 
+# -- Coverage-biased seed generation -------------------------------------------
+
+
+def generate_coverage_seed(
+    hp_specs: list[HyperparamSpec],
+    history: list[HistoricalAgent],
+    seed: int | None = None,
+) -> tuple[dict, CoverageReport]:
+    """Generate a single seed point biased toward coverage gaps.
+
+    Computes coverage from *history*, applies :func:`bias_sampler` to
+    nudge poorly-covered numeric genes toward empty buckets, and
+    samples a single point.  Non-numeric genes (``int_choice``,
+    ``str_choice``) are sampled uniformly.
+
+    Parameters
+    ----------
+    hp_specs:
+        Hyperparameter specifications from :func:`parse_search_ranges`.
+    history:
+        Past agents (from :func:`historical_agents_from_model_store`).
+    seed:
+        Optional RNG seed for reproducibility.
+
+    Returns
+    -------
+    (seed_point, coverage_report) — the dict of gene values and the
+    :class:`CoverageReport` snapshot computed before sampling.
+    """
+    rng = random.Random(seed)
+    coverage = compute_coverage(history, hp_specs)
+    biased_specs = bias_sampler(hp_specs, history)
+
+    hp: dict = {}
+    for bs in biased_specs:
+        spec = bs.spec
+        if spec.type in ("int_choice", "str_choice"):
+            hp[spec.name] = rng.choice(spec.choices)
+        elif bs.is_biased:
+            hp[spec.name] = sample_with_bias(bs, rng)
+        else:
+            # Well-covered numeric gene — vanilla sampling.
+            if spec.type == "float":
+                hp[spec.name] = rng.uniform(spec.min, spec.max)
+            elif spec.type == "float_log":
+                hp[spec.name] = math.exp(
+                    rng.uniform(math.log(spec.min), math.log(spec.max))
+                )
+            elif spec.type == "int":
+                hp[spec.name] = rng.randint(int(spec.min), int(spec.max))
+    return hp, coverage
+
+
 # -- Sobol seed-point generation -----------------------------------------------
 
 

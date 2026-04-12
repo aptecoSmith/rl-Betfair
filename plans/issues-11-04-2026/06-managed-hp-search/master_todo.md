@@ -44,7 +44,7 @@ When a session completes:
   - Skip=5 produces different points from skip=0.
   - Round-trip: Sobol point → gene dict → valid hyperparameters.
 
-- [ ] **Session 03 — Coverage-biased seed generation**
+- [x] **Session 03 — Coverage-biased seed generation**
 
   Wire existing `compute_coverage()` and `bias_sampler()` into a
   unified seed generator:

@@ -39,3 +39,14 @@ key in `test_genetic_operators.py`), 12 skipped.
   a fresh point (wired to `get_exploration_run_count()` in Session 05).
 - 4 new tests: bounds check, spacing quality, skip produces different points,
   round-trip validity.
+
+## Session 03 — Coverage-biased seed generation (2026-04-12)
+
+**What landed:**
+- `generate_coverage_seed(hp_specs, history, seed)` in `training/training_plan.py`.
+- Wires the existing `compute_coverage()` → `bias_sampler()` → `sample_with_bias()`
+  pipeline into a single function that returns `(seed_point, CoverageReport)`.
+- Handles all gene types: biased numeric genes via `sample_with_bias()`,
+  well-covered numeric genes via vanilla sampling, choice genes via uniform pick.
+- 3 new tests: empty history produces valid seed, clustered history biases away
+  from cluster, CoverageReport is JSON-serialisable.

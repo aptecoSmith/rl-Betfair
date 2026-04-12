@@ -13,12 +13,14 @@ from fastapi.testclient import TestClient
 
 from agents.population_manager import HyperparamSpec, parse_search_ranges
 from training.training_plan import (
+    CoverageReport,
     GenerationOutcome,
     HistoricalAgent,
     PlanRegistry,
     TrainingPlan,
     bias_sampler,
     compute_coverage,
+    generate_coverage_seed,
     generate_sobol_points,
     is_launchable,
     validate_plan,
@@ -557,3 +559,53 @@ class TestSobolSeedGenerator:
                     assert isinstance(val, int)
                 elif spec.type in ("int_choice", "str_choice"):
                     assert val in spec.choices
+
+
+# -- 10. Coverage-biased seed generation (Sprint 4, Session 03) ----------------
+
+
+class TestCoverageSeed:
+    """Tests for ``generate_coverage_seed``."""
+
+    def test_empty_history_produces_uniform_seed(self, hp_specs):
+        """With no models, the seed is effectively random (all genes present)."""
+        seed, report = generate_coverage_seed(hp_specs, [], seed=42)
+        assert report.total_agents == 0
+        # Every spec should have a value.
+        for spec in hp_specs:
+            assert spec.name in seed
+
+    def test_clustered_history_biases_away(self, hp_specs):
+        """50 models all in one gamma region → seed biased toward other regions."""
+        history = [
+            HistoricalAgent(
+                architecture_name="ppo_lstm_v1",
+                hyperparameters={"gamma": 0.951},
+            )
+            for _ in range(50)
+        ]
+        # Run many seeds and check the average gamma is higher than the
+        # clustered region (0.951 is bottom of range 0.95–0.999).
+        gammas = []
+        for i in range(50):
+            seed, _ = generate_coverage_seed(hp_specs, history, seed=i)
+            gammas.append(seed["gamma"])
+        avg = sum(gammas) / len(gammas)
+        # Midpoint of range is ~0.975. Biased sampling should push avg
+        # well above the clustered 0.951 region.
+        assert avg > 0.96, f"Expected avg gamma > 0.96, got {avg}"
+
+    def test_coverage_report_is_serialisable(self, hp_specs):
+        """CoverageReport.to_dict() should produce JSON-serialisable output."""
+        import json
+        history = [
+            HistoricalAgent("ppo_lstm_v1", {"gamma": 0.97, "learning_rate": 1e-4})
+            for _ in range(5)
+        ]
+        _, report = generate_coverage_seed(hp_specs, history, seed=0)
+        d = report.to_dict()
+        # Should round-trip through JSON without error.
+        serialised = json.dumps(d)
+        assert isinstance(serialised, str)
+        parsed = json.loads(serialised)
+        assert parsed["total_agents"] == 5
