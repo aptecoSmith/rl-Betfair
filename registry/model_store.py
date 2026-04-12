@@ -292,6 +292,18 @@ class ModelStore:
         finally:
             conn.close()
 
+    def update_hyperparameters(self, model_id: str, hyperparameters: dict) -> None:
+        """Overwrite a model's stored hyperparameters JSON."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE models SET hyperparameters = ? WHERE model_id = ?",
+                (json.dumps(hyperparameters), model_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def update_composite_score(self, model_id: str, score: float) -> None:
         """Update a model's composite score and last_evaluated_at."""
         now = datetime.now(UTC).isoformat()

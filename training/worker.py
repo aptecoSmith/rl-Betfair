@@ -23,6 +23,7 @@ import queue as thread_queue
 import sys
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -394,14 +395,20 @@ class TrainingWorker:
                     reevaluate_garaged=reevaluate_garaged,
                     reevaluate_min_score=reevaluate_min_score,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Training run failed")
+                # Write crash file for post-mortem debugging
+                crash_dir = Path("logs/crashes")
+                crash_dir.mkdir(parents=True, exist_ok=True)
+                crash_file = crash_dir / f"crash_{time.strftime('%Y%m%d_%H%M%S')}.log"
+                crash_file.write_text(traceback.format_exc())
+                logger.info("Crash details written to %s", crash_file)
                 try:
                     self.progress_queue.put_nowait({
                         "event": "phase_complete",
                         "phase": "run_error",
                         "timestamp": time.time(),
-                        "summary": {"error": "Training run failed"},
+                        "summary": {"error": str(exc)},
                     })
                 except thread_queue.Full:
                     pass

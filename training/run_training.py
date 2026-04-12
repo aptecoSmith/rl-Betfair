@@ -38,6 +38,7 @@ import logging
 import os
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -288,6 +289,12 @@ class TrainingOrchestrator:
             "test_days": len(test_days),
         })
 
+        # Backfill any models missing newly-added HP keys so crossover
+        # and mutation don't KeyError on stale records.
+        patched = self.pop_manager.backfill_hyperparameters()
+        if patched:
+            logger.info("Backfilled hyperparameters on %d existing model(s)", patched)
+
         agents = self.pop_manager.initialise_population(
             generation=0, seed=seed, plan=self.training_plan,
         )
@@ -314,16 +321,24 @@ class TrainingOrchestrator:
                 })
 
             logger.info("=== Generation %d ===", gen)
-            gen_result = self._run_generation(
-                generation=gen,
-                agents=agents,
-                train_days=train_days,
-                test_days=test_days,
-                train_cutoff=train_cutoff,
-                n_epochs=n_epochs,
-                is_last=(gen == n_generations - 1) or finishing_between_gens,
-                skip_training=finishing_between_gens,
-            )
+            try:
+                gen_result = self._run_generation(
+                    generation=gen,
+                    agents=agents,
+                    train_days=train_days,
+                    test_days=test_days,
+                    train_cutoff=train_cutoff,
+                    n_epochs=n_epochs,
+                    is_last=(gen == n_generations - 1) or finishing_between_gens,
+                    skip_training=finishing_between_gens,
+                )
+            except Exception:
+                logger.exception("Generation %d failed", gen)
+                self._emit_phase_complete("generation_error", {
+                    "generation": gen,
+                    "error": traceback.format_exc(),
+                })
+                break
             result.generations.append(gen_result)
 
             # If finish was requested (either between gens or mid-training),
@@ -629,11 +644,17 @@ class TrainingOrchestrator:
         if not is_last and scores:
             self._emit_phase_start("selecting", {"generation": generation})
 
-            # Discard policy
-            discarded = self.pop_manager.apply_discard_policy(scores)
+            # Scope selection to this run's population — the scoreboard
+            # persists scores for every active model, but only the agents
+            # in *this* generation should participate in selection/breeding.
+            run_ids = {a.model_id for a in agents}
+            run_scores = [s for s in scores if s.model_id in run_ids]
+
+            # Discard policy (scoped to this run's agents)
+            discarded = self.pop_manager.apply_discard_policy(run_scores)
 
             # Filter out discarded from selection
-            active_scores = [s for s in scores if s.model_id not in discarded]
+            active_scores = [s for s in run_scores if s.model_id not in discarded]
             if active_scores:
                 selection = self.pop_manager.select(active_scores)
 

@@ -461,3 +461,222 @@ class TestGeneticLogging:
         for e in events:
             assert e.human_summary is not None
             assert len(e.human_summary) > 0
+
+
+# ── _default_for_spec ──────────────────────────────────────────────────────
+
+
+class TestDefaultForSpec:
+    """Tests for the _default_for_spec helper used when a parent model is
+    missing a hyperparameter that was added after the model was created."""
+
+    def test_float_returns_midpoint(self):
+        from agents.population_manager import HyperparamSpec, _default_for_spec
+        spec = HyperparamSpec("x", "float", min=0.0, max=1.0)
+        assert _default_for_spec(spec) == pytest.approx(0.5)
+
+    def test_float_log_returns_geometric_midpoint(self):
+        from agents.population_manager import HyperparamSpec, _default_for_spec
+        import math
+        spec = HyperparamSpec("x", "float_log", min=0.001, max=1.0)
+        expected = math.exp((math.log(0.001) + math.log(1.0)) / 2.0)
+        assert _default_for_spec(spec) == pytest.approx(expected)
+
+    def test_int_returns_midpoint(self):
+        from agents.population_manager import HyperparamSpec, _default_for_spec
+        spec = HyperparamSpec("x", "int", min=1, max=5)
+        assert _default_for_spec(spec) == 3
+
+    def test_int_choice_returns_middle_choice(self):
+        from agents.population_manager import HyperparamSpec, _default_for_spec
+        spec = HyperparamSpec("x", "int_choice", choices=[64, 128, 256, 512, 1024])
+        assert _default_for_spec(spec) == 256  # index 2 of 5
+
+    def test_str_choice_returns_middle_choice(self):
+        from agents.population_manager import HyperparamSpec, _default_for_spec
+        spec = HyperparamSpec("x", "str_choice", choices=["WIN", "BOTH", "EACH_WAY"])
+        assert _default_for_spec(spec) == "BOTH"
+
+    def test_single_choice(self):
+        from agents.population_manager import HyperparamSpec, _default_for_spec
+        spec = HyperparamSpec("x", "int_choice", choices=[128])
+        assert _default_for_spec(spec) == 128
+
+    def test_unknown_type_raises(self):
+        from agents.population_manager import HyperparamSpec, _default_for_spec
+        spec = HyperparamSpec("x", "bad_type", min=0, max=1)
+        with pytest.raises(ValueError, match="Unknown hyperparameter type"):
+            _default_for_spec(spec)
+
+
+# ── Crossover with missing keys ────────────────────────────────────────────
+
+
+class TestCrossoverMissingKeys:
+    """Crossover must tolerate parents that predate a newly-added HP."""
+
+    def _make_pm(self):
+        return PopulationManager(_make_config(), model_store=None)
+
+    def test_parent_b_missing_key_uses_default(self):
+        pm = self._make_pm()
+        parent_a = dict(PARENT_A_HP)
+        parent_b = {k: v for k, v in PARENT_B_HP.items() if k != "mlp_layers"}
+        child, inh = pm.crossover(parent_a, parent_b, rng=random.Random(42))
+        assert "mlp_layers" in child
+
+    def test_parent_a_missing_key_uses_default(self):
+        pm = self._make_pm()
+        parent_a = {k: v for k, v in PARENT_A_HP.items() if k != "mlp_layers"}
+        parent_b = dict(PARENT_B_HP)
+        child, inh = pm.crossover(parent_a, parent_b, rng=random.Random(42))
+        assert "mlp_layers" in child
+
+    def test_both_parents_missing_key_uses_default(self):
+        pm = self._make_pm()
+        parent_a = {k: v for k, v in PARENT_A_HP.items() if k != "mlp_layers"}
+        parent_b = {k: v for k, v in PARENT_B_HP.items() if k != "mlp_layers"}
+        child, inh = pm.crossover(parent_a, parent_b, rng=random.Random(42))
+        assert "mlp_layers" in child
+        # Default for int min=1 max=3 is 2
+        assert child["mlp_layers"] == 2
+
+    def test_child_still_valid_after_missing_keys(self):
+        pm = self._make_pm()
+        # Strip multiple keys
+        parent_a = {k: v for k, v in PARENT_A_HP.items()
+                    if k not in ("mlp_layers", "entropy_coefficient")}
+        parent_b = dict(PARENT_B_HP)
+        child, _ = pm.crossover(parent_a, parent_b, rng=random.Random(42))
+        validate_hyperparams(child, pm.hp_specs)
+
+
+# ── Mutation with missing keys ─────────────────────────────────────────────
+
+
+class TestMutationMissingKeys:
+    """Mutate must tolerate HP dicts that predate a newly-added HP."""
+
+    def test_missing_key_backfilled_and_mutated(self):
+        pm = PopulationManager(_make_config(), model_store=None)
+        hp = {k: v for k, v in PARENT_A_HP.items() if k != "mlp_layers"}
+        assert "mlp_layers" not in hp
+        pm.mutate(hp, mutation_rate=1.0, rng=random.Random(42))
+        assert "mlp_layers" in hp  # backfilled
+        validate_hyperparams(hp, pm.hp_specs)
+
+    def test_missing_key_backfilled_no_mutation(self):
+        pm = PopulationManager(_make_config(), model_store=None)
+        hp = {k: v for k, v in PARENT_A_HP.items() if k != "mlp_layers"}
+        pm.mutate(hp, mutation_rate=0.0, rng=random.Random(42))
+        assert "mlp_layers" in hp
+        assert hp["mlp_layers"] == 2  # default midpoint
+
+
+# ── Breed with single survivor ─────────────────────────────────────────────
+
+
+class TestBreedSingleSurvivor:
+    """Breeding must work when only one agent survives selection."""
+
+    def test_single_survivor_produces_children(self, tmp_path):
+        config = _make_config(pop_size=4, n_elite=1, top_pct=0.5)
+        store = ModelStore(str(tmp_path / "test.db"), str(tmp_path / "weights"))
+        pm = PopulationManager(config, model_store=store)
+        agents = pm.initialise_population(generation=0, seed=42)
+
+        # Only keep 1 survivor
+        scores = [_make_score(agents[0].model_id, composite=0.9)]
+        result = SelectionResult(
+            elites=[agents[0].model_id],
+            survivors=[agents[0].model_id],
+            eliminated=[a.model_id for a in agents[1:]],
+            ranked_scores=scores,
+        )
+        children, records = pm.breed(result, generation=1, mutation_rate=0.3, seed=99)
+        assert len(children) == config["population"]["size"] - 1  # 3 children
+        for child in children:
+            assert child.hyperparameters is not None
+            validate_hyperparams(child.hyperparameters, pm.hp_specs)
+
+    def test_single_survivor_children_are_clones_plus_mutation(self, tmp_path):
+        """With one parent, children are mutated clones — both parents are the same."""
+        config = _make_config(pop_size=3, n_elite=1, top_pct=0.5)
+        store = ModelStore(str(tmp_path / "test.db"), str(tmp_path / "weights"))
+        pm = PopulationManager(config, model_store=store)
+        agents = pm.initialise_population(generation=0, seed=42)
+
+        scores = [_make_score(agents[0].model_id, composite=0.9)]
+        result = SelectionResult(
+            elites=[agents[0].model_id],
+            survivors=[agents[0].model_id],
+            eliminated=[a.model_id for a in agents[1:]],
+            ranked_scores=scores,
+        )
+        children, records = pm.breed(result, generation=1, mutation_rate=0.3, seed=99)
+        for rec in records:
+            assert rec.parent_a_id == agents[0].model_id
+            assert rec.parent_b_id == agents[0].model_id
+
+
+# ── Backfill hyperparameters ───────────────────────────────────────────────
+
+
+class TestBackfillHyperparameters:
+    """backfill_hyperparameters() patches models missing newly-added HP keys."""
+
+    def test_patches_missing_keys(self, tmp_path):
+        config = _make_config(pop_size=2)
+        store = ModelStore(str(tmp_path / "test.db"), str(tmp_path / "weights"))
+        pm = PopulationManager(config, model_store=store)
+
+        # Create a model with a missing key (simulate pre-existing model)
+        import json
+        incomplete_hp = {k: v for k, v in PARENT_A_HP.items() if k != "mlp_layers"}
+        mid = store.create_model(
+            generation=0,
+            architecture_name="ppo_lstm_v1",
+            architecture_description="test",
+            hyperparameters=incomplete_hp,
+        )
+
+        patched = pm.backfill_hyperparameters()
+        assert patched == 1
+
+        # Verify the model now has the key
+        record = store.get_model(mid)
+        assert "mlp_layers" in record.hyperparameters
+
+    def test_leaves_complete_models_untouched(self, tmp_path):
+        config = _make_config(pop_size=2)
+        store = ModelStore(str(tmp_path / "test.db"), str(tmp_path / "weights"))
+        pm = PopulationManager(config, model_store=store)
+
+        # Create a model with all keys present
+        mid = store.create_model(
+            generation=0,
+            architecture_name="ppo_lstm_v1",
+            architecture_description="test",
+            hyperparameters=dict(PARENT_A_HP),
+        )
+
+        patched = pm.backfill_hyperparameters()
+        assert patched == 0
+
+    def test_returns_correct_count(self, tmp_path):
+        config = _make_config(pop_size=2)
+        store = ModelStore(str(tmp_path / "test.db"), str(tmp_path / "weights"))
+        pm = PopulationManager(config, model_store=store)
+
+        # 2 incomplete, 1 complete
+        incomplete_hp = {k: v for k, v in PARENT_A_HP.items() if k != "mlp_layers"}
+        store.create_model(0, "ppo_lstm_v1", "test", incomplete_hp)
+        store.create_model(0, "ppo_lstm_v1", "test", incomplete_hp)
+        store.create_model(0, "ppo_lstm_v1", "test", dict(PARENT_A_HP))
+
+        patched = pm.backfill_hyperparameters()
+        assert patched == 2
+
+    def test_no_store_returns_zero(self):
+        pm = PopulationManager(_make_config(), model_store=None)
+        assert pm.backfill_hyperparameters() == 0

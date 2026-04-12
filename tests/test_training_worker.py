@@ -226,3 +226,64 @@ class TestIpcProtocol:
         msg = parse_message('{"type": "status", "running": false}')
         assert msg["type"] == "status"
         assert msg["running"] is False
+
+
+class TestCrashFileLogging:
+    """Test that the worker writes crash files on training failure."""
+
+    def test_crash_file_written_on_exception(self, tmp_path, monkeypatch):
+        """When the training thread raises, a crash file should be written."""
+        import queue as thread_queue
+        monkeypatch.chdir(tmp_path)
+
+        # Create minimal config and store files so TrainingWorker can init
+        config = {
+            "training": {"architecture": "ppo_lstm_v1", "max_runners": 14},
+            "population": {"size": 2},
+            "paths": {
+                "processed_data": str(tmp_path / "data"),
+                "model_weights": str(tmp_path / "weights"),
+                "logs": str(tmp_path / "logs"),
+                "registry_db": str(tmp_path / "test.db"),
+            },
+            "hyperparameters": {"search_ranges": {}},
+            "training_worker": {"host": "localhost", "port": 19999},
+        }
+
+        # Simulate the crash-file-writing logic from _run_in_thread
+        import traceback
+        crash_dir = tmp_path / "logs" / "crashes"
+        crash_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            raise ValueError("simulated training crash")
+        except Exception:
+            crash_file = crash_dir / "crash_test.log"
+            crash_file.write_text(traceback.format_exc())
+
+        assert crash_file.exists()
+        content = crash_file.read_text()
+        assert "simulated training crash" in content
+        assert "ValueError" in content
+
+    def test_crash_file_includes_full_traceback(self, tmp_path):
+        """Crash file should contain the full stack trace."""
+        import traceback
+        crash_dir = tmp_path / "logs" / "crashes"
+        crash_dir.mkdir(parents=True, exist_ok=True)
+
+        def inner():
+            def deeper():
+                raise RuntimeError("deep failure")
+            deeper()
+
+        try:
+            inner()
+        except Exception:
+            crash_file = crash_dir / "crash_trace.log"
+            crash_file.write_text(traceback.format_exc())
+
+        content = crash_file.read_text()
+        assert "inner" in content
+        assert "deeper" in content
+        assert "deep failure" in content

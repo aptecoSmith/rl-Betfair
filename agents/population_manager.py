@@ -76,6 +76,24 @@ def _repair_reward_gene_pairs(hp: dict) -> None:
         hp["early_pick_bonus_min"], hp["early_pick_bonus_max"] = hi, lo
 
 
+def _default_for_spec(spec: HyperparamSpec) -> float | int | str:
+    """Return a sensible default for a hyperparameter spec.
+
+    Used when an older model's stored hyperparameters are missing a key
+    that was added to ``config.yaml`` after the model was created.
+    """
+    if spec.type == "float":
+        return (spec.min + spec.max) / 2.0
+    elif spec.type == "float_log":
+        return math.exp((math.log(spec.min) + math.log(spec.max)) / 2.0)
+    elif spec.type == "int":
+        return round((spec.min + spec.max) / 2.0)
+    elif spec.type in ("int_choice", "str_choice"):
+        mid = len(spec.choices) // 2
+        return spec.choices[mid]
+    raise ValueError(f"Unknown hyperparameter type: {spec.type!r}")
+
+
 def parse_search_ranges(raw: dict[str, dict]) -> list[HyperparamSpec]:
     """Parse the ``hyperparameters.search_ranges`` section of config.yaml."""
     specs = []
@@ -356,6 +374,27 @@ class PopulationManager:
 
         return agents
 
+    def backfill_hyperparameters(self) -> int:
+        """Patch any active models that are missing newly-added HP keys.
+
+        Returns the number of models updated.
+        """
+        if self.model_store is None:
+            return 0
+
+        updated = 0
+        for record in self.model_store.list_models(status="active"):
+            hp = record.hyperparameters
+            patched = False
+            for spec in self.hp_specs:
+                if spec.name not in hp:
+                    hp[spec.name] = _default_for_spec(spec)
+                    patched = True
+            if patched:
+                self.model_store.update_hyperparameters(record.model_id, hp)
+                updated += 1
+        return updated
+
     def load_agent(self, model_id: str) -> AgentRecord:
         """Load an existing agent from the model store.
 
@@ -505,11 +544,12 @@ class PopulationManager:
 
         for spec in self.hp_specs:
             name = spec.name
+            fallback = _default_for_spec(spec)
             if rng.random() < 0.5:
-                child[name] = parent_a_hp[name]
+                child[name] = parent_a_hp.get(name, fallback)
                 inheritance[name] = "A"
             else:
-                child[name] = parent_b_hp[name]
+                child[name] = parent_b_hp.get(name, fallback)
                 inheritance[name] = "B"
 
         # Architecture inherits like any other trait
@@ -577,7 +617,8 @@ class PopulationManager:
                 deltas[name] = None
                 continue
 
-            old_val = hp[name]
+            old_val = hp.get(name, _default_for_spec(spec))
+            hp[name] = old_val  # ensure key exists after backfill
 
             if spec.type == "float":
                 sigma = (spec.max - spec.min) * 0.1
@@ -679,9 +720,20 @@ class PopulationManager:
         children: list[AgentRecord] = []
         breeding_records: list[BreedingRecord] = []
 
+        if len(survivors) < 2 and n_children > 0:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "Only %d survivor(s) — cloning + mutating instead of crossover",
+                len(survivors),
+            )
+
         for _ in range(n_children):
-            # Pick two parents from survivors
-            parent_a_id, parent_b_id = rng.sample(survivors, 2)
+            # Pick two parents from survivors (or clone if only one)
+            if len(survivors) >= 2:
+                parent_a_id, parent_b_id = rng.sample(survivors, 2)
+            else:
+                parent_a_id = survivors[0]
+                parent_b_id = survivors[0]
 
             # Get parent hyperparams
             hp_a = survivor_hp.get(parent_a_id)

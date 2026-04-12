@@ -829,3 +829,119 @@ class TestParquetBetLogs:
         store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
         result = store.write_bet_logs_parquet("run-1", "2026-03-26", [])
         assert result is None
+
+
+# ── Selection scoping ──────────────────────────────────────────────────────
+
+
+class TestSelectionScoping:
+    """Selection must only consider agents in the current run's population,
+    not all active models in the registry (bug fixed 2026-04-12)."""
+
+    def test_preexisting_models_excluded_from_selection(self, tmp_path):
+        """Pre-existing DB models should not participate in selection."""
+        config = _make_full_config()
+        config["population"]["size"] = 2
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+
+        # Insert pre-existing models that would dominate selection
+        for i in range(10):
+            mid = store.create_model(
+                generation=0,
+                architecture_name="ppo_lstm_v1",
+                architecture_description="pre-existing",
+                hyperparameters={},
+            )
+            # Give them a high score so they'd always survive if included
+            store.update_composite_score(mid, 0.99)
+
+        orch = TrainingOrchestrator(config, model_store=store)
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        result = orch.run(
+            train_days=[train],
+            test_days=[test],
+            n_generations=2,
+            n_epochs=1,
+            seed=42,
+        )
+
+        gen0 = result.generations[0]
+        if gen0.selection is not None:
+            # Survivors should only be from the run's 2 agents,
+            # not the 10 pre-existing ones
+            assert len(gen0.selection.survivors) <= config["population"]["size"]
+
+    def test_gen1_population_bounded_by_pop_size(self, tmp_path):
+        """Gen 1 should train at most population_size agents."""
+        config = _make_full_config()
+        config["population"]["size"] = 4
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+
+        # Pre-existing models that should be ignored
+        for i in range(20):
+            store.create_model(0, "ppo_lstm_v1", "old", {})
+
+        orch = TrainingOrchestrator(config, model_store=store)
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        result = orch.run(
+            train_days=[train],
+            test_days=[test],
+            n_generations=2,
+            n_epochs=1,
+            seed=42,
+        )
+        # Gen 1 should have trained <= pop_size agents
+        gen1 = result.generations[1]
+        assert len(gen1.training_stats) <= config["population"]["size"]
+
+
+# ── Generation error handling ──────────────────────────────────────────────
+
+
+class TestGenerationErrorHandling:
+    """Generation-level try/except should catch errors and emit events."""
+
+    def test_generation_error_emits_event(self, tmp_path):
+        """If a generation fails, a generation_error event should be emitted."""
+        import queue
+        config = _make_full_config()
+        store = ModelStore(db_path=tmp_path / "test.db", weights_dir=tmp_path / "w")
+        q = queue.Queue()
+        orch = TrainingOrchestrator(config, model_store=store, progress_queue=q)
+
+        train = _make_day("2026-03-26", n_races=1, n_ticks=3)
+        test = _make_day("2026-03-27", n_races=1, n_ticks=3)
+
+        # Monkey-patch _run_generation to raise
+        original = orch._run_generation
+
+        def _exploding_gen(*args, **kwargs):
+            raise RuntimeError("test explosion")
+
+        orch._run_generation = _exploding_gen
+
+        result = orch.run(
+            train_days=[train],
+            test_days=[test],
+            n_generations=1,
+            n_epochs=1,
+            seed=42,
+        )
+
+        # Should not have crashed — generations list is empty because gen 0 failed
+        assert len(result.generations) == 0
+
+        # Check that a generation_error event was emitted
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        error_events = [
+            e for e in events
+            if e.get("phase") == "generation_error"
+        ]
+        assert len(error_events) == 1
+        assert "test explosion" in error_events[0]["summary"]["error"]
