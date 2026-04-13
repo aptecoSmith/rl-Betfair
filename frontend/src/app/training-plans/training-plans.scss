@@ -379,6 +379,48 @@
   }
 }
 
+// ── Session preview (editor) ───────────────────────────────────
+.session-splitting-section {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-top: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.session-preview {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: rgba(33, 150, 243, 0.06);
+  border: 1px solid rgba(33, 150, 243, 0.2);
+  border-radius: 6px;
+
+  .session-preview-summary {
+    font-size: 0.85rem;
+    color: #b0bec5;
+    margin-bottom: 0.5rem;
+    strong { color: #64b5f6; }
+  }
+
+  .session-preview-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .session-preview-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.8rem;
+    color: #90a4ae;
+
+    .session-label { font-weight: 600; min-width: 5rem; color: #b0bec5; }
+    .session-gens { font-family: monospace; min-width: 6rem; }
+    .session-agents { color: #78909c; }
+  }
+}
+
 // ── Checkbox label ─────────────────────────────────────────────
 .checkbox-label {
   display: flex;

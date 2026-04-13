@@ -169,11 +169,15 @@
       @if (plan.generations_per_session) {
         <div class="session-breakdown" data-testid="session-breakdown">
           <h3>Sessions</h3>
+          <p class="help-text">
+            Each session trains all {{ plan.population_size }} agents through {{ plan.generations_per_session }} generation{{ plan.generations_per_session > 1 ? 's' : '' }} (train → eval → score → breed), then checkpoints.
+            {{ plan.auto_continue ? 'Auto-continue is on — sessions run back-to-back.' : 'Auto-continue is off — the plan pauses between sessions.' }}
+          </p>
           <div class="session-list">
             @for (s of sessionBoundaries(plan); track s.start; let i = $index) {
               <div class="session-row">
                 <span class="session-label">Session {{ i + 1 }}</span>
-                <span class="session-gens">Gen {{ s.start }}–{{ s.end }}</span>
+                <span class="session-gens">Gen {{ s.start }}–{{ s.end }} ({{ s.end - s.start + 1 }} gen{{ s.end - s.start > 0 ? 's' : '' }})</span>
                 <span class="status-badge" [attr.data-status]="s.status">{{ s.status }}</span>
               </div>
             }
@@ -202,8 +206,8 @@
         <dt>strategy</dt><dd>{{ plan.exploration_strategy ?? 'random' }}</dd>
         <dt>n_generations</dt><dd>{{ plan.n_generations ?? 3 }}</dd>
         <dt>n_epochs</dt><dd>{{ plan.n_epochs ?? 3 }}</dd>
-        <dt>generations_per_session</dt><dd>{{ plan.generations_per_session ?? '(all in one)' }}</dd>
-        <dt>auto_continue</dt><dd>{{ plan.auto_continue ? 'yes' : 'no' }}</dd>
+        <dt>session splitting</dt><dd>{{ plan.generations_per_session ? plan.generations_per_session + ' gens per session' : 'off (all in one run)' }}</dd>
+        <dt>auto-continue</dt><dd>{{ plan.auto_continue ? 'yes — sessions run back-to-back' : 'no — pauses between sessions' }}</dd>
         <dt>seed</dt><dd>{{ plan.seed ?? '(none)' }}</dd>
         <dt>min_arch_samples</dt><dd>{{ plan.min_arch_samples }}</dd>
         <dt>notes</dt><dd>{{ plan.notes || '(none)' }}</dd>
@@ -299,23 +303,53 @@
         </div>
       </div>
 
-      <div class="form-row">
-        <div class="form-field">
-          <label>generations_per_session (optional)</label>
-          <input type="number" min="1" placeholder="all in one session"
-                 [ngModel]="editorGenerationsPerSession()" (ngModelChange)="editorGenerationsPerSession.set($event || null)"
-                 data-testid="editor-gens-per-session" />
-          <span class="field-help">Split training into sessions of N generations each. Leave empty to run all generations in a single session.</span>
+      <div class="form-section session-splitting-section">
+        <h3>Session splitting (optional)</h3>
+        <p class="help-text">
+          A "session" is a save-point in the training run. Each generation always trains, evaluates, scores, and breeds all {{ editorPopulationSize() }} agents — sessions just control where the process can stop and restart. If your machine crashes mid-run, you resume from the last completed session instead of starting over.
+        </p>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label>Generations per session</label>
+            <input type="number" min="1" placeholder="no splitting"
+                   [ngModel]="editorGenerationsPerSession()" (ngModelChange)="editorGenerationsPerSession.set($event || null)"
+                   data-testid="editor-gens-per-session" />
+            <span class="field-help">How many generations run before the process checkpoints. Leave empty to run all {{ editorNGenerations() }} generations without stopping.</span>
+          </div>
+          <div class="form-field">
+            <label>Auto-continue</label>
+            <label class="checkbox-label">
+              <input type="checkbox" [ngModel]="editorAutoContinue()" (ngModelChange)="editorAutoContinue.set($event)"
+                     data-testid="editor-auto-continue" />
+              Automatically start the next session when one finishes
+            </label>
+            <span class="field-help">When off, the plan pauses between sessions so you can inspect results before continuing.</span>
+          </div>
         </div>
-        <div class="form-field">
-          <label>auto_continue</label>
-          <label class="checkbox-label">
-            <input type="checkbox" [ngModel]="editorAutoContinue()" (ngModelChange)="editorAutoContinue.set($event)"
-                   data-testid="editor-auto-continue" />
-            Automatically start the next session when one finishes
-          </label>
-          <span class="field-help">When unchecked, the plan pauses between sessions and waits for a manual "Continue" click.</span>
-        </div>
+
+        @if (editorGenerationsPerSession() && editorGenerationsPerSession()! > 0 && editorGenerationsPerSession()! < editorNGenerations()) {
+          <div class="session-preview" data-testid="session-preview">
+            @let gps = editorGenerationsPerSession()!;
+            @let nGens = editorNGenerations();
+            @let nSessions = Math.ceil(nGens / gps);
+            <div class="session-preview-summary">
+              {{ nGens }} generations ÷ {{ gps }} per session = <strong>{{ nSessions }} session{{ nSessions > 1 ? 's' : '' }}</strong>, each training all {{ editorPopulationSize() }} agents through {{ gps }} full train → eval → score → breed cycle{{ gps > 1 ? 's' : '' }}.
+            </div>
+            <div class="session-preview-detail">
+              @for (i of sessionPreviewIndices(); track i) {
+                @let startGen = i * gps;
+                @let endGen = Math.min(startGen + gps - 1, nGens - 1);
+                @let count = endGen - startGen + 1;
+                <div class="session-preview-row">
+                  <span class="session-label">Session {{ i + 1 }}</span>
+                  <span class="session-gens">Gen {{ startGen }}–{{ endGen }}</span>
+                  <span class="session-agents">{{ editorPopulationSize() }} agents × {{ count }} gen{{ count > 1 ? 's' : '' }}</span>
+                </div>
+              }
+            </div>
+          </div>
+        }
       </div>
 
       <div class="form-field">

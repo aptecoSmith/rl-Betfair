@@ -448,6 +448,17 @@ export class TrainingPlans implements OnInit {
     return 'pending';
   }
 
+  // ── Template helpers ────────────────────────────────────────────
+  readonly Math = Math;
+
+  sessionPreviewIndices(): number[] {
+    const gps = this.editorGenerationsPerSession();
+    const nGens = this.editorNGenerations();
+    if (!gps || gps <= 0 || gps >= nGens) return [];
+    const n = Math.ceil(nGens / gps);
+    return Array.from({ length: n }, (_, i) => i);
+  }
+
   // ── Helpers ─────────────────────────────────────────────────────
   /** Format ISO timestamp to short readable form, e.g. "7 Apr 2026, 01:34" */
   shortDate(iso: string): string {
