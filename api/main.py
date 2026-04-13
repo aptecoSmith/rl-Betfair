@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     app.state.config_path = str(Path("config.yaml").resolve())
     db_path = config["paths"]["registry_db"]
     weights_dir = config["paths"]["model_weights"]
-    bet_logs_dir = str(Path(db_path).parent / "bet_logs")
+    bet_logs_dir = config["paths"].get("bet_logs") or str(Path(db_path).parent / "bet_logs")
 
     store = ModelStore(
         db_path=db_path,

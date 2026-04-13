@@ -171,7 +171,7 @@ class ModelStore:
         self.weights_dir = Path(weights_dir)
         # Default bet_logs_dir sits next to the db file
         if bet_logs_dir is None:
-            self.bet_logs_dir = self.db_path.parent / "bet_logs"
+            self.bet_logs_dir = Path("logs/bet_logs")
         else:
             self.bet_logs_dir = Path(bet_logs_dir)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

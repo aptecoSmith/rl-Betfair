@@ -28,6 +28,7 @@ paths:
   processed_data: data/processed
   backup_data: data/backup
   model_weights: registry/weights
+  bet_logs: logs/bet_logs
   logs: logs
   registry_db: registry/models.db
   streamrecorder_backups: ../StreamRecorder1/backups

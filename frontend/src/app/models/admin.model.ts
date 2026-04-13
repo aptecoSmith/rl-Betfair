@@ -102,3 +102,14 @@ export interface ProcessLogsResponse {
   name: string;
   logs: string[];
 }
+
+export interface LogSubdir {
+  name: string;
+  file_count: number;
+  total_size_bytes: number;
+}
+
+export interface LogPathsResponse {
+  logs_root: string;
+  subdirs: LogSubdir[];
+}

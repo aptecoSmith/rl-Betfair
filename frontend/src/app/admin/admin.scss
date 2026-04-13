@@ -829,3 +829,29 @@ tr.selected-row {
     max-width: 500px;
   }
 }
+
+// ── Log Files ─────────────────────────────────────────────────────
+
+.log-paths-root {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+
+  code {
+    background: #14141d;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    color: #e0e0e0;
+  }
+}
+
+.log-paths-table {
+  max-width: 600px;
+
+  code {
+    font-size: 0.85rem;
+    color: #e0e0e0;
+  }
+}

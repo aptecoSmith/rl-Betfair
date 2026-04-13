@@ -28,6 +28,8 @@ from api.schemas import (
     ImportDayResponse,
     ImportRangeRequest,
     ImportRangeResponse,
+    LogPathsResponse,
+    LogSubdir,
     MysqlDatesResponse,
     ResetRequest,
     ResetResponse,
@@ -985,3 +987,25 @@ async def update_betting_constraints(body: BettingConstraints, request: Request)
         yaml.dump(on_disk, f, default_flow_style=False, sort_keys=False)
 
     return body
+
+
+# ── Log Paths ──────────────────────────────────────────────────────────
+
+
+@router.get("/log-paths", response_model=LogPathsResponse)
+async def get_log_paths(request: Request):
+    """Return the logs root and stats for each subdirectory."""
+    logs_root = Path(request.app.state.config.get("paths", {}).get("logs", "logs"))
+    subdirs: list[LogSubdir] = []
+    if logs_root.exists():
+        for entry in sorted(logs_root.iterdir()):
+            if entry.is_dir():
+                files = list(entry.rglob("*"))
+                files = [f for f in files if f.is_file()]
+                total_size = sum(f.stat().st_size for f in files)
+                subdirs.append(LogSubdir(
+                    name=entry.name,
+                    file_count=len(files),
+                    total_size_bytes=total_size,
+                ))
+    return LogPathsResponse(logs_root=str(logs_root), subdirs=subdirs)

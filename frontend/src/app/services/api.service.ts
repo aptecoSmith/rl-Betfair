@@ -26,6 +26,7 @@ import {
   ProcessStatus,
   ProcessActionResponse,
   ProcessLogsResponse,
+  LogPathsResponse,
 } from '../models/admin.model';
 
 @Injectable({ providedIn: 'root' })
@@ -113,6 +114,10 @@ export class ApiService {
 
   getStreamrecorderBackups(): Observable<StreamrecorderBackupsResponse> {
     return this.http.get<StreamrecorderBackupsResponse>(`${this.baseUrl}/admin/streamrecorder-backups`);
+  }
+
+  getLogPaths(): Observable<LogPathsResponse> {
+    return this.http.get<LogPathsResponse>(`${this.baseUrl}/admin/log-paths`);
   }
 
   restoreBackups(dates: string[]): Observable<RestoreResponse> {

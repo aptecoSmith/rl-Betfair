@@ -3,7 +3,7 @@ import { DecimalPipe, SlicePipe, TitleCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
 import { TrainingService } from '../services/training.service';
-import { ExtractedDay, BackupDay, AdminAgentEntry, StreamrecorderBackup, ProcessStatus } from '../models/admin.model';
+import { ExtractedDay, BackupDay, AdminAgentEntry, StreamrecorderBackup, ProcessStatus, LogSubdir } from '../models/admin.model';
 
 @Component({
   selector: 'app-admin',
@@ -99,6 +99,11 @@ export class Admin implements OnInit, OnDestroy {
   // ── MySQL gap detection ──────────────────────────────────────
   readonly mysqlDates = signal<string[]>([]);
   readonly mysqlAvailable = signal(false);
+
+  // ── Log paths ───────────────────────────────────────────────
+  readonly logPathsRoot = signal<string>('');
+  readonly logPathsSubdirs = signal<LogSubdir[]>([]);
+  readonly logPathsCopied = signal(false);
 
   readonly filteredDays = computed(() => {
     const filter = this.daySearchFilter().toLowerCase();
@@ -241,6 +246,7 @@ export class Admin implements OnInit, OnDestroy {
     this.loadMysqlDates();
     this.loadProcesses();
     this.loadConstraints();
+    this.loadLogPaths();
   }
 
   private loadGarageCount(): void {
@@ -750,6 +756,24 @@ export class Admin implements OnInit, OnDestroy {
         this.error.set('Failed to save constraints');
         this.clearMessageAfterDelay();
       },
+    });
+  }
+
+  // ── Log paths ────────────────────────────────────────────────
+
+  loadLogPaths(): void {
+    this.api.getLogPaths().subscribe({
+      next: (res) => {
+        this.logPathsRoot.set(res.logs_root);
+        this.logPathsSubdirs.set(res.subdirs);
+      },
+    });
+  }
+
+  copyLogPath(): void {
+    navigator.clipboard.writeText(this.logPathsRoot()).then(() => {
+      this.logPathsCopied.set(true);
+      setTimeout(() => this.logPathsCopied.set(false), 2000);
     });
   }
 

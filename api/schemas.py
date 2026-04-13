@@ -448,3 +448,17 @@ class BettingConstraints(BaseModel):
     max_lay_price: float | None = None
     min_seconds_before_off: int = 0
     reevaluate_garaged_default: bool = True
+
+
+# ── Log Paths ────────────────────────────────────────────────────────
+
+
+class LogSubdir(BaseModel):
+    name: str
+    file_count: int
+    total_size_bytes: int
+
+
+class LogPathsResponse(BaseModel):
+    logs_root: str
+    subdirs: list[LogSubdir]

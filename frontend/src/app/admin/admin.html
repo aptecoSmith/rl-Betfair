@@ -607,6 +607,46 @@
     }
   </section>
 
+  <!-- ── Log Files ──────────────────────────────────────────────── -->
+  <section class="admin-section">
+    <h2>Log Files</h2>
+    <p class="section-desc">On-disk log directories and file counts.</p>
+
+    @if (logPathsRoot()) {
+      <div class="log-paths-root">
+        <code>{{ logPathsRoot() }}</code>
+        <button class="btn btn-secondary btn-sm" (click)="copyLogPath()">
+          {{ logPathsCopied() ? 'Copied!' : 'Copy path' }}
+        </button>
+      </div>
+
+      @if (logPathsSubdirs().length > 0) {
+        <table class="admin-table log-paths-table">
+          <thead>
+            <tr>
+              <th>Subdirectory</th>
+              <th>Files</th>
+              <th>Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (sub of logPathsSubdirs(); track sub.name) {
+              <tr>
+                <td><code>{{ sub.name }}/</code></td>
+                <td>{{ sub.file_count }}</td>
+                <td>{{ formatBytes(sub.total_size_bytes) }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      } @else {
+        <p class="empty">No subdirectories found.</p>
+      }
+    } @else {
+      <p class="loading">Loading log paths...</p>
+    }
+  </section>
+
   <!-- ── Reset ─────────────────────────────────────────────────── -->
   <section class="admin-section reset-section">
     <h2>Start Afresh</h2>
