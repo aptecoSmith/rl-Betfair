@@ -304,6 +304,20 @@ async def start_training(request: Request, body: StartTrainingRequest):
         if unknown:
             raise HTTPException(400, f"Unknown architectures: {unknown}")
 
+    # Load training plan if plan_id provided
+    plan_data = None
+    if body.plan_id is not None:
+        plan_registry = getattr(request.app.state, "plan_registry", None)
+        if plan_registry is None:
+            raise HTTPException(503, "Plan registry not configured")
+        try:
+            plan = plan_registry.load(body.plan_id)
+        except KeyError:
+            raise HTTPException(404, f"No such plan: {body.plan_id}")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        plan_data = plan.to_dict()
+
     # Budget override validation
     if body.starting_budget is not None and body.starting_budget <= 0:
         raise HTTPException(400, "starting_budget must be positive")
@@ -333,6 +347,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
         min_seconds_before_off=body.min_seconds_before_off,
         starting_budget=body.starting_budget,
         market_type_filters=body.market_type_filters,
+        plan_id=body.plan_id,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

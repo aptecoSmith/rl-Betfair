@@ -97,7 +97,13 @@
   background: #1e1e2e;
   padding: 1.5rem;
   border-radius: 8px;
-  h2 { color: #fff; margin: 0 0 0.3rem 0; }
+  .detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.3rem;
+  }
+  h2 { color: #fff; margin: 0; }
   .plan-id { color: #888; font-size: 0.8rem; margin-bottom: 1rem; }
 }
 

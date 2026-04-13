@@ -92,8 +92,22 @@
   <!-- ── DETAIL MODE ───────────────────────────────────────────── -->
   @if (mode() === 'detail' && selectedPlan(); as plan) {
     <section class="plan-detail">
-      <h2>{{ plan.name }}</h2>
+      <div class="detail-header">
+        <h2>{{ plan.name }}</h2>
+        <button
+          class="btn-primary"
+          (click)="startPlan()"
+          [disabled]="launching() || selectedValidation().some(v => v.severity === 'error')"
+          data-testid="start-plan"
+        >
+          {{ launching() ? 'Starting…' : 'Start training' }}
+        </button>
+      </div>
       <div class="plan-id">plan_id: <code>{{ plan.plan_id }}</code></div>
+
+      @if (launchError()) {
+        <div class="message error" data-testid="launch-error">{{ launchError() }}</div>
+      }
 
       @if (selectedValidation().length > 0) {
         <div class="validation-section">
@@ -110,6 +124,8 @@
         <dt>architectures</dt><dd>{{ plan.architectures.join(', ') }}</dd>
         <dt>budget</dt><dd>{{ plan.starting_budget != null ? '£' + plan.starting_budget + '/race' : '(default)' }}</dd>
         <dt>strategy</dt><dd>{{ plan.exploration_strategy ?? 'random' }}</dd>
+        <dt>n_generations</dt><dd>{{ plan.n_generations ?? 3 }}</dd>
+        <dt>n_epochs</dt><dd>{{ plan.n_epochs ?? 3 }}</dd>
         <dt>seed</dt><dd>{{ plan.seed ?? '(none)' }}</dd>
         <dt>min_arch_samples</dt><dd>{{ plan.min_arch_samples }}</dd>
         <dt>notes</dt><dd>{{ plan.notes || '(none)' }}</dd>
@@ -189,6 +205,19 @@
                  [ngModel]="editorStartingBudget()" (ngModelChange)="editorStartingBudget.set($event)"
                  data-testid="editor-starting-budget" />
           <span class="field-help">Starting bankroll per race day. Models trained at one budget may behave differently at another. Default is 100.</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-field">
+          <label>n_generations</label>
+          <input type="number" min="1" [ngModel]="editorNGenerations()" (ngModelChange)="editorNGenerations.set($event)" data-testid="editor-n-generations" />
+          <span class="field-help">Number of evolutionary generations to run. More generations = more selection pressure, but longer runs.</span>
+        </div>
+        <div class="form-field">
+          <label>n_epochs</label>
+          <input type="number" min="1" [ngModel]="editorNEpochs()" (ngModelChange)="editorNEpochs.set($event)" data-testid="editor-n-epochs" />
+          <span class="field-help">PPO training epochs per agent per generation. 3 is standard; higher values risk overfitting on small datasets.</span>
         </div>
       </div>
 

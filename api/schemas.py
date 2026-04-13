@@ -381,6 +381,7 @@ class RestoreResponse(BaseModel):
 
 
 class StartTrainingRequest(BaseModel):
+    plan_id: str | None = None  # optional training plan to launch
     n_generations: int = 3
     n_epochs: int = 3
     population_size: int | None = None  # override config default if set

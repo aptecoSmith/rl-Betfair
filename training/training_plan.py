@@ -148,6 +148,11 @@ class TrainingPlan:
     #: When ``exploration_strategy == "manual"``, the operator-supplied
     #: seed point (gene name → value).  Ignored for other strategies.
     manual_seed_point: dict | None = None
+    #: Number of generations to run.  Plans saved before this field was
+    #: added default to 3, matching the StartTrainingRequest default.
+    n_generations: int = 3
+    #: Number of PPO epochs per agent per generation.
+    n_epochs: int = 3
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:
@@ -167,6 +172,8 @@ class TrainingPlan:
             "starting_budget": self.starting_budget,
             "exploration_strategy": self.exploration_strategy,
             "manual_seed_point": self.manual_seed_point,
+            "n_generations": self.n_generations,
+            "n_epochs": self.n_epochs,
         }
 
     @classmethod
@@ -191,6 +198,8 @@ class TrainingPlan:
             starting_budget=raw.get("starting_budget"),
             exploration_strategy=raw.get("exploration_strategy", "random"),
             manual_seed_point=raw.get("manual_seed_point"),
+            n_generations=int(raw.get("n_generations", 3)),
+            n_epochs=int(raw.get("n_epochs", 3)),
         )
 
     @staticmethod
@@ -208,6 +217,8 @@ class TrainingPlan:
         starting_budget: float | None = None,
         exploration_strategy: str = "random",
         manual_seed_point: dict | None = None,
+        n_generations: int = 3,
+        n_epochs: int = 3,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -225,6 +236,8 @@ class TrainingPlan:
             starting_budget=starting_budget,
             exploration_strategy=exploration_strategy,
             manual_seed_point=manual_seed_point,
+            n_generations=n_generations,
+            n_epochs=n_epochs,
         )
 
 

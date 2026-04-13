@@ -58,6 +58,8 @@ export interface TrainingPlan {
   starting_budget?: number | null;
   exploration_strategy?: string;
   manual_seed_point?: Record<string, number | string> | null;
+  n_generations?: number;
+  n_epochs?: number;
 }
 
 export interface ValidationIssue {
@@ -91,6 +93,8 @@ export interface TrainingPlanPayload {
   starting_budget?: number | null;
   exploration_strategy?: string;
   manual_seed_point?: Record<string, number | string> | null;
+  n_generations?: number;
+  n_epochs?: number;
 }
 
 export interface GeneCoverageEntry {

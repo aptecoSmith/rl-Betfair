@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
 import { ScoreboardResponse } from '../models/scoreboard.model';
 import { ModelDetailResponse, LineageResponse, GeneticsResponse } from '../models/model-detail.model';
 import { ReplayDayResponse, ReplayRaceResponse } from '../models/replay.model';
@@ -155,6 +156,7 @@ export class ApiService {
   }
 
   startTraining(params: {
+    plan_id?: string | null;
     n_generations?: number; n_epochs?: number;
     population_size?: number; seed?: number | null;
     reevaluate_garaged?: boolean; reevaluate_min_score?: number | null;
@@ -163,12 +165,14 @@ export class ApiService {
     max_back_price?: number | null;
     max_lay_price?: number | null;
     min_seconds_before_off?: number | null;
+    starting_budget?: number | null;
     market_type_filters?: string[] | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
   }> {
     return this.http.post<any>(`${this.baseUrl}/training/start`, {
+      plan_id: params.plan_id ?? null,
       n_generations: params.n_generations ?? 3,
       n_epochs: params.n_epochs ?? 3,
       population_size: params.population_size ?? null,
@@ -181,6 +185,7 @@ export class ApiService {
       max_back_price: params.max_back_price ?? null,
       max_lay_price: params.max_lay_price ?? null,
       min_seconds_before_off: params.min_seconds_before_off ?? null,
+      starting_budget: params.starting_budget ?? null,
       market_type_filters: params.market_type_filters ?? null,
     });
   }
@@ -233,7 +238,17 @@ export class ApiService {
   }
 
   getTrainingPlanCoverage(): Observable<CoverageResponse> {
-    return this.http.get<CoverageResponse>(`${this.baseUrl}/training-plans/coverage`);
+    return this.http.get<any>(`${this.baseUrl}/training-plans/coverage`).pipe(
+      map(resp => {
+        // API returns gene_coverage as a dict keyed by gene name;
+        // the frontend expects an array.
+        const gc = resp?.report?.gene_coverage;
+        if (gc && !Array.isArray(gc)) {
+          resp.report.gene_coverage = Object.values(gc);
+        }
+        return resp as CoverageResponse;
+      }),
+    );
   }
 
   // ── Betting constraints ───────────────────────────────────────────

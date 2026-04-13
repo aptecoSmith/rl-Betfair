@@ -1,7 +1,7 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { JsonPipe } from '@angular/common';
-import { RouterLink } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 import { ApiService } from '../services/api.service';
 import {
   CoverageReport,
@@ -34,6 +34,7 @@ interface ArchInfo { name: string; description: string; }
 })
 export class TrainingPlans implements OnInit {
   private readonly api = inject(ApiService);
+  private readonly router = inject(Router);
 
   // ── List / detail state ─────────────────────────────────────────
   readonly plans = signal<TrainingPlan[]>([]);
@@ -71,6 +72,8 @@ export class TrainingPlans implements OnInit {
   readonly editorHpRanges = signal<Record<string, HpRangeOverride>>({});
   readonly editorStartingBudget = signal<number | null>(null);
   readonly editorArchLrRanges = signal<Record<string, HpRangeOverride>>({});
+  readonly editorNGenerations = signal(3);
+  readonly editorNEpochs = signal(3);
   readonly editorExplorationStrategy = signal<string>('random');
   readonly editorBiasToggle = signal(false);
   readonly editorSaving = signal(false);
@@ -169,6 +172,8 @@ export class TrainingPlans implements OnInit {
     this.editorHpRanges.set(ranges);
     this.editorArchLrRanges.set({});
     this.editorStartingBudget.set(null);
+    this.editorNGenerations.set(3);
+    this.editorNEpochs.set(3);
     this.editorName.set('');
     this.editorErrors.set([]);
     this.editorTopError.set(null);
@@ -303,6 +308,8 @@ export class TrainingPlans implements OnInit {
       notes: this.editorNotes(),
       starting_budget: this.editorStartingBudget(),
       exploration_strategy: this.editorExplorationStrategy(),
+      n_generations: this.editorNGenerations(),
+      n_epochs: this.editorNEpochs(),
     };
     this.editorSaving.set(true);
     this.api.createTrainingPlan(payload).subscribe({
@@ -322,6 +329,35 @@ export class TrainingPlans implements OnInit {
         } else {
           this.editorTopError.set(detail ?? err?.message ?? 'Failed to save plan');
         }
+      },
+    });
+  }
+
+  // ── Launch a plan ───────────────────────────────────────────────
+  readonly launching = signal(false);
+  readonly launchError = signal<string | null>(null);
+
+  startPlan(): void {
+    const plan = this.selectedPlan();
+    if (!plan) return;
+    this.launching.set(true);
+    this.launchError.set(null);
+    this.api.startTraining({
+      plan_id: plan.plan_id,
+      n_generations: plan.n_generations ?? 3,
+      n_epochs: plan.n_epochs ?? 3,
+      population_size: plan.population_size,
+      architectures: plan.architectures,
+      seed: plan.seed ?? null,
+      starting_budget: plan.starting_budget ?? null,
+    }).subscribe({
+      next: () => {
+        this.launching.set(false);
+        this.router.navigate(['/training']);
+      },
+      error: (err) => {
+        this.launching.set(false);
+        this.launchError.set(err?.error?.detail ?? err?.message ?? 'Failed to start training');
       },
     });
   }

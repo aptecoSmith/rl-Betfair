@@ -45,7 +45,7 @@ from agents.population_manager import parse_search_ranges
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/training-plans", tags=["training-plans"])
+router = APIRouter(prefix="/training-plans", tags=["training-plans"])
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -157,6 +157,8 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
             starting_budget=budget_val,
             exploration_strategy=str(payload.get("exploration_strategy", "random")),
             manual_seed_point=payload.get("manual_seed_point"),
+            n_generations=int(payload.get("n_generations", 3)),
+            n_epochs=int(payload.get("n_epochs", 3)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")

@@ -47,6 +47,7 @@ from rich.text import Text
 
 from registry.model_store import ModelStore
 from registry.scoreboard import Scoreboard
+from training.training_plan import PlanRegistry, TrainingPlan
 from training.ipc import (
     DEFAULT_WORKER_HOST,
     DEFAULT_WORKER_PORT,
@@ -119,12 +120,19 @@ class TrainingWorker:
         # ModelStore (shared DB via WAL)
         db_path = config["paths"]["registry_db"]
         weights_dir = config["paths"]["model_weights"]
-        bet_logs_dir = str(Path(db_path).parent / "bet_logs")
+        bet_logs_dir = config["paths"].get("bet_logs") or str(Path(db_path).parent / "bet_logs")
         self.store = ModelStore(
             db_path=db_path,
             weights_dir=weights_dir,
             bet_logs_dir=bet_logs_dir,
         )
+
+        # Plan registry — same path convention as the API
+        plan_root = (
+            config.get("paths", {}).get("training_plans")
+            or str(Path(db_path).parent / "training_plans")
+        )
+        self.plan_registry = PlanRegistry(plan_root)
 
         # Training state
         self.running = False
@@ -343,6 +351,18 @@ class TrainingWorker:
             test_dates = dates[split:]
 
         run_id = str(uuid.uuid4())
+
+        # Load training plan if plan_id provided
+        plan_id = params.get("plan_id")
+        training_plan: TrainingPlan | None = None
+        if plan_id is not None:
+            try:
+                training_plan = self.plan_registry.load(plan_id)
+                console.print(f"[dim]Loaded training plan: {training_plan.name} ({plan_id[:8]}…)[/dim]")
+            except (KeyError, ValueError) as exc:
+                await ws.send(make_error_msg(f"Failed to load plan {plan_id}: {exc}"))
+                return
+
         n_generations = params.get("n_generations", 3)
         n_epochs = params.get("n_epochs", 3)
         population_size = params.get("population_size")
@@ -383,6 +403,8 @@ class TrainingWorker:
 
         console.print()
         console.rule(f"[bold green]Training Run {run_id[:8]}[/bold green]")
+        if training_plan:
+            console.print(f"  Plan: {training_plan.name} ({training_plan.plan_id[:8]}…)")
         console.print(f"  Generations: {n_generations}  |  Epochs: {n_epochs}")
         console.print(f"  Population:  {run_config['population']['size']}")
         console.print(f"  Train days:  {len(train_dates)}  |  Test days: {len(test_dates)}")
@@ -405,6 +427,8 @@ class TrainingWorker:
                     finish_event=self.finish_event,
                     skip_training_event=self.skip_training_event,
                     stop_after_current_eval_event=self.stop_after_current_eval_event,
+                    training_plan=training_plan,
+                    plan_registry=self.plan_registry if training_plan else None,
                 )
 
                 orch.run(
@@ -614,8 +638,32 @@ class TrainingWorker:
 # ── Entry point ─────────────────────────────────────────────────────
 
 
+_SAFE_PROCESS_PREFIXES = ("python", "node", "npm")
+
+
+def _get_process_name(pid: int) -> str | None:
+    """Return the image name (e.g. 'python.exe') for a PID, or None."""
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(",")
+            if len(parts) >= 2:
+                return parts[0].strip('"').lower()
+    except Exception:
+        pass
+    return None
+
+
 def _clear_port(port: int) -> None:
-    """Kill any process listening on the given port (stale worker cleanup)."""
+    """Kill any stale process listening on the given port.
+
+    Safety: only kills python/node/npm processes. Never uses /T (tree kill)
+    to avoid accidentally terminating system or GPU processes.
+    """
     if sys.platform != "win32":
         return  # Unix handles this via SO_REUSEADDR or manual kill
     try:
@@ -626,8 +674,12 @@ def _clear_port(port: int) -> None:
                 parts = line.split()
                 pid = int(parts[-1])
                 if pid > 0:
-                    console.print(f"[yellow]Killing stale process on port {port} (PID {pid})[/yellow]")
-                    _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=10)
+                    proc_name = _get_process_name(pid)
+                    if proc_name and any(proc_name.startswith(p) for p in _SAFE_PROCESS_PREFIXES):
+                        console.print(f"[yellow]Killing stale {proc_name} on port {port} (PID {pid})[/yellow]")
+                        _sp.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+                    else:
+                        console.print(f"[yellow]Skipping unknown process on port {port} (PID {pid}, name={proc_name!r})[/yellow]")
         import time as _time
         _time.sleep(0.5)  # Brief pause to let the OS release the port
     except Exception as exc:
