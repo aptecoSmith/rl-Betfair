@@ -150,6 +150,9 @@
   @if (mode() === 'editor') {
     <section class="plan-editor" data-testid="plan-editor">
       <h2>New training plan</h2>
+      <p class="help-text">
+        A training plan defines the search space for a genetic training run: how many agents compete, which architectures to try, and the hyperparameter ranges to explore. Plans are saved and can be reused across runs.
+      </p>
 
       @if (editorTopError()) {
         <div class="message error" data-testid="editor-top-error">{{ editorTopError() }}</div>
@@ -158,6 +161,7 @@
       <div class="form-field">
         <label>name</label>
         <input type="text" [ngModel]="editorName()" (ngModelChange)="editorName.set($event)" data-testid="editor-name" />
+        <span class="field-help">A short, descriptive label for this plan (e.g. "LSTM deep-dive gen2" or "transformer sweep").</span>
         @if (errorForField('name'); as e) {
           <div class="inline-error">{{ e.code }}: {{ e.message }}</div>
         }
@@ -167,20 +171,24 @@
         <div class="form-field">
           <label>population_size</label>
           <input type="number" [ngModel]="editorPopulationSize()" (ngModelChange)="editorPopulationSize.set($event)" data-testid="editor-pop-size" />
+          <span class="field-help">Number of agents trained per generation. 5-10 for quick tests, 30-50 for serious runs. Larger = better results but proportionally longer training.</span>
         </div>
         <div class="form-field">
           <label>min_arch_samples</label>
           <input type="number" [ngModel]="editorMinArchSamples()" (ngModelChange)="editorMinArchSamples.set($event)" data-testid="editor-min-arch" />
+          <span class="field-help">Minimum agents per architecture before the genetic algorithm can discard an architecture. Prevents killing architectures before they've had a fair trial.</span>
         </div>
         <div class="form-field">
           <label>seed (optional)</label>
           <input type="number" [ngModel]="editorSeed()" (ngModelChange)="editorSeed.set($event)" data-testid="editor-seed" />
+          <span class="field-help">Fixed random seed for reproducibility. Leave empty for a random seed each run.</span>
         </div>
         <div class="form-field">
           <label>budget per race (optional)</label>
           <input type="number" min="0.01" step="any" placeholder="default: 100"
                  [ngModel]="editorStartingBudget()" (ngModelChange)="editorStartingBudget.set($event)"
                  data-testid="editor-starting-budget" />
+          <span class="field-help">Starting bankroll per race day. Models trained at one budget may behave differently at another. Default is 100.</span>
         </div>
       </div>
 
@@ -216,6 +224,7 @@
 
       <div class="form-field">
         <label>architectures (multi-select)</label>
+        <span class="field-help">Select which neural network architectures agents can use. Selecting multiple lets the genetic algorithm compare them head-to-head.</span>
         <div class="arch-chips">
           @for (a of architectures(); track a.name) {
             <button
@@ -238,10 +247,14 @@
       <div class="form-field">
         <label>notes</label>
         <textarea rows="3" [ngModel]="editorNotes()" (ngModelChange)="editorNotes.set($event)"></textarea>
+        <span class="field-help">Free-text notes for your own reference — what you're testing, why you chose these settings, etc.</span>
       </div>
 
       <div class="form-section">
         <h3>Hyperparameter ranges</h3>
+        <p class="help-text">
+          Each gene below controls one dimension of the search space. The genetic algorithm samples values within these ranges for each agent. Narrowing a range focuses the search; widening it explores more strategies but needs a larger population to cover the space.
+        </p>
         <p class="hint">
           One widget per gene from <code>config.yaml</code>'s
           <code>hyperparameters.search_ranges</code>. Adding a gene there
@@ -255,6 +268,8 @@
           </button>
           @if (editorBiasToggle()) {
             <span class="hint">Bias applied — review and tweak ranges below before saving.</span>
+          } @else {
+            <span class="field-help">Automatically narrows ranges toward gaps in historical coverage. Best with 10+ prior training runs.</span>
           }
         </div>
 
@@ -283,6 +298,9 @@
       @if (lrSpec(); as lr) {
         <div class="form-section">
           <h3>arch_lr_ranges (per-architecture learning rate override)</h3>
+          <p class="help-text">
+            Different architectures often train best at different learning rates. Transformers typically need lower rates than LSTMs. Add an override here to give each architecture its own learning rate range instead of sharing the global one.
+          </p>
           <p class="hint">Override <code>learning_rate</code> for specific architectures (Session 6).</p>
           @for (arch of selectedArchsArray(); track arch) {
             <div class="arch-lr-row" [attr.data-testid]="'arch-lr-row-' + arch">
