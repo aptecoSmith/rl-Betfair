@@ -269,7 +269,7 @@ def test_outcome_round_trip(registry, basic_plan):
 def _make_test_app(registry: PlanRegistry, hp_ranges: dict, history=None) -> TestClient:
     """Mount the planner router on a fresh FastAPI with seeded state."""
     app = FastAPI()
-    app.include_router(training_plans_router.router)
+    app.include_router(training_plans_router.router, prefix="/api")
     app.state.plan_registry = registry
     app.state.config = {"hyperparameters": {"search_ranges": hp_ranges}}
     app.state.coverage_history = history or []
