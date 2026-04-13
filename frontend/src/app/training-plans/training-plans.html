@@ -31,7 +31,7 @@
             <div class="plan-card" (click)="openDetail(plan.plan_id)" [attr.data-testid]="'plan-card-' + plan.plan_id">
               <div class="plan-card-header">
                 <div class="plan-name">{{ plan.name }}</div>
-                <div class="plan-created">{{ plan.created_at }}</div>
+                <div class="plan-created">{{ shortDate(plan.created_at) }}</div>
               </div>
               <div class="plan-meta">
                 <div><span class="k">Population</span> <span class="v">{{ plan.population_size }}</span></div>
@@ -62,9 +62,9 @@
                       @for (o of plan.outcomes; track o.generation) {
                         <tr>
                           <td>{{ o.generation }}</td>
-                          <td>{{ o.recorded_at }}</td>
-                          <td>{{ o.best_fitness }}</td>
-                          <td>{{ o.mean_fitness }}</td>
+                          <td>{{ shortDate(o.recorded_at) }}</td>
+                          <td>{{ o.best_fitness | number:'1.2-2' }}</td>
+                          <td>{{ o.mean_fitness | number:'1.2-2' }}</td>
                           <td>{{ o.architectures_alive.length }}</td>
                           <td>{{ o.architectures_died.length }}</td>
                           <td>{{ o.n_agents }}</td>
@@ -94,14 +94,24 @@
     <section class="plan-detail">
       <div class="detail-header">
         <h2>{{ plan.name }}</h2>
-        <button
-          class="btn-primary"
-          (click)="startPlan()"
-          [disabled]="launching() || selectedValidation().some(v => v.severity === 'error')"
-          data-testid="start-plan"
-        >
-          {{ launching() ? 'Starting…' : 'Start training' }}
-        </button>
+        <div class="detail-actions">
+          <button
+            class="btn-primary"
+            (click)="startPlan()"
+            [disabled]="launching() || selectedValidation().some(v => v.severity === 'error')"
+            data-testid="start-plan"
+          >
+            {{ launching() ? 'Starting…' : 'Start training' }}
+          </button>
+          <button
+            class="btn-danger"
+            (click)="deletePlan()"
+            [disabled]="deleting()"
+            data-testid="delete-plan"
+          >
+            {{ deleting() ? 'Deleting…' : 'Delete' }}
+          </button>
+        </div>
       </div>
       <div class="plan-id">plan_id: <code>{{ plan.plan_id }}</code></div>
 
@@ -129,7 +139,7 @@
         <dt>seed</dt><dd>{{ plan.seed ?? '(none)' }}</dd>
         <dt>min_arch_samples</dt><dd>{{ plan.min_arch_samples }}</dd>
         <dt>notes</dt><dd>{{ plan.notes || '(none)' }}</dd>
-        <dt>created_at</dt><dd>{{ plan.created_at }}</dd>
+        <dt>created_at</dt><dd>{{ shortDate(plan.created_at) }}</dd>
       </dl>
 
       <h3>hp_ranges</h3>
@@ -148,11 +158,11 @@
             @for (o of plan.outcomes; track o.generation) {
               <tr>
                 <td>{{ o.generation }}</td>
-                <td>{{ o.recorded_at }}</td>
-                <td>{{ o.best_fitness }}</td>
-                <td>{{ o.mean_fitness }}</td>
-                <td>{{ o.architectures_alive.join(',') }}</td>
-                <td>{{ o.architectures_died.join(',') }}</td>
+                <td>{{ shortDate(o.recorded_at) }}</td>
+                <td>{{ o.best_fitness | number:'1.2-2' }}</td>
+                <td>{{ o.mean_fitness | number:'1.2-2' }}</td>
+                <td>{{ o.architectures_alive.join(', ') }}</td>
+                <td>{{ o.architectures_died.join(', ') }}</td>
                 <td>{{ o.n_agents }}</td>
               </tr>
             }

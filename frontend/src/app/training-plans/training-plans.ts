@@ -1,6 +1,6 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { JsonPipe } from '@angular/common';
+import { DecimalPipe, JsonPipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import { ApiService } from '../services/api.service';
 import {
@@ -28,7 +28,7 @@ interface ArchInfo { name: string; description: string; }
 @Component({
   selector: 'app-training-plans',
   standalone: true,
-  imports: [FormsModule, JsonPipe, RouterLink, GeneEditor, EarlyPickValidator, CoveragePanel],
+  imports: [FormsModule, DecimalPipe, JsonPipe, RouterLink, GeneEditor, EarlyPickValidator, CoveragePanel],
   templateUrl: './training-plans.html',
   styleUrl: './training-plans.scss',
 })
@@ -333,6 +333,27 @@ export class TrainingPlans implements OnInit {
     });
   }
 
+  // ── Delete a plan ──────────────────────────────────────────────
+  readonly deleting = signal(false);
+
+  deletePlan(): void {
+    const plan = this.selectedPlan();
+    if (!plan || !confirm(`Delete plan "${plan.name}"? This cannot be undone.`)) return;
+    this.deleting.set(true);
+    this.api.deleteTrainingPlan(plan.plan_id).subscribe({
+      next: () => {
+        this.deleting.set(false);
+        this.plans.update(prev => prev.filter(p => p.plan_id !== plan.plan_id));
+        this.selectedPlan.set(null);
+        this.mode.set('list');
+      },
+      error: (err) => {
+        this.deleting.set(false);
+        this.launchError.set(err?.error?.detail ?? 'Failed to delete plan');
+      },
+    });
+  }
+
   // ── Launch a plan ───────────────────────────────────────────────
   readonly launching = signal(false);
   readonly launchError = signal<string | null>(null);
@@ -363,6 +384,17 @@ export class TrainingPlans implements OnInit {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────
+  /** Format ISO timestamp to short readable form, e.g. "7 Apr 2026, 01:34" */
+  shortDate(iso: string): string {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+        + ', ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return iso;
+    }
+  }
+
   errorForField(field: string): ValidationIssue | null {
     return this.editorErrors().find(i => i.field === field) ?? null;
   }

@@ -237,6 +237,10 @@ export class ApiService {
     return this.http.post<TrainingPlanDetailResponse>(`${this.baseUrl}/training-plans`, payload);
   }
 
+  deleteTrainingPlan(planId: string): Observable<{ deleted: boolean; plan_id: string }> {
+    return this.http.delete<{ deleted: boolean; plan_id: string }>(`${this.baseUrl}/training-plans/${planId}`);
+  }
+
   getTrainingPlanCoverage(): Observable<CoverageResponse> {
     return this.http.get<any>(`${this.baseUrl}/training-plans/coverage`).pipe(
       map(resp => {

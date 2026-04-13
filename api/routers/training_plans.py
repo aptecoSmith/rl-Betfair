@@ -122,6 +122,15 @@ def get_plan(plan_id: str, request: Request) -> dict[str, Any]:
     }
 
 
+@router.delete("/{plan_id}")
+def delete_plan(plan_id: str, request: Request) -> dict[str, Any]:
+    """Delete a plan by ID. Returns 404 if the plan doesn't exist."""
+    reg = _registry(request)
+    if not reg.delete(plan_id):
+        raise HTTPException(404, f"No such plan: {plan_id}")
+    return {"deleted": True, "plan_id": plan_id}
+
+
 @router.post("")
 def create_plan(payload: dict, request: Request) -> dict[str, Any]:
     """Create + persist a plan after validating it.
