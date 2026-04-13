@@ -19,6 +19,24 @@ import subprocess
 import sys
 import time
 
+_SAFE_PROCESS_PREFIXES = ("python", "node", "npm")
+
+
+def _get_process_name_win(pid: int) -> str | None:
+    """Return the image name (e.g. 'python.exe') for a PID, or None."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(",")
+            if len(parts) >= 2:
+                return parts[0].strip('"').lower()
+    except Exception:
+        pass
+    return None
+
 
 def port_free(port: int) -> bool:
     """Return True if a TCP connect to ``127.0.0.1:port`` is refused."""
@@ -81,8 +99,12 @@ def kill_stale_on_port(port: int, *, wait_seconds: float = 5.0) -> list[int]:
     for pid in pids:
         try:
             if sys.platform == "win32":
+                # Verify process is python/node before killing — never use /T
+                proc_name = _get_process_name_win(pid)
+                if not (proc_name and any(proc_name.startswith(p) for p in _SAFE_PROCESS_PREFIXES)):
+                    continue  # skip unknown/system processes
                 subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    ["taskkill", "/F", "/PID", str(pid)],
                     capture_output=True, timeout=5,
                 )
             else:

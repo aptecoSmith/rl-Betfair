@@ -65,7 +65,7 @@ def worker_process():
     # Teardown: kill the worker
     if proc.poll() is None:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/PID", str(proc.pid)], capture_output=True)
         else:
             proc.terminate()
             proc.wait(timeout=5)

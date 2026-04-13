@@ -42,6 +42,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger("supervisor")
 
+# ── Safe process kill helpers ────────────────────────────────────────────
+
+# Only kill processes with these image names (case-insensitive prefix match).
+# Prevents accidentally terminating system, GPU, or display-driver processes.
+_SAFE_PROCESS_PREFIXES = ("python", "node", "npm")
+
+
+def _get_process_name(pid: int) -> str | None:
+    """Return the image name (e.g. 'python.exe') for a PID, or None."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Output: "python.exe","1234","Console","1","45,000 K"
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(",")
+            if len(parts) >= 2:
+                return parts[0].strip('"').lower()
+    except Exception:
+        pass
+    return None
+
+
+def _is_safe_to_kill(process_name: str) -> bool:
+    """Return True if the process image name is one we're allowed to kill."""
+    name = process_name.lower()
+    return any(name.startswith(prefix) for prefix in _SAFE_PROCESS_PREFIXES)
+
+
 # ── Process definitions ──────────────────────────────────────────────────
 
 PROCESS_DEFS = {
@@ -114,7 +144,12 @@ class ManagedProcess:
         return None
 
     def _clear_port(self) -> None:
-        """Kill any stale process holding this service's port."""
+        """Kill any stale process holding this service's port.
+
+        Safety: only kills processes whose image name is python*, node*,
+        or npm* to avoid accidentally terminating system/GPU processes.
+        Never uses /T (tree kill) — only the specific PID is killed.
+        """
         if sys.platform != "win32":
             return
         try:
@@ -124,8 +159,12 @@ class ManagedProcess:
                     parts = line.split()
                     pid = int(parts[-1])
                     if pid > 0:
-                        logger.info("Killing stale process on port %d (PID %d)", self.port, pid)
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=10)
+                        proc_name = _get_process_name(pid)
+                        if proc_name and _is_safe_to_kill(proc_name):
+                            logger.info("Killing stale %s on port %d (PID %d)", proc_name, self.port, pid)
+                            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+                        else:
+                            logger.warning("Skipping unknown process on port %d (PID %d, name=%r)", self.port, pid, proc_name)
             time.sleep(0.5)
         except Exception as exc:
             logger.warning("Could not clear port %d: %s", self.port, exc)
@@ -174,8 +213,9 @@ class ManagedProcess:
         pid = self._proc.pid
         try:
             if sys.platform == "win32":
+                # No /T — only kill the specific child process, never the tree
                 subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    ["taskkill", "/F", "/PID", str(pid)],
                     capture_output=True, timeout=10,
                 )
             else:
