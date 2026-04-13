@@ -190,6 +190,12 @@ export class ApiService {
     });
   }
 
+  resumeTraining(planId: string): Observable<{
+    run_id: string; session: number; start_generation: number; n_generations: number;
+  }> {
+    return this.http.post<any>(`${this.baseUrl}/training/resume`, { plan_id: planId });
+  }
+
   getArchitectures(): Observable<{ name: string; description: string }[]> {
     return this.http.get<{ name: string; description: string }[]>(`${this.baseUrl}/training/architectures`);
   }

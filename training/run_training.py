@@ -221,6 +221,7 @@ class TrainingOrchestrator:
         seed: int | None = None,
         reevaluate_garaged: bool = False,
         reevaluate_min_score: float | None = None,
+        start_generation: int = 0,
     ) -> TrainingRunResult:
         """Execute the full generational training loop.
 
@@ -232,11 +233,15 @@ class TrainingOrchestrator:
             Days used for evaluation (latest chronologically).
             If empty, evaluation is skipped with a warning.
         n_generations :
-            Number of generations to run.
+            Number of generations to run (within this session).
         n_epochs :
             Number of training passes over the training days per agent.
         seed :
             Optional RNG seed for population initialisation.
+        start_generation :
+            Generation offset for session resumption.  When > 0 the
+            orchestrator loads survivors from the model store instead
+            of creating a fresh random population.
 
         Returns
         -------
@@ -297,10 +302,12 @@ class TrainingOrchestrator:
             f"max {self.config.get('training', {}).get('max_bets_per_race', 20)} bets/race"
         )
 
-        # -- Generation 0: initialise population --
+        # -- Initialise or resume population --
+        end_generation = start_generation + n_generations  # exclusive upper bound
         self._emit_phase_start("training", {
             "run_id": run_id,
             "n_generations": n_generations,
+            "start_generation": start_generation,
             "train_days": len(train_days),
             "test_days": len(test_days),
         })
@@ -311,13 +318,29 @@ class TrainingOrchestrator:
         if patched:
             logger.info("Backfilled hyperparameters on %d existing model(s)", patched)
 
-        # Resolve exploration strategy → seed point (if any).
-        seed_point = self._resolve_seed_point(run_id)
-
-        agents = self.pop_manager.initialise_population(
-            generation=0, seed=seed, plan=self.training_plan,
-            seed_point=seed_point,
-        )
+        if start_generation > 0 and self.model_store is not None:
+            # Resuming from a previous session — load survivors from the
+            # model store rather than creating a fresh random population.
+            logger.info("Resuming from generation %d — loading survivors from model store", start_generation)
+            self._emit_info(f"Session resume: loading survivors from generation {start_generation - 1}")
+            agents = self.pop_manager.load_active_agents()
+            if not agents:
+                logger.warning(
+                    "No active agents found in model store for resume — "
+                    "falling back to fresh population"
+                )
+                seed_point = self._resolve_seed_point(run_id)
+                agents = self.pop_manager.initialise_population(
+                    generation=start_generation, seed=seed, plan=self.training_plan,
+                    seed_point=seed_point,
+                )
+        else:
+            # Fresh start — initialise population from scratch.
+            seed_point = self._resolve_seed_point(run_id)
+            agents = self.pop_manager.initialise_population(
+                generation=0, seed=seed, plan=self.training_plan,
+                seed_point=seed_point,
+            )
 
         # Track which architectures the plan ever saw, so we can flag
         # any that die out across generations in the outcome record.
@@ -327,17 +350,17 @@ class TrainingOrchestrator:
             else set()
         )
 
-        for gen in range(n_generations):
+        for gen in range(start_generation, end_generation):
             if self._check_stop():
                 break
 
             # Finish requested between generations: skip remaining, evaluate, exit
-            finishing_between_gens = self._check_finish() and gen > 0
+            finishing_between_gens = self._check_finish() and gen > start_generation
             if finishing_between_gens:
                 logger.info("Finish requested — skipping to final evaluation (gen %d)", gen)
                 self._emit_phase_start("finishing_early", {
                     "generation": gen,
-                    "skipped_generations": n_generations - gen,
+                    "skipped_generations": end_generation - gen,
                 })
 
             logger.info("=== Generation %d ===", gen)
@@ -349,7 +372,7 @@ class TrainingOrchestrator:
                     test_days=test_days,
                     train_cutoff=train_cutoff,
                     n_epochs=n_epochs,
-                    is_last=(gen == n_generations - 1) or finishing_between_gens,
+                    is_last=(gen == end_generation - 1) or finishing_between_gens,
                     skip_training=finishing_between_gens,
                 )
             except Exception:
@@ -371,7 +394,7 @@ class TrainingOrchestrator:
                 break
 
             # Prepare next generation's agents
-            if gen < n_generations - 1:
+            if gen < end_generation - 1:
                 # Survivors carry over, children are new
                 survivor_agents = []
                 if gen_result.selection is not None:

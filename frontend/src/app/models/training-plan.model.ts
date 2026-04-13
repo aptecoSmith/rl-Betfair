@@ -64,6 +64,9 @@ export interface TrainingPlan {
   current_generation?: number | null;
   started_at?: string | null;
   completed_at?: string | null;
+  generations_per_session?: number | null;
+  auto_continue?: boolean;
+  current_session?: number;
 }
 
 export interface ValidationIssue {
@@ -99,6 +102,8 @@ export interface TrainingPlanPayload {
   manual_seed_point?: Record<string, number | string> | null;
   n_generations?: number;
   n_epochs?: number;
+  generations_per_session?: number | null;
+  auto_continue?: boolean;
 }
 
 export interface GeneCoverageEntry {

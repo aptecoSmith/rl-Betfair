@@ -403,6 +403,17 @@ class StartTrainingRequest(BaseModel):
     market_type_filters: list[str] | None = None
 
 
+class ResumeTrainingRequest(BaseModel):
+    plan_id: str
+
+
+class ResumeTrainingResponse(BaseModel):
+    run_id: str
+    session: int
+    start_generation: int
+    n_generations: int
+
+
 class ArchitectureInfo(BaseModel):
     name: str
     description: str

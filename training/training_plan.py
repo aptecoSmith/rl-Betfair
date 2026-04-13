@@ -171,6 +171,41 @@ class TrainingPlan:
     started_at: str | None = None
     #: ISO timestamp when the run completed (successfully or with error).
     completed_at: str | None = None
+    #: Session splitting -- how many generations per session.
+    #: None = all in one session (backward compatible default).
+    generations_per_session: int | None = None
+    #: When True, automatically launch the next session when one finishes.
+    #: When False, set status to "paused" and wait for manual Continue.
+    auto_continue: bool = False
+    #: Which session is currently active (0-indexed).
+    current_session: int = 0
+
+    # ---- session helpers ----
+    def session_boundaries(self) -> list[tuple[int, int]]:
+        """Return (start_gen, end_gen) inclusive pairs for each session.
+
+        E.g. 10 gens with 3 per session → [(0,2), (3,5), (6,8), (9,9)]
+        None generations_per_session → single session spanning all gens.
+        """
+        n = self.n_generations
+        gps = self.generations_per_session
+        if gps is None or gps <= 0 or gps >= n:
+            return [(0, n - 1)]
+        boundaries: list[tuple[int, int]] = []
+        start = 0
+        while start < n:
+            end = min(start + gps - 1, n - 1)
+            boundaries.append((start, end))
+            start = end + 1
+        return boundaries
+
+    @property
+    def total_sessions(self) -> int:
+        return len(self.session_boundaries())
+
+    @property
+    def has_remaining_sessions(self) -> bool:
+        return self.current_session < self.total_sessions - 1
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:
@@ -196,6 +231,9 @@ class TrainingPlan:
             "current_generation": self.current_generation,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "generations_per_session": self.generations_per_session,
+            "auto_continue": self.auto_continue,
+            "current_session": self.current_session,
         }
 
     @classmethod
@@ -226,6 +264,9 @@ class TrainingPlan:
             current_generation=raw.get("current_generation"),
             started_at=raw.get("started_at"),
             completed_at=raw.get("completed_at"),
+            generations_per_session=raw.get("generations_per_session"),
+            auto_continue=bool(raw.get("auto_continue", False)),
+            current_session=int(raw.get("current_session", 0)),
         )
 
     @staticmethod
@@ -245,6 +286,8 @@ class TrainingPlan:
         manual_seed_point: dict | None = None,
         n_generations: int = 3,
         n_epochs: int = 3,
+        generations_per_session: int | None = None,
+        auto_continue: bool = False,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -264,6 +307,8 @@ class TrainingPlan:
             manual_seed_point=manual_seed_point,
             n_generations=n_generations,
             n_epochs=n_epochs,
+            generations_per_session=generations_per_session,
+            auto_continue=auto_continue,
         )
 
 
@@ -448,6 +493,13 @@ class PlanRegistry:
             plan.started_at = started_at
         if completed_at is not _SENTINEL:
             plan.completed_at = completed_at
+        self.save(plan)
+        return plan
+
+    def advance_session(self, plan_id: str) -> TrainingPlan:
+        """Bump ``current_session`` by one and persist."""
+        plan = self.load(plan_id)
+        plan.current_session += 1
         self.save(plan)
         return plan
 

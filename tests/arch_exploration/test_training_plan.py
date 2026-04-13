@@ -814,3 +814,234 @@ def test_plan_api_returns_status_fields(tmp_path, hp_ranges):
     assert data["plan"]["status"] == "running"
     assert data["plan"]["current_generation"] == 2
     assert data["plan"]["started_at"] == "2026-04-13T10:00:00+00:00"
+
+
+# -- Session splitting tests -------------------------------------------------
+
+
+class TestSessionBoundaries:
+    """Test session_boundaries() computation."""
+
+    def test_no_splitting(self, hp_ranges):
+        """generations_per_session=None → single session spanning all gens."""
+        plan = TrainingPlan.new(
+            name="no-split", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=5,
+        )
+        assert plan.session_boundaries() == [(0, 4)]
+        assert plan.total_sessions == 1
+        assert not plan.has_remaining_sessions
+
+    def test_even_split(self, hp_ranges):
+        """10 gens, 3 per session → 4 sessions."""
+        plan = TrainingPlan.new(
+            name="even", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=10, generations_per_session=3,
+        )
+        assert plan.session_boundaries() == [(0, 2), (3, 5), (6, 8), (9, 9)]
+        assert plan.total_sessions == 4
+
+    def test_exact_divisor(self, hp_ranges):
+        """6 gens, 3 per session → 2 sessions."""
+        plan = TrainingPlan.new(
+            name="exact", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=6, generations_per_session=3,
+        )
+        assert plan.session_boundaries() == [(0, 2), (3, 5)]
+        assert plan.total_sessions == 2
+
+    def test_one_per_session(self, hp_ranges):
+        """1 gen per session → each gen is its own session."""
+        plan = TrainingPlan.new(
+            name="one-each", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=3, generations_per_session=1,
+        )
+        assert plan.session_boundaries() == [(0, 0), (1, 1), (2, 2)]
+        assert plan.total_sessions == 3
+
+    def test_gps_larger_than_n_gens(self, hp_ranges):
+        """generations_per_session > n_generations → single session."""
+        plan = TrainingPlan.new(
+            name="oversized", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=3, generations_per_session=10,
+        )
+        assert plan.session_boundaries() == [(0, 2)]
+        assert plan.total_sessions == 1
+
+    def test_has_remaining_sessions(self, hp_ranges):
+        plan = TrainingPlan.new(
+            name="remaining", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=6, generations_per_session=3,
+        )
+        assert plan.has_remaining_sessions  # session 0, 2 total
+        plan.current_session = 1
+        assert not plan.has_remaining_sessions  # on last session
+
+
+class TestSessionRoundTrip:
+    """Session fields survive serialisation."""
+
+    def test_session_fields_in_to_dict(self, hp_ranges):
+        plan = TrainingPlan.new(
+            name="rt", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=6, generations_per_session=2, auto_continue=True,
+        )
+        plan.current_session = 1
+        d = plan.to_dict()
+        assert d["generations_per_session"] == 2
+        assert d["auto_continue"] is True
+        assert d["current_session"] == 1
+
+    def test_session_fields_from_dict(self, hp_ranges):
+        plan = TrainingPlan.new(
+            name="rt", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=6, generations_per_session=2, auto_continue=True,
+        )
+        plan.current_session = 1
+        restored = TrainingPlan.from_dict(plan.to_dict())
+        assert restored.generations_per_session == 2
+        assert restored.auto_continue is True
+        assert restored.current_session == 1
+
+    def test_old_plan_without_session_fields(self, hp_ranges):
+        """Plans saved before session splitting default gracefully."""
+        raw = TrainingPlan.new(
+            name="old", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+        ).to_dict()
+        # Remove session fields to simulate old data
+        del raw["generations_per_session"]
+        del raw["auto_continue"]
+        del raw["current_session"]
+        restored = TrainingPlan.from_dict(raw)
+        assert restored.generations_per_session is None
+        assert restored.auto_continue is False
+        assert restored.current_session == 0
+        assert restored.session_boundaries() == [(0, 2)]  # default 3 gens
+
+
+class TestAdvanceSession:
+    """PlanRegistry.advance_session() bumps and persists."""
+
+    def test_advance_session(self, registry, hp_ranges):
+        plan = TrainingPlan.new(
+            name="adv", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=6, generations_per_session=2,
+        )
+        registry.save(plan)
+        updated = registry.advance_session(plan.plan_id)
+        assert updated.current_session == 1
+        # Verify persisted
+        reloaded = registry.load(plan.plan_id)
+        assert reloaded.current_session == 1
+
+    def test_advance_session_twice(self, registry, hp_ranges):
+        plan = TrainingPlan.new(
+            name="adv2", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=9, generations_per_session=3,
+        )
+        registry.save(plan)
+        registry.advance_session(plan.plan_id)
+        updated = registry.advance_session(plan.plan_id)
+        assert updated.current_session == 2
+
+
+class TestResumeEndpoint:
+    """API resume endpoint tests."""
+
+    @staticmethod
+    def _make_resume_app(reg, hp_ranges, tmp_path):
+        from api.routers import training as training_router
+        app = FastAPI()
+        app.include_router(training_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = {
+            "hyperparameters": {"search_ranges": hp_ranges},
+            "paths": {"processed_data": str(tmp_path)},
+        }
+        app.state.training_state = {"running": False}
+        app.state.worker_ws = None
+        app.state.worker_pending_response = None
+        return app
+
+    def test_resume_paused_plan(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+        plan = TrainingPlan.new(
+            name="resume-test", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+            n_generations=6, generations_per_session=3,
+        )
+        plan.status = "paused"
+        plan.current_session = 1
+        reg.save(plan)
+
+        app = self._make_resume_app(reg, hp_ranges, tmp_path)
+        client = TestClient(app)
+
+        # The plan loads correctly and passes status validation, but fails
+        # at the data availability check (no parquet files in tmp_path).
+        # This still validates the plan loading + session computation.
+        resp = client.post("/api/training/resume", json={"plan_id": plan.plan_id})
+        assert resp.status_code == 400
+        assert "No extracted data" in resp.json()["detail"]
+
+    def test_resume_draft_plan_rejected(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+        plan = TrainingPlan.new(
+            name="draft-test", population_size=10,
+            architectures=["ppo_lstm_v1"], hp_ranges=hp_ranges,
+        )
+        reg.save(plan)
+
+        app = self._make_resume_app(reg, hp_ranges, tmp_path)
+        client = TestClient(app)
+
+        resp = client.post("/api/training/resume", json={"plan_id": plan.plan_id})
+        assert resp.status_code == 400
+        assert "draft" in resp.json()["detail"]
+
+    def test_resume_nonexistent_plan(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+
+        app = self._make_resume_app(reg, hp_ranges, tmp_path)
+        client = TestClient(app)
+
+        resp = client.post("/api/training/resume", json={"plan_id": "nonexistent"})
+        assert resp.status_code == 404
+
+
+class TestApiCreatePlanWithSessions:
+    """POST /training-plans includes session fields."""
+
+    def test_create_plan_with_sessions(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = {"hyperparameters": {"search_ranges": hp_ranges}}
+        client = TestClient(app)
+
+        resp = client.post("/api/training-plans", json={
+            "name": "session-plan",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1"],
+            "hp_ranges": hp_ranges,
+            "n_generations": 6,
+            "generations_per_session": 2,
+            "auto_continue": True,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["plan"]["generations_per_session"] == 2
+        assert data["plan"]["auto_continue"] is True
+        assert data["plan"]["current_session"] == 0

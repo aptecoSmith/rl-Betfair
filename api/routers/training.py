@@ -20,6 +20,8 @@ from api.schemas import (
     GeneticsInfo,
     HyperparamSchemaEntry,
     ProgressSnapshot,
+    ResumeTrainingRequest,
+    ResumeTrainingResponse,
     StartTrainingRequest,
     StartTrainingResponse,
     StopTrainingResponse,
@@ -401,6 +403,82 @@ async def stop_training(request: Request, granularity: str = "immediate"):
         "eval_all": "Stop requested — skipping training, evaluating all models then stopping",
     }
     return StopTrainingResponse(detail=detail_map[granularity])
+
+
+@router.post("/training/resume", response_model=ResumeTrainingResponse)
+async def resume_training(request: Request, body: ResumeTrainingRequest):
+    """Resume a paused or failed training plan from its next incomplete session.
+
+    Loads the plan, determines which session to resume from, and sends a
+    start command to the worker with the correct generation offset.
+    """
+    state = _state(request)
+    if state["running"]:
+        raise HTTPException(409, "A training run is already in progress")
+
+    plan_registry = getattr(request.app.state, "plan_registry", None)
+    if plan_registry is None:
+        raise HTTPException(503, "Plan registry not configured")
+
+    try:
+        plan = plan_registry.load(body.plan_id)
+    except KeyError:
+        raise HTTPException(404, f"No such plan: {body.plan_id}")
+
+    if plan.status not in ("paused", "failed"):
+        raise HTTPException(
+            400,
+            f"Plan status is '{plan.status}' — only 'paused' or 'failed' plans can be resumed",
+        )
+
+    # Determine which session to resume from
+    boundaries = plan.session_boundaries()
+    session_idx = plan.current_session
+
+    # If the plan crashed mid-session, replay that session from scratch
+    if session_idx >= len(boundaries):
+        raise HTTPException(400, "All sessions already completed")
+
+    start_gen, end_gen = boundaries[session_idx]
+    n_gens = end_gen - start_gen + 1
+
+    # Compute train/test split (same logic as start_training)
+    config = request.app.state.config
+    data_dir = config["paths"]["processed_data"]
+    processed = Path(data_dir)
+    dates = sorted(
+        f.stem
+        for f in processed.glob("*.parquet")
+        if not f.stem.endswith("_runners") and f.stem != ".gitkeep"
+    )
+    if not dates:
+        raise HTTPException(400, "No extracted data available — import days first")
+
+    split = max(1, len(dates) // 2)
+    train_dates = dates[:split]
+    test_dates = dates[split:]
+
+    cmd = make_start_cmd(
+        n_generations=n_gens,
+        n_epochs=plan.n_epochs,
+        population_size=plan.population_size,
+        seed=plan.seed,
+        architectures=plan.architectures,
+        starting_budget=plan.starting_budget,
+        plan_id=plan.plan_id,
+        start_generation=start_gen,
+    )
+    resp = await _send_to_worker(request, cmd, timeout=30.0)
+
+    if resp.get("type") == EVT_ERROR:
+        raise HTTPException(409, resp.get("message", "Worker rejected resume request"))
+
+    return ResumeTrainingResponse(
+        run_id=resp.get("run_id", "unknown"),
+        session=session_idx + 1,
+        start_generation=start_gen,
+        n_generations=n_gens,
+    )
 
 
 @router.post("/training/finish", response_model=FinishTrainingResponse)

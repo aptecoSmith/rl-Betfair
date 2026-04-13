@@ -25,6 +25,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import random
@@ -41,6 +42,8 @@ from registry.scoreboard import ModelScore
 
 if TYPE_CHECKING:
     from training.training_plan import TrainingPlan
+
+logger = logging.getLogger(__name__)
 
 
 # -- Hyperparameter sampling --------------------------------------------------
@@ -506,6 +509,22 @@ class PopulationManager:
             architecture_name=arch_name,
             policy=policy,
         )
+
+    def load_active_agents(self) -> list[AgentRecord]:
+        """Load all active agents from the model store.
+
+        Used when resuming a session — the previous session's survivors
+        are the starting population for the next session.
+        """
+        if self.model_store is None:
+            return []
+        agents: list[AgentRecord] = []
+        for record in self.model_store.list_models(status="active"):
+            try:
+                agents.append(self.load_agent(record.model_id))
+            except Exception:
+                logger.warning("Could not load active agent %s, skipping", record.model_id, exc_info=True)
+        return agents
 
     # -- Genetic selection ---------------------------------------------------------
 

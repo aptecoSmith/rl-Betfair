@@ -372,6 +372,24 @@ class TrainingWorker:
         seed = params.get("seed")
         reevaluate_garaged = params.get("reevaluate_garaged", False)
         reevaluate_min_score = params.get("reevaluate_min_score")
+        start_generation = params.get("start_generation", 0)
+
+        # Session splitting: on initial launch (start_generation == 0),
+        # scope n_generations to the first session's range if the plan
+        # defines generations_per_session.
+        if (
+            training_plan is not None
+            and training_plan.generations_per_session is not None
+            and start_generation == 0
+        ):
+            boundaries = training_plan.session_boundaries()
+            if boundaries:
+                s0_start, s0_end = boundaries[0]
+                n_generations = s0_end - s0_start + 1
+                console.print(
+                    f"[dim]Session splitting: running session 1/{len(boundaries)} "
+                    f"(gen {s0_start}-{s0_end})[/dim]"
+                )
 
         # Reload config from disk so changes made via the Admin UI
         # (e.g. betting constraints, reevaluate_garaged_default) take
@@ -392,13 +410,15 @@ class TrainingWorker:
                     training_plan.plan_id,
                     "running",
                     started_at=datetime.now(timezone.utc).isoformat(),
-                    current_generation=0,
+                    current_generation=start_generation,
                 )
             except Exception:
                 logger.exception("Failed to set plan status to running")
 
         # Track the active plan_id so the event handler can update status
         self._active_plan_id: str | None = plan_id
+        # Stash params for auto-continue (next session re-uses same config)
+        self._last_start_params: dict = dict(params)
 
         # Reset
         self.stop_event.clear()
@@ -424,7 +444,10 @@ class TrainingWorker:
         console.rule(f"[bold green]Training Run {run_id[:8]}[/bold green]")
         if training_plan:
             console.print(f"  Plan: {training_plan.name} ({training_plan.plan_id[:8]}…)")
-        console.print(f"  Generations: {n_generations}  |  Epochs: {n_epochs}")
+        if start_generation > 0:
+            console.print(f"  Generations: {n_generations} (starting at gen {start_generation})  |  Epochs: {n_epochs}")
+        else:
+            console.print(f"  Generations: {n_generations}  |  Epochs: {n_epochs}")
         console.print(f"  Population:  {run_config['population']['size']}")
         console.print(f"  Train days:  {len(train_dates)}  |  Test days: {len(test_dates)}")
         console.print()
@@ -458,6 +481,7 @@ class TrainingWorker:
                     seed=seed,
                     reevaluate_garaged=reevaluate_garaged,
                     reevaluate_min_score=reevaluate_min_score,
+                    start_generation=start_generation,
                 )
             except Exception as exc:
                 logger.exception("Training run failed")
@@ -526,22 +550,20 @@ class TrainingWorker:
             plan_id = getattr(self, "_active_plan_id", None)
             if plan_id is not None:
                 phase = event.get("phase", "")
-                if phase == "run_error":
-                    final_status = "failed"
-                elif phase == "run_stopped":
-                    final_status = "failed"
+                if phase in ("run_error", "run_stopped"):
+                    # Error or user-stop: mark failed, clear plan
+                    try:
+                        from datetime import datetime, timezone
+                        self.plan_registry.set_status(
+                            plan_id, "failed",
+                            completed_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                    except Exception:
+                        logger.exception("Failed to set plan status to failed")
+                    self._active_plan_id = None
                 else:
-                    final_status = "completed"
-                try:
-                    from datetime import datetime, timezone
-                    self.plan_registry.set_status(
-                        plan_id,
-                        final_status,
-                        completed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-                except Exception:
-                    logger.exception("Failed to set plan status to %s", final_status)
-                self._active_plan_id = None
+                    # Successful run_complete — check for remaining sessions
+                    self._handle_session_complete(plan_id)
 
         # Broadcast to WS clients (async — schedule as a task)
         msg = make_event_msg(event)
@@ -549,6 +571,94 @@ class TrainingWorker:
 
         # Print to terminal
         self._print_event(event, is_terminal)
+
+    def _handle_session_complete(self, plan_id: str) -> None:
+        """Handle plan session completion — auto-continue or pause.
+
+        Called from _handle_event when a plan-based run completes
+        successfully.  Decides whether to launch the next session,
+        pause, or mark the plan as fully completed.
+        """
+        from datetime import datetime, timezone
+
+        try:
+            plan = self.plan_registry.load(plan_id)
+        except Exception:
+            logger.exception("Failed to load plan %s for session check", plan_id)
+            self._active_plan_id = None
+            return
+
+        if plan.has_remaining_sessions:
+            # Advance to next session
+            try:
+                plan = self.plan_registry.advance_session(plan_id)
+            except Exception:
+                logger.exception("Failed to advance session for plan %s", plan_id)
+                self._active_plan_id = None
+                return
+
+            if plan.auto_continue:
+                # Auto-launch next session
+                console.print(
+                    f"[bold green]Auto-continuing to session {plan.current_session + 1}"
+                    f"/{plan.total_sessions}[/bold green]"
+                )
+                self._launch_next_session(plan)
+            else:
+                # Pause and wait for manual continue
+                try:
+                    self.plan_registry.set_status(plan_id, "paused")
+                except Exception:
+                    logger.exception("Failed to set plan status to paused")
+                console.print(
+                    f"[yellow]Session {plan.current_session}/{plan.total_sessions} "
+                    f"complete — paused, waiting for Continue[/yellow]"
+                )
+                self._active_plan_id = None
+        else:
+            # All sessions done
+            try:
+                self.plan_registry.set_status(
+                    plan_id, "completed",
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:
+                logger.exception("Failed to set plan status to completed")
+            self._active_plan_id = None
+
+    def _launch_next_session(self, plan: TrainingPlan) -> None:
+        """Launch the next session of a plan via auto-continue.
+
+        Reuses the stashed start params but with updated generation range.
+        """
+        boundaries = plan.session_boundaries()
+        session_idx = plan.current_session
+        if session_idx >= len(boundaries):
+            logger.warning("Session index %d out of bounds for plan %s", session_idx, plan.plan_id)
+            self._active_plan_id = None
+            return
+
+        start_gen, end_gen = boundaries[session_idx]
+        n_gens_this_session = end_gen - start_gen + 1
+
+        # Build params from the stashed start params
+        params = dict(getattr(self, "_last_start_params", {}))
+        params["n_generations"] = n_gens_this_session
+        params["start_generation"] = start_gen
+        params["plan_id"] = plan.plan_id
+
+        # Schedule the next session start in the event loop
+        # (we're in a sync callback, so use create_task)
+        async def _start():
+            # Create a dummy websocket reference — we'll broadcast to all clients
+            # Use the first connected client, or None
+            ws = next(iter(self.clients), None)
+            if ws is None:
+                logger.warning("No WebSocket clients connected for auto-continue")
+                return
+            await self._start_training(params, ws)
+
+        asyncio.create_task(_start())
 
     async def _check_dead_thread(self) -> None:
         """Periodically check if the training thread died without sending

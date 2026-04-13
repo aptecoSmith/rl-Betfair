@@ -352,3 +352,40 @@
   font-size: 0.85rem;
   &:hover { text-decoration: underline; }
 }
+
+// ── Session breakdown ──────────────────────────────────────────
+.session-breakdown {
+  margin-bottom: 1.5rem;
+
+  h3 { margin-bottom: 0.5rem; }
+
+  .session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .session-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.4rem 0.75rem;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+    font-size: 0.85rem;
+
+    .session-label { font-weight: 600; min-width: 5rem; }
+    .session-gens { font-family: monospace; color: #aaa; min-width: 6rem; }
+  }
+}
+
+// ── Checkbox label ─────────────────────────────────────────────
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+
+  input[type="checkbox"] { width: 16px; height: 16px; }
+}

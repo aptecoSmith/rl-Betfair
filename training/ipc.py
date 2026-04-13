@@ -53,6 +53,7 @@ def make_start_cmd(
     starting_budget: float | None = None,
     market_type_filters: list[str] | None = None,
     plan_id: str | None = None,
+    start_generation: int = 0,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -71,6 +72,7 @@ def make_start_cmd(
         "starting_budget": starting_budget,
         "market_type_filters": market_type_filters,
         "plan_id": plan_id,
+        "start_generation": start_generation,
     })
 
 

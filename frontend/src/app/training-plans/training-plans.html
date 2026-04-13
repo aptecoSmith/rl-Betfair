@@ -129,6 +129,21 @@
           }
           <a routerLink="/training" class="cross-link" data-testid="link-to-monitor">View in training monitor →</a>
         </div>
+      } @else if (plan.status === 'paused') {
+        <div class="plan-status-info">
+          <span class="status-badge" data-status="paused">paused</span>
+          @if (plan.current_session != null && plan.generations_per_session) {
+            <span class="status-meta">Session {{ plan.current_session + 1 }} / {{ sessionBoundaries(plan).length }} waiting</span>
+          }
+          <button
+            class="btn-primary"
+            (click)="resumePlan()"
+            [disabled]="resuming()"
+            data-testid="continue-plan"
+          >
+            {{ resuming() ? 'Resuming…' : 'Continue' }}
+          </button>
+        </div>
       } @else if (plan.status && plan.status !== 'draft') {
         <div class="plan-status-info">
           <span class="status-badge" [attr.data-status]="plan.status">{{ plan.status }}</span>
@@ -138,6 +153,31 @@
           @if (plan.completed_at) {
             <span class="status-meta">Finished {{ shortDate(plan.completed_at) }}</span>
           }
+          @if (plan.status === 'failed') {
+            <button
+              class="btn-primary"
+              (click)="resumePlan()"
+              [disabled]="resuming()"
+              data-testid="retry-plan"
+            >
+              {{ resuming() ? 'Resuming…' : 'Retry from last session' }}
+            </button>
+          }
+        </div>
+      }
+
+      @if (plan.generations_per_session) {
+        <div class="session-breakdown" data-testid="session-breakdown">
+          <h3>Sessions</h3>
+          <div class="session-list">
+            @for (s of sessionBoundaries(plan); track s.start; let i = $index) {
+              <div class="session-row">
+                <span class="session-label">Session {{ i + 1 }}</span>
+                <span class="session-gens">Gen {{ s.start }}–{{ s.end }}</span>
+                <span class="status-badge" [attr.data-status]="s.status">{{ s.status }}</span>
+              </div>
+            }
+          </div>
         </div>
       }
 
@@ -162,6 +202,8 @@
         <dt>strategy</dt><dd>{{ plan.exploration_strategy ?? 'random' }}</dd>
         <dt>n_generations</dt><dd>{{ plan.n_generations ?? 3 }}</dd>
         <dt>n_epochs</dt><dd>{{ plan.n_epochs ?? 3 }}</dd>
+        <dt>generations_per_session</dt><dd>{{ plan.generations_per_session ?? '(all in one)' }}</dd>
+        <dt>auto_continue</dt><dd>{{ plan.auto_continue ? 'yes' : 'no' }}</dd>
         <dt>seed</dt><dd>{{ plan.seed ?? '(none)' }}</dd>
         <dt>min_arch_samples</dt><dd>{{ plan.min_arch_samples }}</dd>
         <dt>notes</dt><dd>{{ plan.notes || '(none)' }}</dd>
@@ -254,6 +296,25 @@
           <label>n_epochs</label>
           <input type="number" min="1" [ngModel]="editorNEpochs()" (ngModelChange)="editorNEpochs.set($event)" data-testid="editor-n-epochs" />
           <span class="field-help">PPO training epochs per agent per generation. 3 is standard; higher values risk overfitting on small datasets.</span>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-field">
+          <label>generations_per_session (optional)</label>
+          <input type="number" min="1" placeholder="all in one session"
+                 [ngModel]="editorGenerationsPerSession()" (ngModelChange)="editorGenerationsPerSession.set($event || null)"
+                 data-testid="editor-gens-per-session" />
+          <span class="field-help">Split training into sessions of N generations each. Leave empty to run all generations in a single session.</span>
+        </div>
+        <div class="form-field">
+          <label>auto_continue</label>
+          <label class="checkbox-label">
+            <input type="checkbox" [ngModel]="editorAutoContinue()" (ngModelChange)="editorAutoContinue.set($event)"
+                   data-testid="editor-auto-continue" />
+            Automatically start the next session when one finishes
+          </label>
+          <span class="field-help">When unchecked, the plan pauses between sessions and waits for a manual "Continue" click.</span>
         </div>
       </div>
 

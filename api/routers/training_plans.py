@@ -168,6 +168,12 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
             manual_seed_point=payload.get("manual_seed_point"),
             n_generations=int(payload.get("n_generations", 3)),
             n_epochs=int(payload.get("n_epochs", 3)),
+            generations_per_session=(
+                int(payload["generations_per_session"])
+                if payload.get("generations_per_session") is not None
+                else None
+            ),
+            auto_continue=bool(payload.get("auto_continue", False)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")

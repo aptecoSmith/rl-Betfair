@@ -76,6 +76,8 @@ export class TrainingPlans implements OnInit {
   readonly editorNGenerations = signal(3);
   readonly editorNEpochs = signal(3);
   readonly editorExplorationStrategy = signal<string>('random');
+  readonly editorGenerationsPerSession = signal<number | null>(null);
+  readonly editorAutoContinue = signal(false);
   readonly editorBiasToggle = signal(false);
   readonly editorSaving = signal(false);
   readonly editorErrors = signal<ValidationIssue[]>([]);
@@ -181,6 +183,8 @@ export class TrainingPlans implements OnInit {
     this.editorStartingBudget.set(null);
     this.editorNGenerations.set(3);
     this.editorNEpochs.set(3);
+    this.editorGenerationsPerSession.set(null);
+    this.editorAutoContinue.set(false);
     this.editorName.set('');
     this.editorErrors.set([]);
     this.editorTopError.set(null);
@@ -317,6 +321,8 @@ export class TrainingPlans implements OnInit {
       exploration_strategy: this.editorExplorationStrategy(),
       n_generations: this.editorNGenerations(),
       n_epochs: this.editorNEpochs(),
+      generations_per_session: this.editorGenerationsPerSession(),
+      auto_continue: this.editorAutoContinue(),
     };
     this.editorSaving.set(true);
     this.api.createTrainingPlan(payload).subscribe({
@@ -388,6 +394,58 @@ export class TrainingPlans implements OnInit {
         this.launchError.set(err?.error?.detail ?? err?.message ?? 'Failed to start training');
       },
     });
+  }
+
+  // ── Resume / Continue ──────────────────────────────────────────
+  readonly resuming = signal(false);
+
+  resumePlan(): void {
+    const plan = this.selectedPlan();
+    if (!plan) return;
+    this.resuming.set(true);
+    this.launchError.set(null);
+    this.api.resumeTraining(plan.plan_id).subscribe({
+      next: () => {
+        this.resuming.set(false);
+        this.router.navigate(['/training']);
+      },
+      error: (err) => {
+        this.resuming.set(false);
+        this.launchError.set(err?.error?.detail ?? err?.message ?? 'Failed to resume training');
+      },
+    });
+  }
+
+  // ── Session helpers ───────────────────────────────────────────
+  sessionBoundaries(plan: TrainingPlan): { start: number; end: number; status: string }[] {
+    const n = plan.n_generations ?? 3;
+    const gps = plan.generations_per_session;
+    if (gps == null || gps <= 0 || gps >= n) {
+      return [{ start: 0, end: n - 1, status: this.sessionStatus(plan, 0, 0, n - 1) }];
+    }
+    const boundaries: { start: number; end: number; status: string }[] = [];
+    let start = 0;
+    let idx = 0;
+    while (start < n) {
+      const end = Math.min(start + gps - 1, n - 1);
+      boundaries.push({ start, end, status: this.sessionStatus(plan, idx, start, end) });
+      start = end + 1;
+      idx++;
+    }
+    return boundaries;
+  }
+
+  private sessionStatus(plan: TrainingPlan, sessionIdx: number, startGen: number, endGen: number): string {
+    const currentSession = plan.current_session ?? 0;
+    if (sessionIdx < currentSession) return 'completed';
+    if (sessionIdx === currentSession) {
+      if (plan.status === 'running') return 'running';
+      if (plan.status === 'paused') return 'paused';
+      if (plan.status === 'completed') return 'completed';
+      if (plan.status === 'failed') return 'failed';
+      return 'pending';
+    }
+    return 'pending';
   }
 
   // ── Helpers ─────────────────────────────────────────────────────
