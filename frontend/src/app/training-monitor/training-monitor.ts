@@ -159,6 +159,7 @@ export class TrainingMonitor implements OnDestroy {
     return this.formatElapsed(elapsed);
   });
 
+  readonly activePlanId = computed(() => this.status().plan_id ?? null);
   readonly processBar = computed(() => this.status().process);
   readonly itemBar = computed(() => this.status().item);
 

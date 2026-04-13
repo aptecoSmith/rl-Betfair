@@ -30,7 +30,10 @@
           @for (plan of plans(); track plan.plan_id) {
             <div class="plan-card" (click)="openDetail(plan.plan_id)" [attr.data-testid]="'plan-card-' + plan.plan_id">
               <div class="plan-card-header">
-                <div class="plan-name">{{ plan.name }}</div>
+                <div class="plan-name">
+                  {{ plan.name }}
+                  <span class="status-badge" [attr.data-status]="plan.status ?? 'draft'">{{ plan.status ?? 'draft' }}</span>
+                </div>
                 <div class="plan-created">{{ shortDate(plan.created_at) }}</div>
               </div>
               <div class="plan-meta">
@@ -114,6 +117,29 @@
         </div>
       </div>
       <div class="plan-id">plan_id: <code>{{ plan.plan_id }}</code></div>
+
+      @if (plan.status === 'running') {
+        <div class="plan-progress" data-testid="plan-progress">
+          <span class="status-badge" data-status="running">running</span>
+          @if (plan.current_generation != null && plan.n_generations) {
+            <span class="progress-text">Generation {{ plan.current_generation + 1 }} / {{ plan.n_generations }}</span>
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" [style.width.%]="((plan.current_generation + 1) / plan.n_generations) * 100"></div>
+            </div>
+          }
+          <a routerLink="/training" class="cross-link" data-testid="link-to-monitor">View in training monitor →</a>
+        </div>
+      } @else if (plan.status && plan.status !== 'draft') {
+        <div class="plan-status-info">
+          <span class="status-badge" [attr.data-status]="plan.status">{{ plan.status }}</span>
+          @if (plan.started_at) {
+            <span class="status-meta">Started {{ shortDate(plan.started_at) }}</span>
+          }
+          @if (plan.completed_at) {
+            <span class="status-meta">Finished {{ shortDate(plan.completed_at) }}</span>
+          }
+        </div>
+      }
 
       @if (launchError()) {
         <div class="message error" data-testid="launch-error">{{ launchError() }}</div>

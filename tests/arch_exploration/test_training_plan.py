@@ -686,3 +686,131 @@ class TestCoverageSeed:
         assert isinstance(serialised, str)
         parsed = json.loads(serialised)
         assert parsed["total_agents"] == 5
+
+
+# -- Status tracking tests (Session 2.2) ------------------------------------
+
+
+def test_plan_status_defaults_to_draft(basic_plan):
+    """New plans should have status=draft."""
+    assert basic_plan.status == "draft"
+    assert basic_plan.current_generation is None
+    assert basic_plan.started_at is None
+    assert basic_plan.completed_at is None
+
+
+def test_plan_status_round_trips(registry, basic_plan):
+    """Status fields survive save/load."""
+    basic_plan.status = "running"
+    basic_plan.current_generation = 2
+    basic_plan.started_at = "2026-04-13T10:00:00+00:00"
+    registry.save(basic_plan)
+    reloaded = registry.load(basic_plan.plan_id)
+    assert reloaded.status == "running"
+    assert reloaded.current_generation == 2
+    assert reloaded.started_at == "2026-04-13T10:00:00+00:00"
+
+
+def test_set_status_draft_to_running(registry, basic_plan):
+    """set_status transitions draft → running and sets started_at."""
+    registry.save(basic_plan)
+    updated = registry.set_status(
+        basic_plan.plan_id,
+        "running",
+        started_at="2026-04-13T10:00:00+00:00",
+        current_generation=0,
+    )
+    assert updated.status == "running"
+    assert updated.started_at == "2026-04-13T10:00:00+00:00"
+    assert updated.current_generation == 0
+    # Persisted
+    reloaded = registry.load(basic_plan.plan_id)
+    assert reloaded.status == "running"
+
+
+def test_set_status_running_to_completed(registry, basic_plan):
+    """set_status transitions running → completed with completed_at."""
+    registry.save(basic_plan)
+    registry.set_status(basic_plan.plan_id, "running", started_at="2026-04-13T10:00:00+00:00")
+    updated = registry.set_status(
+        basic_plan.plan_id,
+        "completed",
+        completed_at="2026-04-13T12:00:00+00:00",
+    )
+    assert updated.status == "completed"
+    assert updated.completed_at == "2026-04-13T12:00:00+00:00"
+    # started_at preserved from previous call
+    assert updated.started_at == "2026-04-13T10:00:00+00:00"
+
+
+def test_set_status_running_to_failed(registry, basic_plan):
+    """set_status transitions running → failed on crash."""
+    registry.save(basic_plan)
+    registry.set_status(basic_plan.plan_id, "running", started_at="2026-04-13T10:00:00+00:00")
+    updated = registry.set_status(
+        basic_plan.plan_id,
+        "failed",
+        completed_at="2026-04-13T10:05:00+00:00",
+    )
+    assert updated.status == "failed"
+    assert updated.completed_at == "2026-04-13T10:05:00+00:00"
+
+
+def test_record_outcome_bumps_current_generation(registry, basic_plan):
+    """record_outcome should update current_generation."""
+    registry.save(basic_plan)
+    outcome = GenerationOutcome(
+        generation=1,
+        recorded_at="2026-04-13T11:00:00+00:00",
+        best_fitness=0.8,
+        mean_fitness=0.5,
+        architectures_alive=["ppo_lstm_v1"],
+        n_agents=10,
+    )
+    updated = registry.record_outcome(basic_plan.plan_id, outcome)
+    assert updated.current_generation == 1
+    assert len(updated.outcomes) == 1
+    # Persisted
+    reloaded = registry.load(basic_plan.plan_id)
+    assert reloaded.current_generation == 1
+
+
+def test_plan_to_dict_includes_status_fields(basic_plan):
+    """to_dict includes the new status fields."""
+    basic_plan.status = "completed"
+    basic_plan.current_generation = 4
+    basic_plan.started_at = "2026-04-13T10:00:00+00:00"
+    basic_plan.completed_at = "2026-04-13T14:00:00+00:00"
+    d = basic_plan.to_dict()
+    assert d["status"] == "completed"
+    assert d["current_generation"] == 4
+    assert d["started_at"] == "2026-04-13T10:00:00+00:00"
+    assert d["completed_at"] == "2026-04-13T14:00:00+00:00"
+
+
+def test_plan_api_returns_status_fields(tmp_path, hp_ranges):
+    """GET /training-plans/{plan_id} includes status in the response."""
+    reg = PlanRegistry(tmp_path / "plans")
+    plan = TrainingPlan.new(
+        name="status-test",
+        population_size=10,
+        architectures=["ppo_lstm_v1", "ppo_time_lstm_v1"],
+        hp_ranges=hp_ranges,
+    )
+    plan.status = "running"
+    plan.current_generation = 2
+    plan.started_at = "2026-04-13T10:00:00+00:00"
+    reg.save(plan)
+
+    app = FastAPI()
+    app.include_router(training_plans_router.router, prefix="/api")
+    app.state.plan_registry = reg
+    app.state.config = {"hyperparameters": {"search_ranges": hp_ranges}}
+    client = TestClient(app)
+
+    resp = client.get(f"/api/training-plans/{plan.plan_id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["plan"]["status"] == "running"
+    assert data["plan"]["current_generation"] == 2
+    assert data["plan"]["started_at"] == "2026-04-13T10:00:00+00:00"

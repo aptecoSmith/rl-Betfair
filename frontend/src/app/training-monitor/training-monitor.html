@@ -47,6 +47,9 @@
         <div class="phase-banner">
           <span class="phase-dot"></span>
           {{ phaseLabel() }}
+          @if (activePlanId()) {
+            <a [routerLink]="['/training-plans']" [queryParams]="{ plan: activePlanId() }" class="plan-link" data-testid="link-to-plan">Plan →</a>
+          }
           <span class="heartbeat-chip" [class]="heartbeatColor()">
             <span class="heartbeat-dot"></span>
             {{ heartbeatAge() }}

@@ -105,12 +105,18 @@ def make_status_msg(
     })
 
 
-def make_started_msg(run_id: str, train_days: list[str], test_days: list[str]) -> str:
+def make_started_msg(
+    run_id: str,
+    train_days: list[str],
+    test_days: list[str],
+    plan_id: str | None = None,
+) -> str:
     return json.dumps({
         "type": EVT_STARTED,
         "run_id": run_id,
         "train_days": train_days,
         "test_days": test_days,
+        "plan_id": plan_id,
     })
 
 

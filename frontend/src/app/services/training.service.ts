@@ -31,6 +31,7 @@ export class TrainingService implements OnDestroy {
     worker_connected: false,
     unevaluated_count: null,
     eval_rate_s: null,
+    plan_id: null,
   });
 
   /** Timestamp (epoch ms) of the last non-ping event received. */
@@ -195,6 +196,7 @@ export class TrainingService implements OnDestroy {
         worker_connected: this.status().worker_connected,
         unevaluated_count: null,
         eval_rate_s: null,
+        plan_id: null,
       });
       return;
     }

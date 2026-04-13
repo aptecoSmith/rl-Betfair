@@ -79,6 +79,7 @@ async def lifespan(app: FastAPI):
         "latest_event": None,
         "latest_process": None,
         "latest_item": None,
+        "plan_id": None,
     }
     # Set of connected WebSocket send callbacks for broadcasting
     app.state.ws_clients: set = set()
@@ -133,6 +134,7 @@ async def lifespan(app: FastAPI):
                 state["running"] = False
                 state["latest_process"] = None
                 state["latest_item"] = None
+                state["plan_id"] = None
 
             # Broadcast to all connected WebSocket clients
             import json
@@ -203,6 +205,9 @@ async def lifespan(app: FastAPI):
                                 pending.set_result(msg)
 
                         elif msg_type == EVT_STARTED:
+                            # Track active plan_id for the status endpoint
+                            state = app.state.training_state
+                            state["plan_id"] = msg.get("plan_id")
                             # Resolve pending response
                             pending = app.state.worker_pending_response
                             if pending and not pending.done():

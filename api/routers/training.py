@@ -94,14 +94,15 @@ def get_training_status(request: Request):
             phase="worker_disconnected",
             detail="Training worker connection lost — training may still be running in the worker process",
             worker_connected=False,
+            plan_id=state.get("plan_id"),
         )
 
     if not state["running"]:
-        return TrainingStatus(running=False, worker_connected=worker_connected)
+        return TrainingStatus(running=False, worker_connected=worker_connected, plan_id=state.get("plan_id"))
 
     latest = state.get("latest_event")
     if not latest:
-        return TrainingStatus(running=True, worker_connected=worker_connected)
+        return TrainingStatus(running=True, worker_connected=worker_connected, plan_id=state.get("plan_id"))
 
     def _snap(d: dict | None) -> ProgressSnapshot | None:
         if not d:
@@ -132,6 +133,7 @@ def get_training_status(request: Request):
         worker_connected=worker_connected,
         unevaluated_count=latest.get("unevaluated_count"),
         eval_rate_s=latest.get("eval_rate_s"),
+        plan_id=state.get("plan_id"),
     )
 
 

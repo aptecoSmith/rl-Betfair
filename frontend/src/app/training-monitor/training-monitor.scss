@@ -115,6 +115,14 @@
   50% { opacity: 0.4; }
 }
 
+.plan-link {
+  color: #64b5f6;
+  text-decoration: none;
+  font-size: 0.8rem;
+  margin-left: auto;
+  &:hover { text-decoration: underline; }
+}
+
 .heartbeat-chip {
   display: inline-flex;
   align-items: center;

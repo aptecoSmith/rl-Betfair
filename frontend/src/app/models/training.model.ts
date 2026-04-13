@@ -18,6 +18,7 @@ export interface TrainingStatus {
   worker_connected: boolean;
   unevaluated_count: number | null;
   eval_rate_s: number | null;
+  plan_id: string | null;
 }
 
 export interface ActivityLogEntry {

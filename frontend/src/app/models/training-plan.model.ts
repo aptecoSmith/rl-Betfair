@@ -60,6 +60,10 @@ export interface TrainingPlan {
   manual_seed_point?: Record<string, number | string> | null;
   n_generations?: number;
   n_epochs?: number;
+  status?: 'draft' | 'running' | 'completed' | 'failed' | 'paused';
+  current_generation?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
 }
 
 export interface ValidationIssue {

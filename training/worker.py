@@ -144,6 +144,9 @@ class TrainingWorker:
         self.training_thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # Active plan tracking (for status updates on terminal events)
+        self._active_plan_id: str | None = None
+
         # Latest state for catch-up on connect / status queries
         self.latest_event: dict | None = None
         self.latest_process: dict | None = None
@@ -381,6 +384,22 @@ class TrainingWorker:
         # Build run config with all per-run overrides applied
         run_config = self._apply_run_overrides(self.config, params)
 
+        # Mark plan as running
+        if training_plan is not None:
+            try:
+                from datetime import datetime, timezone
+                self.plan_registry.set_status(
+                    training_plan.plan_id,
+                    "running",
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    current_generation=0,
+                )
+            except Exception:
+                logger.exception("Failed to set plan status to running")
+
+        # Track the active plan_id so the event handler can update status
+        self._active_plan_id: str | None = plan_id
+
         # Reset
         self.stop_event.clear()
         self.finish_event.clear()
@@ -398,8 +417,8 @@ class TrainingWorker:
             except thread_queue.Empty:
                 break
 
-        # Acknowledge
-        await self._broadcast(make_started_msg(run_id, train_dates, test_dates))
+        # Acknowledge — include plan_id so the frontend can cross-link
+        await self._broadcast(make_started_msg(run_id, train_dates, test_dates, plan_id=plan_id))
 
         console.print()
         console.rule(f"[bold green]Training Run {run_id[:8]}[/bold green]")
@@ -503,6 +522,27 @@ class TrainingWorker:
             self.latest_item = None
             is_terminal = True
 
+            # Update plan status on terminal events
+            plan_id = getattr(self, "_active_plan_id", None)
+            if plan_id is not None:
+                phase = event.get("phase", "")
+                if phase == "run_error":
+                    final_status = "failed"
+                elif phase == "run_stopped":
+                    final_status = "failed"
+                else:
+                    final_status = "completed"
+                try:
+                    from datetime import datetime, timezone
+                    self.plan_registry.set_status(
+                        plan_id,
+                        final_status,
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception:
+                    logger.exception("Failed to set plan status to %s", final_status)
+                self._active_plan_id = None
+
         # Broadcast to WS clients (async — schedule as a task)
         msg = make_event_msg(event)
         asyncio.create_task(self._broadcast(msg))
@@ -520,6 +560,19 @@ class TrainingWorker:
                 self.latest_process = None
                 self.latest_item = None
                 console.print("[red]Training thread exited unexpectedly[/red]")
+                # Update plan status if a plan-based run died
+                plan_id = self._active_plan_id
+                if plan_id is not None:
+                    try:
+                        from datetime import datetime, timezone
+                        self.plan_registry.set_status(
+                            plan_id,
+                            "failed",
+                            completed_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                    except Exception:
+                        logger.exception("Failed to set plan status to failed (dead thread)")
+                    self._active_plan_id = None
 
     async def _broadcast(self, msg: str) -> None:
         dead: set = set()

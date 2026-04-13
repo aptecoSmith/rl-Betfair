@@ -136,6 +136,7 @@ class TrainingStatus(BaseModel):
     worker_connected: bool = False
     unevaluated_count: int | None = None
     eval_rate_s: float | None = None
+    plan_id: str | None = None
 
 
 # ── WebSocket Events ────────────────────────────────────────────────

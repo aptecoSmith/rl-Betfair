@@ -1,7 +1,7 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { DecimalPipe, JsonPipe } from '@angular/common';
-import { Router, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { ApiService } from '../services/api.service';
 import {
   CoverageReport,
@@ -35,6 +35,7 @@ interface ArchInfo { name: string; description: string; }
 export class TrainingPlans implements OnInit {
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
 
   // ── List / detail state ─────────────────────────────────────────
   readonly plans = signal<TrainingPlan[]>([]);
@@ -101,6 +102,12 @@ export class TrainingPlans implements OnInit {
     this.loadSchema();
     this.loadArchitectures();
     this.loadCoverage();
+
+    // If a ?plan= query param is present, open that plan's detail view
+    const planId = this.route.snapshot.queryParamMap.get('plan');
+    if (planId) {
+      this.openDetail(planId);
+    }
   }
 
   // ── Loaders ─────────────────────────────────────────────────────

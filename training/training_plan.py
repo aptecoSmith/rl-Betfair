@@ -42,6 +42,10 @@ from typing import Iterable
 from agents.population_manager import HyperparamSpec, parse_search_ranges
 
 
+# -- Sentinel -----------------------------------------------------------------
+
+_SENTINEL = object()  # distinguishes "not passed" from None in set_status()
+
 # -- Constants ----------------------------------------------------------------
 
 
@@ -153,6 +157,20 @@ class TrainingPlan:
     n_generations: int = 3
     #: Number of PPO epochs per agent per generation.
     n_epochs: int = 3
+    #: Lifecycle status of this plan.
+    #: "draft" = saved but never launched.
+    #: "running" = training is currently in progress.
+    #: "completed" = training finished successfully.
+    #: "failed" = training crashed.
+    #: "paused" = reserved for Session 3 (auto-continue).
+    status: str = "draft"
+    #: Which generation is currently being trained (0-indexed).
+    #: None when no run is active.
+    current_generation: int | None = None
+    #: ISO timestamp when the current/last run started.
+    started_at: str | None = None
+    #: ISO timestamp when the run completed (successfully or with error).
+    completed_at: str | None = None
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:
@@ -174,6 +192,10 @@ class TrainingPlan:
             "manual_seed_point": self.manual_seed_point,
             "n_generations": self.n_generations,
             "n_epochs": self.n_epochs,
+            "status": self.status,
+            "current_generation": self.current_generation,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
         }
 
     @classmethod
@@ -200,6 +222,10 @@ class TrainingPlan:
             manual_seed_point=raw.get("manual_seed_point"),
             n_generations=int(raw.get("n_generations", 3)),
             n_epochs=int(raw.get("n_epochs", 3)),
+            status=str(raw.get("status", "draft")),
+            current_generation=raw.get("current_generation"),
+            started_at=raw.get("started_at"),
+            completed_at=raw.get("completed_at"),
         )
 
     @staticmethod
@@ -389,9 +415,39 @@ class PlanRegistry:
         return True
 
     def record_outcome(self, plan_id: str, outcome: GenerationOutcome) -> TrainingPlan:
-        """Append a :class:`GenerationOutcome` to the plan and persist."""
+        """Append a :class:`GenerationOutcome` to the plan and persist.
+
+        Also bumps ``current_generation`` so the UI can show progress.
+        """
         plan = self.load(plan_id)
         plan.outcomes.append(outcome)
+        plan.current_generation = outcome.generation
+        self.save(plan)
+        return plan
+
+    def set_status(
+        self,
+        plan_id: str,
+        status: str,
+        *,
+        current_generation: int | None = _SENTINEL,
+        started_at: str | None = _SENTINEL,
+        completed_at: str | None = _SENTINEL,
+    ) -> TrainingPlan:
+        """Update the lifecycle status of a plan and persist.
+
+        Only the fields explicitly passed are overwritten; the rest keep
+        their current value.  Use ``_SENTINEL`` default to distinguish
+        "not passed" from ``None``.
+        """
+        plan = self.load(plan_id)
+        plan.status = status
+        if current_generation is not _SENTINEL:
+            plan.current_generation = current_generation
+        if started_at is not _SENTINEL:
+            plan.started_at = started_at
+        if completed_at is not _SENTINEL:
+            plan.completed_at = completed_at
         self.save(plan)
         return plan
 
