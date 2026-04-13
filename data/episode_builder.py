@@ -629,6 +629,19 @@ def _build_day(
                 if runner.status in ("WINNER", "PLACED"):
                     winning_ids.add(runner.selection_id)
 
+            mtype = str(first_row.get("market_type") or "")
+            ew_divisor = _opt_float(first_row.get("each_way_divisor"))
+
+            # Guard: EACH_WAY markets without a divisor would settle placed
+            # runners at full win odds — skip them entirely.
+            if mtype == "EACH_WAY" and ew_divisor is None:
+                logger.warning(
+                    "Skipping %s (%s) — EACH_WAY market missing "
+                    "each_way_divisor, settlement would be wrong",
+                    market_id, first.venue,
+                )
+                continue
+
             races.append(
                 Race(
                     market_id=market_id,
@@ -637,11 +650,11 @@ def _build_day(
                     winner_selection_id=first.winner_selection_id,
                     ticks=ticks,
                     runner_metadata=runner_meta,
-                    market_name=str(first_row.get("market_name") or ""),
-                    market_type=str(first_row.get("market_type") or ""),
+                    market_name=mtype,
+                    market_type=mtype,
                     n_runners=len(runner_meta),
                     winning_selection_ids=winning_ids,
-                    each_way_divisor=_opt_float(first_row.get("each_way_divisor")),
+                    each_way_divisor=ew_divisor,
                     number_of_each_way_places=_opt_int(first_row.get("number_of_each_way_places")),
                 )
             )

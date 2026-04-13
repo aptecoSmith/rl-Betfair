@@ -785,6 +785,20 @@ class DataExtractor:
         runners_df: pd.DataFrame,
     ) -> None:
         """Write Parquet files for one day."""
+        # Warn on EACH_WAY markets missing divisor — settlement would be wrong.
+        if "market_type" in ticks_df.columns and "each_way_divisor" in ticks_df.columns:
+            ew_markets = ticks_df.loc[
+                ticks_df["market_type"] == "EACH_WAY"
+            ].groupby("market_id")["each_way_divisor"].first()
+            bad = ew_markets[ew_markets.isna()]
+            if len(bad):
+                logger.error(
+                    "%s: %d EACH_WAY market(s) missing each_way_divisor — "
+                    "these will be skipped at training time: %s",
+                    target_date.isoformat(), len(bad),
+                    ", ".join(bad.index[:5]),
+                )
+
         date_str = target_date.isoformat()
         ticks_path = self._output_dir / f"{date_str}.parquet"
         runners_path = self._output_dir / f"{date_str}_runners.parquet"
