@@ -36,6 +36,14 @@ export class Scoreboard implements OnInit, OnDestroy {
   readonly models = signal<ScoreboardEntry[]>([]);
   readonly loading = signal(true);
   readonly error = signal<string | null>(null);
+  readonly selectedIds = signal<Set<string>>(new Set());
+
+  readonly allVisibleSelected = computed(() => {
+    const all = this.rankedModels();
+    if (all.length === 0) return false;
+    const sel = this.selectedIds();
+    return all.every(m => sel.has(m.model_id));
+  });
 
   readonly rankedModels = computed(() =>
     this.models()
@@ -104,6 +112,38 @@ export class Scoreboard implements OnInit, OnDestroy {
   onRowClick(model: ScoreboardEntry): void {
     this.selectionState.selectedModelId.set(model.model_id);
     this.router.navigate(['/models', model.model_id]);
+  }
+
+  toggleSelect(event: Event, model: ScoreboardEntry): void {
+    event.stopPropagation();
+    const next = new Set(this.selectedIds());
+    if (next.has(model.model_id)) next.delete(model.model_id);
+    else next.add(model.model_id);
+    this.selectedIds.set(next);
+  }
+
+  isSelected(model: ScoreboardEntry): boolean {
+    return this.selectedIds().has(model.model_id);
+  }
+
+  toggleSelectAll(event: Event): void {
+    event.stopPropagation();
+    if (this.allVisibleSelected()) {
+      this.selectedIds.set(new Set());
+    } else {
+      this.selectedIds.set(new Set(this.rankedModels().map(m => m.model_id)));
+    }
+  }
+
+  clearSelection(): void {
+    this.selectedIds.set(new Set());
+  }
+
+  evaluateSelected(): void {
+    const ids = Array.from(this.selectedIds());
+    if (ids.length === 0) return;
+    this.selectionState.evaluationPreselected.set(ids);
+    this.router.navigate(['/evaluation']);
   }
 
   onToggleGarage(event: Event, model: ScoreboardEntry): void {

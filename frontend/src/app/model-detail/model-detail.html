@@ -29,9 +29,67 @@
         <span class="score-value">{{ m.composite_score !== null ? (m.composite_score | number:'1.3-3') : '—' }}</span>
       </div>
       <button class="btn-view-bets" (click)="navigateToBets()" data-testid="view-bets-btn">View Bets</button>
+      <button class="btn-reeval" (click)="openReevalDialog()" data-testid="reeval-btn" title="Re-evaluate this model on selected days">Re-evaluate</button>
       <button class="btn-delete-model" (click)="promptDelete()" data-testid="delete-model-btn" title="Delete this model">Delete</button>
     }
   </div>
+
+  @if (showReevalDialog()) {
+    <div class="dialog-overlay">
+      <div class="dialog reeval-dialog" data-testid="reeval-dialog">
+        <h3>Re-evaluate <code>{{ shortId() }}</code></h3>
+        <p>Pick the days to evaluate. Pre-populated with the days from the
+        model's last evaluation run.</p>
+
+        <div class="reeval-actions-row">
+          <button type="button" (click)="selectAllReevalDates()" data-testid="reeval-select-all">Select all</button>
+          <button type="button" (click)="clearReevalDates()" data-testid="reeval-clear">Clear</button>
+          <span class="count-chip">{{ selectedReevalDates().size }} selected</span>
+        </div>
+
+        @if (availableDates().length === 0) {
+          <p class="empty">No processed days available.</p>
+        } @else {
+          <div class="reeval-date-list">
+            @for (date of availableDates(); track date) {
+              <label class="reeval-date-row" [class.picked]="isReevalDateSelected(date)">
+                <input
+                  type="checkbox"
+                  [checked]="isReevalDateSelected(date)"
+                  (change)="toggleReevalDate(date)"
+                  [attr.data-testid]="'reeval-date-' + date"
+                />
+                <span class="row-date">{{ date }}</span>
+              </label>
+            }
+          </div>
+        }
+
+        @if (reevalError(); as err) {
+          <p class="error" data-testid="reeval-error">{{ err }}</p>
+        }
+        @if (reevalAccepted()) {
+          <p class="success" data-testid="reeval-success">Evaluation started.</p>
+        }
+        @if (workerBusy() && !reevalAccepted()) {
+          <p class="warn" data-testid="reeval-busy">Worker is busy — wait for the current job to finish.</p>
+        }
+
+        <div class="dialog-actions">
+          <button class="btn-secondary" (click)="cancelReeval()">Close</button>
+          <button class="btn-secondary" (click)="navigateToEvaluation()" data-testid="reeval-goto-page">Open Evaluation page</button>
+          <button
+            class="btn-primary"
+            (click)="confirmReeval()"
+            [disabled]="reevalSubmitting() || workerBusy() || selectedReevalDates().size === 0"
+            data-testid="reeval-confirm"
+          >
+            {{ reevalSubmitting() ? 'Sending…' : 'Evaluate' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  }
 
   @if (showDeleteDialog()) {
     <div class="dialog-overlay">

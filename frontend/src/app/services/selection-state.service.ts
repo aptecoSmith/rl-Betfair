@@ -19,6 +19,10 @@ export class SelectionStateService {
   readonly replayDate = signal<string | null>(null);
   readonly replayRaceId = signal<string | null>(null);
 
+  // ── Evaluation page ──
+  /** Models pre-selected for the evaluation page (set by scoreboard bulk action). */
+  readonly evaluationPreselected = signal<string[]>([]);
+
   // ── Training Monitor ──
   readonly trainingFormValues = signal<{
     generations: number;

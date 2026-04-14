@@ -1,0 +1,211 @@
+<div class="evaluation-page">
+  <h1>Manual Evaluation</h1>
+  <p class="lead">
+    Pick one or more models and one or more test days, then run an evaluation.
+    Results are written into the registry exactly like training-triggered
+    evaluations and will appear on the scoreboard.
+  </p>
+
+  @if (isRunning()) {
+    <section class="card progress-card" data-testid="eval-progress">
+      <h2>
+        @if (isManualEval()) {
+          Evaluation in progress
+        } @else {
+          Worker busy
+        }
+      </h2>
+      @if (status().phase) {
+        <p class="phase">Phase: <strong>{{ status().phase }}</strong></p>
+      }
+      @if (status().detail) {
+        <p class="detail">{{ status().detail }}</p>
+      }
+      @if (status().overall; as bar) {
+        <div class="eta-bar">
+          <div class="eta-header">
+            <span class="eta-level">OVERALL</span>
+            <span class="eta-label">{{ bar.label }}</span>
+            <span class="eta-stats">
+              {{ bar.completed }}/{{ bar.total }}
+              · ETA {{ bar.process_eta_human || '—' }}
+            </span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill bar-overall" [style.width.%]="bar.pct"></div>
+          </div>
+          <span class="bar-pct">{{ bar.pct }}%</span>
+        </div>
+      }
+      @if (status().process; as bar) {
+        <div class="eta-bar">
+          <div class="eta-header">
+            <span class="eta-level">PHASE</span>
+            <span class="eta-label">{{ bar.label }}</span>
+            <span class="eta-stats">
+              {{ bar.completed }}/{{ bar.total }}
+              · ETA {{ bar.process_eta_human || '—' }}
+            </span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill bar-process" [style.width.%]="bar.pct"></div>
+          </div>
+          <span class="bar-pct">{{ bar.pct }}%</span>
+        </div>
+      }
+      @if (status().item; as bar) {
+        <div class="eta-bar">
+          <div class="eta-header">
+            <span class="eta-level">CURRENT</span>
+            <span class="eta-label">{{ bar.label }}</span>
+            <span class="eta-stats">
+              {{ bar.completed }}/{{ bar.total }}
+              · ETA {{ bar.process_eta_human || bar.item_eta_human || '—' }}
+            </span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill bar-item" [style.width.%]="bar.pct"></div>
+          </div>
+          <span class="bar-pct">{{ bar.pct }}%</span>
+        </div>
+      }
+    </section>
+  }
+
+  <div class="picker-grid">
+    <!-- Model picker -->
+    <section class="card model-picker" data-testid="model-picker">
+      <header class="picker-header">
+        <h2>Models</h2>
+        <span class="count-chip">{{ selectedModelIds().size }} selected</span>
+      </header>
+      <input
+        type="text"
+        class="filter-input"
+        placeholder="Filter by ID or architecture"
+        [ngModel]="modelFilter()"
+        (ngModelChange)="modelFilter.set($event)"
+        data-testid="model-filter"
+      />
+      <div class="picker-actions">
+        <button type="button" (click)="selectAllVisibleModels()" data-testid="select-all-models">Select all visible</button>
+        <button type="button" (click)="clearModels()" data-testid="clear-models">Clear</button>
+      </div>
+      @if (loadingModels()) {
+        <p class="loading">Loading models…</p>
+      } @else {
+        <div class="picker-list" role="list">
+          @for (m of filteredModels(); track m.model_id) {
+            <label class="picker-row" [class.picked]="isModelSelected(m.model_id)">
+              <input
+                type="checkbox"
+                [checked]="isModelSelected(m.model_id)"
+                (change)="toggleModel(m.model_id)"
+                [attr.data-testid]="'model-checkbox-' + shortId(m.model_id)"
+              />
+              <span class="row-id" [title]="m.model_id">{{ shortId(m.model_id) }}</span>
+              <span class="row-arch">{{ m.architecture_name }}</span>
+              <span class="row-score" [title]="'Composite score'">
+                {{ m.composite_score !== null ? (m.composite_score | number:'1.3-3') : '—' }}
+              </span>
+              @if (m.garaged) {
+                <span class="row-tag tag-garage">★ garage</span>
+              }
+            </label>
+          }
+          @if (filteredModels().length === 0) {
+            <p class="empty">No models match the filter.</p>
+          }
+        </div>
+      }
+    </section>
+
+    <!-- Date picker -->
+    <section class="card date-picker" data-testid="date-picker">
+      <header class="picker-header">
+        <h2>Test Days</h2>
+        <span class="count-chip">{{ selectedDates().size }} selected</span>
+      </header>
+      <div class="picker-actions">
+        <button type="button" (click)="selectAllDates()" data-testid="select-all-dates">Select all</button>
+        <button type="button" (click)="selectLastN(7)" data-testid="select-last-7">Last 7</button>
+        <button type="button" (click)="selectLastN(14)" data-testid="select-last-14">Last 14</button>
+        <button type="button" (click)="clearDates()" data-testid="clear-dates">Clear</button>
+      </div>
+      @if (loadingDays()) {
+        <p class="loading">Loading days…</p>
+      } @else {
+        <div class="picker-list dates" role="list">
+          @for (d of days(); track d.date) {
+            <label class="picker-row" [class.picked]="isDateSelected(d.date)">
+              <input
+                type="checkbox"
+                [checked]="isDateSelected(d.date)"
+                (change)="toggleDate(d.date)"
+                [attr.data-testid]="'date-checkbox-' + d.date"
+              />
+              <span class="row-date">{{ d.date }}</span>
+              <span class="row-races">{{ d.race_count }} races</span>
+            </label>
+          }
+          @if (days().length === 0) {
+            <p class="empty">No processed days available — import some first.</p>
+          }
+        </div>
+      }
+    </section>
+  </div>
+
+  <div class="submit-bar">
+    @if (submitError(); as err) {
+      <div class="error" data-testid="submit-error">{{ err }}</div>
+    }
+    <button
+      type="button"
+      class="btn-primary"
+      (click)="onEvaluate()"
+      [disabled]="!canSubmit()"
+      data-testid="submit-eval"
+    >
+      @if (submitting()) {
+        Sending…
+      } @else if (isRunning()) {
+        Worker busy
+      } @else {
+        Evaluate ({{ selectedModelIds().size }} model{{ selectedModelIds().size === 1 ? '' : 's' }} ×
+        {{ selectedDates().size }} day{{ selectedDates().size === 1 ? '' : 's' }})
+      }
+    </button>
+  </div>
+
+  @if (results().length > 0) {
+    <section class="card results-card" data-testid="eval-results">
+      <h2>Results</h2>
+      @if (resultsLoading()) {
+        <p class="loading">Refreshing…</p>
+      }
+      <table class="results-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Architecture</th>
+            <th>Mean Daily P&amp;L</th>
+            <th>Bet Win %</th>
+            <th>Composite</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (m of results(); track m.model_id) {
+            <tr class="clickable" (click)="goToModel(m.model_id)">
+              <td><a [routerLink]="['/models', m.model_id]">{{ shortId(m.model_id) }}</a></td>
+              <td>{{ m.architecture_name }}</td>
+              <td>{{ m.mean_daily_pnl | currency:'GBP':'symbol':'1.2-2' }}</td>
+              <td>{{ m.bet_precision !== null ? ((m.bet_precision * 100) | number:'1.0-0') + '%' : '—' }}</td>
+              <td class="score">{{ m.composite_score !== null ? (m.composite_score | number:'1.4-4') : '—' }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </section>
+  }
+</div>

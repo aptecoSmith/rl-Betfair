@@ -9,10 +9,29 @@
     <div class="error" data-testid="error">{{ err }}</div>
   }
 
+  @if (!loading() && !error() && selectedIds().size > 0) {
+    <div class="bulk-toolbar" data-testid="bulk-toolbar">
+      <span class="bulk-count">{{ selectedIds().size }} model{{ selectedIds().size === 1 ? '' : 's' }} selected</span>
+      <button type="button" class="btn-bulk-eval" (click)="evaluateSelected()" data-testid="bulk-evaluate-btn">
+        Evaluate selected ({{ selectedIds().size }})
+      </button>
+      <button type="button" class="btn-bulk-clear" (click)="clearSelection()" data-testid="bulk-clear-btn">Clear</button>
+    </div>
+  }
+
   @if (!loading() && !error()) {
     <table class="scoreboard-table" data-testid="scoreboard-table">
       <thead>
         <tr>
+          <th class="select-col">
+            <input
+              type="checkbox"
+              [checked]="allVisibleSelected()"
+              (click)="toggleSelectAll($event)"
+              data-testid="select-all-checkbox"
+              title="Select all visible"
+            />
+          </th>
           <th>Rank</th>
           <th class="garage-col"></th>
           <th>Model ID</th>
@@ -38,7 +57,16 @@
             [style.border-left]="'4px solid ' + generationColour(model.generation)"
             (click)="onRowClick(model)"
             [attr.data-testid]="'row-' + i"
+            [class.row-selected]="isSelected(model)"
           >
+            <td class="select-col" (click)="$event.stopPropagation()">
+              <input
+                type="checkbox"
+                [checked]="isSelected(model)"
+                (click)="toggleSelect($event, model)"
+                [attr.data-testid]="'select-checkbox-' + i"
+              />
+            </td>
             <td>{{ i + 1 }}</td>
             <td class="garage-col">
               <button class="garage-btn" [class.garaged]="model.garaged" (click)="onToggleGarage($event, model)" [title]="model.garaged ? 'Remove from garage' : 'Add to garage'">
@@ -76,7 +104,7 @@
         }
         @empty {
           <tr>
-            <td colspan="16" class="empty-state" data-testid="empty-state">No models found</td>
+            <td colspan="17" class="empty-state" data-testid="empty-state">No models found</td>
           </tr>
         }
       </tbody>

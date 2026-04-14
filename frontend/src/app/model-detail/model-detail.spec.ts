@@ -113,6 +113,16 @@ class MockApiService {
   deleteAgent(_id: string) {
     return of({ deleted: true, detail: 'Deleted' });
   }
+  getExtractedDays() {
+    return of({ days: [
+      { date: '2026-03-25', tick_count: 100, race_count: 5, file_size_bytes: 1024 },
+      { date: '2026-03-26', tick_count: 100, race_count: 5, file_size_bytes: 1024 },
+      { date: '2026-03-27', tick_count: 100, race_count: 5, file_size_bytes: 1024 },
+    ] });
+  }
+  startEvaluation(_payload: { model_ids: string[]; test_dates: string[] | null }) {
+    return of({ accepted: true, job_id: 'job-1', model_count: 1, day_count: 1 });
+  }
 }
 
 describe('ModelDetail', () => {
@@ -731,5 +741,49 @@ describe('ModelDetail', () => {
     const btn = fixture.nativeElement.querySelector('[data-testid="view-bets-btn"]');
     expect(btn).toBeTruthy();
     expect(btn?.textContent?.trim()).toBe('View Bets');
+  });
+
+  // ── Re-evaluate ──
+
+  it('should render re-evaluate button', () => {
+    setup();
+    const btn = fixture.nativeElement.querySelector('[data-testid="reeval-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn?.textContent?.trim()).toBe('Re-evaluate');
+  });
+
+  it('should open re-eval dialog with metric_history dates pre-selected', () => {
+    setup();
+    component.openReevalDialog();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('[data-testid="reeval-dialog"]');
+    expect(dialog).toBeTruthy();
+    // The mock model has metrics_history for 2026-03-25 and 2026-03-26.
+    expect(component.isReevalDateSelected('2026-03-25')).toBe(true);
+    expect(component.isReevalDateSelected('2026-03-26')).toBe(true);
+    expect(component.isReevalDateSelected('2026-03-27')).toBe(false);
+  });
+
+  it('should call startEvaluation with selected dates on confirmReeval', () => {
+    setup();
+    const evalSpy = vi.spyOn(mockApi, 'startEvaluation');
+    component.openReevalDialog();
+    fixture.detectChanges();
+    component.toggleReevalDate('2026-03-27');
+    component.confirmReeval();
+    expect(evalSpy).toHaveBeenCalledWith({
+      model_ids: [MODEL_ID],
+      test_dates: ['2026-03-25', '2026-03-26', '2026-03-27'],
+    });
+  });
+
+  it('should reject confirmReeval with no dates selected', () => {
+    setup();
+    const evalSpy = vi.spyOn(mockApi, 'startEvaluation');
+    component.openReevalDialog();
+    component.clearReevalDates();
+    component.confirmReeval();
+    expect(evalSpy).not.toHaveBeenCalled();
+    expect(component.reevalError()).toBeTruthy();
   });
 });

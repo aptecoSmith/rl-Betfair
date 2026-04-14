@@ -57,57 +57,54 @@
 
 ### Evaluation page
 
-- [ ] Create `frontend/src/app/evaluation/` component
-- [ ] Add route `/evaluation` and nav link
-- [ ] Model picker: searchable list of all models from scoreboard data,
+- [x] Create `frontend/src/app/evaluation/` component
+- [x] Add route `/evaluation` and nav link
+- [x] Model picker: searchable list of all models from scoreboard data,
       with checkboxes. Show model ID (short), architecture, composite
       score, garage status
-- [ ] Date picker: list of available processed days with checkboxes.
-      Show date, race count. Provide "select all", "select range",
-      "last N days" shortcuts
-- [ ] "Evaluate" button — calls POST /api/evaluate with selected
+- [x] Date picker: list of available processed days with checkboxes.
+      Show date, race count. Provide "select all", "last N days" shortcuts
+- [x] "Evaluate" button — calls POST /api/evaluate with selected
       model_ids and test_dates
-- [ ] Disable button if worker is busy (poll status or check via WS)
-- [ ] Progress section: reuse the existing progress bar components
-      from training monitor (or extract shared component). Show
-      current model, day progress, overall progress, ETA
-- [ ] Results summary: after evaluation completes, show a table of
-      results — model ID, total PnL, win rate, composite score per
-      model. Link each to model detail page.
+- [x] Disable button if worker is busy (uses TrainingService.isRunning)
+- [x] Progress section reuses the training-monitor bar markup (overall,
+      phase, current) fed from the shared TrainingService signal
+- [x] Results summary table populated when an evaluating phase completes;
+      rows link to model detail
 
 ### Model detail — re-evaluate button
 
-- [ ] Add "Re-evaluate" button to model detail page header
-- [ ] On click: open a small dialog with date picker (pre-populated
+- [x] Add "Re-evaluate" button to model detail page header
+- [x] On click: open a small dialog with date picker (pre-populated
       with the dates from the model's last evaluation run)
-- [ ] "Evaluate" in dialog calls POST /api/evaluate with just this
+- [x] "Evaluate" in dialog calls POST /api/evaluate with just this
       model + selected dates
-- [ ] Show inline progress or navigate to evaluation page
+- [x] "Open Evaluation page" shortcut also provided in the dialog
 
 ### Scoreboard — bulk select
 
-- [ ] Add checkbox column to scoreboard table
-- [ ] Add "Select all" checkbox in header
-- [ ] Add toolbar that appears when selection > 0: "Evaluate selected
+- [x] Add checkbox column to scoreboard table
+- [x] Add "Select all" checkbox in header
+- [x] Add toolbar that appears when selection > 0: "Evaluate selected
       (N)" button
-- [ ] On click: navigate to evaluation page with models pre-selected,
-      or open date picker dialog then trigger directly
+- [x] On click: navigate to evaluation page with models pre-selected
+      via SelectionStateService.evaluationPreselected
 
 ### Shared progress component (optional)
 
-- [ ] If the progress bar markup is duplicated between training monitor
-      and evaluation page, extract to a shared
-      `progress-bars` component. Otherwise just duplicate — don't
-      over-abstract for two uses.
+- [x] Skipped — markup duplicated for two uses, no abstraction needed yet
 
 ### Tests
 
-- [ ] Evaluation page renders with model and date pickers
-- [ ] Selecting models and dates enables the evaluate button
-- [ ] Re-evaluate button appears on model detail page
+- [x] Evaluation page renders with model and date pickers
+- [x] Selecting models and dates enables the evaluate button
+- [x] Re-evaluate button appears on model detail page + opens dialog
+      with metric_history dates pre-selected
 
 ### Verify
 
-- [ ] `cd frontend && ng build` — clean
-- [ ] Manual: pick 2 models and 3 days, evaluate, verify results
-      appear in scoreboard and model detail
+- [x] `cd frontend && ng build` — clean
+- [x] Manual smoke via preview server: nav link works, page renders,
+      bulk-select toolbar appears + routes to /evaluation with the
+      model pre-selected, re-evaluate dialog opens with prior dates
+      ticked

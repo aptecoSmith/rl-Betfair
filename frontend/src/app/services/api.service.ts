@@ -310,6 +310,25 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/exploration/suggested-seed`);
   }
 
+  // ── Manual evaluation ────────────────────────────────────────────
+
+  startEvaluation(payload: { model_ids: string[]; test_dates: string[] | null }): Observable<{
+    accepted: boolean; job_id: string; model_count: number; day_count: number;
+  }> {
+    return this.http.post<any>(`${this.baseUrl}/evaluate`, payload);
+  }
+
+  getEvaluationStatus(): Observable<{
+    running: boolean;
+    phase: string | null;
+    detail: string | null;
+    process: { label: string; completed: number; total: number; pct: number; item_eta_human: string; process_eta_human: string } | null;
+    item: { label: string; completed: number; total: number; pct: number; item_eta_human: string; process_eta_human: string } | null;
+    manual_evaluation: boolean;
+  }> {
+    return this.http.get<any>(`${this.baseUrl}/evaluate/status`);
+  }
+
   updateBettingConstraints(constraints: {
     max_back_price: number | null;
     max_lay_price: number | null;

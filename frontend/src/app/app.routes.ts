@@ -10,6 +10,7 @@ export const routes: Routes = [
   { path: 'bets', loadComponent: () => import('./bet-explorer/bet-explorer').then(m => m.BetExplorer) },
   { path: 'garage', loadComponent: () => import('./garage/garage').then(m => m.Garage) },
   { path: 'training-plans', loadComponent: () => import('./training-plans/training-plans').then(m => m.TrainingPlans) },
+  { path: 'evaluation', loadComponent: () => import('./evaluation/evaluation').then(m => m.Evaluation) },
   { path: 'schema-inspector', loadComponent: () => import('./schema-inspector/schema-inspector').then(m => m.SchemaInspector) },
   { path: 'coverage', loadComponent: () => import('./coverage-dashboard/coverage-dashboard').then(m => m.CoverageDashboard) },
 ];

@@ -137,7 +137,7 @@ describe('Scoreboard', () => {
     const headers = fixture.nativeElement.querySelectorAll('th');
     const headerTexts = Array.from(headers).map((h: any) => h.textContent.trim());
     expect(headerTexts).toEqual([
-      'Rank', '', 'Model ID', 'Gen', 'Architecture', 'Filter',
+      '', 'Rank', '', 'Model ID', 'Gen', 'Architecture', 'Filter',
       'Profitable Days', 'Bet Win %', 'Sharpe', 'Mean Daily P&L', 'Return %',
       'Early Picks', 'Efficiency', 'Trained', 'Last Eval', 'Composite Score',
     ]);

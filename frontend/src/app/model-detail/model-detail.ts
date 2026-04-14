@@ -1,8 +1,10 @@
 import { Component, OnInit, inject, signal, computed } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { CommonModule, DecimalPipe, CurrencyPipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
+import { TrainingService } from '../services/training.service';
 import {
   ModelDetailResponse,
   DayMetric,
@@ -42,7 +44,7 @@ interface TreeEdge {
 @Component({
   selector: 'app-model-detail',
   standalone: true,
-  imports: [CommonModule, DecimalPipe, CurrencyPipe],
+  imports: [CommonModule, FormsModule, DecimalPipe, CurrencyPipe],
   templateUrl: './model-detail.html',
   styleUrl: './model-detail.scss',
 })
@@ -51,6 +53,7 @@ export class ModelDetail implements OnInit {
   private readonly router = inject(Router);
   private readonly api = inject(ApiService);
   private readonly selectionState = inject(SelectionStateService);
+  private readonly training = inject(TrainingService);
 
   readonly modelId = this.route.snapshot.paramMap.get('id') ?? '';
 
@@ -62,6 +65,15 @@ export class ModelDetail implements OnInit {
   readonly lineageNodes = signal<LineageNode[]>([]);
   readonly geneticEvents = signal<GeneticEvent[]>([]);
   readonly showDeleteDialog = signal(false);
+
+  // ── Re-evaluate dialog ───────────────────────────────────────────
+  readonly showReevalDialog = signal(false);
+  readonly availableDates = signal<string[]>([]);
+  readonly selectedReevalDates = signal<Set<string>>(new Set());
+  readonly reevalSubmitting = signal(false);
+  readonly reevalError = signal<string | null>(null);
+  readonly reevalAccepted = signal(false);
+  readonly workerBusy = computed(() => this.training.isRunning());
 
   // ── Computed ───────────────────────────────────────────────────────
 
@@ -341,6 +353,82 @@ export class ModelDetail implements OnInit {
       next: () => this.router.navigate(['/scoreboard']),
       error: (err) => this.error.set(err.error?.detail || 'Failed to delete model'),
     });
+  }
+
+  // ── Re-evaluate dialog ────────────────────────────────────────────
+
+  openReevalDialog(): void {
+    this.reevalError.set(null);
+    this.reevalAccepted.set(false);
+    // Pre-populate with the dates from the model's last evaluation, if any.
+    const m = this.model();
+    const prior = new Set((m?.metrics_history ?? []).map(d => d.date));
+    this.selectedReevalDates.set(prior);
+
+    // Load all available processed days so the user can add or remove.
+    this.api.getExtractedDays().subscribe({
+      next: (resp) => {
+        this.availableDates.set([...resp.days].map(d => d.date).sort());
+      },
+      error: () => this.availableDates.set([]),
+    });
+    this.showReevalDialog.set(true);
+  }
+
+  cancelReeval(): void {
+    this.showReevalDialog.set(false);
+  }
+
+  toggleReevalDate(date: string): void {
+    const next = new Set(this.selectedReevalDates());
+    if (next.has(date)) next.delete(date); else next.add(date);
+    this.selectedReevalDates.set(next);
+  }
+
+  isReevalDateSelected(date: string): boolean {
+    return this.selectedReevalDates().has(date);
+  }
+
+  selectAllReevalDates(): void {
+    this.selectedReevalDates.set(new Set(this.availableDates()));
+  }
+
+  clearReevalDates(): void {
+    this.selectedReevalDates.set(new Set());
+  }
+
+  confirmReeval(): void {
+    const dates = Array.from(this.selectedReevalDates()).sort();
+    if (dates.length === 0) {
+      this.reevalError.set('Pick at least one date.');
+      return;
+    }
+    if (this.workerBusy()) {
+      this.reevalError.set('Worker is busy with another job.');
+      return;
+    }
+    this.reevalSubmitting.set(true);
+    this.reevalError.set(null);
+    this.api.startEvaluation({
+      model_ids: [this.modelId],
+      test_dates: dates,
+    }).subscribe({
+      next: () => {
+        this.reevalSubmitting.set(false);
+        this.reevalAccepted.set(true);
+        this.training.setRunning(true, 'Starting evaluation...');
+        // Close the dialog after a brief moment so the user sees confirmation.
+        setTimeout(() => this.showReevalDialog.set(false), 800);
+      },
+      error: (err) => {
+        this.reevalSubmitting.set(false);
+        this.reevalError.set(err?.error?.detail ?? 'Failed to start evaluation');
+      },
+    });
+  }
+
+  navigateToEvaluation(): void {
+    this.router.navigate(['/evaluation']);
   }
 
   formatParamValue(value: unknown): string {
