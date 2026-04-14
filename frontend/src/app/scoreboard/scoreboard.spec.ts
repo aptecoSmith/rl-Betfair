@@ -192,8 +192,9 @@ describe('Scoreboard', () => {
       ],
     });
     const rows = fixture.nativeElement.querySelectorAll('.scoreboard-row');
-    expect(rows[0].querySelector('td')?.textContent?.trim()).toBe('1');
-    expect(rows[1].querySelector('td')?.textContent?.trim()).toBe('2');
+    // First td is the select-checkbox column, rank is the second td.
+    expect(rows[0].querySelectorAll('td')[1]?.textContent?.trim()).toBe('1');
+    expect(rows[1].querySelectorAll('td')[1]?.textContent?.trim()).toBe('2');
   });
 
   it('should handle null composite_score by ranking last', () => {
@@ -270,24 +271,24 @@ describe('Scoreboard', () => {
     setup({ models: [makeEntry({ win_rate: 0.85 })] });
     const el = fixture.nativeElement as HTMLElement;
     const cells = el.querySelectorAll('.scoreboard-row td');
-    // Columns: 0=Rank, 1=Garage, 2=ID, 3=Gen, 4=Arch, 5=Filter,
-    // 6=ProfitableDays, 7=BetWin%, 8=Sharpe, 9=P&L, 10=Return%,
-    // 11=EarlyPicks, 12=Efficiency, 13=Trained, 14=LastEval, 15=Score
-    expect(cells[6]?.textContent?.trim()).toBe('85%');
+    // Columns: 0=Select, 1=Rank, 2=Garage, 3=ID, 4=Gen, 5=Arch, 6=Filter,
+    // 7=ProfitableDays, 8=BetWin%, 9=Sharpe, 10=P&L, 11=Return%,
+    // 12=EarlyPicks, 13=Efficiency, 14=Trained, 15=LastEval, 16=Score
+    expect(cells[7]?.textContent?.trim()).toBe('85%');
   });
 
   it('should format bet_precision as percentage', () => {
     setup({ models: [makeEntry({ bet_precision: 0.7 })] });
     const el = fixture.nativeElement as HTMLElement;
     const cells = el.querySelectorAll('.scoreboard-row td');
-    expect(cells[7]?.textContent?.trim()).toBe('70%');
+    expect(cells[8]?.textContent?.trim()).toBe('70%');
   });
 
   it('should display early picks count', () => {
     setup({ models: [makeEntry({ early_picks: 5 })] });
     const el = fixture.nativeElement as HTMLElement;
     const cells = el.querySelectorAll('.scoreboard-row td');
-    expect(cells[11]?.textContent?.trim()).toBe('5');
+    expect(cells[12]?.textContent?.trim()).toBe('5');
   });
 
   it('should show dash for null composite score', () => {
