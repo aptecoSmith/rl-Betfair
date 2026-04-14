@@ -228,6 +228,21 @@ class TrainingWorker:
                 params["breeding_pool"]
             )
 
+        # Adaptive breeding overrides (Issue 09).
+        if params.get("mutation_rate") is not None:
+            run_config.setdefault("population", {})["mutation_rate"] = (
+                params["mutation_rate"]
+            )
+        for key in (
+            "bad_generation_threshold",
+            "bad_generation_policy",
+            "adaptive_mutation",
+            "adaptive_mutation_increment",
+            "adaptive_mutation_cap",
+        ):
+            if params.get(key) is not None:
+                run_config.setdefault("population", {})[key] = params[key]
+
         return run_config
 
     def _reload_config_from_disk(self) -> bool:

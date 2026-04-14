@@ -202,6 +202,12 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
             ),
             breeding_pool=payload.get("breeding_pool"),
             stud_model_ids=list(payload.get("stud_model_ids") or []),
+            mutation_rate=payload.get("mutation_rate"),
+            bad_generation_threshold=payload.get("bad_generation_threshold"),
+            bad_generation_policy=payload.get("bad_generation_policy"),
+            adaptive_mutation=payload.get("adaptive_mutation"),
+            adaptive_mutation_increment=payload.get("adaptive_mutation_increment"),
+            adaptive_mutation_cap=payload.get("adaptive_mutation_cap"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")
@@ -221,6 +227,15 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
             )
     if plan.stud_model_ids and len(plan.stud_model_ids) > 5:
         raise HTTPException(422, "stud_model_ids: at most 5 studs allowed")
+    if plan.bad_generation_policy is not None:
+        if plan.bad_generation_policy not in {"persist", "boost_mutation", "inject_top"}:
+            raise HTTPException(
+                422,
+                f"Unknown bad_generation_policy '{plan.bad_generation_policy}'. "
+                "Must be one of: persist, boost_mutation, inject_top",
+            )
+    if plan.mutation_rate is not None and not (0.0 <= plan.mutation_rate <= 1.0):
+        raise HTTPException(422, "mutation_rate must be between 0.0 and 1.0")
 
     issues = validate_plan(plan)
     if not is_launchable(issues):

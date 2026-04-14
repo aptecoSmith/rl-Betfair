@@ -170,6 +170,12 @@ export class ApiService {
     max_mutations_per_child?: number | null;
     breeding_pool?: 'run_only' | 'include_garaged' | 'full_registry' | null;
     stud_model_ids?: string[] | null;
+    mutation_rate?: number | null;
+    bad_generation_threshold?: number | null;
+    bad_generation_policy?: 'persist' | 'boost_mutation' | 'inject_top' | null;
+    adaptive_mutation?: boolean | null;
+    adaptive_mutation_increment?: number | null;
+    adaptive_mutation_cap?: number | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
@@ -193,6 +199,12 @@ export class ApiService {
       max_mutations_per_child: params.max_mutations_per_child ?? null,
       breeding_pool: params.breeding_pool ?? null,
       stud_model_ids: params.stud_model_ids ?? null,
+      mutation_rate: params.mutation_rate ?? null,
+      bad_generation_threshold: params.bad_generation_threshold ?? null,
+      bad_generation_policy: params.bad_generation_policy ?? null,
+      adaptive_mutation: params.adaptive_mutation ?? null,
+      adaptive_mutation_increment: params.adaptive_mutation_increment ?? null,
+      adaptive_mutation_cap: params.adaptive_mutation_cap ?? null,
     });
   }
 

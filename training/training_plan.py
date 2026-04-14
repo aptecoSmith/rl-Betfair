@@ -194,6 +194,14 @@ class TrainingPlan:
     #: to be parents in every generation regardless of selection. Empty
     #: list = no studs. Max 5 enforced in API.
     stud_model_ids: list[str] = field(default_factory=list)
+    #: Per-plan mutation rate override (Issue 09). None = use config default.
+    mutation_rate: float | None = None
+    #: Adaptive breeding config (Issue 09). None = use config default.
+    bad_generation_threshold: float | None = None
+    bad_generation_policy: str | None = None  # persist|boost_mutation|inject_top
+    adaptive_mutation: bool | None = None
+    adaptive_mutation_increment: float | None = None
+    adaptive_mutation_cap: float | None = None
 
     # ---- session helpers ----
     def session_boundaries(self) -> list[tuple[int, int]]:
@@ -252,6 +260,12 @@ class TrainingPlan:
             "max_mutations_per_child": self.max_mutations_per_child,
             "breeding_pool": self.breeding_pool,
             "stud_model_ids": list(self.stud_model_ids),
+            "mutation_rate": self.mutation_rate,
+            "bad_generation_threshold": self.bad_generation_threshold,
+            "bad_generation_policy": self.bad_generation_policy,
+            "adaptive_mutation": self.adaptive_mutation,
+            "adaptive_mutation_increment": self.adaptive_mutation_increment,
+            "adaptive_mutation_cap": self.adaptive_mutation_cap,
         }
 
     @classmethod
@@ -288,6 +302,12 @@ class TrainingPlan:
             max_mutations_per_child=raw.get("max_mutations_per_child"),
             breeding_pool=raw.get("breeding_pool"),
             stud_model_ids=list(raw.get("stud_model_ids", []) or []),
+            mutation_rate=raw.get("mutation_rate"),
+            bad_generation_threshold=raw.get("bad_generation_threshold"),
+            bad_generation_policy=raw.get("bad_generation_policy"),
+            adaptive_mutation=raw.get("adaptive_mutation"),
+            adaptive_mutation_increment=raw.get("adaptive_mutation_increment"),
+            adaptive_mutation_cap=raw.get("adaptive_mutation_cap"),
         )
 
     @staticmethod
@@ -312,6 +332,12 @@ class TrainingPlan:
         max_mutations_per_child: int | None = None,
         breeding_pool: str | None = None,
         stud_model_ids: list[str] | None = None,
+        mutation_rate: float | None = None,
+        bad_generation_threshold: float | None = None,
+        bad_generation_policy: str | None = None,
+        adaptive_mutation: bool | None = None,
+        adaptive_mutation_increment: float | None = None,
+        adaptive_mutation_cap: float | None = None,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -336,6 +362,12 @@ class TrainingPlan:
             max_mutations_per_child=max_mutations_per_child,
             breeding_pool=breeding_pool,
             stud_model_ids=list(stud_model_ids or []),
+            mutation_rate=mutation_rate,
+            bad_generation_threshold=bad_generation_threshold,
+            bad_generation_policy=bad_generation_policy,
+            adaptive_mutation=adaptive_mutation,
+            adaptive_mutation_increment=adaptive_mutation_increment,
+            adaptive_mutation_cap=adaptive_mutation_cap,
         )
 
 

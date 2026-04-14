@@ -412,6 +412,14 @@ class StartTrainingRequest(BaseModel):
     # be parents in every generation regardless of selection. Max 5.
     # None or empty list = no studs (current behaviour).
     stud_model_ids: list[str] | None = None
+    # Per-run mutation rate override (Issue 09). None = use config default.
+    mutation_rate: float | None = None
+    # Adaptive breeding (Issue 09). None on any field = use config default.
+    bad_generation_threshold: float | None = None
+    bad_generation_policy: str | None = None  # persist|boost_mutation|inject_top
+    adaptive_mutation: bool | None = None
+    adaptive_mutation_increment: float | None = None
+    adaptive_mutation_cap: float | None = None
 
 
 class ResumeTrainingRequest(BaseModel):

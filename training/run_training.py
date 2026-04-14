@@ -208,6 +208,9 @@ class TrainingOrchestrator:
         # Stud models (Issue 13): hand-picked parents forced into every
         # generation's breeding regardless of selection.
         self.stud_model_ids: list[str] = list(stud_model_ids or [])
+        # Adaptive breeding (Issue 09) — per-run state.
+        self._consecutive_bad_gens: int = 0
+        self._effective_mutation_rate: float | None = None
 
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(
@@ -795,8 +798,64 @@ class TrainingOrchestrator:
             # Discard policy (scoped to this run's agents)
             discarded = self.pop_manager.apply_discard_policy(run_scores)
 
-            # Build the breeding pool according to config.
+            # ── Adaptive breeding: detect bad generation ──
             pop_cfg_local = self.config.get("population", {})
+            base_mutation_rate = pop_cfg_local.get("mutation_rate", 0.3)
+            bad_gen_threshold = float(
+                pop_cfg_local.get("bad_generation_threshold", 0.0) or 0.0
+            )
+            bad_gen_policy = pop_cfg_local.get("bad_generation_policy", "persist")
+            adaptive = bool(pop_cfg_local.get("adaptive_mutation", False))
+            increment = float(pop_cfg_local.get("adaptive_mutation_increment", 0.1))
+            cap = float(pop_cfg_local.get("adaptive_mutation_cap", 0.8))
+
+            best_score = (
+                max((s.composite_score for s in run_scores), default=0.0)
+                if run_scores else 0.0
+            )
+            is_bad = (
+                bad_gen_threshold > 0.0 and best_score < bad_gen_threshold
+            )
+            policy_inject_top = False
+            policy_boost = False
+
+            if is_bad:
+                self._consecutive_bad_gens += 1
+                self._emit_info(
+                    f"Generation {generation} underperformed "
+                    f"(best={best_score:.4f}, threshold={bad_gen_threshold:.4f}) "
+                    f"— policy={bad_gen_policy}"
+                )
+                if bad_gen_policy == "boost_mutation":
+                    policy_boost = True
+                elif bad_gen_policy == "inject_top":
+                    policy_inject_top = True
+            else:
+                if self._consecutive_bad_gens > 0:
+                    self._emit_info(
+                        f"Generation {generation} recovered "
+                        f"(best={best_score:.4f}) — resetting adaptive state"
+                    )
+                self._consecutive_bad_gens = 0
+
+            # Effective mutation rate.
+            if adaptive and self._consecutive_bad_gens > 0:
+                effective_mutation = min(
+                    cap,
+                    base_mutation_rate + increment * self._consecutive_bad_gens,
+                )
+            elif policy_boost:
+                effective_mutation = min(cap, base_mutation_rate + increment)
+            else:
+                effective_mutation = base_mutation_rate
+            self._effective_mutation_rate = effective_mutation
+            if effective_mutation != base_mutation_rate:
+                self._emit_info(
+                    f"Mutation rate: {base_mutation_rate:.2f} → "
+                    f"{effective_mutation:.2f}"
+                )
+
+            # Build the breeding pool according to config.
             breeding_pool_mode = pop_cfg_local.get("breeding_pool", "run_only")
             external_ids: set[str] = set()
             if breeding_pool_mode == "include_garaged" and self.model_store is not None:
@@ -820,6 +879,35 @@ class TrainingOrchestrator:
                     breeding_pool_mode,
                 )
 
+
+            # inject_top policy: pull top garaged models as parent-only.
+            if policy_inject_top and self.model_store is not None:
+                try:
+                    garaged = self.model_store.list_garaged_models()
+                    # Already sorted by composite_score desc.
+                    top_n = 5
+                    injected = 0
+                    for g in garaged:
+                        if injected >= top_n:
+                            break
+                        if g.model_id in run_ids or g.model_id in external_ids:
+                            continue
+                        external_ids.add(g.model_id)
+                        injected += 1
+                    if injected:
+                        self._emit_info(
+                            f"inject_top: added {injected} top garaged "
+                            f"model(s) as parent-only"
+                        )
+                    else:
+                        self._emit_info(
+                            "inject_top: no eligible garaged models to inject"
+                        )
+                except Exception:
+                    logger.warning(
+                        "inject_top: could not enumerate garaged models",
+                        exc_info=True,
+                    )
 
             # Pool scores = run scores (post-discard) + external scores.
             active_scores = [s for s in run_scores if s.model_id not in discarded]
@@ -874,7 +962,13 @@ class TrainingOrchestrator:
                     "external_parents": len(external_parent_ids),
                 })
 
-                mutation_rate = self.config["population"].get("mutation_rate", 0.3)
+                # Use adaptive/effective mutation rate when set, else the
+                # base config value.
+                mutation_rate = (
+                    self._effective_mutation_rate
+                    if self._effective_mutation_rate is not None
+                    else self.config["population"].get("mutation_rate", 0.3)
+                )
                 max_mutations = self.config["population"].get(
                     "max_mutations_per_child"
                 )

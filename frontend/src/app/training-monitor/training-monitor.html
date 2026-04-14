@@ -471,6 +471,58 @@
                       not retrained.
                     </span>
                   </label>
+                  <label class="form-field">
+                    <span class="field-label">Mutation rate override</span>
+                    <input type="number" [(ngModel)]="mutationRateOverride" min="0" max="1" step="0.05" placeholder="Default ({{ (genetics()?.mutation_rate ?? 0.3) }})" data-testid="input-mutation-rate" />
+                    <span class="field-help">
+                      Probability of mutating each hyperparameter when breeding. Higher =
+                      more exploration, lower = more exploitation of what already works.
+                      Leave blank for the config default.
+                    </span>
+                  </label>
+                  <label class="form-field checkbox-field">
+                    <input type="checkbox" [(ngModel)]="adaptiveMutation" data-testid="check-adaptive-mutation" />
+                    <span class="field-label">Adaptive mutation (ramp on bad generations)</span>
+                  </label>
+                  @if (adaptiveMutation) {
+                    <label class="form-field">
+                      <span class="field-label">Adaptive increment</span>
+                      <input type="number" [(ngModel)]="adaptiveMutationIncrement" min="0" max="1" step="0.05" placeholder="0.1" />
+                      <span class="field-help">
+                        Mutation rate added per consecutive bad generation.
+                      </span>
+                    </label>
+                    <label class="form-field">
+                      <span class="field-label">Adaptive cap</span>
+                      <input type="number" [(ngModel)]="adaptiveMutationCap" min="0" max="1" step="0.05" placeholder="0.8" />
+                      <span class="field-help">
+                        Maximum mutation rate (resets on a good generation).
+                      </span>
+                    </label>
+                  }
+                  <label class="form-field">
+                    <span class="field-label">Bad-generation threshold</span>
+                    <input type="number" [(ngModel)]="badGenerationThreshold" min="0" max="1" step="0.05" placeholder="0 (disabled)" data-testid="input-bad-gen-threshold" />
+                    <span class="field-help">
+                      Best composite score below this means the generation is considered
+                      bad — the policy below kicks in. Set to 0 to disable detection.
+                    </span>
+                  </label>
+                  <label class="form-field">
+                    <span class="field-label">Bad-generation policy</span>
+                    <select [(ngModel)]="badGenerationPolicy" data-testid="select-bad-gen-policy">
+                      <option [ngValue]="null">Default (persist)</option>
+                      <option value="persist">persist — breed normally</option>
+                      <option value="boost_mutation">boost_mutation — temporarily raise mutation rate</option>
+                      <option value="inject_top">inject_top — pull top garaged models as parents</option>
+                    </select>
+                    <span class="field-help">
+                      What to do when a generation is bad. <strong>persist</strong> = no
+                      change, <strong>boost_mutation</strong> = bump mutation by the
+                      adaptive increment, <strong>inject_top</strong> = add top garaged
+                      models as parent-only contributors.
+                    </span>
+                  </label>
                   <div class="form-field">
                     <span class="field-label">Stud models (max {{ STUD_MAX }})</span>
                     <span class="field-help">

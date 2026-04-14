@@ -414,6 +414,30 @@ async def start_training(request: Request, body: StartTrainingRequest):
                 400, f"Stud model(s) have no hyperparameters: {no_hp}",
             )
 
+    # Adaptive breeding validation (Issue 09)
+    if body.bad_generation_policy is not None:
+        valid_policies = {"persist", "boost_mutation", "inject_top"}
+        if body.bad_generation_policy not in valid_policies:
+            raise HTTPException(
+                400,
+                f"Unknown bad_generation_policy '{body.bad_generation_policy}'. "
+                f"Must be one of: {sorted(valid_policies)}",
+            )
+    if body.mutation_rate is not None and not (0.0 <= body.mutation_rate <= 1.0):
+        raise HTTPException(400, "mutation_rate must be between 0.0 and 1.0")
+    if body.adaptive_mutation_increment is not None and not (
+        0.0 <= body.adaptive_mutation_increment <= 1.0
+    ):
+        raise HTTPException(
+            400, "adaptive_mutation_increment must be between 0.0 and 1.0",
+        )
+    if body.adaptive_mutation_cap is not None and not (
+        0.0 <= body.adaptive_mutation_cap <= 1.0
+    ):
+        raise HTTPException(
+            400, "adaptive_mutation_cap must be between 0.0 and 1.0",
+        )
+
     # Send start command to worker
     cmd = make_start_cmd(
         n_generations=body.n_generations,
@@ -434,6 +458,12 @@ async def start_training(request: Request, body: StartTrainingRequest):
         max_mutations_per_child=body.max_mutations_per_child,
         breeding_pool=body.breeding_pool,
         stud_model_ids=body.stud_model_ids,
+        mutation_rate=body.mutation_rate,
+        bad_generation_threshold=body.bad_generation_threshold,
+        bad_generation_policy=body.bad_generation_policy,
+        adaptive_mutation=body.adaptive_mutation,
+        adaptive_mutation_increment=body.adaptive_mutation_increment,
+        adaptive_mutation_cap=body.adaptive_mutation_cap,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 
@@ -552,6 +582,12 @@ async def resume_training(request: Request, body: ResumeTrainingRequest):
         max_mutations_per_child=plan.max_mutations_per_child,
         breeding_pool=plan.breeding_pool,
         stud_model_ids=plan.stud_model_ids or None,
+        mutation_rate=plan.mutation_rate,
+        bad_generation_threshold=plan.bad_generation_threshold,
+        bad_generation_policy=plan.bad_generation_policy,
+        adaptive_mutation=plan.adaptive_mutation,
+        adaptive_mutation_increment=plan.adaptive_mutation_increment,
+        adaptive_mutation_cap=plan.adaptive_mutation_cap,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

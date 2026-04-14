@@ -57,6 +57,12 @@ def make_start_cmd(
     max_mutations_per_child: int | None = None,
     breeding_pool: str | None = None,
     stud_model_ids: list[str] | None = None,
+    mutation_rate: float | None = None,
+    bad_generation_threshold: float | None = None,
+    bad_generation_policy: str | None = None,
+    adaptive_mutation: bool | None = None,
+    adaptive_mutation_increment: float | None = None,
+    adaptive_mutation_cap: float | None = None,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -79,6 +85,12 @@ def make_start_cmd(
         "max_mutations_per_child": max_mutations_per_child,
         "breeding_pool": breeding_pool,
         "stud_model_ids": stud_model_ids,
+        "mutation_rate": mutation_rate,
+        "bad_generation_threshold": bad_generation_threshold,
+        "bad_generation_policy": bad_generation_policy,
+        "adaptive_mutation": adaptive_mutation,
+        "adaptive_mutation_increment": adaptive_mutation_increment,
+        "adaptive_mutation_cap": adaptive_mutation_cap,
     })
 
 

@@ -19,6 +19,19 @@ population:
   # full_registry:   all active+garaged models (parent-only)
   # See plans/issues-12-04-2026/08-breeding-pool-scope/.
   breeding_pool: run_only
+  # Adaptive breeding (Issue 09). Detect bad generations and respond.
+  # bad_generation_threshold: best composite score below this triggers
+  #                           the policy. 0.0 disables detection.
+  # bad_generation_policy:    persist (do nothing) | boost_mutation
+  #                           (increase mutation rate) | inject_top
+  #                           (load top garaged models as parent-only).
+  # adaptive_mutation:        when true, mutation rate increases each
+  #                           consecutive bad generation, resets on good.
+  bad_generation_threshold: 0.0
+  bad_generation_policy: persist
+  adaptive_mutation: false
+  adaptive_mutation_increment: 0.1
+  adaptive_mutation_cap: 0.8
 reward:
   early_pick_bonus_min: 1.2
   early_pick_bonus_max: 1.5

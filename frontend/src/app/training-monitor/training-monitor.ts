@@ -112,6 +112,14 @@ export class TrainingMonitor implements OnDestroy {
   maxMutationsPerChild: number | null = null;
   // Issue 08 — null = use config default (run_only).
   breedingPool: 'run_only' | 'include_garaged' | 'full_registry' | null = null;
+  // Issue 09 — null = use config default. Empty/null mutationRateOverride
+  // leaves config.yaml's value intact.
+  mutationRateOverride: number | null = null;
+  badGenerationThreshold: number | null = null;
+  badGenerationPolicy: 'persist' | 'boost_mutation' | 'inject_top' | null = null;
+  adaptiveMutation = false;
+  adaptiveMutationIncrement: number | null = null;
+  adaptiveMutationCap: number | null = null;
   // Issue 13 — stud models. Hand-picked guaranteed parents (max 5).
   studModelIds: string[] = [];
   readonly studPickerOptions = signal<{ id: string; label: string }[]>([]);
@@ -581,6 +589,12 @@ export class TrainingMonitor implements OnDestroy {
       max_mutations_per_child: this.maxMutationsPerChild,
       breeding_pool: this.breedingPool,
       stud_model_ids: this.studModelIds.length > 0 ? this.studModelIds : null,
+      mutation_rate: this.mutationRateOverride,
+      bad_generation_threshold: this.badGenerationThreshold,
+      bad_generation_policy: this.badGenerationPolicy,
+      adaptive_mutation: this.adaptiveMutation ? true : null,
+      adaptive_mutation_increment: this.adaptiveMutationIncrement,
+      adaptive_mutation_cap: this.adaptiveMutationCap,
     };
     if (!this.useAllData) {
       params.train_dates = this.datesInRange(this.trainDateStart, this.trainDateEnd);
