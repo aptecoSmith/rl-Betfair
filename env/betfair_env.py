@@ -362,6 +362,12 @@ class BetfairEnv(gymnasium.Env):
         "inactivity_penalty",
         "naked_penalty_weight",
         "early_lock_bonus_weight",
+        # Session 1 (arb-improvements): per-step reward clip applied at
+        # the training-signal layer inside PPOTrainer. Whitelisted here
+        # so it can evolve per-agent via the same gene passthrough path.
+        # The env itself does NOT use this key — clipping happens
+        # downstream of the env's reward output.
+        "reward_clip",
     })
 
     def __init__(

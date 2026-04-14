@@ -72,6 +72,12 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     # the genome but the env's scalping branch is dormant.
     "naked_penalty_weight": ("naked_penalty_weight",),
     "early_lock_bonus_weight": ("early_lock_bonus_weight",),
+    # Session 1 (arb-improvements): reward_clip passthrough. Whitelisted
+    # in BetfairEnv._REWARD_OVERRIDE_KEYS so it survives the env-side
+    # filter even though the env itself doesn't use it — the trainer
+    # reads it off self.reward_overrides to clip the per-step reward
+    # fed into the advantage/return computation.
+    "reward_clip": ("reward_clip",),
 }
 
 
@@ -99,7 +105,16 @@ def _reward_overrides_from_hp(hp: dict) -> dict:
 
 @dataclass(slots=True)
 class Transition:
-    """A single (s, a, r, ...) transition from one env step."""
+    """A single (s, a, r, ...) transition from one env step.
+
+    ``reward`` is the raw env reward (telemetry-truth; accumulates into
+    EpisodeStats.total_reward and the log line). ``training_reward`` is
+    the value actually fed into the advantage/return computation — it
+    equals ``reward`` unless Session-1 reward clipping is active, in
+    which case it is ``np.clip(reward, -c, +c)``. Keeping them separate
+    preserves the raw+shaped≈total_reward invariant (clipping is a
+    training-signal transform, not a reward-accumulator transform).
+    """
 
     obs: np.ndarray
     action: np.ndarray
@@ -107,6 +122,7 @@ class Transition:
     value: float
     reward: float
     done: bool
+    training_reward: float = 0.0
 
 
 @dataclass
@@ -144,6 +160,13 @@ class EpisodeStats:
     n_steps: int
     raw_pnl_reward: float = 0.0
     shaped_bonus: float = 0.0
+    # Session 1 (arb-improvements): sum of per-step rewards AFTER the
+    # training-signal reward clip. Equals ``total_reward`` when
+    # ``reward_clip`` is 0 (off). Divergence indicates an outlier race
+    # whose reward was clipped into the advantage buffer — a signal the
+    # safety net caught an update that would otherwise have collapsed
+    # the policy.
+    clipped_reward_total: float = 0.0
     # Forced-arbitrage (scalping) rollups — Issue 05. Always zero on
     # directional runs; non-zero identifies a scalping episode so the
     # activity log / training monitor can surface arb activity.
@@ -222,6 +245,25 @@ class PPOTrainer:
         self.max_grad_norm = hp.get("max_grad_norm", 0.5)
         self.ppo_epochs = hp.get("ppo_epochs", 4)
         self.mini_batch_size = hp.get("mini_batch_size", 64)
+
+        # -- Session 1 (arb-improvements) clipping knobs ---------------------
+        # Three independent safety nets that default to 0.0 = off. When
+        # off, training is byte-identical to pre-session behaviour. When
+        # on, they stop a single outlier race from collapsing the policy
+        # during epoch 1 (see plans/arb-improvements/purpose.md).
+        #
+        #  * reward_clip: per-step reward fed into the advantage/return
+        #    buffer is clipped to [-c, +c]. Unclipped reward still flows
+        #    into EpisodeStats, info["day_pnl"], the log line, and the
+        #    monitor progress events — this is a training-signal-only
+        #    transform (hard_constraints.md).
+        #  * advantage_clip: per-transition advantage magnitude clamped
+        #    before the PPO ratio multiplies it.
+        #  * value_loss_clip: per-sample value-loss contribution capped
+        #    at ``value_loss_clip ** 2`` before the batch mean.
+        self.reward_clip = float(hp.get("reward_clip", 0.0) or 0.0)
+        self.advantage_clip = float(hp.get("advantage_clip", 0.0) or 0.0)
+        self.value_loss_clip = float(hp.get("value_loss_clip", 0.0) or 0.0)
 
         # Build per-agent reward overrides from the sampled genes. This is
         # how reward-shaping hyperparameters reach BetfairEnv — previously
@@ -350,6 +392,7 @@ class PPOTrainer:
         )
 
         total_reward = 0.0
+        clipped_reward_total = 0.0
         n_steps = 0
         done = False
 
@@ -385,16 +428,28 @@ class PPOTrainer:
                 next_obs, reward, terminated, truncated, next_info = env.step(action_np)
                 done = terminated or truncated
 
+                # Session 1: clip the TRAINING SIGNAL only. The raw
+                # reward is still what EpisodeStats/info/logs see.
+                raw_reward = float(reward)
+                if self.reward_clip > 0.0:
+                    training_reward = float(
+                        np.clip(raw_reward, -self.reward_clip, self.reward_clip)
+                    )
+                else:
+                    training_reward = raw_reward
+
                 rollout.append(Transition(
                     obs=obs,
                     action=action_np,
                     log_prob=float(log_prob.item()),
                     value=float(value.item()),
-                    reward=float(reward),
+                    reward=raw_reward,
                     done=done,
+                    training_reward=training_reward,
                 ))
 
-                total_reward += reward
+                total_reward += raw_reward
+                clipped_reward_total += training_reward
                 n_steps += 1
                 obs = next_obs
                 info = next_info
@@ -420,6 +475,7 @@ class PPOTrainer:
             n_steps=n_steps,
             raw_pnl_reward=info.get("raw_pnl_reward", 0.0),
             shaped_bonus=info.get("shaped_bonus", 0.0),
+            clipped_reward_total=clipped_reward_total,
             arbs_completed=int(info.get("arbs_completed", 0) or 0),
             arbs_naked=int(info.get("arbs_naked", 0) or 0),
             locked_pnl=float(info.get("locked_pnl", 0.0) or 0.0),
@@ -458,7 +514,9 @@ class PPOTrainer:
                     transitions[t + 1].value if t + 1 < n else last_value
                 )
 
-            delta = tr.reward + self.gamma * next_value - tr.value
+            # Session 1: advantage/return computation uses the clipped
+            # training signal (equals tr.reward when reward_clip is off).
+            delta = tr.training_reward + self.gamma * next_value - tr.value
             last_gae = delta + self.gamma * self.gae_lambda * last_gae
             advantages[t] = last_gae
             returns[t] = last_gae + tr.value
@@ -521,6 +579,16 @@ class PPOTrainer:
                 mb_advantages = advantages[mb_idx]
                 mb_returns = returns[mb_idx]
 
+                # Session 1: advantage magnitude clamp. Sits in front of
+                # the PPO ratio, not in place of max_grad_norm. Default
+                # 0.0 = off.
+                if self.advantage_clip > 0.0:
+                    mb_advantages = torch.clamp(
+                        mb_advantages,
+                        -self.advantage_clip,
+                        self.advantage_clip,
+                    )
+
                 # Forward pass (no LSTM state for mini-batch -- treat each
                 # transition independently during optimisation)
                 out = self.policy(mb_obs)
@@ -540,8 +608,18 @@ class PPOTrainer:
                 )
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Value loss (clipped)
-                value_loss = nn.functional.mse_loss(values, mb_returns)
+                # Value loss. Session 1 adds an optional per-sample cap:
+                # clamp each squared residual at ``value_loss_clip ** 2``
+                # before the batch mean, so one outlier return cannot
+                # dominate the update. Default 0.0 = off → identical to
+                # the previous F.mse_loss(values, mb_returns).
+                if self.value_loss_clip > 0.0:
+                    sq_err = (values - mb_returns).pow(2)
+                    value_loss = torch.clamp(
+                        sq_err, max=self.value_loss_clip ** 2
+                    ).mean()
+                else:
+                    value_loss = nn.functional.mse_loss(values, mb_returns)
 
                 # Total loss
                 loss = (
@@ -590,6 +668,7 @@ class PPOTrainer:
             "architecture_name": self.architecture_name,
             "day_date": ep.day_date,
             "total_reward": round(ep.total_reward, 4),
+            "clipped_reward_total": round(ep.clipped_reward_total, 4),
             "raw_pnl_reward": round(ep.raw_pnl_reward, 4),
             "shaped_bonus": round(ep.shaped_bonus, 4),
             "total_pnl": round(ep.total_pnl, 4),
@@ -656,6 +735,7 @@ class PPOTrainer:
             "episode": {
                 "day_date": ep.day_date,
                 "total_reward": ep.total_reward,
+                "clipped_reward_total": ep.clipped_reward_total,
                 "total_pnl": ep.total_pnl,
                 "bet_count": ep.bet_count,
                 "policy_loss": loss_info["policy_loss"],
