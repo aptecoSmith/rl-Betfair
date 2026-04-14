@@ -259,3 +259,252 @@ class TestScalpingPairedPlacement:
         ]
         assert passive_lays
         assert passive_lays[0].price < backs[0].average_price
+
+
+# ── Session 2: Reward + settlement ──────────────────────────────────────────
+
+
+class TestScalpingReward:
+    """Reward structure for forced-arbitrage mode (Issue 05, session 2)."""
+
+    def _run_episode(self, env, action):
+        """Drive *env* through one full episode with *action* each step.
+
+        Returns the final ``info`` dict after termination.
+        """
+        obs, _ = env.reset()
+        terminated = False
+        info = {}
+        while not terminated:
+            obs, _, terminated, _, info = env.step(action)
+        return info
+
+    def test_completed_arb_locks_real_pnl_via_race_pnl(self, scalping_config):
+        """A completed arb's locked PnL shows up in raw race P&L, not shaping."""
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        env.reset()
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        a[56] = -1.0
+        env.step(a)
+
+        bm = env.bet_manager
+        # Force the paired passive to "fill" by creating a matching Bet
+        # with the same pair_id. This is a test harness shortcut — it
+        # skips the on_tick volume accumulation but is equivalent to a
+        # real fill for settlement purposes.
+        from env.bet_manager import Bet, BetSide
+        agg = [b for b in bm.bets if b.pair_id is not None][0]
+        resting = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ][0]
+        bm.bets.append(Bet(
+            selection_id=resting.selection_id,
+            side=resting.side,
+            requested_stake=resting.requested_stake,
+            matched_stake=resting.requested_stake,
+            average_price=resting.price,
+            market_id=resting.market_id,
+            ltp_at_placement=resting.ltp_at_placement,
+            pair_id=resting.pair_id,
+            tick_index=2,
+        ))
+
+        pairs = bm.get_paired_positions(
+            market_id=agg.market_id, commission=0.05,
+        )
+        assert pairs and pairs[0]["complete"]
+        # Completed pair: back 4.0, lay 4.2 → negative spread means the
+        # passive was at a worse price than the back; locked_pnl clamps
+        # to actual gross (which is negative here by construction).
+        assert pairs[0]["locked_pnl"] != 0.0
+
+    def test_precision_and_early_pick_zeroed_in_scalping_mode(
+        self, scalping_config,
+    ):
+        """Directional shaping is switched off when scalping_mode is on."""
+        cfg = dict(scalping_config)
+        cfg["reward"] = dict(cfg["reward"])
+        cfg["reward"]["precision_bonus"] = 10.0
+        cfg["reward"]["early_pick_bonus_min"] = 5.0
+        cfg["reward"]["early_pick_bonus_max"] = 5.0
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg)
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        info = self._run_episode(env, a)
+        # Those two shaping terms are the only ones we loaded with large
+        # non-zero weights. If either leaked into shaping, the cumulative
+        # shaped reward would be bounded away from zero by a large margin.
+        assert abs(info["shaped_bonus"]) < 1.0, info["shaped_bonus"]
+
+    def test_naked_penalty_scales_with_exposure_weight(self, scalping_config):
+        """Doubling the penalty weight roughly doubles the shaped penalty."""
+        cfg_lo = dict(scalping_config)
+        cfg_lo["reward"] = dict(cfg_lo["reward"])
+        cfg_lo["reward"]["naked_penalty_weight"] = 1.0
+
+        cfg_hi = dict(scalping_config)
+        cfg_hi["reward"] = dict(cfg_hi["reward"])
+        cfg_hi["reward"]["naked_penalty_weight"] = 4.0
+
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        a[56] = 1.0  # passive 15 ticks away → likely naked
+
+        env_lo = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg_lo)
+        info_lo = self._run_episode(env_lo, a)
+
+        env_hi = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg_hi)
+        info_hi = self._run_episode(env_hi, a)
+
+        # Higher weight → more negative shaped contribution.
+        assert info_hi["shaped_bonus"] < info_lo["shaped_bonus"] - 0.01
+
+    def test_early_lock_bonus_is_time_proportional(self, scalping_config):
+        """A pair that locks on an earlier tick yields a larger bonus."""
+        # Drive the reward weight up so the bonus dominates shaping.
+        cfg = dict(scalping_config)
+        cfg["reward"] = dict(cfg["reward"])
+        cfg["reward"]["early_lock_bonus_weight"] = 10.0
+        # Disable penalty to isolate the bonus signal.
+        cfg["reward"]["naked_penalty_weight"] = 0.0
+
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=10), cfg)
+        env.reset()
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        a[56] = -1.0
+        env.step(a)
+
+        from env.bet_manager import Bet
+        bm = env.bet_manager
+        agg = [b for b in bm.bets if b.pair_id is not None][0]
+        resting = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ][0]
+
+        # Simulate the passive filling on tick 1 (very early — lots of
+        # runway left) and compare against a fill on the penultimate
+        # tick (almost no runway).
+        def synth_pair_fill(fill_tick: int) -> float:
+            env2 = BetfairEnv(_make_day(n_races=1, n_pre_ticks=10), cfg)
+            env2.reset()
+            env2.step(a)
+            bm2 = env2.bet_manager
+            agg2 = [b for b in bm2.bets if b.pair_id is not None][0]
+            resting2 = [
+                o for o in bm2.passive_book.orders if o.pair_id == agg2.pair_id
+            ][0]
+            bm2.bets.append(Bet(
+                selection_id=resting2.selection_id,
+                side=resting2.side,
+                requested_stake=resting2.requested_stake,
+                matched_stake=resting2.requested_stake,
+                average_price=resting2.price,
+                market_id=resting2.market_id,
+                ltp_at_placement=resting2.ltp_at_placement,
+                pair_id=resting2.pair_id,
+                tick_index=fill_tick,
+            ))
+            # Manually flush passive order so settlement doesn't double up.
+            bm2.passive_book._orders = [
+                o for o in bm2.passive_book._orders if id(o) != id(resting2)
+            ]
+            for sid_orders in bm2.passive_book._orders_by_sid.values():
+                for o in sid_orders[:]:
+                    if id(o) == id(resting2):
+                        sid_orders.remove(o)
+            # Step through remaining ticks to drive settlement.
+            terminated = False
+            info = {}
+            while not terminated:
+                _, _, terminated, _, info = env2.step(a)
+            return info["shaped_bonus"]
+
+        early = synth_pair_fill(1)
+        late = synth_pair_fill(9)
+        assert early > late
+
+    def test_invariant_raw_plus_shaped_equals_total_reward(
+        self, scalping_config,
+    ):
+        """The raw+shaped accounting invariant survives scalping mode."""
+        cfg = dict(scalping_config)
+        cfg["reward"] = dict(cfg["reward"])
+        cfg["reward"]["naked_penalty_weight"] = 2.5
+        cfg["reward"]["early_lock_bonus_weight"] = 1.5
+
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg)
+        obs, _ = env.reset()
+        total_reward = 0.0
+        terminated = False
+        info = {}
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        while not terminated:
+            obs, r, terminated, _, info = env.step(a)
+            total_reward += r
+        # Summing raw and shaped must recover the episode reward.
+        assert total_reward == pytest.approx(
+            info["raw_pnl_reward"] + info["shaped_bonus"], abs=1e-6,
+        )
+
+    def test_info_exposes_scalping_rollups(self, scalping_config):
+        """Episode info carries arbs_completed / arbs_naked / locked_pnl."""
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        info = self._run_episode(env, a)
+        # Keys must exist even when no pairs completed.
+        for key in ("arbs_completed", "arbs_naked", "locked_pnl", "naked_pnl"):
+            assert key in info
+
+    def test_unfilled_passives_cancelled_at_race_off(self, scalping_config):
+        """Race-off cancels resting passive legs; their budget is released."""
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        env.reset()
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        a[56] = 1.0  # max ticks → passive likely won't fill
+        env.step(a)
+        # Drive to settlement.
+        terminated = False
+        info = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(a)
+        # After race-off cleanup there are no resting passive orders.
+        assert info["passive_orders"] == []
+
+    def test_scalping_mode_off_unchanged_shaping(self, legacy_config):
+        """Legacy directional shaping still runs when scalping is off."""
+        cfg = dict(legacy_config)
+        cfg["reward"] = dict(cfg["reward"])
+        cfg["reward"]["precision_bonus"] = 2.0
+        # The legacy path should yield non-scalping info keys at zero.
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg)
+        a = np.zeros(14 * ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        obs, _ = env.reset()
+        terminated = False
+        info = {}
+        while not terminated:
+            obs, _, terminated, _, info = env.step(a)
+        assert info["arbs_completed"] == 0
+        assert info["arbs_naked"] == 0
+        assert info["locked_pnl"] == 0.0

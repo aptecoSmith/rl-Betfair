@@ -291,6 +291,12 @@ class RaceRecord:
     early_picks: int
     budget_before: float
     budget_after: float
+    # Forced-arbitrage / scalping diagnostics (Issue 05). Zero for
+    # non-scalping races; populated when scalping_mode is on.
+    arbs_completed: int = 0
+    arbs_naked: int = 0
+    locked_pnl: float = 0.0
+    naked_pnl: float = 0.0
 
 
 # ── Environment ─────────────────────────────────────────────────────────────
@@ -354,6 +360,8 @@ class BetfairEnv(gymnasium.Env):
         "spread_cost_weight",
         "commission",
         "inactivity_penalty",
+        "naked_penalty_weight",
+        "early_lock_bonus_weight",
     })
 
     def __init__(
@@ -454,6 +462,12 @@ class BetfairEnv(gymnasium.Env):
         self._spread_cost_weight = reward_cfg.get("spread_cost_weight", 0.0)
         self._inactivity_penalty = reward_cfg.get("inactivity_penalty", 0.0)
         self._commission = reward_cfg.get("commission", 0.05)
+        # Forced-arbitrage / scalping reward terms (Issue 05, session 2).
+        # Both default to 0.0 so enabling scalping_mode without setting
+        # these keeps the reward signal identical to the directional path
+        # apart from the skipped precision / early-pick bonuses.
+        self._naked_penalty_weight = reward_cfg.get("naked_penalty_weight", 0.0)
+        self._early_lock_bonus_weight = reward_cfg.get("early_lock_bonus_weight", 0.0)
 
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
@@ -799,6 +813,15 @@ class BetfairEnv(gymnasium.Env):
             "passive_fills": bm.passive_book.last_fills,
             "passive_cancels": bm.passive_book.last_cancels,
             "action_debug": dict(self._last_action_debug),
+            # Scalping diagnostics aggregated across settled races. The
+            # per-race figures live on RaceRecord; these rollups make the
+            # training monitor's job trivial.
+            "arbs_completed": sum(
+                r.arbs_completed for r in self._race_records
+            ),
+            "arbs_naked": sum(r.arbs_naked for r in self._race_records),
+            "locked_pnl": sum(r.locked_pnl for r in self._race_records),
+            "naked_pnl": sum(r.naked_pnl for r in self._race_records),
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -860,7 +883,7 @@ class BetfairEnv(gymnasium.Env):
         # 0b. Advance passive order book — accumulate traded-volume deltas
         #     before the action is processed (mirrors live order-stream timing).
         assert self.bet_manager is not None
-        self.bet_manager.passive_book.on_tick(tick)
+        self.bet_manager.passive_book.on_tick(tick, tick_index=self._tick_idx)
 
         # 1. Process action (bets only on pre-race ticks)
         if not tick.in_play:
@@ -1161,6 +1184,57 @@ class BetfairEnv(gymnasium.Env):
         bm = self.bet_manager
         assert bm is not None
 
+        # ── Scalping snapshot (Issue 05 — session 2) ─────────────────────
+        # Compute pair / naked diagnostics BEFORE race-off cleanup cancels
+        # the unfilled passive legs. `get_paired_positions` groups matched
+        # Bet objects by pair_id, so only legs that actually filled are
+        # counted — unfilled resting passives are cancelled in the next
+        # step. `get_naked_exposure` reads UNSETTLED bets, so we also have
+        # to take its reading here (after settlement every bet becomes
+        # WON/LOST/VOID and the helper would return zero).
+        scalping_locked_pnl = 0.0
+        scalping_arbs_completed = 0
+        scalping_arbs_naked = 0
+        scalping_naked_exposure = 0.0
+        scalping_early_lock_bonus = 0.0
+        if self.scalping_mode:
+            pairs = bm.get_paired_positions(
+                market_id=race.market_id, commission=self._commission,
+            )
+            for p in pairs:
+                if p["complete"]:
+                    scalping_arbs_completed += 1
+                    scalping_locked_pnl += p["locked_pnl"]
+                else:
+                    scalping_arbs_naked += 1
+            scalping_naked_exposure = bm.get_naked_exposure(
+                market_id=race.market_id,
+            )
+            # Early-lock bonus: per completed pair, reward how early the
+            # passive leg filled. `tick_index` on passive Bets is set in
+            # PassiveOrderBook.on_tick; a value of -1 (not recorded) falls
+            # back to zero contribution so the bonus stays well-defined.
+            total_ticks = max(len(race.ticks), 1)
+            if self._early_lock_bonus_weight > 0.0:
+                for p in pairs:
+                    if not p["complete"]:
+                        continue
+                    passive = p["passive"]
+                    aggressive = p["aggressive"]
+                    if passive is None or aggressive is None:
+                        continue
+                    # The passive leg is the one whose tick_index came
+                    # from on_tick; the aggressive leg's tick_index was
+                    # set at placement. Pick whichever is later — that's
+                    # when the pair became "locked".
+                    t_agg = aggressive.tick_index if aggressive.tick_index >= 0 else 0
+                    t_pass = passive.tick_index if passive.tick_index >= 0 else t_agg
+                    lock_tick = max(t_agg, t_pass)
+                    remaining_frac = max(0.0, 1.0 - lock_tick / total_ticks)
+                    scalping_early_lock_bonus += (
+                        self._early_lock_bonus_weight * remaining_frac
+                    )
+
         # ── Race-off cleanup (session 27 — P4c) ──────────────────────────
         # Cancel all unfilled passive orders before settlement.  Budget
         # reservations are released, P&L contribution is zero.  Idempotent.
@@ -1211,9 +1285,16 @@ class BetfairEnv(gymnasium.Env):
         # regardless of outcome, so losing bets punish the shaped reward
         # exactly as much as winning bets reward it. This removes the
         # "random-bet policies earn free positive reward" loophole.
-        early_pick_bonus, early_pick_count = self._compute_early_pick_bonus(
-            race, race_bets,
-        )
+        #
+        # Skipped entirely in scalping mode (Issue 05 — hard constraint):
+        # one leg of every completed arb is a planned loss, so any
+        # directional "early winner" bonus would mis-shape the signal.
+        if self.scalping_mode:
+            early_pick_bonus, early_pick_count = 0.0, 0
+        else:
+            early_pick_bonus, early_pick_count = self._compute_early_pick_bonus(
+                race, race_bets,
+            )
 
         # Efficiency penalty — includes cancelled passives (API call friction).
         efficiency_cost = (race_bet_count + race_cancel_count) * self._efficiency_penalty
@@ -1224,7 +1305,14 @@ class BetfairEnv(gymnasium.Env):
         # non-negative reward, creating a free "participation trophy" for
         # any policy that placed bets.)
         winning = sum(1 for b in race_bets if b.outcome is BetOutcome.WON)
-        if race_bet_count > 0 and self._precision_bonus > 0:
+        # Precision is a directional metric — in scalping mode one leg of
+        # every completed arb is a planned loss, so we zero this term out
+        # unconditionally (Issue 05, hard constraint).
+        if (
+            race_bet_count > 0
+            and self._precision_bonus > 0
+            and not self.scalping_mode
+        ):
             precision = winning / race_bet_count
             precision_reward = (precision - 0.5) * self._precision_bonus
         else:
@@ -1255,6 +1343,30 @@ class BetfairEnv(gymnasium.Env):
 
         inactivity_term = -self._inactivity_penalty if race_bet_count == 0 else 0.0
 
+        # ── Scalping shaping terms (Issue 05) ────────────────────────────
+        # Naked-exposure penalty: proportional to £ of potential loss on
+        # unpaired matched bets at race-off. Strictly non-positive, so it
+        # pushes the agent toward completing pairs rather than carrying
+        # naked directional risk into settlement.
+        #
+        # Early-lock bonus: rewards pairs whose second leg filled quickly.
+        # Aggregated across the race; scales linearly with how many ticks
+        # of "runway" were left when the pair locked.
+        #
+        # Both default to 0.0 when their weights are zero — the scalping
+        # reward path is structurally present but inert unless a genome
+        # opts in. The locked PnL itself is already real money (it flows
+        # through race_pnl as both legs settle), so we don't add it here;
+        # double-counting would break the raw-money invariant.
+        naked_penalty_term = 0.0
+        if self.scalping_mode and self._naked_penalty_weight > 0.0 and self.starting_budget > 0:
+            naked_penalty_term = -(
+                self._naked_penalty_weight
+                * scalping_naked_exposure
+                / self.starting_budget
+            )
+        early_lock_term = scalping_early_lock_bonus if self.scalping_mode else 0.0
+
         shaped = (
             early_pick_bonus
             + precision_reward
@@ -1262,6 +1374,8 @@ class BetfairEnv(gymnasium.Env):
             + drawdown_term
             + spread_cost_term
             + inactivity_term
+            + naked_penalty_term
+            + early_lock_term
         )
         reward = race_pnl + shaped
 
@@ -1269,6 +1383,11 @@ class BetfairEnv(gymnasium.Env):
         self._cum_raw_reward += race_pnl
         self._cum_shaped_reward += shaped
         self._cum_spread_cost += spread_cost_term
+
+        # Naked P&L = the portion of race_pnl NOT explained by completed
+        # arb spreads. When scalping_mode is off both branches fold to the
+        # same number (locked_pnl = 0), keeping the field meaningful.
+        naked_pnl = race_pnl - scalping_locked_pnl
 
         self._race_records.append(RaceRecord(
             market_id=race.market_id,
@@ -1279,6 +1398,10 @@ class BetfairEnv(gymnasium.Env):
             early_picks=early_pick_count,
             budget_before=budget_before,
             budget_after=bm.budget,
+            arbs_completed=scalping_arbs_completed,
+            arbs_naked=scalping_arbs_naked,
+            locked_pnl=scalping_locked_pnl,
+            naked_pnl=naked_pnl,
         ))
 
         return reward

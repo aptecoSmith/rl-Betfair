@@ -428,7 +428,7 @@ class PassiveOrderBook:
             self._last_total_matched[sid] = runner.total_matched
         return order
 
-    def on_tick(self, tick: "Tick") -> None:
+    def on_tick(self, tick: "Tick", tick_index: int = -1) -> None:
         """Accumulate traded-volume deltas and convert filled orders to Bets.
 
         Two-phase per tick:
@@ -522,6 +522,7 @@ class PassiveOrderBook:
                 market_id=order.market_id,
                 ltp_at_placement=order.ltp_at_placement,
                 pair_id=order.pair_id,
+                tick_index=tick_index,
             )
             self._bet_manager.bets.append(bet)
 

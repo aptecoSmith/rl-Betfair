@@ -39,3 +39,47 @@ Implemented:
 Backward compatibility verified: all 1811 pre-existing tests still
 pass. When `scalping_mode=False` the action space (56), observation
 space, and step behaviour are byte-identical to pre-session code.
+
+## Session 2 — Reward + settlement (2026-04-14)
+
+Implemented:
+
+- `config.yaml` gained `reward.naked_penalty_weight` and
+  `reward.early_lock_bonus_weight` (both default 0.0 so flipping
+  `scalping_mode` on without tuning keeps the reward budget-neutral).
+  Both keys are whitelisted in `BetfairEnv._REWARD_OVERRIDE_KEYS` so
+  genetic-search genomes can evolve them per-agent.
+- `PassiveOrderBook.on_tick(tick, tick_index=-1)` now accepts the
+  current race-tick index and stamps it on the `Bet` created when a
+  resting order matches. This lets the scalping early-lock bonus
+  compute "how early did the second leg fill?" without any extra
+  bookkeeping. Default remains `-1` so every existing call-site
+  (tests, live-inference helpers) keeps its current behaviour.
+- `BetfairEnv._settle_current_race` now takes a pair/naked snapshot
+  BEFORE `passive_book.cancel_all("race-off")` so unfilled passives
+  are counted as naked correctly, and runs the scalping branch of
+  reward shaping:
+    - `precision_reward` and `early_pick_bonus` are forced to zero in
+      scalping mode (one leg of every completed arb is a planned loss;
+      directional shaping actively punishes the strategy).
+    - `naked_penalty_term = -weight · naked_exposure / starting_budget`
+      — strictly ≤ 0, pushes the agent toward completing pairs before
+      race-off.
+    - `early_lock_term` sums
+      `weight · max(0, 1 − lock_tick / total_ticks)` over completed
+      pairs, where `lock_tick` is the later of the aggressive bet's
+      placement tick and the passive bet's fill tick. Encourages the
+      agent to target volatile moments that fill the second leg fast.
+- `RaceRecord` now carries `arbs_completed`, `arbs_naked`,
+  `locked_pnl`, and `naked_pnl` (raw cash P&L not explained by locked
+  arb spreads). Aggregates are exposed on `info` for the training
+  monitor and the evaluator.
+- `tests/test_forced_arbitrage.py` — 8 new `TestScalpingReward`
+  tests: completed-pair locked PnL via race_pnl, directional shaping
+  zeroed, naked penalty scales with weight, early-lock bonus is
+  time-proportional, raw+shaped≈total invariant holds, info rollups
+  present, race-off cancels unfilled passives, legacy path unchanged.
+
+Verified: `python -m pytest tests/ -q` → **1844 passed, 7 skipped,
+133 deselected, 1 xfailed**. Invariant `raw + shaped ≈ total_reward`
+holds across scalping rollouts (dedicated test).

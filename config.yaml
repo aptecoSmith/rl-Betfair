@@ -43,6 +43,16 @@ reward:
   drawdown_shaping_weight: 0.0
   spread_cost_weight: 0.0
   inactivity_penalty: 0.0
+  # Forced-arbitrage (scalping) reward terms (Issue 05, session 2).
+  # Only active when training.scalping_mode is true. Default 0.0 means
+  # the scalping reward branch is a no-op even if scalping_mode is on —
+  # bump these to shape the behaviour.
+  #   naked_penalty_weight: multiplier on naked-exposure penalty
+  #     (penalty = -weight * naked_exposure / starting_budget)
+  #   early_lock_bonus_weight: multiplier on completed-pair bonus
+  #     proportional to ticks remaining when the second leg filled
+  naked_penalty_weight: 0.0
+  early_lock_bonus_weight: 0.0
   coefficients:
     win_rate: 0.35
     sharpe: 0.3
