@@ -850,6 +850,14 @@ class BetfairEnv(gymnasium.Env):
         self._tick_idx = 0
         self._races_completed = 0
         self._day_pnl = 0.0
+        # Running sum of the *reward-eligible* per-race P&L (Issue 05,
+        # session 3 follow-up). Equals ``day_pnl`` on directional runs.
+        # In scalping mode it's the cumulative locked_pnl only — naked
+        # bet windfalls are excluded, so the agent can't "cheat" by
+        # leaving unpaired bets and hoping for directional wins. The
+        # terminal day-budget bonus reads this value (not day_pnl) so
+        # the same exclusion propagates end-of-episode.
+        self._day_reward_pnl = 0.0
         self._race_records = []
         self._bet_times = {}
         # Split episode reward into "raw" (tied to real money — race_pnl +
@@ -931,16 +939,14 @@ class BetfairEnv(gymnasium.Env):
 
         # 5. End-of-day bonus on final step
         if terminated:
-            # Day P&L = sum of race P&Ls (true accounting)
-            day_pnl = self._day_pnl
-            # Small bonus proportional to day P&L (normalised by budget).
-            # This is tied to real money, so it counts as raw reward.
-            # ``terminal_bonus_weight`` (Session 3 gene) scales how much
-            # the agent cares about end-of-day vs per-race settlement;
-            # because ``day_pnl`` is real cash, scaling it does NOT break
-            # the zero-mean shaping invariant.
+            # Terminal day-budget bonus uses the reward-eligible P&L so
+            # scalping excludes naked windfalls here too (matches the
+            # per-race exclusion above). On directional runs
+            # ``_day_reward_pnl`` equals ``_day_pnl`` so behaviour is
+            # byte-identical.
+            reward_day_pnl = self._day_reward_pnl
             terminal_bonus = (
-                self._terminal_bonus_weight * day_pnl / self.starting_budget
+                self._terminal_bonus_weight * reward_day_pnl / self.starting_budget
             )
             reward += terminal_bonus
             self._cum_raw_reward += terminal_bonus
@@ -1396,10 +1402,19 @@ class BetfairEnv(gymnasium.Env):
             + naked_penalty_term
             + early_lock_term
         )
-        reward = race_pnl + shaped
+        # Scalping reward-eligible P&L excludes naked bet outcomes: a
+        # naked back that happens to win is directional luck, not a
+        # scalping skill, and rewarding it would teach the agent to
+        # leave unpaired bets on purpose (defeating the strategy). The
+        # naked_penalty_term still covers the *exposure* downside on
+        # both sides — so leaving naked bets is strictly punished, not
+        # silently tolerated. Directional runs keep the legacy path.
+        race_reward_pnl = scalping_locked_pnl if self.scalping_mode else race_pnl
+        self._day_reward_pnl += race_reward_pnl
+        reward = race_reward_pnl + shaped
 
         # Track raw vs shaped for diagnostic logging.
-        self._cum_raw_reward += race_pnl
+        self._cum_raw_reward += race_reward_pnl
         self._cum_shaped_reward += shaped
         self._cum_spread_cost += spread_cost_term
 

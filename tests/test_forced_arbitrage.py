@@ -586,6 +586,54 @@ class TestScalpingGenes:
         assert env._naked_penalty_weight == pytest.approx(3.5)
         assert env._early_lock_bonus_weight == pytest.approx(0.7)
 
+    def test_naked_windfall_excluded_from_raw_reward(self, scalping_config):
+        """Naked bet P&L must not count toward the reward in scalping mode.
+
+        A naked back that wins is directional luck, not scalping skill —
+        folding it into the reward would teach the agent to deliberately
+        leave unpaired bets and hope for a price run. The naked penalty
+        covers the exposure, and that's the only signal naked bets get.
+        """
+        cfg = dict(scalping_config)
+        cfg["reward"] = dict(cfg["reward"])
+        # Turn shaping way down so the raw reward is effectively the only
+        # thing driving the reward stream.
+        cfg["reward"]["naked_penalty_weight"] = 0.0
+        cfg["reward"]["early_lock_bonus_weight"] = 0.0
+        cfg["reward"]["terminal_bonus_weight"] = 0.0
+        cfg["reward"]["efficiency_penalty"] = 0.0
+
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg)
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0       # back signal
+        a[14] = -0.8     # small stake
+        a[28] = 1.0      # aggressive
+        a[56] = 1.0      # 15-tick spread
+        env.reset()
+        env.step(a)
+        # Subsequent steps: hold (no new bets) so we can isolate the
+        # behaviour of the first naked leg without more pairs stacking.
+        hold = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        # Force the one outstanding pair to stay unfilled: clear the
+        # passive_book and strip pair_id off the matched aggressive so
+        # `get_paired_positions` can't find a pair group.
+        bm = env.bet_manager
+        bm.passive_book._orders = []
+        bm.passive_book._orders_by_sid.clear()
+        for b in bm.bets:
+            b.pair_id = None
+        terminated = False
+        info = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(hold)
+        # No pair was completed, so the raw reward excludes the naked
+        # bet's P&L entirely — even if day_pnl is non-zero because the
+        # runner did win / lose directionally.
+        assert info["arbs_completed"] == 0
+        assert info["locked_pnl"] == 0.0
+        assert info["naked_pnl"] == pytest.approx(info["day_pnl"], abs=1e-6)
+        assert info["raw_pnl_reward"] == pytest.approx(0.0, abs=1e-6)
+
     def test_evaluator_collects_scalping_metrics(self, scalping_config):
         """EvaluationDayRecord carries arbs_completed / arbs_naked /
         locked_pnl / naked_pnl sourced from the env's info dict."""
