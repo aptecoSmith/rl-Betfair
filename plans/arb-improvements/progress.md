@@ -78,9 +78,68 @@ Test results: 8 / 8 new tests pass; full non-gpu/non-slow suite green
 
 UI work deferred to Session 8 (consolidation pass).
 
-### Session 2 — Entropy floor
+### Session 2 — Entropy floor & per-head logging
 
-Not yet started.
+**Shipped 2026-04-14.** Adaptive entropy-coefficient controller + per-head
+entropy diagnostics. All four new hyperparameters default to values that
+leave training byte-identical (`entropy_floor=0` = off).
+
+New hyperparameters on `PPOTrainer`:
+
+- `entropy_floor` (float, default `0.0` = off). When the rolling mean
+  entropy drops below this value, `entropy_coefficient` is scaled to
+  `floor / rolling_mean × base`, capped at `entropy_boost_max`. When the
+  rolling mean recovers, the coefficient snaps back to the baseline.
+- `entropy_floor_window` (int, default `10` batches).
+- `entropy_boost_max` (float, default `10.0`) — caps the multiplier.
+- `entropy_collapse_patience` (int, default `5`) — consecutive batches a
+  single head must sit below the floor before the `entropy_collapse`
+  warning flag fires.
+
+The controller scales the *coefficient* only; the policy's action
+distribution is never touched directly (hard_constraints.md §Stabilisation).
+
+Progress events now carry an `action_stats` dict at the top level:
+
+```
+action_stats = {
+    "mean_entropy_signal":     <rolling mean>,
+    "mean_entropy_stake":      <rolling mean>,
+    "mean_entropy_aggression": <rolling mean>,
+    "mean_entropy_cancel":     <rolling mean>,
+    "mean_entropy_arb_spread": <rolling mean>,
+    "entropy_collapse":        <bool>,
+    "entropy_coeff_active":    <float>,
+}
+```
+
+Per-head entropy is sliced out of `dist.entropy()` using the policy's
+`max_runners` and `_per_runner_action_dim` — no policy-network change
+needed. Heads not present in the policy (e.g. `arb_spread` on a
+directional run) are reported as `0.0` for a stable schema but never
+trip the collapse detector.
+
+Files changed:
+
+- `agents/ppo_trainer.py` — `_HEAD_NAMES` constant; entropy-floor hp
+  plumbing; rolling window / per-head collapse streak; new
+  `_update_entropy_controller` + `_compute_per_head_entropy` methods;
+  per-head entropy accumulated through the mini-batch loop and flushed
+  at the end of each `_ppo_update`; `action_stats` routed through
+  `loss_info` into `_publish_progress`.
+- `tests/arb_improvements/test_entropy_floor.py` — 7 CPU-only tests:
+  floor triggers scaling, recovery restores baseline, floor off = no
+  coefficient change, per-head entropy in progress event, collapse flag
+  sets / clears, boost_max caps multiplier, raw+shaped invariant holds
+  with floor armed.
+
+Test results: 7 / 7 new tests pass; `tests/arb_improvements/`,
+`tests/test_ppo_trainer.py`, `tests/test_forced_arbitrage.py` = 90
+pass, no regressions. The 17 pre-existing real-data integration
+failures (empty parquet, missing each-way divisors) are unchanged by
+this session.
+
+UI work deferred to Session 8 (consolidation pass).
 
 ### Session 3 — Signal-bias warmup & bet-rate diagnostics
 

@@ -132,6 +132,41 @@
   rely on the update actually doing work should be checking parameter
   drift, not just that no exception was raised.
 
+## Session 2 — Entropy floor & per-head logging (2026-04-14)
+
+- **Per-head entropy is trivially sliceable from a single flat Normal.**
+  The policy packs its action space as
+  `[signal × N | stake × N | aggression × N | cancel × N | arb_spread × N]`
+  with N = `max_runners`. `dist.entropy()` is already per-dim, so a simple
+  index slice gives per-head values — no need to change the policy
+  network or introduce per-head Normals. The only ugliness is that
+  directional-mode policies have 4 heads and scalping policies have 5;
+  the slicer just iterates `min(per_runner_apd, len(_HEAD_NAMES))` and
+  the unused arb_spread window stays empty on directional runs.
+
+- **Patience is `streak > N`, not `streak >= N`.** The spec said
+  "below floor for > N batches" — test 5 pins this explicitly so the
+  boundary can't silently shift. With patience=5, the 6th consecutive
+  collapsed batch is what trips the flag, matching the plain-English
+  reading of the prompt.
+
+- **Don't rebuild the controller when the floor is off.** The gate
+  `self.entropy_floor > 0.0` guards the coefficient update, but the
+  rolling per-head windows still accumulate. Operators get the
+  diagnostic sparkline data for free, and flipping the floor on later
+  in the session doesn't require a warm-up period to populate the
+  window. This matches Session 1's philosophy: telemetry always on,
+  training-signal transforms opt-in.
+
+- **Stub policies need `max_runners` and `_per_runner_action_dim`.** The
+  Session 1 stub got away with a flat 2-dim action space because the
+  clipping tests don't care about heads. Session 2 tests need those
+  attributes — `_compute_per_head_entropy` falls back to a single
+  "signal" head when they're missing, which is friendly to code paths
+  that hit the controller without a real multi-head policy, but the
+  tests themselves explicitly set `max_runners=2, per_runner_action_dim=5`
+  so the 5-head schema is actually exercised.
+
 ## Open questions — decide as sessions land
 
 - **Oracle coverage on low-liquidity days.** Unknown how dense arb

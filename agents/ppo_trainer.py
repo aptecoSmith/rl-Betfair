@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +44,24 @@ from env.betfair_env import BetfairEnv
 from training.progress_tracker import ProgressTracker
 
 logger = logging.getLogger(__name__)
+
+
+# -- Per-head action layout ---------------------------------------------------
+
+#: Ordered names of the per-runner action heads, matching the layout
+#: produced by ``env.betfair_env`` and consumed by ``BetfairEnv.step``:
+#: ``[signal × N | stake × N | aggression × N | cancel × N | arb_spread × N]``
+#: where N = ``max_runners``. The 5th head (``arb_spread``) is only present
+#: when the env's scalping branch is active; directional runs use the first
+#: four. Used by the Session 2 entropy-floor controller to slice the
+#: flat Normal distribution into per-head entropies.
+_HEAD_NAMES: tuple[str, ...] = (
+    "signal",
+    "stake",
+    "aggression",
+    "cancel",
+    "arb_spread",
+)
 
 
 # -- Gene → env reward override mapping ---------------------------------------
@@ -241,6 +260,46 @@ class PPOTrainer:
         self.gae_lambda = hp.get("gae_lambda", 0.95)
         self.clip_epsilon = hp.get("ppo_clip_epsilon", 0.2)
         self.entropy_coeff = hp.get("entropy_coefficient", 0.01)
+        # -- Session 2 (arb-improvements) entropy-floor controller --------
+        # Baseline coefficient captured before any adaptive scaling. When
+        # ``entropy_floor`` is 0 (default) the controller is a no-op and
+        # ``self.entropy_coeff`` stays at the baseline for every update —
+        # byte-identical to pre-session behaviour.
+        #
+        # The controller keeps a rolling window of per-head entropies.
+        # Before each PPO update's entropy-bonus term, if the rolling
+        # mean entropy (averaged across heads and the window) is below
+        # the floor, ``self.entropy_coeff`` is scaled up to
+        # ``min(entropy_boost_max, floor / rolling_mean) * base``. When
+        # the rolling mean recovers above the floor, it snaps back to
+        # baseline. The floor scales the *coefficient*, never the action
+        # distribution directly (hard_constraints.md §Stabilisation).
+        self._entropy_coeff_base = float(self.entropy_coeff)
+        self.entropy_floor = float(hp.get("entropy_floor", 0.0) or 0.0)
+        self.entropy_floor_window = int(hp.get("entropy_floor_window", 10) or 10)
+        self.entropy_boost_max = float(hp.get("entropy_boost_max", 10.0) or 10.0)
+        # Number of consecutive PPO updates a single head must sit below
+        # the floor before the ``entropy_collapse`` warning flag fires.
+        # Defaults to 5 (per session_2_entropy_floor.md, "sensible default").
+        self.entropy_collapse_patience = int(
+            hp.get("entropy_collapse_patience", 5) or 5
+        )
+        # Rolling window of mean-across-heads entropy, used by the
+        # coefficient controller.
+        self._entropy_window: deque[float] = deque(
+            maxlen=max(1, self.entropy_floor_window)
+        )
+        # Per-head rolling windows (for action_stats progress reporting)
+        # and per-head consecutive-below-floor streak (for collapse flag).
+        self._per_head_window: dict[str, deque[float]] = {
+            h: deque(maxlen=max(1, self.entropy_floor_window))
+            for h in _HEAD_NAMES
+        }
+        self._per_head_below_streak: dict[str, int] = {
+            h: 0 for h in _HEAD_NAMES
+        }
+        self._entropy_collapse: bool = False
+        self._entropy_coeff_active: float = self._entropy_coeff_base
         self.value_loss_coeff = hp.get("value_loss_coeff", 0.5)
         self.max_grad_norm = hp.get("max_grad_norm", 0.5)
         self.ppo_epochs = hp.get("ppo_epochs", 4)
@@ -565,6 +624,14 @@ class PPOTrainer:
         policy_losses = []
         value_losses = []
         entropies = []
+        # Session 2: accumulate per-head entropy contributions across the
+        # mini-batch loop so we can push a single average-per-head sample
+        # to the rolling window at the end of this update. Only heads
+        # actually present in the policy's action space are populated —
+        # a directional (4-head) policy omits ``arb_spread`` so it never
+        # trips the collapse detector for a head it can't produce.
+        per_head_sums: dict[str, float] = {}
+        per_head_count: int = 0
 
         for _ in range(self.ppo_epochs):
             # Generate random mini-batch indices
@@ -596,7 +663,16 @@ class PPOTrainer:
                 dist = Normal(out.action_mean, std)
 
                 new_log_probs = dist.log_prob(mb_actions).sum(dim=-1)
-                entropy = dist.entropy().sum(dim=-1).mean()
+                per_dim_entropy = dist.entropy()  # (batch, action_dim)
+                entropy = per_dim_entropy.sum(dim=-1).mean()
+                # Session 2: per-head entropy slices for the floor
+                # controller + progress event.
+                mb_per_head = self._compute_per_head_entropy(per_dim_entropy)
+                for h_name, h_val in mb_per_head.items():
+                    per_head_sums[h_name] = (
+                        per_head_sums.get(h_name, 0.0) + h_val
+                    )
+                per_head_count += 1
                 values = out.value.squeeze(-1)
 
                 # PPO clipped surrogate
@@ -647,11 +723,141 @@ class PPOTrainer:
             n, n_updates, ppo_elapsed, self.device,
         )
 
+        # Session 2: flush this update's per-head entropies into the
+        # rolling controller. ``per_head_sums`` only contains heads the
+        # policy actually produced during the mini-batch loop.
+        per_head_mean: dict[str, float] = {
+            h_name: total / per_head_count
+            for h_name, total in per_head_sums.items()
+        } if per_head_count > 0 else {}
+        action_stats = self._update_entropy_controller(per_head_mean)
+
         return {
             "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
             "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
             "entropy": float(np.mean(entropies)) if entropies else 0.0,
+            "action_stats": action_stats,
         }
+
+    # -- Entropy-floor controller (Session 2) --------------------------------
+
+    def _update_entropy_controller(
+        self, per_head_entropy: dict[str, float],
+    ) -> dict[str, float]:
+        """Push a batch's per-head mean entropies into the rolling window,
+        update the coefficient scaling, and recompute the collapse flag.
+
+        Returns an ``action_stats`` dict suitable for the progress event:
+        per-head rolling mean entropies, the currently-active entropy
+        coefficient, and a boolean ``entropy_collapse`` warning flag.
+
+        The controller is a no-op (returns the rolling state but never
+        changes the coefficient) when ``entropy_floor == 0``.
+        """
+        # Record the per-head values into the rolling windows (always —
+        # the action_stats dict is useful diagnostics regardless of whether
+        # the floor is armed).
+        for name, value in per_head_entropy.items():
+            if name in self._per_head_window:
+                self._per_head_window[name].append(float(value))
+
+        # Overall rolling mean is the mean of the per-head values pushed
+        # this call. Stored one-per-update so the window reflects batches,
+        # not heads.
+        if per_head_entropy:
+            batch_mean = float(
+                sum(per_head_entropy.values()) / len(per_head_entropy)
+            )
+            self._entropy_window.append(batch_mean)
+
+        # Coefficient controller. Kept off entirely when entropy_floor<=0
+        # — byte-identical to pre-session behaviour.
+        if self.entropy_floor > 0.0 and self._entropy_window:
+            rolling_mean = float(
+                sum(self._entropy_window) / len(self._entropy_window)
+            )
+            if rolling_mean < self.entropy_floor:
+                # Guard against zero/near-zero mean entropy blowing the
+                # ratio past float range. ``entropy_boost_max`` is the
+                # authoritative cap; this just avoids a div-by-zero on
+                # the way to it.
+                denom = max(rolling_mean, 1e-8)
+                multiplier = min(
+                    self.entropy_boost_max, self.entropy_floor / denom,
+                )
+                self._entropy_coeff_active = (
+                    multiplier * self._entropy_coeff_base
+                )
+            else:
+                self._entropy_coeff_active = self._entropy_coeff_base
+        else:
+            self._entropy_coeff_active = self._entropy_coeff_base
+
+        # Per-head collapse streak — driven even when the floor is off
+        # so the diagnostic flag is still meaningful for operators. A
+        # zero floor means no head is ever "below", so streaks stay at 0
+        # and the flag stays False.
+        any_collapse = False
+        for name in _HEAD_NAMES:
+            value = per_head_entropy.get(name)
+            if value is None:
+                continue
+            if self.entropy_floor > 0.0 and value < self.entropy_floor:
+                self._per_head_below_streak[name] += 1
+            else:
+                self._per_head_below_streak[name] = 0
+            if (
+                self._per_head_below_streak[name]
+                > self.entropy_collapse_patience
+            ):
+                any_collapse = True
+        self._entropy_collapse = bool(any_collapse)
+
+        # Apply the active coefficient so the NEXT mini-batch loop uses
+        # the new value for the entropy bonus term.
+        self.entropy_coeff = self._entropy_coeff_active
+
+        # Build the action_stats dict with one key per head. Heads that
+        # haven't been seen yet (e.g. arb_spread on a directional run)
+        # report 0.0 so the schema is stable.
+        action_stats: dict[str, float] = {}
+        for name in _HEAD_NAMES:
+            window = self._per_head_window[name]
+            if window:
+                action_stats[f"mean_entropy_{name}"] = float(
+                    sum(window) / len(window)
+                )
+            else:
+                action_stats[f"mean_entropy_{name}"] = 0.0
+        action_stats["entropy_collapse"] = self._entropy_collapse
+        action_stats["entropy_coeff_active"] = self._entropy_coeff_active
+        return action_stats
+
+    def _compute_per_head_entropy(
+        self, per_dim_entropy: torch.Tensor,
+    ) -> dict[str, float]:
+        """Slice a (batch, action_dim) entropy tensor into per-head means.
+
+        Action layout is ``[head_0 × N | head_1 × N | …]`` where
+        ``N = max_runners`` and head indices follow ``_HEAD_NAMES``.
+        Returns a plain ``{head_name: float}`` dict (one entry per head
+        actually present in the policy's action space).
+        """
+        max_runners = getattr(self.policy, "max_runners", None)
+        per_runner_apd = getattr(self.policy, "_per_runner_action_dim", None)
+        if max_runners is None or per_runner_apd is None:
+            # Fallback for minimal/stub policies used in isolation tests
+            # that don't have the multi-head layout: treat the whole
+            # distribution as a single "signal" head.
+            return {"signal": float(per_dim_entropy.mean().item())}
+
+        per_head: dict[str, float] = {}
+        for h_idx in range(min(per_runner_apd, len(_HEAD_NAMES))):
+            start = h_idx * max_runners
+            end = start + max_runners
+            chunk = per_dim_entropy[:, start:end]
+            per_head[_HEAD_NAMES[h_idx]] = float(chunk.mean().item())
+        return per_head
 
     # -- Logging & progress ---------------------------------------------------
 
@@ -746,6 +952,20 @@ class PPOTrainer:
                 "locked_pnl": ep.locked_pnl,
                 "naked_pnl": ep.naked_pnl,
             },
+            # Session 2 — per-head entropy + floor-controller diagnostics.
+            # Present on every progress event; floor-off runs still emit
+            # the rolling per-head means so the monitor can sparkline
+            # entropy trajectories before the operator decides to arm the
+            # floor. See plans/arb-improvements/session_2_entropy_floor.md.
+            "action_stats": loss_info.get(
+                "action_stats",
+                {
+                    f"mean_entropy_{h}": 0.0 for h in _HEAD_NAMES
+                } | {
+                    "entropy_collapse": False,
+                    "entropy_coeff_active": self._entropy_coeff_active,
+                },
+            ),
         }
 
         if self.progress_queue is not None:
