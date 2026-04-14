@@ -134,5 +134,11 @@ class TestPopulationFromRealConfig:
         for a in agents:
             record = store.get_model(a.model_id)
             assert record.generation == 0
-            assert record.architecture_name == "ppo_lstm_v1"
+            # Population init samples architectures at random from the
+            # registered set; don't pin this to ppo_lstm_v1.
+            assert record.architecture_name in (
+                "ppo_lstm_v1",
+                "ppo_time_lstm_v1",
+                "ppo_transformer_v1",
+            )
             assert record.status == "active"
