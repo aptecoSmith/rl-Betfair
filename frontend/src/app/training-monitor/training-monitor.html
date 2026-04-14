@@ -432,18 +432,25 @@
                   <label class="form-field">
                     <span class="field-label">
                       <input type="checkbox" [(ngModel)]="scalpingMode" data-testid="scalping-mode-toggle" />
-                      Scalping mode (forced arbitrage)
+                      Scalping mode — forced arbitrage <strong>(whole-run toggle)</strong>
                     </span>
                     <span class="field-help">
-                      Forces paired orders — every aggressive bet automatically
-                      generates a counter-order on the opposite side, N ticks
-                      away. The agent learns to profit from small price
-                      movements rather than predicting winners. Enables the
-                      <code>arb_spread</code>, <code>naked_penalty_weight</code>
-                      and <code>early_lock_bonus_weight</code> genes. Runs with
-                      this on evolve a fundamentally different strategy — mixing
-                      scalping and directional agents in one population is
-                      incompatible because the action space shapes differ.
+                      Forces paired orders: every aggressive bet automatically
+                      generates a counter-order <strong>N</strong> ticks the other
+                      way on the same runner. The agent learns to profit from
+                      small price movements rather than predicting winners, and
+                      the <code>arb_spread_scale</code>,
+                      <code>naked_penalty_weight</code> and
+                      <code>early_lock_bonus_weight</code> genes start evolving.
+                    </span>
+                    <span class="field-help" style="color: #c9a048;">
+                      <strong>Can't coexist with directional training.</strong>
+                      Scalping agents take one extra action per runner
+                      (<code>arb_spread</code>) and read two extra per-runner
+                      observation features, so the policy networks are
+                      structurally different shapes. Mixing them in one
+                      population would break crossover and policy loading. The
+                      whole run is either scalping or directional.
                     </span>
                   </label>
                 </div>

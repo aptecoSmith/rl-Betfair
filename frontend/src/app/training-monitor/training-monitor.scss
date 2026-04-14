@@ -830,6 +830,34 @@
   margin: 0 0 0.75rem;
 }
 
+// Chip row — used for the market-type filter toggles in step 3 (and
+// anywhere else a chip layout is needed). Previously these styles only
+// lived in `training-plans.scss`, which is component-scoped, so the
+// `.active` state never lit up here and clicks looked like no-ops.
+.arch-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+
+  .chip {
+    background: #14141d;
+    border: 1px solid #333;
+    color: #aaa;
+    padding: 0.3rem 0.7rem;
+    border-radius: 12px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 0.8rem;
+
+    &:hover { border-color: #555; color: #ddd; }
+    &.active {
+      background: rgba(76, 175, 80, 0.15);
+      border-color: #81c784;
+      color: #81c784;
+    }
+  }
+}
+
 .help-text {
   font-size: 0.8125rem;
   color: #a0a0b8;
