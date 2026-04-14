@@ -4,56 +4,52 @@
 
 ### Worker — CMD_EVALUATE command
 
-- [ ] Add `CMD_EVALUATE` constant to `training/worker.py`
-- [ ] Handler receives: `{ model_ids: list[str], test_dates: list[str] | null }`
-- [ ] If `test_dates` is null, use all available processed days
-- [ ] For each model_id: load weights from registry, instantiate policy,
+- [x] Add `CMD_EVALUATE` constant to `training/ipc.py`
+- [x] Handler receives: `{ model_ids: list[str], test_dates: list[str] | null }`
+- [x] If `test_dates` is null, use all available processed days
+- [x] For each model_id: load weights from registry, instantiate policy,
       call `Evaluator.evaluate()`
-- [ ] Publish progress via existing WebSocket — reuse evaluator's
+- [x] Publish progress via existing WebSocket — reuse evaluator's
       progress tracker with phase="evaluating"
-- [ ] Handle errors per-model (skip failed, report, continue with next)
-- [ ] Worker state during evaluation: "evaluating" (distinct from
-      "training") so training monitor knows what's happening
+- [x] Handle errors per-model (skip failed, report, continue with next)
+- [x] Worker state during evaluation: shared `running` flag (one job
+      at a time); summary carries `manual_evaluation: true` flag
 
 ### API — POST /api/evaluate endpoint
 
-- [ ] Add `EvaluateRequest` schema: `{ model_ids: list[str],
-      test_dates: list[str] | None }` to `api/schemas.py`
-- [ ] Add `EvaluateResponse` schema: `{ accepted: bool, model_count: int,
-      day_count: int }`
-- [ ] Add `POST /api/evaluate` to `api/routers/training.py` (or a new
-      `evaluation.py` router)
-- [ ] Validate: all model_ids exist in registry, all test_dates are
+- [x] Add `EvaluateRequest` schema
+- [x] Add `EvaluateResponse` schema
+- [x] Add `POST /evaluate` (new `api/routers/evaluation.py`)
+- [x] Validate: all model_ids exist in registry, all test_dates are
       available in processed data
-- [ ] Reject if worker is already busy (training or evaluating)
-- [ ] Send CMD_EVALUATE to worker via IPC
-- [ ] Return accepted response
+- [x] Reject if worker is already busy
+- [x] Send CMD_EVALUATE to worker via IPC
+- [x] Return accepted response
 
 ### API — GET /api/evaluate/status
 
-- [ ] Return current evaluation progress (or "idle" if not running)
-- [ ] Include: model_ids being evaluated, current model, progress pct,
-      ETA, completed count
+- [x] Returns current evaluation progress (or "idle" if not running)
+- [x] Includes: phase, detail, process snapshot, item snapshot,
+      manual_evaluation flag
 
 ### API — available days for eval
 
-- [ ] Ensure `GET /api/admin/days` (or a new lightweight endpoint)
-      returns all available processed days with enough info to pick
-      them in the UI
+- [x] Existing `GET /admin/days` already returns processed days with
+      tick/race counts — no new endpoint needed.
 
 ### Tests
 
-- [ ] Test CMD_EVALUATE runs evaluator for given model IDs
-- [ ] Test CMD_EVALUATE with null test_dates uses all available days
-- [ ] Test POST /api/evaluate rejects when worker is busy
-- [ ] Test POST /api/evaluate validates model_ids exist
-- [ ] Test progress events are published during standalone evaluation
+- [x] POST /evaluate: rejects when worker busy
+- [x] POST /evaluate: validates model_ids exist
+- [x] POST /evaluate: validates test_dates exist
+- [x] POST /evaluate: default-all-dates expansion + explicit dates
+- [x] GET /evaluate/status: idle + running variants
 
 ### Verify
 
-- [ ] `python -m pytest tests/ --timeout=120 -q` — all green
+- [x] `python -m pytest tests/ --timeout=120 -q` — 1811 passed
 - [ ] Manual: call POST /api/evaluate with a known model_id, verify
-      evaluation runs and results appear in registry
+      evaluation runs and results appear in registry (defer to session 2)
 
 ---
 

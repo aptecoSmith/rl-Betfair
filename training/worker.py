@@ -51,6 +51,7 @@ from training.training_plan import PlanRegistry, TrainingPlan
 from training.ipc import (
     DEFAULT_WORKER_HOST,
     DEFAULT_WORKER_PORT,
+    CMD_EVALUATE,
     CMD_FINISH,
     CMD_START,
     CMD_STOP,
@@ -59,6 +60,7 @@ from training.ipc import (
     STOP_EVAL_CURRENT,
     STOP_IMMEDIATE,
     make_error_msg,
+    make_evaluate_started_msg,
     make_event_msg,
     make_started_msg,
     make_status_msg,
@@ -317,6 +319,14 @@ class TrainingWorker:
                 return
             await self._start_training(msg, ws)
 
+        elif msg_type == CMD_EVALUATE:
+            if self.running:
+                await ws.send(make_error_msg(
+                    "Worker is busy — cannot start evaluation while another job is running"
+                ))
+                return
+            await self._start_evaluation(msg, ws)
+
         elif msg_type == CMD_STOP:
             if not self.running:
                 await ws.send(make_error_msg("No training run in progress"))
@@ -532,6 +542,231 @@ class TrainingWorker:
 
         self.training_thread = threading.Thread(
             target=_run_in_thread, daemon=True, name="training-run",
+        )
+        self.training_thread.start()
+
+    # ── Evaluation lifecycle ────────────────────────────────────────
+
+    async def _start_evaluation(
+        self, params: dict, ws: websockets.server.ServerConnection,
+    ) -> None:
+        """Handle CMD_EVALUATE — run the Evaluator on N models × M test days."""
+        from data.episode_builder import load_days
+
+        model_ids: list[str] = list(params.get("model_ids") or [])
+        test_dates_raw: list[str] | None = params.get("test_dates")
+
+        if not model_ids:
+            await ws.send(make_error_msg("No model_ids provided"))
+            return
+
+        # Validate models exist + have weights
+        missing: list[str] = []
+        no_weights: list[str] = []
+        for mid in model_ids:
+            rec = self.store.get_model(mid)
+            if rec is None:
+                missing.append(mid)
+            elif not rec.weights_path:
+                no_weights.append(mid)
+        if missing:
+            await ws.send(make_error_msg(f"Model(s) not found: {missing}"))
+            return
+        if no_weights:
+            await ws.send(make_error_msg(f"Model(s) have no saved weights: {no_weights}"))
+            return
+
+        # Reload config so admin-edited constraints take effect
+        self._reload_config_from_disk()
+        data_dir = self.config["paths"]["processed_data"]
+        processed = Path(data_dir)
+        all_dates = sorted(
+            f.stem
+            for f in processed.glob("*.parquet")
+            if not f.stem.endswith("_runners") and f.stem != ".gitkeep"
+        )
+        if not all_dates:
+            await ws.send(make_error_msg("No extracted data available — import days first"))
+            return
+
+        if test_dates_raw is None:
+            test_dates = all_dates
+        else:
+            unknown = [d for d in test_dates_raw if d not in all_dates]
+            if unknown:
+                await ws.send(make_error_msg(f"Test dates not found in data: {unknown}"))
+                return
+            test_dates = sorted(test_dates_raw)
+
+        job_id = str(uuid.uuid4())
+
+        # Reset state
+        self.stop_event.clear()
+        self.finish_event.clear()
+        self.skip_training_event.clear()
+        self.stop_after_current_eval_event.clear()
+        self.running = True
+        self.latest_event = None
+        self.latest_process = None
+        self.latest_item = None
+        self.latest_overall = None
+        self._active_plan_id = None
+
+        while not self.progress_queue.empty():
+            try:
+                self.progress_queue.get_nowait()
+            except thread_queue.Empty:
+                break
+
+        await self._broadcast(make_evaluate_started_msg(job_id, model_ids, test_dates))
+
+        console.print()
+        console.rule(f"[bold cyan]Manual Evaluation {job_id[:8]}[/bold cyan]")
+        console.print(f"  Models: {len(model_ids)}  |  Test days: {len(test_dates)}")
+        console.print()
+
+        config_for_run = copy.deepcopy(self.config)
+
+        def _run_in_thread() -> None:
+            from training.evaluator import Evaluator
+            from agents.architecture_registry import create_policy
+            from env.betfair_env import (
+                ACTIONS_PER_RUNNER,
+                AGENT_STATE_DIM,
+                MARKET_DIM,
+                OBS_SCHEMA_VERSION,
+                POSITION_DIM,
+                RUNNER_DIM,
+                VELOCITY_DIM,
+            )
+
+            try:
+                self.progress_queue.put_nowait({
+                    "event": "phase_start",
+                    "phase": "evaluating",
+                    "timestamp": time.time(),
+                    "summary": {
+                        "model_count": len(model_ids),
+                        "day_count": len(test_dates),
+                        "manual_evaluation": True,
+                    },
+                })
+
+                console.print("[dim]Loading test data...[/dim]")
+                test_days = load_days(
+                    test_dates, data_dir=data_dir, progress_queue=self.progress_queue,
+                )
+                console.print(f"[dim]Loaded {len(test_days)} test days[/dim]")
+
+                max_runners = config_for_run["training"]["max_runners"]
+                obs_dim = (
+                    MARKET_DIM
+                    + VELOCITY_DIM
+                    + (RUNNER_DIM * max_runners)
+                    + AGENT_STATE_DIM
+                    + (POSITION_DIM * max_runners)
+                )
+                action_dim = max_runners * ACTIONS_PER_RUNNER
+
+                evaluator = Evaluator(
+                    config=config_for_run,
+                    model_store=self.store,
+                    progress_queue=self.progress_queue,
+                )
+
+                train_cutoff = test_dates[0] if test_dates else ""
+                completed = 0
+                failed: list[tuple[str, str]] = []
+
+                for idx, mid in enumerate(model_ids):
+                    if self.stop_event.is_set():
+                        break
+
+                    self.progress_queue.put_nowait({
+                        "event": "progress",
+                        "phase": "evaluating",
+                        "process": {
+                            "label": f"Evaluating {len(model_ids)} models",
+                            "completed": idx,
+                            "total": len(model_ids),
+                            "pct": 100.0 * idx / max(len(model_ids), 1),
+                            "item_eta_human": "",
+                            "process_eta_human": "",
+                        },
+                        "detail": f"Evaluating model {mid[:12]} ({idx+1}/{len(model_ids)})",
+                    })
+
+                    try:
+                        record = self.store.get_model(mid)
+                        if record is None:
+                            raise ValueError(f"Model {mid} disappeared from registry")
+                        hp = record.hyperparameters or {}
+                        arch_name = record.architecture_name
+                        market_type_filter = hp.get("market_type_filter", "BOTH")
+
+                        policy = create_policy(
+                            name=arch_name,
+                            obs_dim=obs_dim,
+                            action_dim=action_dim,
+                            max_runners=max_runners,
+                            hyperparams=hp,
+                        )
+                        state_dict = self.store.load_weights(
+                            mid,
+                            expected_obs_schema_version=OBS_SCHEMA_VERSION,
+                        )
+                        policy.load_state_dict(state_dict)
+
+                        evaluator.evaluate(
+                            model_id=mid,
+                            policy=policy,
+                            test_days=test_days,
+                            train_cutoff_date=train_cutoff,
+                            market_type_filter=market_type_filter,
+                        )
+                        completed += 1
+                    except Exception as exc:
+                        logger.exception("Evaluation failed for model %s", mid)
+                        failed.append((mid, str(exc)))
+                        try:
+                            self.progress_queue.put_nowait({
+                                "event": "progress",
+                                "phase": "evaluating",
+                                "detail": f"Model {mid[:12]} failed: {exc}",
+                            })
+                        except thread_queue.Full:
+                            pass
+
+                self.progress_queue.put_nowait({
+                    "event": "phase_complete",
+                    "phase": "run_complete",
+                    "timestamp": time.time(),
+                    "summary": {
+                        "manual_evaluation": True,
+                        "models_evaluated": completed,
+                        "models_failed": len(failed),
+                        "failed_model_ids": [m for m, _ in failed],
+                    },
+                })
+            except Exception as exc:
+                logger.exception("Manual evaluation crashed")
+                crash_dir = Path("logs/crashes")
+                crash_dir.mkdir(parents=True, exist_ok=True)
+                crash_file = crash_dir / f"crash_eval_{time.strftime('%Y%m%d_%H%M%S')}.log"
+                crash_file.write_text(traceback.format_exc())
+                logger.info("Crash details written to %s", crash_file)
+                try:
+                    self.progress_queue.put_nowait({
+                        "event": "phase_complete",
+                        "phase": "run_error",
+                        "timestamp": time.time(),
+                        "summary": {"error": str(exc), "manual_evaluation": True},
+                    })
+                except thread_queue.Full:
+                    pass
+
+        self.training_thread = threading.Thread(
+            target=_run_in_thread, daemon=True, name="manual-evaluation",
         )
         self.training_thread.start()
 

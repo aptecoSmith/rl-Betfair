@@ -475,6 +475,29 @@ class FinishTrainingResponse(BaseModel):
     detail: str
 
 
+class EvaluateRequest(BaseModel):
+    """Body for POST /evaluate — manual standalone evaluation request."""
+    model_ids: list[str]
+    test_dates: list[str] | None = None  # None = all available processed days
+
+
+class EvaluateResponse(BaseModel):
+    accepted: bool
+    job_id: str
+    model_count: int
+    day_count: int
+
+
+class EvaluateStatus(BaseModel):
+    """Lightweight status poll for the evaluation page."""
+    running: bool
+    phase: str | None = None
+    detail: str | None = None
+    process: ProgressSnapshot | None = None
+    item: ProgressSnapshot | None = None
+    manual_evaluation: bool = False
+
+
 class BettingConstraints(BaseModel):
     max_back_price: float | None = None
     max_lay_price: float | None = None

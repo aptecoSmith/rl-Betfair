@@ -19,6 +19,7 @@ CMD_START = "start"
 CMD_STOP = "stop"
 CMD_FINISH = "finish"
 CMD_STATUS = "status"
+CMD_EVALUATE = "evaluate"
 
 # Stop granularity levels (most → least aggressive)
 STOP_IMMEDIATE = "immediate"
@@ -139,6 +140,34 @@ def make_started_msg(
         "train_days": train_days,
         "test_days": test_days,
         "plan_id": plan_id,
+    })
+
+
+def make_evaluate_cmd(
+    model_ids: list[str],
+    test_dates: list[str] | None = None,
+) -> str:
+    return json.dumps({
+        "type": CMD_EVALUATE,
+        "model_ids": model_ids,
+        "test_dates": test_dates,
+    })
+
+
+def make_evaluate_started_msg(
+    job_id: str,
+    model_ids: list[str],
+    test_dates: list[str],
+) -> str:
+    return json.dumps({
+        "type": EVT_STARTED,
+        "kind": "evaluate",
+        "run_id": job_id,
+        "model_ids": model_ids,
+        "test_dates": test_dates,
+        "train_days": [],
+        "test_days": test_dates,
+        "plan_id": None,
     })
 
 
