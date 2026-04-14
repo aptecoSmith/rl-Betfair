@@ -1,11 +1,11 @@
 import { Component, inject, computed, effect, signal, OnDestroy, viewChild, ElementRef } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { RouterLink } from '@angular/router';
-import { DecimalPipe, JsonPipe } from '@angular/common';
+import { Router, RouterLink } from '@angular/router';
+import { DecimalPipe } from '@angular/common';
 import { TrainingService } from '../services/training.service';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
-import { WSEvent } from '../models/training.model';
+import { RunCompleteSummary, WSEvent } from '../models/training.model';
 
 /** Phase label mapping (same as header, but full labels). */
 const PHASE_LABELS: Record<string, string> = {
@@ -29,7 +29,7 @@ export interface AgentGridItem {
 @Component({
   selector: 'app-training-monitor',
   standalone: true,
-  imports: [JsonPipe, DecimalPipe, FormsModule, RouterLink],
+  imports: [DecimalPipe, FormsModule, RouterLink],
   templateUrl: './training-monitor.html',
   styleUrl: './training-monitor.scss',
 })
@@ -39,6 +39,7 @@ export class TrainingMonitor implements OnDestroy {
   private readonly training = inject(TrainingService);
   private readonly api = inject(ApiService);
   private readonly selectionState = inject(SelectionStateService);
+  private readonly router = inject(Router);
   private tickTimer: ReturnType<typeof setInterval> | null = null;
 
   readonly status = this.training.status;
@@ -144,11 +145,15 @@ export class TrainingMonitor implements OnDestroy {
   /** Ticks every 10s to drive the "time since" display. */
   readonly now = signal(Date.now());
 
-  /** Last completed run summary (shown when idle). */
+  /** Last completed run summary (shown when idle). Prefers the rich
+   * summary captured by the effect; falls back to the latest event if
+   * nothing has been captured yet. */
   readonly lastRunSummary = computed(() => {
+    const captured = this.endSummary();
+    if (captured) return captured;
     const event = this.training.latestEvent();
     if (!event || event.event !== 'run_complete') return null;
-    return event.summary ?? null;
+    return (event.summary as RunCompleteSummary | undefined) ?? null;
   });
 
   /** Human-readable time since last run completed. */
@@ -203,6 +208,33 @@ export class TrainingMonitor implements OnDestroy {
   readonly overallBar = computed(() => this.status().overall);
   readonly processBar = computed(() => this.status().process);
   readonly itemBar = computed(() => this.status().item);
+
+  // ── End-of-run summary modal ─────────────────────────────────────────
+  /** Auto-opens when a run_complete event arrives; dismissable. */
+  readonly showEndSummary = signal(false);
+  /** Stored so "View summary" on the idle card can re-open the modal. */
+  readonly endSummary = signal<RunCompleteSummary | null>(null);
+
+  private endSummaryEffect = effect(() => {
+    const event = this.training.latestEvent();
+    if (!event) return;
+    const isRunComplete =
+      event.event === 'run_complete' ||
+      (event.event === 'phase_complete' &&
+        ['run_complete', 'run_stopped', 'run_error'].includes(event.phase ?? ''));
+    if (!isRunComplete) return;
+    // Prefer an explicitly-shaped summary; fall back to whatever the
+    // event carries so legacy minimal events still show something.
+    const summary = (event.summary as RunCompleteSummary | undefined) ?? {};
+    // Derive status from phase if the backend didn't set it (legacy path).
+    if (!summary.status) {
+      if (event.phase === 'run_stopped') summary.status = 'stopped';
+      else if (event.phase === 'run_error') summary.status = 'error';
+      else summary.status = 'completed';
+    }
+    this.endSummary.set(summary);
+    this.showEndSummary.set(true);
+  });
 
   readonly phaseLabel = computed(() => {
     const phase = this.status().phase;
@@ -271,6 +303,9 @@ export class TrainingMonitor implements OnDestroy {
       this.isFinishing.set(false);
       this.activeStopGranularity.set(null);
       this.showStopDialog.set(false);
+    } else {
+      // Auto-dismiss the end-of-run modal when a new run starts.
+      this.showEndSummary.set(false);
     }
   });
 
@@ -588,6 +623,7 @@ export class TrainingMonitor implements OnDestroy {
     this.stopResetEffect.destroy();
     this.activePlanFetchEffect.destroy();
     this.autoScrollEffect.destroy();
+    this.endSummaryEffect.destroy();
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
   }
@@ -665,5 +701,61 @@ export class TrainingMonitor implements OnDestroy {
 
   getAgentClass(agent: AgentGridItem): string {
     return `agent-cell agent-${agent.status}`;
+  }
+
+  // ── End-of-run summary modal actions ───────────────────────────────
+
+  /** Close the modal but keep the summary available for re-open. */
+  onDismissEndSummary(): void {
+    this.showEndSummary.set(false);
+  }
+
+  /** Re-open the modal from the idle-state compact card. */
+  onViewEndSummary(): void {
+    if (this.endSummary()) this.showEndSummary.set(true);
+  }
+
+  onViewScoreboard(): void {
+    this.showEndSummary.set(false);
+    this.router.navigate(['/scoreboard']);
+  }
+
+  onViewBestModel(): void {
+    const id = this.endSummary()?.best_model?.model_id;
+    if (!id) return;
+    this.showEndSummary.set(false);
+    this.router.navigate(['/models', id]);
+  }
+
+  /** Dismiss the modal so the wizard is the active view. */
+  onStartNewRun(): void {
+    this.showEndSummary.set(false);
+  }
+
+  /** Header style/label per status. */
+  endSummaryHeader(): { label: string; cls: string } {
+    const s = this.endSummary()?.status ?? 'completed';
+    if (s === 'stopped') return { label: 'Training Stopped', cls: 'status-stopped' };
+    if (s === 'error') return { label: 'Training Failed', cls: 'status-error' };
+    return { label: 'Training Complete', cls: 'status-complete' };
+  }
+
+  formatWallTime(seconds: number | undefined | null): string {
+    if (seconds == null) return '—';
+    const s = Math.max(0, Math.floor(seconds));
+    if (s < 60) return `${s}s`;
+    if (s < 3600) {
+      const m = Math.floor(s / 60);
+      const rem = s % 60;
+      return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+    }
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+
+  shortId(id: string | undefined | null): string {
+    if (!id) return '—';
+    return id.length > 12 ? `${id.slice(0, 12)}…` : id;
   }
 }

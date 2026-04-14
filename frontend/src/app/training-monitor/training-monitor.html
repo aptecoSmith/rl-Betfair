@@ -214,14 +214,22 @@
   } @else {
     <!-- ── Idle State: Wizard ─────────────────────────────── -->
     <div class="idle-state" data-testid="idle-state">
-      @if (lastRunSummary()) {
-        <div class="last-run">
-          <h3>Last Run Complete
+      @if (lastRunSummary(); as s) {
+        <div class="last-run-card" data-testid="last-run-card">
+          <div class="last-run-headline">
+            <span class="last-run-title">Last run {{ s.status ?? 'completed' }}</span>
             @if (timeSinceCompleted()) {
               <span class="time-since">· {{ timeSinceCompleted() }}</span>
             }
-          </h3>
-          <pre class="run-summary">{{ lastRunSummary() | json }}</pre>
+            @if (s.best_model) {
+              <span class="last-run-best">
+                · Best: <strong>{{ shortId(s.best_model.model_id) }}</strong>
+                (score {{ s.best_model.composite_score | number:'1.2-2' }},
+                P&amp;L {{ s.best_model.total_pnl | number:'1.2-2' }})
+              </span>
+            }
+          </div>
+          <button type="button" class="btn btn-secondary" (click)="onViewEndSummary()" data-testid="view-summary-btn">View summary</button>
         </div>
       }
 
@@ -637,6 +645,108 @@
         <span class="legend-item"><span class="legend-dot agent-evaluated"></span> Evaluated</span>
         <span class="legend-item"><span class="legend-dot agent-selected"></span> Selected</span>
         <span class="legend-item"><span class="legend-dot agent-discarded"></span> Discarded</span>
+      </div>
+    </div>
+  }
+
+  <!-- ── End-of-run summary modal ─────────────────────────── -->
+  @if (showEndSummary() && endSummary(); as s) {
+    <div class="dialog-backdrop" (click)="onDismissEndSummary()">
+      <div class="dialog-card end-summary-dialog"
+           (click)="$event.stopPropagation()"
+           data-testid="end-summary-dialog">
+        <div class="dialog-header" [class]="endSummaryHeader().cls">
+          <h3>{{ endSummaryHeader().label }}</h3>
+          <button class="dialog-close" (click)="onDismissEndSummary()">&times;</button>
+        </div>
+        <div class="dialog-body">
+          @if (s.error_message) {
+            <div class="error-box">{{ s.error_message }}</div>
+          }
+
+          <div class="summary-stats">
+            <div class="stat">
+              <span class="stat-label">Duration</span>
+              <span class="stat-value">{{ formatWallTime(s.wall_time_seconds) }}</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Generations</span>
+              <span class="stat-value">
+                {{ s.generations_completed ?? 0 }}/{{ s.generations_requested ?? 0 }}
+                @if (s.status === 'stopped' && (s.generations_completed ?? 0) < (s.generations_requested ?? 0)) {
+                  <span class="stat-note">(stopped early)</span>
+                }
+              </span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Agents trained</span>
+              <span class="stat-value">{{ s.total_agents_trained ?? 0 }}</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Agents evaluated</span>
+              <span class="stat-value">{{ s.total_agents_evaluated ?? 0 }}</span>
+            </div>
+          </div>
+
+          @if (s.best_model; as best) {
+            <div class="best-model-card" data-testid="best-model-card">
+              <div class="best-model-header">Best model</div>
+              <div class="best-model-id">{{ shortId(best.model_id) }}</div>
+              <div class="best-model-stats">
+                <span><strong>Score:</strong> {{ best.composite_score | number:'1.3-3' }}</span>
+                <span><strong>P&amp;L:</strong> {{ best.total_pnl | number:'1.2-2' }}</span>
+                <span><strong>Win rate:</strong> {{ best.win_rate | number:'1.1-1' }}</span>
+                <span><strong>Architecture:</strong> {{ best.architecture }}</span>
+              </div>
+            </div>
+          }
+
+          @if (s.top_5 && s.top_5.length > 0) {
+            <div class="top-5-section">
+              <div class="top-5-title">Top {{ s.top_5.length }}</div>
+              <table class="top-5-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Model</th>
+                    <th>Score</th>
+                    <th>P&amp;L</th>
+                    <th>Win rate</th>
+                    <th>Architecture</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (m of s.top_5; track m.model_id; let idx = $index) {
+                    <tr>
+                      <td>{{ idx + 1 }}</td>
+                      <td>{{ shortId(m.model_id) }}</td>
+                      <td>{{ m.composite_score | number:'1.3-3' }}</td>
+                      <td>{{ m.pnl | number:'1.2-2' }}</td>
+                      <td>{{ m.win_rate | number:'1.1-1' }}</td>
+                      <td>{{ m.architecture }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          }
+
+          @if (s.population_summary; as pop) {
+            <div class="population-summary">
+              <span class="pop-chip pop-survived">{{ pop.survived }} survived</span>
+              <span class="pop-chip pop-discarded">{{ pop.discarded }} discarded</span>
+              <span class="pop-chip pop-garaged">{{ pop.garaged }} garaged</span>
+            </div>
+          }
+        </div>
+        <div class="dialog-footer end-summary-footer">
+          <button class="btn btn-secondary" (click)="onDismissEndSummary()">Dismiss</button>
+          <button class="btn btn-secondary" (click)="onStartNewRun()" data-testid="start-new-run-btn">Start New Run</button>
+          @if (s.best_model) {
+            <button class="btn btn-secondary" (click)="onViewBestModel()" data-testid="view-best-model-btn">View Best Model</button>
+          }
+          <button class="btn btn-primary" (click)="onViewScoreboard()" data-testid="view-scoreboard-btn">View Scoreboard</button>
+        </div>
       </div>
     </div>
   }
