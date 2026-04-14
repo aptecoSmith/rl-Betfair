@@ -69,6 +69,7 @@ TICKS_COLUMNS: list[str] = [
     "winner_selection_id",
     "each_way_divisor",
     "number_of_each_way_places",
+    "placed_selection_ids",
     "race_status",
     "temperature",
     "precipitation",
@@ -218,6 +219,63 @@ SQL_EW_SUBQUERY_NULL = """
 SQL_MARKET_NAMES = """
     SELECT MarketId AS market_id, MarketName AS market_name
     FROM coldData.marketOnDates
+    WHERE MarketId IN :market_ids
+"""
+
+#: Standalone query to fetch EW terms from ``updates`` by date.
+#: Used as a fallback when ``PolledMarketSnapshots`` has NULL EW columns
+#: (pre-dates the column being populated in BetfairPoller).
+SQL_EW_SUBQUERY_FULL_STANDALONE = text("""
+    SELECT MarketId           AS market_id,
+           MAX(EachWayDivisor) AS each_way_divisor,
+           MAX(NumberOfEachWayPlaces) AS number_of_each_way_places
+    FROM updates
+    WHERE DATE(MarketStartTime) = :target_date
+      AND EachWayDivisor IS NOT NULL
+    GROUP BY MarketId
+""")
+
+# ── EW result resolution ─────────────────────────────────────────────────────
+#
+# For EACH_WAY markets, ``marketResults`` has one row per result runner (winner
+# + placed), but the ``WinnerSelectionId`` column name is misleading — it's
+# actually "result runner".  We need to distinguish the real winner from placed
+# runners so settlement applies the correct odds.
+#
+# Primary source: CLOSED tick from ``PolledMarketSnapshots`` contains per-runner
+# status (WINNER/PLACED/LOSER).  Fallback: cross-reference with the WIN market
+# for the same event + start time.
+
+#: Fetch the CLOSED tick for EW markets.  RunnersJson has per-runner status.
+SQL_EW_CLOSED_TICKS = """
+    SELECT MarketId AS market_id, RunnersJson AS runners_json
+    FROM PolledMarketSnapshots
+    WHERE MarketStatus = 'CLOSED'
+      AND MarketId IN :market_ids
+    ORDER BY MarketId, Timestamp DESC
+"""
+
+#: Fallback: get the actual winner from the paired WIN market.
+SQL_EW_WIN_CROSSREF = """
+    SELECT ew.MarketId   AS ew_market_id,
+           win.WinnerSelectionId AS true_winner_id
+    FROM coldData.marketResults ew
+    JOIN coldData.marketResults win
+        ON  win.EventId        = ew.EventId
+        AND win.MarketStartTime = ew.MarketStartTime
+        AND win.MarketType      = 'WIN'
+    WHERE ew.MarketType = 'EACH_WAY'
+      AND ew.MarketId IN :market_ids
+    GROUP BY ew.MarketId, win.WinnerSelectionId
+"""
+
+#: All result runner IDs for EW markets (winner + placed).
+#: No MarketType filter — some result rows have empty MarketType even for
+#: EACH_WAY markets.  The caller already knows which markets are EW.
+SQL_EW_ALL_RESULT_IDS = """
+    SELECT MarketId AS market_id,
+           WinnerSelectionId AS selection_id
+    FROM coldData.marketResults
     WHERE MarketId IN :market_ids
 """
 
@@ -513,7 +571,7 @@ class DataExtractor:
             ``True`` if ticks were found and files written; ``False`` if no
             tick data exists for *target_date* (files are not written).
         """
-        total_steps = 6
+        total_steps = 7
 
         def _report(step: int, message: str) -> None:
             if on_progress is not None:
@@ -553,6 +611,16 @@ class DataExtractor:
             _report(5, "Loading market names")
             names_df = self._query_market_names(market_ids, conn)
 
+            # Resolve EW results (true winner + all placed IDs)
+            _report(6, "Resolving EACH_WAY market results")
+            ew_market_ids = list(
+                ticks_df.loc[
+                    ticks_df.get("market_type", pd.Series(dtype=str)) == "EACH_WAY",
+                    "market_id",
+                ].unique()
+            )
+            ew_results_df = self._query_ew_results(ew_market_ids, conn)
+
         # Merge market_name into ticks (left join — some markets may not have names)
         if not names_df.empty:
             ticks_df = ticks_df.merge(names_df, on="market_id", how="left")
@@ -560,12 +628,31 @@ class DataExtractor:
         else:
             ticks_df["market_name"] = ""
 
+        # Merge EW results: fix winner_selection_id and add placed_selection_ids
+        if not ew_results_df.empty:
+            ew_map = ew_results_df.set_index("market_id")
+            mask = ticks_df["market_id"].isin(ew_map.index)
+            # Overwrite winner_selection_id for EW markets with the true winner
+            ticks_df.loc[mask, "winner_selection_id"] = (
+                ticks_df.loc[mask, "market_id"]
+                .map(ew_map["true_winner_id"])
+            )
+            # Add placed_selection_ids (all result runner IDs)
+            ticks_df["placed_selection_ids"] = (
+                ticks_df["market_id"].map(ew_map["placed_selection_ids"])
+            )
+        else:
+            ticks_df["placed_selection_ids"] = None
+        # Fill non-EW markets with None
+        if "placed_selection_ids" not in ticks_df.columns:
+            ticks_df["placed_selection_ids"] = None
+
         # Ensure race_status column exists (legacy path doesn't have it)
         if "race_status" not in ticks_df.columns:
             ticks_df["race_status"] = None
 
         _report(
-            6,
+            7,
             f"Writing Parquet ({len(ticks_df):,} ticks, {len(runners_df)} runners)",
         )
         self._save_day(target_date, ticks_df, runners_df)
@@ -682,6 +769,124 @@ class DataExtractor:
             return pd.DataFrame(columns=["market_id", "market_name"])
         return pd.DataFrame(rows, columns=list(result.keys()))
 
+    def _query_ew_results(
+        self, ew_market_ids: list[str], conn: sa.Connection,
+    ) -> pd.DataFrame:
+        """Resolve true winner + all result IDs for EACH_WAY markets.
+
+        Returns a DataFrame with columns ``market_id``, ``true_winner_id``,
+        ``placed_selection_ids`` (comma-separated string of ALL result runner
+        IDs including the winner).
+
+        Uses two sources with combined 100% coverage:
+        1. Primary: CLOSED tick from ``PolledMarketSnapshots`` — has per-runner
+           WINNER/PLACED/LOSER status.
+        2. Fallback: cross-reference with the paired WIN market in
+           ``marketResults`` (same EventId + MarketStartTime).
+        """
+        if not ew_market_ids:
+            return pd.DataFrame(
+                columns=["market_id", "true_winner_id", "placed_selection_ids"],
+            )
+
+        bp = bindparam("market_ids", expanding=True)
+
+        # 1. All result runner IDs (winner + placed) from marketResults
+        all_ids_df = pd.DataFrame(
+            conn.execute(
+                text(SQL_EW_ALL_RESULT_IDS).bindparams(bp),
+                {"market_ids": ew_market_ids},
+            ).fetchall(),
+            columns=["market_id", "selection_id"],
+        )
+        placed_map: dict[str, str] = {}
+        for mid, grp in all_ids_df.groupby("market_id"):
+            placed_map[str(mid)] = ",".join(
+                str(int(s)) for s in sorted(grp["selection_id"])
+            )
+
+        # 2. Primary: CLOSED tick → parse WINNER/PLACED statuses
+        #    Also extract all result IDs (WINNER + PLACED) from the tick as
+        #    a fallback for placed_map when marketResults has empty MarketType.
+        winner_from_tick: dict[str, int] = {}
+        placed_from_tick: dict[str, str] = {}
+        try:
+            closed_rows = conn.execute(
+                text(SQL_EW_CLOSED_TICKS).bindparams(
+                    bindparam("market_ids", expanding=True),
+                ),
+                {"market_ids": ew_market_ids},
+            ).fetchall()
+            seen: set[str] = set()
+            for row in closed_rows:
+                mid = str(row[0])
+                if mid in seen:
+                    continue  # take only the latest CLOSED tick per market
+                seen.add(mid)
+                runners = json.loads(row[1])
+                result_ids: list[int] = []
+                for r in runners:
+                    status = (
+                        r.get("state", {}).get("status")
+                        or r.get("Definition", {}).get("Status")
+                        or ""
+                    )
+                    sel_id = (
+                        r.get("selectionId")
+                        or r.get("RunnerId", {}).get("SelectionId")
+                    )
+                    if not sel_id:
+                        continue
+                    sel_id = int(sel_id)
+                    if status == "WINNER":
+                        winner_from_tick[mid] = sel_id
+                        result_ids.append(sel_id)
+                    elif status == "PLACED":
+                        result_ids.append(sel_id)
+                if result_ids:
+                    placed_from_tick[mid] = ",".join(
+                        str(s) for s in sorted(result_ids)
+                    )
+        except Exception:
+            logger.warning("Failed to query CLOSED ticks for EW results", exc_info=True)
+
+        # Back-fill placed_map from CLOSED ticks for markets that
+        # marketResults missed (empty MarketType).
+        for mid, ids_str in placed_from_tick.items():
+            if not placed_map.get(mid):
+                placed_map[mid] = ids_str
+
+        # 3. Fallback: WIN market cross-reference
+        winner_from_win: dict[str, int] = {}
+        try:
+            xref_rows = conn.execute(
+                text(SQL_EW_WIN_CROSSREF).bindparams(
+                    bindparam("market_ids", expanding=True),
+                ),
+                {"market_ids": ew_market_ids},
+            ).fetchall()
+            for row in xref_rows:
+                mid = str(row[0])
+                if mid not in winner_from_win:
+                    winner_from_win[mid] = int(row[1])
+        except Exception:
+            logger.warning("Failed to query WIN cross-ref for EW results", exc_info=True)
+
+        # 4. Build result DataFrame — tick is authoritative, WIN is fallback
+        rows = []
+        for mid in ew_market_ids:
+            true_winner = winner_from_tick.get(mid) or winner_from_win.get(mid)
+            placed_ids = placed_map.get(mid, "")
+            if true_winner is None:
+                logger.warning(
+                    "EW market %s — could not determine true winner "
+                    "(no CLOSED tick and no WIN market cross-ref)",
+                    mid,
+                )
+            rows.append((mid, true_winner, placed_ids))
+
+        return pd.DataFrame(rows, columns=["market_id", "true_winner_id", "placed_selection_ids"])
+
     def _query_runners(
         self, market_ids: list[str], conn: sa.Connection
     ) -> pd.DataFrame:
@@ -775,6 +980,35 @@ class DataExtractor:
 
         # Join RaceStatusEvents — as-of merge by market_id + timestamp
         df = _join_race_status(df, target_date, conn)
+
+        # Backfill each_way_divisor from the updates table when the polled
+        # table has NULL (pre-dates the column being populated in BetfairPoller).
+        if (
+            "each_way_divisor" in df.columns
+            and df["each_way_divisor"].isna().all()
+        ):
+            try:
+                ew_from_updates = pd.read_sql(
+                    text(SQL_EW_SUBQUERY_FULL_STANDALONE),
+                    conn,
+                    params={"target_date": target_date.isoformat()},
+                )
+                if not ew_from_updates.empty:
+                    ew_map = ew_from_updates.set_index("market_id")
+                    df["each_way_divisor"] = df["market_id"].map(
+                        ew_map["each_way_divisor"]
+                    )
+                    df["number_of_each_way_places"] = df["market_id"].map(
+                        ew_map["number_of_each_way_places"]
+                    )
+                    filled = df["each_way_divisor"].notna().sum()
+                    if filled:
+                        logger.info(
+                            "Backfilled EW divisor from updates table for %d ticks",
+                            filled,
+                        )
+            except Exception:
+                logger.debug("updates EW backfill failed", exc_info=True)
 
         return _cast_ticks(df)
 

@@ -618,17 +618,6 @@ def _build_day(
             first_row = group.iloc[0]
             runner_meta = _build_runner_metadata(runners_df, market_id)
 
-            # Build winning_selection_ids from the last tick's runner statuses.
-            # For WIN markets: only WINNER.  For EACH_WAY: WINNER + PLACED.
-            # For EACH_WAY markets, WINNER + PLACED runners are both included.
-            # Settlement applies the place fraction via each_way_divisor —
-            # see BetManager.settle_race().
-            winning_ids: set[int] = set()
-            last_tick = ticks[-1]
-            for runner in last_tick.runners:
-                if runner.status in ("WINNER", "PLACED"):
-                    winning_ids.add(runner.selection_id)
-
             mtype = str(first_row.get("market_type") or "")
             ew_divisor = _opt_float(first_row.get("each_way_divisor"))
 
@@ -642,6 +631,26 @@ def _build_day(
                 )
                 continue
 
+            # Build winning_selection_ids — the set of ALL result runners
+            # (winner + placed for EW; just winner for WIN).
+            #
+            # Primary: ``placed_selection_ids`` column from the extractor's
+            # EW result resolution (comma-separated string of IDs).
+            # Fallback: last-tick runner statuses (works when in-play ticks
+            # are present and the market reached CLOSED state).
+            winning_ids: set[int] = set()
+            placed_ids_str = str(first_row.get("placed_selection_ids") or "")
+            if placed_ids_str and placed_ids_str != "nan":
+                for s in placed_ids_str.split(","):
+                    s = s.strip()
+                    if s:
+                        winning_ids.add(int(float(s)))
+            else:
+                last_tick = ticks[-1]
+                for runner in last_tick.runners:
+                    if runner.status in ("WINNER", "PLACED"):
+                        winning_ids.add(runner.selection_id)
+
             races.append(
                 Race(
                     market_id=market_id,
@@ -650,7 +659,7 @@ def _build_day(
                     winner_selection_id=first.winner_selection_id,
                     ticks=ticks,
                     runner_metadata=runner_meta,
-                    market_name=mtype,
+                    market_name=str(first_row.get("market_name") or ""),
                     market_type=mtype,
                     n_runners=len(runner_meta),
                     winning_selection_ids=winning_ids,
