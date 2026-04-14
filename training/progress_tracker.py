@@ -135,3 +135,21 @@ class ProgressTracker:
             "item_eta_human": _fmt(item_eta),
             "process_eta_human": _fmt(process_eta),
         }
+
+
+class RunProgressTracker(ProgressTracker):
+    """Overall-run tracker spanning all generations and phases.
+
+    Like :class:`ProgressTracker` but keeps a dynamic ``label`` that the
+    orchestrator updates to reflect the current generation and phase
+    (e.g. ``"Generation 1/3 — training"``). The rolling ETA window carries
+    real timing data across phase boundaries, so the overall ETA does not
+    jump when training transitions to evaluation.
+
+    Unit of work: one agent completion (train or eval). Total = number of
+    generations × population × 2.
+    """
+
+    def set_label(self, label: str) -> None:
+        """Update the dynamic label (e.g. on generation/phase change)."""
+        self.label = label

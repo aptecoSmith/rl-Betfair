@@ -9,10 +9,27 @@
   <!-- ── ETA Bars ─────────────────────────────────────────── -->
   @if (isRunning()) {
     <div class="eta-bars" data-testid="eta-bars">
+      @if (overallBar()) {
+        <div class="eta-bar">
+          <div class="eta-header">
+            <span class="eta-level">OVERALL</span>
+            <span class="eta-label">{{ overallBar()!.label }}</span>
+            <span class="eta-stats">
+              {{ overallBar()!.completed }}/{{ overallBar()!.total }}
+              · ETA {{ overallBar()!.process_eta_human || '—' }}
+            </span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill bar-overall" [style.width.%]="overallBar()!.pct"></div>
+          </div>
+          <span class="bar-pct">{{ overallBar()!.pct }}%</span>
+        </div>
+      }
+
       @if (processBar()) {
         <div class="eta-bar">
           <div class="eta-header">
-            <span class="eta-level">PROCESS</span>
+            <span class="eta-level">PHASE</span>
             <span class="eta-label">{{ processBar()!.label }}</span>
             <span class="eta-stats">
               {{ processBar()!.completed }}/{{ processBar()!.total }}
@@ -29,7 +46,7 @@
       @if (itemBar()) {
         <div class="eta-bar">
           <div class="eta-header">
-            <span class="eta-level">ITEM</span>
+            <span class="eta-level">CURRENT</span>
             <span class="eta-label">{{ itemBar()!.label }}</span>
             <span class="eta-stats">
               {{ itemBar()!.completed }}/{{ itemBar()!.total }}

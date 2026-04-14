@@ -151,6 +151,7 @@ class TrainingWorker:
         self.latest_event: dict | None = None
         self.latest_process: dict | None = None
         self.latest_item: dict | None = None
+        self.latest_overall: dict | None = None
 
         # Connected WebSocket clients
         self.clients: set[websockets.server.ServerConnection] = set()
@@ -248,6 +249,7 @@ class TrainingWorker:
             latest_event=self.latest_event,
             latest_process=self.latest_process,
             latest_item=self.latest_item,
+            latest_overall=self.latest_overall,
         )
 
     # ── WebSocket handler ───────────────────────────────────────────
@@ -429,6 +431,7 @@ class TrainingWorker:
         self.latest_event = None
         self.latest_process = None
         self.latest_item = None
+        self.latest_overall = None
 
         # Clear any stale events from the queue
         while not self.progress_queue.empty():
@@ -527,6 +530,8 @@ class TrainingWorker:
             self.latest_process = event["process"]
         if event.get("item"):
             self.latest_item = event["item"]
+        if event.get("overall"):
+            self.latest_overall = event["overall"]
 
         is_terminal = False
         if event.get("event") == "phase_start":
@@ -544,6 +549,7 @@ class TrainingWorker:
             self.running = False
             self.latest_process = None
             self.latest_item = None
+            self.latest_overall = None
             is_terminal = True
 
             # Update plan status on terminal events
@@ -669,6 +675,7 @@ class TrainingWorker:
                 self.running = False
                 self.latest_process = None
                 self.latest_item = None
+                self.latest_overall = None
                 console.print("[red]Training thread exited unexpectedly[/red]")
                 # Update plan status if a plan-based run died
                 plan_id = self._active_plan_id

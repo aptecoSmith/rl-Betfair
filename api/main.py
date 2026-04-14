@@ -79,6 +79,7 @@ async def lifespan(app: FastAPI):
         "latest_event": None,
         "latest_process": None,
         "latest_item": None,
+        "latest_overall": None,
         "plan_id": None,
     }
     # Set of connected WebSocket send callbacks for broadcasting
@@ -116,6 +117,8 @@ async def lifespan(app: FastAPI):
                 state["latest_process"] = event["process"]
             if event.get("item"):
                 state["latest_item"] = event["item"]
+            if event.get("overall"):
+                state["latest_overall"] = event["overall"]
 
             if event.get("event") == "phase_start":
                 state["running"] = True
@@ -134,6 +137,7 @@ async def lifespan(app: FastAPI):
                 state["running"] = False
                 state["latest_process"] = None
                 state["latest_item"] = None
+                state["latest_overall"] = None
                 state["plan_id"] = None
 
             # Broadcast to all connected WebSocket clients
@@ -199,6 +203,8 @@ async def lifespan(app: FastAPI):
                                 state["latest_process"] = msg["latest_process"]
                             if msg.get("latest_item"):
                                 state["latest_item"] = msg["latest_item"]
+                            if msg.get("latest_overall"):
+                                state["latest_overall"] = msg["latest_overall"]
                             # Resolve pending response if any
                             pending = app.state.worker_pending_response
                             if pending and not pending.done():

@@ -34,12 +34,14 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
 import time
 import traceback
 import uuid
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -61,7 +63,14 @@ from registry.model_store import ModelStore
 from registry.scoreboard import ModelScore, Scoreboard
 from training.evaluator import Evaluator
 from training.perf_log import gpu_memory_summary, perf_log
-from training.progress_tracker import ProgressTracker
+from training.progress_tracker import ProgressTracker, RunProgressTracker
+
+# Historical timing file — read on wizard load, written at end of each run.
+# Best-effort only: missing/corrupt → fall back to defaults.
+HISTORICAL_TIMING_PATH = Path("logs/training/last_run_timing.json")
+# Legacy default from Session 4.6 (Jul 2024). Used when no historical
+# timing file exists yet.
+DEFAULT_SECONDS_PER_AGENT_PER_DAY = 12.0
 
 if TYPE_CHECKING:
     from training.training_plan import PlanRegistry, TrainingPlan
@@ -183,6 +192,18 @@ class TrainingOrchestrator:
         self._eval_times: list[float] = []
         self._eval_total_agents: int = 0
         self._eval_completed_agents: int = 0
+        # Overall-run tracker: carries ETA across phase boundaries.
+        self._run_tracker: RunProgressTracker | None = None
+        self._run_phase_label: str = ""
+        # Historical-timing accumulators (written to last_run_timing.json).
+        self._train_wall_s: float = 0.0
+        self._train_agent_days: int = 0
+        self._eval_wall_s: float = 0.0
+        self._eval_agent_days: int = 0
+        # Run-level counters for the end-of-run summary.
+        self._run_start_time: float = 0.0
+        self._total_agents_trained: int = 0
+        self._total_agents_evaluated: int = 0
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(
             config, model_store, progress_queue=progress_queue, device=self.device,
@@ -249,6 +270,7 @@ class TrainingOrchestrator:
         """
         run_id = str(uuid.uuid4())
         result = TrainingRunResult(run_id=run_id)
+        self._run_start_time = time.time()
 
         if not train_days:
             logger.warning("No training days provided — aborting run.")
@@ -304,6 +326,14 @@ class TrainingOrchestrator:
 
         # -- Initialise or resume population --
         end_generation = start_generation + n_generations  # exclusive upper bound
+        # Overall run tracker: one tick per agent-phase (train OR eval).
+        pop_size = int(self.config.get("population", {}).get("size", 0)) or 0
+        run_total = max(1, n_generations * pop_size * 2)
+        self._run_tracker = RunProgressTracker(
+            total=run_total,
+            label=f"Run {run_id[:8]} — starting",
+        )
+        self._run_tracker.reset_timer()
         self._emit_phase_start("training", {
             "run_id": run_id,
             "n_generations": n_generations,
@@ -423,11 +453,24 @@ class TrainingOrchestrator:
             if self.scoreboard is not None:
                 result.final_rankings = self.scoreboard.update_scores()
 
-        self._emit_phase_complete("run_complete", {
-            "run_id": run_id,
-            "generations_completed": n_generations,
-            "final_rankings": len(result.final_rankings),
-        })
+        # Persist historical timing (best-effort) so the next wizard run
+        # has realistic per-agent-per-day rates instead of the 12s default.
+        self._persist_historical_timing(run_id)
+
+        # Status: stopped > completed. run_error is emitted separately from
+        # the worker's except block; this event always fires (even on stop).
+        if self._stopped:
+            status = "stopped"
+        else:
+            status = "completed"
+
+        summary = self._build_run_summary(
+            run_id=run_id,
+            result=result,
+            status=status,
+            n_generations_requested=n_generations,
+        )
+        self._emit_phase_complete("run_complete", summary)
 
         return result
 
@@ -526,6 +569,8 @@ class TrainingOrchestrator:
                 label=f"Generation {generation} — training {len(agents)} agents",
             )
             outer_tracker.reset_timer()
+            if self._run_tracker is not None:
+                self._run_tracker.set_label(f"Generation {generation} — training")
 
             for agent in agents:
                 if self._check_stop() or self._check_finish() or self._check_skip_training():
@@ -548,12 +593,16 @@ class TrainingOrchestrator:
                     model_id=agent.model_id,
                     architecture_name=agent.architecture_name,
                 )
+                train_start = time.time()
                 with perf_log(
                     logger,
                     f"Train agent {agent.model_id[:12]}",
                     log_gpu=(self.device == "cuda"),
                 ):
                     stats = trainer.train(train_days, n_epochs=n_epochs)
+                self._train_wall_s += time.time() - train_start
+                self._train_agent_days += len(train_days) * n_epochs
+                self._total_agents_trained += 1
                 training_stats[agent.model_id] = stats
 
                 # Save updated weights after training
@@ -565,6 +614,8 @@ class TrainingOrchestrator:
                     )
 
                 outer_tracker.tick()
+                if self._run_tracker is not None:
+                    self._run_tracker.tick()
                 self._publish_progress(
                     "training", outer_tracker,
                     detail=(
@@ -597,6 +648,9 @@ class TrainingOrchestrator:
             label=f"Generation {generation} — evaluating {len(agents)} agents",
         )
         eval_tracker.reset_timer()
+        eval_phase_start = time.time()
+        if self._run_tracker is not None:
+            self._run_tracker.set_label(f"Generation {generation} — evaluating")
 
         # Reset eval timing for time estimates
         self._eval_total_agents = len(agents)
@@ -639,6 +693,9 @@ class TrainingOrchestrator:
                 for future in futures:
                     future.result()  # raises if eval failed
                     eval_tracker.tick()
+                    if self._run_tracker is not None:
+                        self._run_tracker.tick()
+                    self._total_agents_evaluated += 1
                     agents_evaluated += 1
         else:
             for agent in agents:
@@ -656,15 +713,23 @@ class TrainingOrchestrator:
                     log_gpu=(self.device == "cuda"),
                 ):
                     _eval_agent(agent)
-                self._eval_times.append(time.time() - eval_start)
+                eval_elapsed = time.time() - eval_start
+                self._eval_times.append(eval_elapsed)
                 self._eval_completed_agents += 1
+                self._total_agents_evaluated += 1
                 eval_tracker.tick()
+                if self._run_tracker is not None:
+                    self._run_tracker.tick()
                 agents_evaluated += 1
                 # After completing this agent's eval, check if we should stop
                 if self._check_stop_after_current_eval():
                     logger.info("Stop-after-current-eval — stopping after agent %s", agent.model_id[:12])
                     self._emit_info("Stopping after current evaluation...")
                     break
+
+        # Accumulate eval wall time for historical-timing persistence.
+        self._eval_wall_s += time.time() - eval_phase_start
+        self._eval_agent_days += agents_evaluated * len(test_days)
 
         self._emit_phase_complete("evaluating", {
             "generation": generation,
@@ -968,11 +1033,134 @@ class TrainingOrchestrator:
             "detail": detail,
             "timestamp": time.time(),
         }
+        if self._run_tracker is not None:
+            event["overall"] = self._run_tracker.to_dict()
         # Include eval stats so the frontend can compute time estimates
         if phase == "evaluating":
             event["unevaluated_count"] = self.unevaluated_count
             event["eval_rate_s"] = self.eval_rate_s
         self._put_event(event)
+
+    def _persist_historical_timing(self, run_id: str) -> None:
+        """Write per-agent-per-day timing to last_run_timing.json.
+
+        Best-effort only — any IO error is logged and swallowed so timing
+        persistence never breaks a run.
+        """
+        try:
+            train_rate = None
+            eval_rate = None
+            # Train rate is seconds per (agent × day × epoch). Epochs are
+            # already baked into self._train_agent_days.
+            if self._train_agent_days > 0:
+                train_rate = self._train_wall_s / self._train_agent_days
+            if self._eval_agent_days > 0:
+                eval_rate = self._eval_wall_s / self._eval_agent_days
+            if train_rate is None and eval_rate is None:
+                return  # nothing useful to save
+
+            payload = {
+                "run_id": run_id,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "train_seconds_per_agent_per_day": train_rate,
+                "eval_seconds_per_agent_per_day": eval_rate,
+                "total_agents_trained": self._total_agents_trained,
+                "total_agents_evaluated": self._total_agents_evaluated,
+            }
+            HISTORICAL_TIMING_PATH.parent.mkdir(parents=True, exist_ok=True)
+            HISTORICAL_TIMING_PATH.write_text(json.dumps(payload, indent=2))
+            logger.info(
+                "Saved historical timing: train=%.2fs/agent-day eval=%.2fs/agent-day",
+                train_rate or 0.0, eval_rate or 0.0,
+            )
+        except Exception:
+            logger.exception("Failed to persist historical timing (non-fatal)")
+
+    def _build_run_summary(
+        self,
+        run_id: str,
+        result: TrainingRunResult,
+        status: str,
+        n_generations_requested: int,
+        error_message: str | None = None,
+    ) -> dict:
+        """Assemble the enriched run_complete summary dict.
+
+        Used by the UI to render the end-of-run modal.
+        """
+        wall_time = max(0.0, time.time() - self._run_start_time)
+        rankings = result.final_rankings or []
+
+        best_model: dict | None = None
+        top_5: list[dict] = []
+        if rankings:
+            # Guard against empty composite scores.
+            sorted_rank = sorted(
+                rankings,
+                key=lambda s: (
+                    s.composite_score if s.composite_score is not None else -1e9
+                ),
+                reverse=True,
+            )
+            top_n = sorted_rank[:5]
+            for s in top_n:
+                arch_name = "unknown"
+                if self.model_store is not None:
+                    rec = self.model_store.get_model(s.model_id)
+                    if rec is not None:
+                        arch_name = rec.architecture_name
+                top_5.append({
+                    "model_id": s.model_id,
+                    "composite_score": s.composite_score,
+                    "pnl": s.mean_daily_pnl,
+                    "win_rate": s.win_rate,
+                    "architecture": arch_name,
+                })
+            if top_5:
+                best = top_5[0]
+                best_model = {
+                    "model_id": best["model_id"],
+                    "composite_score": best["composite_score"],
+                    "total_pnl": best["pnl"],
+                    "win_rate": best["win_rate"],
+                    "architecture": best["architecture"],
+                }
+
+        # Population summary from model_store (active / discarded / garaged).
+        survived = 0
+        discarded = 0
+        garaged = 0
+        if self.model_store is not None:
+            try:
+                for rec in self.model_store.list_models():
+                    if rec.garaged:
+                        garaged += 1
+                    elif rec.status == "active":
+                        survived += 1
+                    elif rec.status == "discarded":
+                        discarded += 1
+            except Exception:
+                logger.exception("Failed to build population summary (non-fatal)")
+
+        return {
+            "run_id": run_id,
+            "status": status,
+            "generations_completed": len(result.generations),
+            "generations_requested": n_generations_requested,
+            "total_agents_trained": self._total_agents_trained,
+            "total_agents_evaluated": self._total_agents_evaluated,
+            "wall_time_seconds": round(wall_time, 2),
+            "best_model": best_model,
+            "top_5": top_5,
+            "population_summary": {
+                "survived": survived,
+                "discarded": discarded,
+                "garaged": garaged,
+            },
+            "error_message": error_message,
+            # Keep the old key so any existing consumers still see it.
+            "final_rankings": len(rankings),
+        }
 
     def _put_event(self, event: dict) -> None:
         """Put an event on the progress queue (non-blocking).

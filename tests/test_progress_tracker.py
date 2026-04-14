@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from training.progress_tracker import ProgressTracker, _fmt
+from training.progress_tracker import ProgressTracker, RunProgressTracker, _fmt
 
 
 # ─── _fmt helper ──────────────────────────────────────────────────────────────
@@ -205,6 +205,41 @@ class TestProgressTrackerToDict:
         t = ProgressTracker(total=42, label="test")
         d = t.to_dict()
         assert d["total"] == 42
+
+
+class TestRunProgressTracker:
+    """RunProgressTracker carries ETA across phase boundaries."""
+
+    def test_set_label_updates_label(self):
+        t = RunProgressTracker(total=10, label="init")
+        t.set_label("Generation 1 — training")
+        assert t.label == "Generation 1 — training"
+        # to_dict surfaces the updated label.
+        assert t.to_dict()["label"] == "Generation 1 — training"
+
+    def test_eta_carries_across_phase_change(self):
+        # Simulate: 5 training ticks, label changes (phase → eval), 5 more ticks.
+        # ETA at each stage should be based on the rolling window, not reset.
+        t = RunProgressTracker(total=20, label="gen1 train", rolling_window=10)
+        t._times = deque([1.0, 1.0, 1.0, 1.0, 1.0], maxlen=10)
+        t.completed = 5
+        eta_before = t.process_eta_seconds  # (20 - 5) × 1.0 = 15.0
+
+        # Phase transition — new label, but window/completed preserved.
+        t.set_label("gen1 eval")
+        assert t.process_eta_seconds == pytest.approx(eta_before)
+
+        # Continue ticking with the new phase's timing.
+        t._times.extend([1.0, 1.0, 1.0, 1.0, 1.0])
+        t.completed = 10
+        # mean still 1.0, remaining=10 → 10.0
+        assert t.process_eta_seconds == pytest.approx(10.0)
+
+    def test_is_a_progress_tracker(self):
+        # Duck-type compat: same to_dict shape as ProgressTracker.
+        t = RunProgressTracker(total=3, label="run")
+        d = t.to_dict()
+        assert {"label", "completed", "total", "pct", "item_eta_human", "process_eta_human"} <= set(d.keys())
 
 
 class TestProgressTrackerResetTimer:

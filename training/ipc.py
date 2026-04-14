@@ -97,6 +97,7 @@ def make_status_msg(
     latest_event: dict | None,
     latest_process: dict | None,
     latest_item: dict | None,
+    latest_overall: dict | None = None,
 ) -> str:
     return json.dumps({
         "type": EVT_STATUS,
@@ -104,6 +105,7 @@ def make_status_msg(
         "latest_event": latest_event,
         "latest_process": latest_process,
         "latest_item": latest_item,
+        "latest_overall": latest_overall,
     })
 
 

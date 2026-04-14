@@ -200,6 +200,7 @@ export class TrainingMonitor implements OnDestroy {
       },
     });
   });
+  readonly overallBar = computed(() => this.status().overall);
   readonly processBar = computed(() => this.status().process);
   readonly itemBar = computed(() => this.status().item);
 
@@ -446,22 +447,29 @@ export class TrainingMonitor implements OnDestroy {
 
     const trainDays = info.train_days;
     const testDays = info.test_days;
-    const secsPerAgentDay = info.seconds_per_agent_per_day;
+    // Use separate train/eval rates when the backend provides them
+    // (populated from the last completed run). Fall back to the legacy
+    // 60/40 split of the single benchmark for fresh installs.
+    const legacyRate = info.seconds_per_agent_per_day ?? 12.0;
+    const trainRate = info.train_seconds_per_agent_per_day ?? legacyRate * 0.6;
+    const evalRate = info.eval_seconds_per_agent_per_day ?? legacyRate * 0.4;
+    const basedOnLastRun = !!info.timing_based_on_last_run;
     const pop = this.populationSize;
     const gens = this.nGenerations;
     const epochs = this.nEpochs;
 
-    // Per generation: (train_days * epochs * rollout+ppo) + (test_days * eval) per agent
-    const trainSecs = trainDays * epochs * secsPerAgentDay * 0.6; // rollout+ppo ~60% of benchmark
-    const evalSecs = testDays * secsPerAgentDay * 0.4; // eval ~40%
+    // Per generation per agent: (train_days × epochs × train_rate) + (test_days × eval_rate)
+    const trainSecs = trainDays * epochs * trainRate;
+    const evalSecs = testDays * evalRate;
     const perAgentPerGen = trainSecs + evalSecs;
     const totalSecs = perAgentPerGen * pop * gens;
 
-    if (totalSecs < 60) return `Roughly ${Math.ceil(totalSecs)}s`;
-    if (totalSecs < 3600) return `Roughly ${Math.ceil(totalSecs / 60)} min`;
+    const suffix = basedOnLastRun ? ' (based on last run)' : ' (default estimate)';
+    if (totalSecs < 60) return `Roughly ${Math.ceil(totalSecs)}s${suffix}`;
+    if (totalSecs < 3600) return `Roughly ${Math.ceil(totalSecs / 60)} min${suffix}`;
     const hours = Math.floor(totalSecs / 3600);
     const mins = Math.ceil((totalSecs % 3600) / 60);
-    return mins > 0 ? `Roughly ${hours}h ${mins}m` : `Roughly ${hours}h`;
+    return mins > 0 ? `Roughly ${hours}h ${mins}m${suffix}` : `Roughly ${hours}h${suffix}`;
   }
 
   datesInRange(start: string, end: string): string[] {

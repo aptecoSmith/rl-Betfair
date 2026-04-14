@@ -13,6 +13,7 @@ export interface TrainingStatus {
   generation: number | null;
   process: ProgressSnapshot | null;
   item: ProgressSnapshot | null;
+  overall: ProgressSnapshot | null;
   detail: string | null;
   last_agent_score: number | null;
   worker_connected: boolean;
@@ -20,6 +21,7 @@ export interface TrainingStatus {
   eval_rate_s: number | null;
   plan_id: string | null;
 }
+
 
 export interface ActivityLogEntry {
   time: string;
@@ -38,6 +40,7 @@ export interface WSEvent {
   phase?: string;
   process?: ProgressSnapshot;
   item?: ProgressSnapshot;
+  overall?: ProgressSnapshot;
   sub_process?: SubProgressSnapshot;
   detail?: string;
   summary?: Record<string, unknown>;

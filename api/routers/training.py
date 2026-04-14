@@ -119,10 +119,11 @@ def get_training_status(request: Request):
         )
 
     # Use independently-tracked snapshots so the poll response
-    # always contains both process and item, even when the latest
+    # always contains overall/process/item, even when the latest
     # event only carried one of them.
     process = _snap(state.get("latest_process"))
     item = _snap(state.get("latest_item"))
+    overall = _snap(state.get("latest_overall"))
 
     return TrainingStatus(
         running=True,
@@ -130,6 +131,7 @@ def get_training_status(request: Request):
         generation=latest.get("generation"),
         process=process,
         item=item,
+        overall=overall,
         detail=latest.get("detail"),
         last_agent_score=latest.get("last_agent_score"),
         worker_connected=worker_connected,
@@ -141,7 +143,13 @@ def get_training_status(request: Request):
 
 @router.get("/training/info")
 def get_training_info(request: Request):
-    """Return data availability and estimated training duration info."""
+    """Return data availability and estimated training duration info.
+
+    Historical rates come from ``logs/training/last_run_timing.json``
+    (written at the end of each completed run). Missing/corrupt file →
+    fall back to the legacy 12s default so the wizard still works on
+    a fresh install.
+    """
     config = request.app.state.config
     data_dir = config["paths"]["processed_data"]
     processed = Path(data_dir)
@@ -154,14 +162,39 @@ def get_training_info(request: Request):
     split = max(1, len(dates) // 2)
     store = request.app.state.store
     garage_count = len(store.list_garaged_models())
+
+    # Historical rates from last completed run (if any).
+    from training.run_training import (
+        HISTORICAL_TIMING_PATH, DEFAULT_SECONDS_PER_AGENT_PER_DAY,
+    )
+    train_rate: float = DEFAULT_SECONDS_PER_AGENT_PER_DAY
+    eval_rate: float = DEFAULT_SECONDS_PER_AGENT_PER_DAY
+    based_on_last_run = False
+    try:
+        if HISTORICAL_TIMING_PATH.exists():
+            raw = json.loads(HISTORICAL_TIMING_PATH.read_text())
+            t = raw.get("train_seconds_per_agent_per_day")
+            e = raw.get("eval_seconds_per_agent_per_day")
+            if isinstance(t, (int, float)) and t > 0:
+                train_rate = float(t)
+            if isinstance(e, (int, float)) and e > 0:
+                eval_rate = float(e)
+            based_on_last_run = isinstance(t, (int, float)) or isinstance(e, (int, float))
+    except Exception:
+        # Corrupt file — fall back silently to defaults.
+        based_on_last_run = False
+
     return {
         "available_days": len(dates),
         "train_days": split,
         "test_days": len(dates) - split,
         "population_size": population_size,
         "dates": dates,
-        # Benchmark: ~12s per agent per day (from Session 4.6)
-        "seconds_per_agent_per_day": 12.0,
+        # Legacy field — kept for backward compatibility with older frontends.
+        "seconds_per_agent_per_day": train_rate,
+        "train_seconds_per_agent_per_day": train_rate,
+        "eval_seconds_per_agent_per_day": eval_rate,
+        "timing_based_on_last_run": based_on_last_run,
         "garage_count": garage_count,
         "reevaluate_garaged_default": config.get("training", {}).get(
             "reevaluate_garaged_default", True,

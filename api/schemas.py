@@ -131,6 +131,7 @@ class TrainingStatus(BaseModel):
     generation: int | None = None
     process: ProgressSnapshot | None = None
     item: ProgressSnapshot | None = None
+    overall: ProgressSnapshot | None = None
     detail: str | None = None
     last_agent_score: float | None = None
     worker_connected: bool = False
