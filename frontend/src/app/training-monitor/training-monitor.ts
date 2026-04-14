@@ -105,6 +105,8 @@ export class TrainingMonitor implements OnDestroy {
   overrideMaxBackPrice: number | null = null;
   overrideMaxLayPrice: number | null = null;
   overrideMinSecondsBeforeOff: number | null = null;
+  // Per-run budget override — null means "use admin default from /training/info".
+  overrideStartingBudget: number | null = null;
   // Market type filter restriction — empty set means "all choices"
   selectedMarketTypeFilters = new Set<string>();
   readonly MARKET_TYPE_CHOICES = ['WIN', 'EACH_WAY', 'BOTH', 'FREE_CHOICE'];
@@ -583,6 +585,7 @@ export class TrainingMonitor implements OnDestroy {
       max_back_price: this.overrideMaxBackPrice,
       max_lay_price: this.overrideMaxLayPrice,
       min_seconds_before_off: this.overrideMinSecondsBeforeOff,
+      starting_budget: this.overrideStartingBudget,
       market_type_filters: this.selectedMarketTypeFilters.size > 0
         ? Array.from(this.selectedMarketTypeFilters)
         : null,

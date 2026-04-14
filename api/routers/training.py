@@ -199,6 +199,9 @@ def get_training_info(request: Request):
         "reevaluate_garaged_default": config.get("training", {}).get(
             "reevaluate_garaged_default", True,
         ),
+        "starting_budget_default": float(
+            config.get("training", {}).get("starting_budget", 20.0)
+        ),
     }
 
 

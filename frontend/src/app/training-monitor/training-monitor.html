@@ -412,6 +412,17 @@
                       </span>
                       <span class="field-help">Skip bets closer than this to the race start</span>
                     </label>
+                    <label class="form-field" data-testid="starting-budget-field">
+                      <span class="field-label">Starting budget per race (£)</span>
+                      <input type="number" step="1" min="1"
+                             [(ngModel)]="overrideStartingBudget"
+                             [placeholder]="'Default: £' + (trainingInfo()?.starting_budget_default ?? 20)"
+                             data-testid="starting-budget-input" />
+                      <span class="current-default">
+                        Admin default: <strong>£{{ trainingInfo()?.starting_budget_default ?? 20 }}</strong>
+                      </span>
+                      <span class="field-help">Budget each agent starts with at the beginning of every race</span>
+                    </label>
                   </div>
                 } @else {
                   <p class="help-text">Loading admin defaults...</p>
@@ -661,6 +672,7 @@
                     <p>Max back: {{ overrideMaxBackPrice ?? (constraintDefaults()?.max_back_price ?? 'unlimited') }}</p>
                     <p>Max lay: {{ overrideMaxLayPrice ?? (constraintDefaults()?.max_lay_price ?? 'unlimited') }}</p>
                     <p>Min seconds before off: {{ overrideMinSecondsBeforeOff ?? (constraintDefaults()?.min_seconds_before_off ?? 0) }}</p>
+                    <p>Starting budget: £{{ overrideStartingBudget ?? (trainingInfo()?.starting_budget_default ?? 20) }}</p>
                   </div>
                   <div class="review-card">
                     <h4>Training</h4>

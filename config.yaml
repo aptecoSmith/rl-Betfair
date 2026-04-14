@@ -59,7 +59,7 @@ paths:
   mysql_bin: /c/Program Files/MySQL/MySQL Server 9.6/bin/mysql.exe
 training:
   architecture: ppo_lstm_v1
-  starting_budget: 100.0
+  starting_budget: 20.0
   max_runners: 14
   max_bets_per_race: 20
   require_gpu: true
