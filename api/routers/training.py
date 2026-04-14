@@ -382,6 +382,38 @@ async def start_training(request: Request, body: StartTrainingRequest):
                 f"Must be one of: {sorted(valid_pools)}",
             )
 
+    # Stud model validation (Issue 13)
+    if body.stud_model_ids:
+        if len(body.stud_model_ids) > 5:
+            raise HTTPException(
+                400, "stud_model_ids: at most 5 studs allowed",
+            )
+        store = getattr(request.app.state, "store", None)
+        if store is None:
+            raise HTTPException(503, "Model store not configured")
+        missing: list[str] = []
+        no_weights: list[str] = []
+        no_hp: list[str] = []
+        for sid in body.stud_model_ids:
+            rec = store.get_model(sid)
+            if rec is None:
+                missing.append(sid)
+                continue
+            if not rec.weights_path:
+                no_weights.append(sid)
+            if not rec.hyperparameters:
+                no_hp.append(sid)
+        if missing:
+            raise HTTPException(400, f"Stud model(s) not found: {missing}")
+        if no_weights:
+            raise HTTPException(
+                400, f"Stud model(s) have no saved weights: {no_weights}",
+            )
+        if no_hp:
+            raise HTTPException(
+                400, f"Stud model(s) have no hyperparameters: {no_hp}",
+            )
+
     # Send start command to worker
     cmd = make_start_cmd(
         n_generations=body.n_generations,
@@ -401,6 +433,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
         plan_id=body.plan_id,
         max_mutations_per_child=body.max_mutations_per_child,
         breeding_pool=body.breeding_pool,
+        stud_model_ids=body.stud_model_ids,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 
@@ -518,6 +551,7 @@ async def resume_training(request: Request, body: ResumeTrainingRequest):
         start_generation=start_gen,
         max_mutations_per_child=plan.max_mutations_per_child,
         breeding_pool=plan.breeding_pool,
+        stud_model_ids=plan.stud_model_ids or None,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

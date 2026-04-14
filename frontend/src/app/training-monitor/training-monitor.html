@@ -471,6 +471,43 @@
                       not retrained.
                     </span>
                   </label>
+                  <div class="form-field">
+                    <span class="field-label">Stud models (max {{ STUD_MAX }})</span>
+                    <span class="field-help">
+                      Hand-picked models that are guaranteed to be parents every
+                      generation. Useful when you know a model has a uniquely good
+                      hyperparameter combination — studs are <strong>parent-only</strong>:
+                      they donate genes via crossover but are not re-trained or scored,
+                      and they don't take survivor slots.
+                    </span>
+                    <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                      <select [(ngModel)]="studPickerSelection" data-testid="select-stud-picker">
+                        <option value="">Pick a model…</option>
+                        @for (opt of availableStudOptions(); track opt.id) {
+                          <option [value]="opt.id">{{ opt.label }}</option>
+                        }
+                      </select>
+                      <button type="button" class="btn btn-secondary"
+                              (click)="addStud()"
+                              [disabled]="!studPickerSelection || studModelIds.length >= STUD_MAX">
+                        Add stud
+                      </button>
+                    </div>
+                    @if (studModelIds.length > 0) {
+                      <div style="display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem;">
+                        @for (id of studModelIds; track id) {
+                          <span class="info-chip" data-testid="stud-chip">
+                            {{ studLabel(id) }}
+                            <button type="button" class="btn-link"
+                                    (click)="removeStud(id)" aria-label="Remove stud"
+                                    style="margin-left: 0.4rem;">
+                              ×
+                            </button>
+                          </span>
+                        }
+                      </div>
+                    }
+                  </div>
                 </div>
                 <p class="help-text">
                   Other population-level knobs (elite count, selection rate, mutation

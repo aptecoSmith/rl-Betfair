@@ -133,6 +133,7 @@ class TrainingOrchestrator:
         stop_after_current_eval_event: threading.Event | None = None,
         training_plan: "TrainingPlan | None" = None,
         plan_registry: "PlanRegistry | None" = None,
+        stud_model_ids: list[str] | None = None,
     ) -> None:
         self.config = config
         self.model_store = model_store
@@ -204,6 +205,10 @@ class TrainingOrchestrator:
         self._run_start_time: float = 0.0
         self._total_agents_trained: int = 0
         self._total_agents_evaluated: int = 0
+        # Stud models (Issue 13): hand-picked parents forced into every
+        # generation's breeding regardless of selection.
+        self.stud_model_ids: list[str] = list(stud_model_ids or [])
+
         self.pop_manager = PopulationManager(config, model_store)
         self.evaluator = Evaluator(
             config, model_store, progress_queue=progress_queue, device=self.device,
@@ -815,6 +820,7 @@ class TrainingOrchestrator:
                     breeding_pool_mode,
                 )
 
+
             # Pool scores = run scores (post-discard) + external scores.
             active_scores = [s for s in run_scores if s.model_id not in discarded]
             external_scores = [s for s in scores if s.model_id in external_ids]
@@ -872,12 +878,35 @@ class TrainingOrchestrator:
                 max_mutations = self.config["population"].get(
                     "max_mutations_per_child"
                 )
+                # Resolve studs: only load HP for IDs present in registry
+                # with both weights and hyperparameters. Validation already
+                # happened at API start, but be defensive — log and skip
+                # any stud that's been deleted or corrupted between launch
+                # and this generation.
+                stud_ids: list[str] = []
+                if self.stud_model_ids and self.model_store is not None:
+                    for sid in self.stud_model_ids:
+                        rec = self.model_store.get_model(sid)
+                        if rec is None:
+                            logger.warning("Stud %s not found — skipping", sid[:12])
+                            continue
+                        if not rec.hyperparameters:
+                            logger.warning("Stud %s has no HP — skipping", sid[:12])
+                            continue
+                        stud_ids.append(sid)
+                    if stud_ids:
+                        self._emit_info(
+                            f"Studs: {len(stud_ids)} guaranteed parent(s) — "
+                            + ", ".join(s[:12] for s in stud_ids)
+                        )
+
                 children, breeding_records = self.pop_manager.breed(
                     selection_result=selection,
                     generation=generation + 1,
                     mutation_rate=mutation_rate,
                     max_mutations=max_mutations,
                     external_parent_ids=external_parent_ids,
+                    stud_parent_ids=stud_ids,
                 )
 
                 self._emit_phase_complete("breeding", {

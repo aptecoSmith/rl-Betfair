@@ -112,6 +112,11 @@ export class TrainingMonitor implements OnDestroy {
   maxMutationsPerChild: number | null = null;
   // Issue 08 — null = use config default (run_only).
   breedingPool: 'run_only' | 'include_garaged' | 'full_registry' | null = null;
+  // Issue 13 — stud models. Hand-picked guaranteed parents (max 5).
+  studModelIds: string[] = [];
+  readonly studPickerOptions = signal<{ id: string; label: string }[]>([]);
+  studPickerSelection = '';
+  readonly STUD_MAX = 5;
 
   /** Time estimate for eval_all: unevaluated_count × eval_rate_s. */
   readonly evalAllEstimate = computed(() => {
@@ -407,6 +412,25 @@ export class TrainingMonitor implements OnDestroy {
       next: (g) => this.genetics.set(g),
       error: () => {},
     });
+    // Build the stud picker option list from active models + garage.
+    this.api.getScoreboard().subscribe({
+      next: (resp) => {
+        const opts: { id: string; label: string }[] = [];
+        for (const m of resp.models ?? []) {
+          if (m.status !== 'active' && !m.garaged) continue;
+          const score = m.composite_score != null
+            ? m.composite_score.toFixed(3)
+            : '—';
+          const tag = m.garaged ? ' [garaged]' : '';
+          opts.push({
+            id: m.model_id,
+            label: `${m.model_id.slice(0, 12)} · ${m.architecture_name} · ${score}${tag}`,
+          });
+        }
+        this.studPickerOptions.set(opts);
+      },
+      error: () => {},
+    });
     this.api.getBettingConstraints().subscribe({
       next: (c) => this.constraintDefaults.set({
         max_back_price: c.max_back_price,
@@ -473,6 +497,28 @@ export class TrainingMonitor implements OnDestroy {
     return Array.from(this.selectedMarketTypeFilters);
   }
 
+  // ── Stud picker (Issue 13) ────────────────────────────────────
+  addStud(): void {
+    const id = this.studPickerSelection;
+    if (!id) return;
+    if (this.studModelIds.includes(id)) return;
+    if (this.studModelIds.length >= this.STUD_MAX) return;
+    this.studModelIds = [...this.studModelIds, id];
+    this.studPickerSelection = '';
+  }
+
+  removeStud(id: string): void {
+    this.studModelIds = this.studModelIds.filter(x => x !== id);
+  }
+
+  studLabel(id: string): string {
+    return this.studPickerOptions().find(o => o.id === id)?.label ?? id.slice(0, 12);
+  }
+
+  availableStudOptions(): { id: string; label: string }[] {
+    return this.studPickerOptions().filter(o => !this.studModelIds.includes(o.id));
+  }
+
   stepStatus(n: number): 'current' | 'done' | 'future' {
     const current = this.wizardStep();
     if (n === current) return 'current';
@@ -534,6 +580,7 @@ export class TrainingMonitor implements OnDestroy {
         : null,
       max_mutations_per_child: this.maxMutationsPerChild,
       breeding_pool: this.breedingPool,
+      stud_model_ids: this.studModelIds.length > 0 ? this.studModelIds : null,
     };
     if (!this.useAllData) {
       params.train_dates = this.datesInRange(this.trainDateStart, this.trainDateEnd);

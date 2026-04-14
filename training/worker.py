@@ -484,6 +484,7 @@ class TrainingWorker:
                     stop_after_current_eval_event=self.stop_after_current_eval_event,
                     training_plan=training_plan,
                     plan_registry=self.plan_registry if training_plan else None,
+                    stud_model_ids=params.get("stud_model_ids") or None,
                 )
 
                 orch.run(

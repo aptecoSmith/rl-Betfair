@@ -56,6 +56,7 @@ def make_start_cmd(
     start_generation: int = 0,
     max_mutations_per_child: int | None = None,
     breeding_pool: str | None = None,
+    stud_model_ids: list[str] | None = None,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -77,6 +78,7 @@ def make_start_cmd(
         "start_generation": start_generation,
         "max_mutations_per_child": max_mutations_per_child,
         "breeding_pool": breeding_pool,
+        "stud_model_ids": stud_model_ids,
     })
 
 

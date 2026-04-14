@@ -169,6 +169,7 @@ export class ApiService {
     market_type_filters?: string[] | null;
     max_mutations_per_child?: number | null;
     breeding_pool?: 'run_only' | 'include_garaged' | 'full_registry' | null;
+    stud_model_ids?: string[] | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
@@ -191,6 +192,7 @@ export class ApiService {
       market_type_filters: params.market_type_filters ?? null,
       max_mutations_per_child: params.max_mutations_per_child ?? null,
       breeding_pool: params.breeding_pool ?? null,
+      stud_model_ids: params.stud_model_ids ?? null,
     });
   }
 

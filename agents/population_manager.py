@@ -824,6 +824,7 @@ class PopulationManager:
         seed: int | None = None,
         max_mutations: int | None = None,
         external_parent_ids: list[str] | None = None,
+        stud_parent_ids: list[str] | None = None,
     ) -> tuple[list[AgentRecord], list[BreedingRecord]]:
         """Breed children to fill the population back to full size.
 
@@ -853,6 +854,15 @@ class PopulationManager:
             they only widen the gene pool from which children are bred.
             Used by the ``include_garaged`` and ``full_registry``
             breeding-pool modes (see ``run_training.py``).
+        stud_parent_ids:
+            Optional list of model IDs that are *guaranteed* to be a
+            parent of at least one child this generation (Issue 13). For
+            each stud, one breeding slot is reserved with parent_a=stud
+            and parent_b=random survivor (or another stud if no
+            survivors). Studs do NOT take survivor slots and are NOT
+            re-trained. If there are more studs than children to breed,
+            only the first ``n_children`` studs are used this generation
+            and a warning is logged.
 
         Returns
         -------
@@ -863,6 +873,7 @@ class PopulationManager:
         rng = random.Random(seed)
         survivors = selection_result.survivors
         external_parent_ids = list(external_parent_ids or [])
+        stud_parent_ids = list(stud_parent_ids or [])
         n_children = self.population_size - len(survivors)
 
         if n_children <= 0:
@@ -882,14 +893,16 @@ class PopulationManager:
             )
 
         # Combined parent pool: run-survivors + external (parent-only) IDs.
+        # Studs are NOT in this pool by default — they get reserved slots
+        # below. They are added to ``parent_hp`` so their HP can be looked up.
         parent_pool = list(survivors) + list(external_parent_ids)
 
         # Need parent hyperparams — look them up from ranked_scores or store.
-        # Iterate the full parent pool (not just survivors) so external
-        # parents' HP are also available.
+        # Iterate the full parent pool (plus studs) so all parents' HP are
+        # available downstream.
         parent_hp: dict[str, dict] = {}
         if self.model_store is not None:
-            for mid in parent_pool:
+            for mid in list(parent_pool) + list(stud_parent_ids):
                 try:
                     record = self.model_store.get_model(mid)
                     if record is not None:
@@ -904,16 +917,49 @@ class PopulationManager:
         children: list[AgentRecord] = []
         breeding_records: list[BreedingRecord] = []
 
-        if len(parent_pool) < 2 and n_children > 0:
+        # Reserve one breeding slot per stud (parent_a=stud, parent_b=survivor).
+        # If more studs than children, log a warning and use only the first
+        # n_children studs this generation.
+        n_stud_slots = min(len(stud_parent_ids), n_children)
+        non_stud_slots = n_children - n_stud_slots
+        if len(parent_pool) < 2 and non_stud_slots > 0:
             import logging as _log
             _log.getLogger(__name__).warning(
                 "Only %d parent(s) in pool — cloning + mutating instead of crossover",
                 len(parent_pool),
             )
+        if stud_parent_ids and n_stud_slots < len(stud_parent_ids):
+            logger.warning(
+                "Studs configured (%d) but only %d breeding slot(s) available — "
+                "using first %d studs this generation",
+                len(stud_parent_ids), n_children, n_stud_slots,
+            )
+        if stud_parent_ids and n_children == 0:
+            logger.warning(
+                "Studs configured but no breeding slots available "
+                "(survivors filled population) — studs not used this generation",
+            )
 
-        for _ in range(n_children):
-            # Pick two parents from the combined pool (or clone if only one)
-            if len(parent_pool) >= 2:
+        # Helper to pick the second parent for a stud child.
+        def _pick_stud_partner(stud_id: str) -> str:
+            # Prefer a run survivor; fall back to external; fall back to
+            # another stud; final fallback = clone.
+            if survivors:
+                return rng.choice(survivors)
+            if external_parent_ids:
+                return rng.choice(external_parent_ids)
+            others = [s for s in stud_parent_ids if s != stud_id]
+            if others:
+                return rng.choice(others)
+            return stud_id
+
+        for child_idx in range(n_children):
+            # Stud-reserved slot?
+            if child_idx < n_stud_slots:
+                parent_a_id = stud_parent_ids[child_idx]
+                parent_b_id = _pick_stud_partner(parent_a_id)
+            elif len(parent_pool) >= 2:
+                # Pick two parents from the combined pool
                 parent_a_id, parent_b_id = rng.sample(parent_pool, 2)
             elif len(parent_pool) == 1:
                 parent_a_id = parent_pool[0]
@@ -991,6 +1037,20 @@ class PopulationManager:
                     deltas=deltas,
                 )
             )
+
+            # Record stud-selection event when this child was bred from a
+            # reserved stud slot (Issue 13).
+            if child_idx < n_stud_slots:
+                self._record_event(
+                    generation, "selection",
+                    parent_a_id=parent_a_id,
+                    child_model_id=model_id,
+                    selection_reason="stud",
+                    summary=(
+                        f"Stud {parent_a_id[:12]} forced as parent for "
+                        f"child {model_id[:12]}"
+                    ),
+                )
 
         return children, breeding_records
 

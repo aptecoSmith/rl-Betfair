@@ -201,6 +201,7 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
                 else None
             ),
             breeding_pool=payload.get("breeding_pool"),
+            stud_model_ids=list(payload.get("stud_model_ids") or []),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")
@@ -218,6 +219,8 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
                 f"Unknown breeding_pool '{plan.breeding_pool}'. "
                 "Must be one of: run_only, include_garaged, full_registry",
             )
+    if plan.stud_model_ids and len(plan.stud_model_ids) > 5:
+        raise HTTPException(422, "stud_model_ids: at most 5 studs allowed")
 
     issues = validate_plan(plan)
     if not is_launchable(issues):

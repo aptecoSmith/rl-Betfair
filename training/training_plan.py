@@ -190,6 +190,10 @@ class TrainingPlan:
     #: active+garaged, parent-only). Defaults to None which means "use
     #: config default" (typically run_only).
     breeding_pool: str | None = None
+    #: Stud models (Issue 13). Hand-picked model IDs that are guaranteed
+    #: to be parents in every generation regardless of selection. Empty
+    #: list = no studs. Max 5 enforced in API.
+    stud_model_ids: list[str] = field(default_factory=list)
 
     # ---- session helpers ----
     def session_boundaries(self) -> list[tuple[int, int]]:
@@ -247,6 +251,7 @@ class TrainingPlan:
             "current_session": self.current_session,
             "max_mutations_per_child": self.max_mutations_per_child,
             "breeding_pool": self.breeding_pool,
+            "stud_model_ids": list(self.stud_model_ids),
         }
 
     @classmethod
@@ -282,6 +287,7 @@ class TrainingPlan:
             current_session=int(raw.get("current_session", 0)),
             max_mutations_per_child=raw.get("max_mutations_per_child"),
             breeding_pool=raw.get("breeding_pool"),
+            stud_model_ids=list(raw.get("stud_model_ids", []) or []),
         )
 
     @staticmethod
@@ -305,6 +311,7 @@ class TrainingPlan:
         auto_continue: bool = False,
         max_mutations_per_child: int | None = None,
         breeding_pool: str | None = None,
+        stud_model_ids: list[str] | None = None,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -328,6 +335,7 @@ class TrainingPlan:
             auto_continue=auto_continue,
             max_mutations_per_child=max_mutations_per_child,
             breeding_pool=breeding_pool,
+            stud_model_ids=list(stud_model_ids or []),
         )
 
 

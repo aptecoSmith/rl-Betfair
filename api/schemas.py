@@ -408,6 +408,10 @@ class StartTrainingRequest(BaseModel):
     # Per-run breeding-pool scope: run_only | include_garaged | full_registry.
     # None = use config default.
     breeding_pool: str | None = None
+    # Per-run stud models (Issue 13). List of model IDs that are forced to
+    # be parents in every generation regardless of selection. Max 5.
+    # None or empty list = no studs (current behaviour).
+    stud_model_ids: list[str] | None = None
 
 
 class ResumeTrainingRequest(BaseModel):
