@@ -667,13 +667,22 @@ class PopulationManager:
         hp: dict,
         mutation_rate: float = 0.3,
         rng: random.Random | None = None,
+        max_mutations: int | None = None,
     ) -> tuple[dict, dict[str, float | None]]:  # noqa: C901
         """Apply mutation to hyperparameters.
 
-        For each parameter, with probability ``mutation_rate``:
-        - float / float_log: Gaussian noise (sigma = 10% of range).
-        - int: random shift of ±1 (or ±1 step for int_choice).
-        - int_choice: jump to an adjacent choice.
+        Two modes:
+
+        - ``max_mutations is None`` (default, legacy):
+          For each parameter, with probability ``mutation_rate``:
+          - float / float_log: Gaussian noise (sigma = 10% of range).
+          - int: random shift of ±1 (or ±1 step for int_choice).
+          - int_choice: jump to an adjacent choice.
+        - ``max_mutations`` is an int N:
+          Randomly sample at most N eligible genes and mutate only those.
+          The per-gene coin-flip is bypassed. This makes attribution
+          tractable: with N=1-3 it's clear which gene caused improvement
+          or regression. See ``plans/issues-12-04-2026/11-mutation-count-cap/``.
 
         The result is always clamped to the valid range.
 
@@ -682,9 +691,12 @@ class PopulationManager:
         hp:
             Hyperparameters to mutate (modified in-place AND returned).
         mutation_rate:
-            Probability of mutating each parameter.
+            Probability of mutating each parameter (legacy mode only).
         rng:
             Optional seeded Random instance.
+        max_mutations:
+            Optional cap on simultaneous gene mutations per child. None
+            preserves the legacy coin-flip behaviour.
 
         Returns
         -------
@@ -703,21 +715,49 @@ class PopulationManager:
         arch_cooldown_in = int(hp.get("arch_change_cooldown", 0) or 0)
         old_arch = hp.get("architecture_name")
 
+        # Backfill missing keys for ALL specs first so that newly-added HP
+        # specs are always present after mutate(), even at mutation_rate=0
+        # or when a cap excludes them. This keeps the hard constraint
+        # ("backfill must still happen for all genes regardless of cap")
+        # independent of any per-gene mutation decision below.
+        for spec in self.hp_specs:
+            if spec.name not in hp:
+                hp[spec.name] = _default_for_spec(spec)
+
+        # When a cap is set, pre-select the genes that will mutate. The
+        # selection respects the architecture cooldown (cooled-down arch
+        # is not eligible). Other genes are all eligible.
+        capped_chosen: set[str] | None = None
+        if max_mutations is not None:
+            eligible = [
+                s for s in self.hp_specs
+                if not (s.name == "architecture_name" and arch_cooldown_in > 0)
+            ]
+            cap = max(0, min(int(max_mutations), len(eligible)))
+            chosen_specs = rng.sample(eligible, cap) if cap > 0 else []
+            capped_chosen = {s.name for s in chosen_specs}
+            if capped_chosen:
+                logger.debug(
+                    "Mutating %d/%d genes (cap=%d): %s",
+                    len(capped_chosen), len(eligible), max_mutations,
+                    ", ".join(sorted(capped_chosen)),
+                )
+
         for spec in self.hp_specs:
             name = spec.name
-            # Backfill missing keys before the mutation coin-flip so that
-            # newly-added HP specs are always present after mutate(),
-            # even at mutation_rate=0.
-            if name not in hp:
-                hp[name] = _default_for_spec(spec)
 
             if name == "architecture_name" and arch_cooldown_in > 0:
                 # Cooldown blocks the arch mutation this generation.
                 deltas[name] = None
                 continue
-            if rng.random() >= mutation_rate:
-                deltas[name] = None
-                continue
+            if capped_chosen is not None:
+                if name not in capped_chosen:
+                    deltas[name] = None
+                    continue
+            else:
+                if rng.random() >= mutation_rate:
+                    deltas[name] = None
+                    continue
 
             old_val = hp[name]
 
@@ -782,22 +822,37 @@ class PopulationManager:
         generation: int,
         mutation_rate: float = 0.3,
         seed: int | None = None,
+        max_mutations: int | None = None,
+        external_parent_ids: list[str] | None = None,
     ) -> tuple[list[AgentRecord], list[BreedingRecord]]:
         """Breed children to fill the population back to full size.
 
-        Survivors are kept unchanged. Children are bred from pairs of survivors
-        via crossover + mutation to fill remaining slots.
+        Survivors are kept unchanged. Children are bred from pairs of
+        survivors (and optional external parents) via crossover +
+        mutation to fill remaining slots.
 
         Parameters
         ----------
         selection_result:
-            Result from :meth:`select`.
+            Result from :meth:`select`. ``selection_result.survivors``
+            should contain *only* run-agent IDs (run-survivors that
+            carry over to the next generation).
         generation:
             Generation number for the new children.
         mutation_rate:
             Probability of mutating each hyperparameter in a child.
         seed:
             Optional RNG seed.
+        max_mutations:
+            Optional cap on simultaneous gene mutations per child. None
+            preserves the legacy coin-flip behaviour. See :meth:`mutate`.
+        external_parent_ids:
+            Optional list of model IDs that contribute hyperparameters as
+            parents only. They do NOT take survivor slots, are NOT
+            re-trained, and are NOT carried over to the next generation —
+            they only widen the gene pool from which children are bred.
+            Used by the ``include_garaged`` and ``full_registry``
+            breeding-pool modes (see ``run_training.py``).
 
         Returns
         -------
@@ -807,38 +862,69 @@ class PopulationManager:
         """
         rng = random.Random(seed)
         survivors = selection_result.survivors
+        external_parent_ids = list(external_parent_ids or [])
         n_children = self.population_size - len(survivors)
 
-        # Need survivor hyperparams — look them up from ranked_scores or store
-        survivor_hp: dict[str, dict] = {}
-        for s in selection_result.ranked_scores:
-            if s.model_id in survivors:
-                if self.model_store is not None:
-                    record = self.model_store.get_model(s.model_id)
-                    survivor_hp[s.model_id] = record.hyperparameters
-                # else: caller must provide them (unit test scenario handled below)
+        if n_children <= 0:
+            # Surprising state: selection produced enough survivors to
+            # already fill (or overflow) the next generation. The GA
+            # cannot make progress in that case — surface it loudly so
+            # the operator can adjust population_size or selection_top_pct.
+            logger.warning(
+                "breed(): no children to breed "
+                "(population_size=%d, run-survivors=%d, external_parents=%d). "
+                "Selection is too generous (top_pct too high) or "
+                "population_size is smaller than the survivor count. "
+                "GA cannot make progress this generation.",
+                self.population_size,
+                len(survivors),
+                len(external_parent_ids),
+            )
+
+        # Combined parent pool: run-survivors + external (parent-only) IDs.
+        parent_pool = list(survivors) + list(external_parent_ids)
+
+        # Need parent hyperparams — look them up from ranked_scores or store.
+        # Iterate the full parent pool (not just survivors) so external
+        # parents' HP are also available.
+        parent_hp: dict[str, dict] = {}
+        if self.model_store is not None:
+            for mid in parent_pool:
+                try:
+                    record = self.model_store.get_model(mid)
+                    if record is not None:
+                        parent_hp[mid] = record.hyperparameters
+                except Exception:
+                    logger.warning(
+                        "Could not load parent %s from store — skipping",
+                        mid, exc_info=True,
+                    )
+        # else: caller must provide them (unit test scenario handled below)
 
         children: list[AgentRecord] = []
         breeding_records: list[BreedingRecord] = []
 
-        if len(survivors) < 2 and n_children > 0:
+        if len(parent_pool) < 2 and n_children > 0:
             import logging as _log
             _log.getLogger(__name__).warning(
-                "Only %d survivor(s) — cloning + mutating instead of crossover",
-                len(survivors),
+                "Only %d parent(s) in pool — cloning + mutating instead of crossover",
+                len(parent_pool),
             )
 
         for _ in range(n_children):
-            # Pick two parents from survivors (or clone if only one)
-            if len(survivors) >= 2:
-                parent_a_id, parent_b_id = rng.sample(survivors, 2)
+            # Pick two parents from the combined pool (or clone if only one)
+            if len(parent_pool) >= 2:
+                parent_a_id, parent_b_id = rng.sample(parent_pool, 2)
+            elif len(parent_pool) == 1:
+                parent_a_id = parent_pool[0]
+                parent_b_id = parent_pool[0]
             else:
-                parent_a_id = survivors[0]
-                parent_b_id = survivors[0]
+                # Empty pool — can't breed.
+                break
 
             # Get parent hyperparams
-            hp_a = survivor_hp.get(parent_a_id)
-            hp_b = survivor_hp.get(parent_b_id)
+            hp_a = parent_hp.get(parent_a_id)
+            hp_b = parent_hp.get(parent_b_id)
             if hp_a is None or hp_b is None:
                 raise RuntimeError(
                     "Cannot breed: parent hyperparameters not available. "
@@ -849,7 +935,9 @@ class PopulationManager:
             child_hp, inheritance = self.crossover(hp_a, hp_b, rng)
 
             # Mutation
-            child_hp, deltas = self.mutate(child_hp, mutation_rate, rng)
+            child_hp, deltas = self.mutate(
+                child_hp, mutation_rate, rng, max_mutations=max_mutations,
+            )
 
             arch_name = child_hp.get("architecture_name", self.default_architecture)
 
@@ -1123,3 +1211,8 @@ class SelectionResult:
     survivors: list[str]    # model IDs that survived (top 50%, includes elites)
     eliminated: list[str]   # model IDs eliminated this generation
     ranked_scores: list[ModelScore]  # full ranked list for reference
+    # External (parent-only) survivors: included in the breeding pool but
+    # not in the next-generation roster. Populated by the breeding-pool
+    # scope logic in run_training.py for include_garaged / full_registry
+    # modes. Empty list = no external parents (default, run_only mode).
+    external_parents: list[str] = field(default_factory=list)

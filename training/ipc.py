@@ -54,6 +54,8 @@ def make_start_cmd(
     market_type_filters: list[str] | None = None,
     plan_id: str | None = None,
     start_generation: int = 0,
+    max_mutations_per_child: int | None = None,
+    breeding_pool: str | None = None,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -73,6 +75,8 @@ def make_start_cmd(
         "market_type_filters": market_type_filters,
         "plan_id": plan_id,
         "start_generation": start_generation,
+        "max_mutations_per_child": max_mutations_per_child,
+        "breeding_pool": breeding_pool,
     })
 
 

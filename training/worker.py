@@ -218,6 +218,16 @@ class TrainingWorker:
         if params.get("min_seconds_before_off") is not None:
             bc_cfg["min_seconds_before_off"] = params["min_seconds_before_off"]
 
+        # Mutation cap and breeding pool — per-run population overrides.
+        if params.get("max_mutations_per_child") is not None:
+            run_config.setdefault("population", {})["max_mutations_per_child"] = (
+                params["max_mutations_per_child"]
+            )
+        if params.get("breeding_pool") is not None:
+            run_config.setdefault("population", {})["breeding_pool"] = (
+                params["breeding_pool"]
+            )
+
         return run_config
 
     def _reload_config_from_disk(self) -> bool:

@@ -443,10 +443,40 @@
                     </div>
                   </div>
                 }
+                <div class="wizard-form">
+                  <label class="form-field">
+                    <span class="field-label">Max mutations per child</span>
+                    <input type="number" [(ngModel)]="maxMutationsPerChild" min="1" max="50" placeholder="Default (coin-flip)" data-testid="input-max-mutations" />
+                    <span class="field-help">
+                      Limits how many hyperparameters change at once when breeding. Lower
+                      values (1-3) make it easier to understand what made a model better
+                      or worse, but explore the search space more slowly. Leave blank for
+                      the default behaviour where each gene has an independent
+                      {{ (genetics()?.mutation_rate ?? 0.3) * 100 | number:'1.0-0' }}% chance
+                      of mutating (~9 changes at once with 30 genes).
+                    </span>
+                  </label>
+                  <label class="form-field">
+                    <span class="field-label">Breeding pool</span>
+                    <select [(ngModel)]="breedingPool" data-testid="select-breeding-pool">
+                      <option [ngValue]="null">Default (run only)</option>
+                      <option value="run_only">run_only — only this run's agents</option>
+                      <option value="include_garaged">include_garaged — add garaged models as parents</option>
+                      <option value="full_registry">full_registry — all active+garaged as parents</option>
+                    </select>
+                    <span class="field-help">
+                      Controls which models compete in the breeding pool. External models
+                      (garaged or registry) are <strong>parent-only</strong>: they donate
+                      hyperparameters to crossover but do not take survivor slots and are
+                      not retrained.
+                    </span>
+                  </label>
+                </div>
                 <p class="help-text">
-                  These population-level knobs are fixed via <code>config.yaml</code>.
-                  To plan a Gen-0 run with custom hyperparameter ranges, an architecture
-                  mix, or per-architecture learning-rate overrides, use the
+                  Other population-level knobs (elite count, selection rate, mutation
+                  rate) are fixed via <code>config.yaml</code>. To plan a Gen-0 run with
+                  custom hyperparameter ranges, an architecture mix, or per-architecture
+                  learning-rate overrides, use the
                   <a routerLink="/training-plans" data-testid="link-to-training-plans">Training Plans</a>
                   page — it talks to <code>POST /api/training-plans</code> instead of
                   <code>POST /api/training/start</code> and lets you persist a plan

@@ -368,6 +368,20 @@ async def start_training(request: Request, body: StartTrainingRequest):
         if unknown:
             raise HTTPException(400, f"Unknown market type filters: {unknown}")
 
+    # Mutation cap validation
+    if body.max_mutations_per_child is not None and body.max_mutations_per_child < 1:
+        raise HTTPException(400, "max_mutations_per_child must be >= 1 (or null)")
+
+    # Breeding pool validation
+    if body.breeding_pool is not None:
+        valid_pools = {"run_only", "include_garaged", "full_registry"}
+        if body.breeding_pool not in valid_pools:
+            raise HTTPException(
+                400,
+                f"Unknown breeding_pool '{body.breeding_pool}'. "
+                f"Must be one of: {sorted(valid_pools)}",
+            )
+
     # Send start command to worker
     cmd = make_start_cmd(
         n_generations=body.n_generations,
@@ -385,6 +399,8 @@ async def start_training(request: Request, body: StartTrainingRequest):
         starting_budget=body.starting_budget,
         market_type_filters=body.market_type_filters,
         plan_id=body.plan_id,
+        max_mutations_per_child=body.max_mutations_per_child,
+        breeding_pool=body.breeding_pool,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 
@@ -500,6 +516,8 @@ async def resume_training(request: Request, body: ResumeTrainingRequest):
         starting_budget=plan.starting_budget,
         plan_id=plan.plan_id,
         start_generation=start_gen,
+        max_mutations_per_child=plan.max_mutations_per_child,
+        breeding_pool=plan.breeding_pool,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

@@ -179,6 +179,17 @@ class TrainingPlan:
     auto_continue: bool = False
     #: Which session is currently active (0-indexed).
     current_session: int = 0
+    #: Optional cap on simultaneous gene mutations per child (Issue 11).
+    #: None preserves the legacy per-gene coin-flip behaviour. 1-3 makes
+    #: gain/regression attribution much cleaner. Persisted on the plan
+    #: so re-launches use the same setting; defaults to None for plans
+    #: saved before this field existed.
+    max_mutations_per_child: int | None = None
+    #: Breeding-pool scope (Issue 08): "run_only" (default), "include_garaged"
+    #: (run + garaged models, parent-only) or "full_registry" (all
+    #: active+garaged, parent-only). Defaults to None which means "use
+    #: config default" (typically run_only).
+    breeding_pool: str | None = None
 
     # ---- session helpers ----
     def session_boundaries(self) -> list[tuple[int, int]]:
@@ -234,6 +245,8 @@ class TrainingPlan:
             "generations_per_session": self.generations_per_session,
             "auto_continue": self.auto_continue,
             "current_session": self.current_session,
+            "max_mutations_per_child": self.max_mutations_per_child,
+            "breeding_pool": self.breeding_pool,
         }
 
     @classmethod
@@ -267,6 +280,8 @@ class TrainingPlan:
             generations_per_session=raw.get("generations_per_session"),
             auto_continue=bool(raw.get("auto_continue", False)),
             current_session=int(raw.get("current_session", 0)),
+            max_mutations_per_child=raw.get("max_mutations_per_child"),
+            breeding_pool=raw.get("breeding_pool"),
         )
 
     @staticmethod
@@ -288,6 +303,8 @@ class TrainingPlan:
         n_epochs: int = 3,
         generations_per_session: int | None = None,
         auto_continue: bool = False,
+        max_mutations_per_child: int | None = None,
+        breeding_pool: str | None = None,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -309,6 +326,8 @@ class TrainingPlan:
             n_epochs=n_epochs,
             generations_per_session=generations_per_session,
             auto_continue=auto_continue,
+            max_mutations_per_child=max_mutations_per_child,
+            breeding_pool=breeding_pool,
         )
 
 

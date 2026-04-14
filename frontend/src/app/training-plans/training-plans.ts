@@ -78,6 +78,8 @@ export class TrainingPlans implements OnInit {
   readonly editorExplorationStrategy = signal<string>('random');
   readonly editorGenerationsPerSession = signal<number | null>(null);
   readonly editorAutoContinue = signal(false);
+  readonly editorMaxMutationsPerChild = signal<number | null>(null);
+  readonly editorBreedingPool = signal<'run_only' | 'include_garaged' | 'full_registry' | null>(null);
   readonly editorBiasToggle = signal(false);
   readonly editorSaving = signal(false);
   readonly editorErrors = signal<ValidationIssue[]>([]);
@@ -185,6 +187,8 @@ export class TrainingPlans implements OnInit {
     this.editorNEpochs.set(3);
     this.editorGenerationsPerSession.set(null);
     this.editorAutoContinue.set(false);
+    this.editorMaxMutationsPerChild.set(null);
+    this.editorBreedingPool.set(null);
     this.editorName.set('');
     this.editorErrors.set([]);
     this.editorTopError.set(null);
@@ -323,6 +327,8 @@ export class TrainingPlans implements OnInit {
       n_epochs: this.editorNEpochs(),
       generations_per_session: this.editorGenerationsPerSession(),
       auto_continue: this.editorAutoContinue(),
+      max_mutations_per_child: this.editorMaxMutationsPerChild(),
+      breeding_pool: this.editorBreedingPool(),
     };
     this.editorSaving.set(true);
     this.api.createTrainingPlan(payload).subscribe({
@@ -384,6 +390,8 @@ export class TrainingPlans implements OnInit {
       architectures: plan.architectures,
       seed: plan.seed ?? null,
       starting_budget: plan.starting_budget ?? null,
+      max_mutations_per_child: plan.max_mutations_per_child ?? null,
+      breeding_pool: plan.breeding_pool ?? null,
     }).subscribe({
       next: () => {
         this.launching.set(false);

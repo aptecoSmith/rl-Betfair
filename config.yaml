@@ -8,6 +8,17 @@ population:
   n_elite: 5
   selection_top_pct: 0.5
   mutation_rate: 0.3
+  # Optional cap on simultaneous gene mutations per child. null = legacy
+  # per-gene coin-flip behaviour (~9 mutations on average from 30 genes).
+  # Setting to 1-3 makes attribution of gain/regression to specific genes
+  # much cleaner. See plans/issues-12-04-2026/11-mutation-count-cap/.
+  max_mutations_per_child: null
+  # Which models compete in the breeding pool each generation.
+  # run_only:        only this run's agents (default, current behaviour)
+  # include_garaged: this run's agents + garaged models (parent-only)
+  # full_registry:   all active+garaged models (parent-only)
+  # See plans/issues-12-04-2026/08-breeding-pool-scope/.
+  breeding_pool: run_only
 reward:
   early_pick_bonus_min: 1.2
   early_pick_bonus_max: 1.5

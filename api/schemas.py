@@ -402,6 +402,12 @@ class StartTrainingRequest(BaseModel):
     starting_budget: float | None = None
     # Per-run market type filter restriction — None = all choices
     market_type_filters: list[str] | None = None
+    # Per-run cap on simultaneous gene mutations per child. None = use
+    # config default (which may itself be null = legacy coin-flip).
+    max_mutations_per_child: int | None = None
+    # Per-run breeding-pool scope: run_only | include_garaged | full_registry.
+    # None = use config default.
+    breeding_pool: str | None = None
 
 
 class ResumeTrainingRequest(BaseModel):

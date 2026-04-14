@@ -67,6 +67,8 @@ export interface TrainingPlan {
   generations_per_session?: number | null;
   auto_continue?: boolean;
   current_session?: number;
+  max_mutations_per_child?: number | null;
+  breeding_pool?: 'run_only' | 'include_garaged' | 'full_registry' | null;
 }
 
 export interface ValidationIssue {
@@ -104,6 +106,8 @@ export interface TrainingPlanPayload {
   n_epochs?: number;
   generations_per_session?: number | null;
   auto_continue?: boolean;
+  max_mutations_per_child?: number | null;
+  breeding_pool?: 'run_only' | 'include_garaged' | 'full_registry' | null;
 }
 
 export interface GeneCoverageEntry {

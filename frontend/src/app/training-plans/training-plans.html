@@ -314,6 +314,39 @@
         </div>
       </div>
 
+      <div class="form-row">
+        <div class="form-field">
+          <label>max_mutations_per_child (optional)</label>
+          <input type="number" min="1" max="50" placeholder="default: coin-flip"
+                 [ngModel]="editorMaxMutationsPerChild()"
+                 (ngModelChange)="editorMaxMutationsPerChild.set($event || null)"
+                 data-testid="editor-max-mutations-per-child" />
+          <span class="field-help">
+            Limits how many hyperparameters change at once when breeding. Lower values
+            (1-3) make it easier to understand what made a model better or worse, but
+            explore the search space more slowly. Leave blank for the default behaviour
+            where each gene has an independent 30% chance of mutating (~9 changes at
+            once with 30 genes).
+          </span>
+        </div>
+        <div class="form-field">
+          <label>breeding_pool</label>
+          <select [ngModel]="editorBreedingPool() ?? 'run_only'"
+                  (ngModelChange)="editorBreedingPool.set($event)"
+                  data-testid="editor-breeding-pool">
+            <option value="run_only">run_only — only this run's agents (default)</option>
+            <option value="include_garaged">include_garaged — add garaged models as parents</option>
+            <option value="full_registry">full_registry — all active+garaged as parents</option>
+          </select>
+          <span class="field-help">
+            Controls which models compete in the breeding pool. External models
+            (garaged or registry) are <strong>parent-only</strong>: they donate
+            hyperparameters to crossover but do not take survivor slots and are
+            not retrained.
+          </span>
+        </div>
+      </div>
+
       <div class="form-section session-splitting-section">
         <h3>Session splitting (optional)</h3>
         <p class="help-text">

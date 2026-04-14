@@ -195,9 +195,29 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
                 else None
             ),
             auto_continue=bool(payload.get("auto_continue", False)),
+            max_mutations_per_child=(
+                int(payload["max_mutations_per_child"])
+                if payload.get("max_mutations_per_child") is not None
+                else None
+            ),
+            breeding_pool=payload.get("breeding_pool"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")
+
+    # Validate the new optional fields
+    if (
+        plan.max_mutations_per_child is not None
+        and plan.max_mutations_per_child < 1
+    ):
+        raise HTTPException(422, "max_mutations_per_child must be >= 1 (or null)")
+    if plan.breeding_pool is not None:
+        if plan.breeding_pool not in {"run_only", "include_garaged", "full_registry"}:
+            raise HTTPException(
+                422,
+                f"Unknown breeding_pool '{plan.breeding_pool}'. "
+                "Must be one of: run_only, include_garaged, full_registry",
+            )
 
     issues = validate_plan(plan)
     if not is_launchable(issues):

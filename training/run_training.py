@@ -292,11 +292,15 @@ class TrainingOrchestrator:
             f"Data: {len(train_days)} train days, {len(test_days)} test days"
         )
         pop_cfg = self.config.get("population", {})
+        cap = pop_cfg.get("max_mutations_per_child")
+        cap_str = f", cap {cap}/child" if cap is not None else ""
+        pool_str = pop_cfg.get("breeding_pool", "run_only")
         self._emit_info(
             f"Population: {pop_cfg.get('size', '?')} agents, "
             f"{pop_cfg.get('n_elite', '?')} elite, "
             f"{int(pop_cfg.get('selection_top_pct', 0) * 100)}% survival, "
-            f"{int(pop_cfg.get('mutation_rate', 0) * 100)}% mutation"
+            f"{int(pop_cfg.get('mutation_rate', 0) * 100)}% mutation{cap_str} "
+            f"(breeding_pool: {pool_str})"
         )
         self._emit_info(
             f"Training: {n_generations} generation(s), {n_epochs} epoch(s) per day"
@@ -775,36 +779,105 @@ class TrainingOrchestrator:
 
             # Scope selection to this run's population — the scoreboard
             # persists scores for every active model, but only the agents
-            # in *this* generation should participate in selection/breeding.
+            # in *this* generation should participate in selection/breeding
+            # (run_only, the default). When the operator opts into
+            # include_garaged or full_registry the external models join
+            # the *pool* but stay parent-only — they don't take survivor
+            # slots in the next generation.
             run_ids = {a.model_id for a in agents}
             run_scores = [s for s in scores if s.model_id in run_ids]
 
             # Discard policy (scoped to this run's agents)
             discarded = self.pop_manager.apply_discard_policy(run_scores)
 
-            # Filter out discarded from selection
+            # Build the breeding pool according to config.
+            pop_cfg_local = self.config.get("population", {})
+            breeding_pool_mode = pop_cfg_local.get("breeding_pool", "run_only")
+            external_ids: set[str] = set()
+            if breeding_pool_mode == "include_garaged" and self.model_store is not None:
+                try:
+                    for g in self.model_store.list_garaged_models():
+                        if g.model_id not in run_ids:
+                            external_ids.add(g.model_id)
+                except Exception:
+                    logger.warning(
+                        "Could not enumerate garaged models for breeding pool",
+                        exc_info=True,
+                    )
+            elif breeding_pool_mode == "full_registry":
+                # All scored models that aren't in this run already.
+                for s in scores:
+                    if s.model_id not in run_ids:
+                        external_ids.add(s.model_id)
+            elif breeding_pool_mode != "run_only":
+                logger.warning(
+                    "Unknown breeding_pool mode %r — falling back to run_only",
+                    breeding_pool_mode,
+                )
+
+            # Pool scores = run scores (post-discard) + external scores.
             active_scores = [s for s in run_scores if s.model_id not in discarded]
-            if active_scores:
-                selection = self.pop_manager.select(active_scores)
+            external_scores = [s for s in scores if s.model_id in external_ids]
+            pool_scores = active_scores + external_scores
+
+            if external_ids:
+                self._emit_info(
+                    f"Breeding pool ({breeding_pool_mode}): "
+                    f"{len(active_scores)} run + {len(external_scores)} external "
+                    f"(parent-only)"
+                )
+
+            if pool_scores:
+                pool_selection = self.pop_manager.select(pool_scores)
+
+                # Split survivors into run-survivors (carry over) and
+                # external (parent-only). External survivors do NOT take
+                # slots in the next generation and are NOT re-trained;
+                # they only contribute hyperparameters via crossover.
+                run_survivor_ids = [
+                    mid for mid in pool_selection.survivors
+                    if mid not in external_ids
+                ]
+                external_parent_ids = [
+                    mid for mid in pool_selection.survivors
+                    if mid in external_ids
+                ]
+                selection = SelectionResult(
+                    elites=[
+                        mid for mid in pool_selection.elites
+                        if mid not in external_ids
+                    ],
+                    survivors=run_survivor_ids,
+                    eliminated=pool_selection.eliminated,
+                    ranked_scores=pool_selection.ranked_scores,
+                    external_parents=external_parent_ids,
+                )
 
                 self._emit_phase_complete("selecting", {
                     "generation": generation,
                     "survivors": len(selection.survivors),
                     "eliminated": len(selection.eliminated),
                     "discarded": len(discarded),
+                    "external_parents": len(external_parent_ids),
                 })
 
                 # Breeding
                 self._emit_phase_start("breeding", {
                     "generation": generation,
                     "survivors": len(selection.survivors),
+                    "external_parents": len(external_parent_ids),
                 })
 
                 mutation_rate = self.config["population"].get("mutation_rate", 0.3)
+                max_mutations = self.config["population"].get(
+                    "max_mutations_per_child"
+                )
                 children, breeding_records = self.pop_manager.breed(
                     selection_result=selection,
                     generation=generation + 1,
                     mutation_rate=mutation_rate,
+                    max_mutations=max_mutations,
+                    external_parent_ids=external_parent_ids,
                 )
 
                 self._emit_phase_complete("breeding", {

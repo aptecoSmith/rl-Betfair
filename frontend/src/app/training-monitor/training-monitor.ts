@@ -108,6 +108,10 @@ export class TrainingMonitor implements OnDestroy {
   // Market type filter restriction — empty set means "all choices"
   selectedMarketTypeFilters = new Set<string>();
   readonly MARKET_TYPE_CHOICES = ['WIN', 'EACH_WAY', 'BOTH', 'FREE_CHOICE'];
+  // Issue 11 — null = use config default (legacy per-gene coin-flip).
+  maxMutationsPerChild: number | null = null;
+  // Issue 08 — null = use config default (run_only).
+  breedingPool: 'run_only' | 'include_garaged' | 'full_registry' | null = null;
 
   /** Time estimate for eval_all: unevaluated_count × eval_rate_s. */
   readonly evalAllEstimate = computed(() => {
@@ -528,6 +532,8 @@ export class TrainingMonitor implements OnDestroy {
       market_type_filters: this.selectedMarketTypeFilters.size > 0
         ? Array.from(this.selectedMarketTypeFilters)
         : null,
+      max_mutations_per_child: this.maxMutationsPerChild,
+      breeding_pool: this.breedingPool,
     };
     if (!this.useAllData) {
       params.train_dates = this.datesInRange(this.trainDateStart, this.trainDateEnd);
