@@ -26,7 +26,8 @@
             <th>Architecture</th>
             <th>Filter</th>
             <th>Status</th>
-            <th>Win Rate</th>
+            <th title="Fraction of evaluation days that finished with positive P&L">Profitable Days</th>
+            <th title="Winning bets / total bets, averaged across evaluation days">Bet Win %</th>
             <th>Sharpe</th>
             <th>Mean Daily P&amp;L</th>
             <th>Return %</th>
@@ -65,6 +66,7 @@
                 </span>
               </td>
               <td>{{ model.win_rate | percent:'1.0-0' }}</td>
+              <td>{{ model.bet_precision | percent:'1.0-0' }}</td>
               <td>{{ model.sharpe | number:'1.2-2' }}</td>
               <td>{{ model.mean_daily_pnl | currency:'GBP':'symbol':'1.2-2' }}</td>
               <td [class.positive]="(model.mean_daily_return_pct ?? 0) > 0" [class.negative]="(model.mean_daily_return_pct ?? 0) < 0">

@@ -21,6 +21,7 @@ function idleStatus(): TrainingStatus {
     worker_connected: false,
     unevaluated_count: null,
     eval_rate_s: null,
+    plan_id: null,
   };
 }
 
@@ -50,6 +51,7 @@ function runningStatus(): TrainingStatus {
     worker_connected: true,
     unevaluated_count: null,
     eval_rate_s: null,
+    plan_id: null,
   };
 }
 
@@ -310,6 +312,7 @@ describe('TrainingMonitor', () => {
       lossHistory: lossSignal,
       lastRunCompletedAt: completedAtSignal,
       phase: signal(null),
+      activityLog: signal([]),
       connect: vi.fn(),
       clearHistory: vi.fn(),
     };

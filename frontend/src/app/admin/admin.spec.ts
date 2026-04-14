@@ -74,6 +74,17 @@ class MockApiService {
   });
   getStreamrecorderBackups() { return this.streamrecorderBackupsResponse$; }
   restoreBackups(_dates: string[]) { return this.restoreResponse$; }
+
+  getBettingConstraints() {
+    return of({
+      max_back_price: null,
+      max_lay_price: null,
+      min_seconds_before_off: 0,
+      reevaluate_garaged_default: false,
+    });
+  }
+  updateBettingConstraints(_c: unknown) { return of({}); }
+  getLogPaths() { return of({ paths: [] }); }
 }
 
 /**
@@ -95,6 +106,9 @@ class MockTrainingService {
     detail: null,
     last_agent_score: null,
     worker_connected: false,
+    unevaluated_count: null,
+    eval_rate_s: null,
+    plan_id: null,
   });
   readonly lastActivityAt = signal(Date.now());
   readonly activityLog = signal([]);

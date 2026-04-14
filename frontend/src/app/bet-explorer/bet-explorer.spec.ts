@@ -25,6 +25,9 @@ function makeModel(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
     test_days: 10,
     profitable_days: 8,
     early_picks: 3,
+    mean_daily_return_pct: null,
+    recorded_budget: null,
+    market_type_filter: null,
     garaged: false,
     garaged_at: null,
     created_at: null,
@@ -350,35 +353,50 @@ describe('BetExplorer', () => {
 
   // ── Table rendering ──
 
-  it('should render bets table', () => {
-    setup();
-    component.betData.set(makeBetResponse());
+  /**
+   * Populate betData and expand every venue and race so bet cards render.
+   * Direct betData.set bypasses loadBets(), which is where expansion normally
+   * happens, so tests that assert on rendered cards must expand manually.
+   */
+  function populateAndExpand(response = makeBetResponse()) {
+    component.betData.set(response);
+    const venues = new Set<string>();
+    const races = new Set<string>();
+    for (const b of response.bets) {
+      venues.add(b.venue || 'Unknown');
+      races.add(b.race_id);
+    }
+    component.expandedVenues.set(venues);
+    component.expandedRaces.set(races);
     fixture.detectChanges();
-    const table = fixture.nativeElement.querySelector('[data-testid="bets-table"]');
-    expect(table).toBeTruthy();
+  }
+
+  it('should render grouped bets container', () => {
+    setup();
+    populateAndExpand();
+    const container = fixture.nativeElement.querySelector('[data-testid="grouped-bets"]');
+    expect(container).toBeTruthy();
   });
 
-  it('should render correct number of rows', () => {
+  it('should render one bet card per bet', () => {
     setup();
-    component.betData.set(makeBetResponse());
-    fixture.detectChanges();
-    const rows = fixture.nativeElement.querySelectorAll('[data-testid="bet-row"]');
-    expect(rows.length).toBe(3);
+    populateAndExpand();
+    const cards = fixture.nativeElement.querySelectorAll('.bet-card');
+    expect(cards.length).toBe(3);
   });
 
-  it('should render all 12 table columns', () => {
+  it('should render column headers for bet cards', () => {
     setup();
-    component.betData.set(makeBetResponse());
-    fixture.detectChanges();
-    const headers = fixture.nativeElement.querySelectorAll('th');
-    const headerTexts = Array.from(headers).map((h: any) => h.textContent.trim());
-    expect(headers.length).toBe(12);
-    expect(headerTexts).toContain('Date');
-    expect(headerTexts).toContain('Venue');
-    expect(headerTexts).toContain('Race');
-    expect(headerTexts).toContain('Runner');
-    expect(headerTexts).toContain('Action');
-    expect(headerTexts).toContain('Outcome');
+    populateAndExpand();
+    const headerRow = fixture.nativeElement.querySelector('.bet-card-header');
+    expect(headerRow).toBeTruthy();
+    const headerText = headerRow?.textContent ?? '';
+    // The column header is a row of spans inside each expanded race
+    for (const label of ['Action', 'Runner', 'Stake', 'Price', 'Matched', 'Time to Off', 'Fill', 'Type', 'Outcome']) {
+      expect(headerText).toContain(label);
+    }
+    // Use a regex to match "P&L" with &amp; entity decoding being irrelevant — textContent decodes it
+    expect(headerText).toContain('P&L');
   });
 
   it('should show empty message when no bets', () => {
@@ -419,35 +437,31 @@ describe('BetExplorer', () => {
 
   it('should style back actions', () => {
     setup();
-    component.betData.set(makeBetResponse());
-    fixture.detectChanges();
+    populateAndExpand();
     const backBadge = fixture.nativeElement.querySelector('.action-badge.back');
     expect(backBadge).toBeTruthy();
   });
 
   it('should style lay actions', () => {
     setup();
-    component.betData.set(makeBetResponse());
-    fixture.detectChanges();
+    populateAndExpand();
     const layBadge = fixture.nativeElement.querySelector('.action-badge.lay');
     expect(layBadge).toBeTruthy();
   });
 
-  // ── Outcome badges ──
+  // ── Settlement badges ──
 
   it('should style won outcomes', () => {
     setup();
-    component.betData.set(makeBetResponse());
-    fixture.detectChanges();
-    const wonBadge = fixture.nativeElement.querySelector('.outcome-badge.won');
+    populateAndExpand();
+    const wonBadge = fixture.nativeElement.querySelector('.settlement-badge.won');
     expect(wonBadge).toBeTruthy();
   });
 
   it('should style lost outcomes', () => {
     setup();
-    component.betData.set(makeBetResponse());
-    fixture.detectChanges();
-    const lostBadge = fixture.nativeElement.querySelector('.outcome-badge.lost');
+    populateAndExpand();
+    const lostBadge = fixture.nativeElement.querySelector('.settlement-badge.lost');
     expect(lostBadge).toBeTruthy();
   });
 
@@ -578,10 +592,9 @@ describe('BetExplorer', () => {
     expect(selectionState.replayRaceId()).toBe('race-42');
   });
 
-  it('should render replay button on bet rows', () => {
+  it('should render replay button on bet cards', () => {
     setup();
-    component.betData.set(makeBetResponse());
-    fixture.detectChanges();
+    populateAndExpand();
     const btn = fixture.nativeElement.querySelector('.btn-replay');
     expect(btn).toBeTruthy();
   });

@@ -87,7 +87,8 @@ describe.skipIf(!apiAvailable)('Scoreboard Integration (real API)', () => {
     expect(headerTexts).toContain('Model ID');
     expect(headerTexts).toContain('Gen');
     expect(headerTexts).toContain('Architecture');
-    expect(headerTexts).toContain('Win Rate');
+    expect(headerTexts).toContain('Profitable Days');
+    expect(headerTexts).toContain('Bet Win %');
     expect(headerTexts).toContain('Sharpe');
     expect(headerTexts).toContain('Composite Score');
   });

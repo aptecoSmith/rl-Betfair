@@ -25,6 +25,9 @@ function makeEntry(overrides: Partial<ScoreboardEntry> = {}): ScoreboardEntry {
     test_days: 10,
     profitable_days: 8,
     early_picks: 3,
+    mean_daily_return_pct: null,
+    recorded_budget: null,
+    market_type_filter: null,
     garaged: false,
     garaged_at: null,
     created_at: null,
@@ -134,8 +137,9 @@ describe('Scoreboard', () => {
     const headers = fixture.nativeElement.querySelectorAll('th');
     const headerTexts = Array.from(headers).map((h: any) => h.textContent.trim());
     expect(headerTexts).toEqual([
-      'Rank', '', 'Model ID', 'Gen', 'Architecture',
-      'Win Rate', 'Bet Precision', 'Sharpe', 'Mean Daily P&L', 'Early Picks', 'Efficiency', 'Composite Score',
+      'Rank', '', 'Model ID', 'Gen', 'Architecture', 'Filter',
+      'Profitable Days', 'Bet Win %', 'Sharpe', 'Mean Daily P&L', 'Return %',
+      'Early Picks', 'Efficiency', 'Trained', 'Last Eval', 'Composite Score',
     ]);
   });
 
@@ -266,22 +270,24 @@ describe('Scoreboard', () => {
     setup({ models: [makeEntry({ win_rate: 0.85 })] });
     const el = fixture.nativeElement as HTMLElement;
     const cells = el.querySelectorAll('.scoreboard-row td');
-    // Columns: 0=Rank, 1=Garage, 2=ID, 3=Gen, 4=Arch, 5=WinRate, 6=BetPrecision, 7=Sharpe, 8=P&L, 9=EarlyPicks, 10=Efficiency, 11=Score
-    expect(cells[5]?.textContent?.trim()).toBe('85%');
+    // Columns: 0=Rank, 1=Garage, 2=ID, 3=Gen, 4=Arch, 5=Filter,
+    // 6=ProfitableDays, 7=BetWin%, 8=Sharpe, 9=P&L, 10=Return%,
+    // 11=EarlyPicks, 12=Efficiency, 13=Trained, 14=LastEval, 15=Score
+    expect(cells[6]?.textContent?.trim()).toBe('85%');
   });
 
   it('should format bet_precision as percentage', () => {
     setup({ models: [makeEntry({ bet_precision: 0.7 })] });
     const el = fixture.nativeElement as HTMLElement;
     const cells = el.querySelectorAll('.scoreboard-row td');
-    expect(cells[6]?.textContent?.trim()).toBe('70%');
+    expect(cells[7]?.textContent?.trim()).toBe('70%');
   });
 
   it('should display early picks count', () => {
     setup({ models: [makeEntry({ early_picks: 5 })] });
     const el = fixture.nativeElement as HTMLElement;
     const cells = el.querySelectorAll('.scoreboard-row td');
-    expect(cells[9]?.textContent?.trim()).toBe('5');
+    expect(cells[11]?.textContent?.trim()).toBe('5');
   });
 
   it('should show dash for null composite score', () => {
