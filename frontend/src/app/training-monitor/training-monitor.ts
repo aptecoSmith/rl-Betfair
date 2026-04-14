@@ -110,6 +110,10 @@ export class TrainingMonitor implements OnDestroy {
   // Market type filter restriction — empty set means "all choices"
   selectedMarketTypeFilters = new Set<string>();
   readonly MARKET_TYPE_CHOICES = ['WIN', 'EACH_WAY', 'BOTH', 'FREE_CHOICE'];
+  // Issue 05 (Sprint 5) — forced-arbitrage / scalping toggle. Default
+  // off; run-level only (mixing scalping + directional agents in one
+  // population has incompatible action / obs shapes).
+  scalpingMode = false;
   // Issue 11 — null = use config default (legacy per-gene coin-flip).
   maxMutationsPerChild: number | null = null;
   // Issue 08 — null = use config default (run_only).
@@ -598,6 +602,7 @@ export class TrainingMonitor implements OnDestroy {
       adaptive_mutation: this.adaptiveMutation ? true : null,
       adaptive_mutation_increment: this.adaptiveMutationIncrement,
       adaptive_mutation_cap: this.adaptiveMutationCap,
+      scalping_mode: this.scalpingMode ? true : null,
     };
     if (!this.useAllData) {
       params.train_dates = this.datesInRange(this.trainDateStart, this.trainDateEnd);

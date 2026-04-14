@@ -67,6 +67,11 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     "reward_drawdown_shaping": ("drawdown_shaping_weight",),
     "reward_spread_cost_weight": ("spread_cost_weight",),
     "inactivity_penalty": ("inactivity_penalty",),
+    # Forced-arbitrage (Issue 05, session 3). Only take effect when
+    # training.scalping_mode is on; on directional runs they live in
+    # the genome but the env's scalping branch is dormant.
+    "naked_penalty_weight": ("naked_penalty_weight",),
+    "early_lock_bonus_weight": ("early_lock_bonus_weight",),
 }
 
 
@@ -139,6 +144,13 @@ class EpisodeStats:
     n_steps: int
     raw_pnl_reward: float = 0.0
     shaped_bonus: float = 0.0
+    # Forced-arbitrage (scalping) rollups — Issue 05. Always zero on
+    # directional runs; non-zero identifies a scalping episode so the
+    # activity log / training monitor can surface arb activity.
+    arbs_completed: int = 0
+    arbs_naked: int = 0
+    locked_pnl: float = 0.0
+    naked_pnl: float = 0.0
 
 
 @dataclass
@@ -217,6 +229,20 @@ class PPOTrainer:
         # agent trained with identical reward shaping.
         self.reward_overrides = _reward_overrides_from_hp(hp)
         self.market_type_filter = hp.get("market_type_filter", "BOTH")
+        # Forced-arbitrage mechanics override (Issue 05, session 3). Only
+        # populated when the gene is present in hp — arb_spread_scale is
+        # a float in [0.5, 2.0] stretching / compressing the agent's tick
+        # spread. Passed to the env separately from reward_overrides
+        # because it changes mechanics, not reward.
+        self.scalping_overrides: dict = {}
+        if "arb_spread_scale" in hp and hp["arb_spread_scale"] is not None:
+            self.scalping_overrides["arb_spread_scale"] = float(hp["arb_spread_scale"])
+        # Per-agent scalping_mode flag (may be pinned at population init
+        # from the run-level toggle). Falls back to the env reading it
+        # from config when the gene is missing.
+        self._scalping_mode_override: bool | None = (
+            bool(hp["scalping_mode"]) if "scalping_mode" in hp else None
+        )
 
         self.optimiser = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
 
@@ -311,6 +337,8 @@ class PPOTrainer:
             feature_cache=self.feature_cache,
             reward_overrides=self.reward_overrides,
             market_type_filter=self.market_type_filter,
+            scalping_mode=self._scalping_mode_override,
+            scalping_overrides=self.scalping_overrides or None,
         )
         obs, info = env.reset()
 
@@ -392,6 +420,10 @@ class PPOTrainer:
             n_steps=n_steps,
             raw_pnl_reward=info.get("raw_pnl_reward", 0.0),
             shaped_bonus=info.get("shaped_bonus", 0.0),
+            arbs_completed=int(info.get("arbs_completed", 0) or 0),
+            arbs_naked=int(info.get("arbs_naked", 0) or 0),
+            locked_pnl=float(info.get("locked_pnl", 0.0) or 0.0),
+            naked_pnl=float(info.get("naked_pnl", 0.0) or 0.0),
         )
 
         return rollout, ep_stats
@@ -569,6 +601,11 @@ class PPOTrainer:
             "policy_loss": round(loss_info["policy_loss"], 6),
             "value_loss": round(loss_info["value_loss"], 6),
             "entropy": round(loss_info["entropy"], 6),
+            # Forced-arbitrage (scalping) rollups — zero for directional.
+            "arbs_completed": ep.arbs_completed,
+            "arbs_naked": ep.arbs_naked,
+            "locked_pnl": round(ep.locked_pnl, 4),
+            "naked_pnl": round(ep.naked_pnl, 4),
             "timestamp": time.time(),
         }
 
@@ -596,6 +633,15 @@ class PPOTrainer:
         tracker: ProgressTracker,
     ) -> None:
         """Publish a progress event to the asyncio queue (if provided)."""
+        scalping_detail = ""
+        if ep.arbs_completed or ep.arbs_naked:
+            # Activity-log surface for scalping runs: "arb completed: 3
+            # arbs, £0.38 locked, naked=1 £-0.02" — issue 05 session 3.
+            scalping_detail = (
+                f" | arbs={ep.arbs_completed}/{ep.arbs_completed + ep.arbs_naked}"
+                f" locked=£{ep.locked_pnl:+.2f}"
+                f" naked=£{ep.naked_pnl:+.2f}"
+            )
         progress = {
             "event": "progress",
             "phase": "training",
@@ -605,6 +651,7 @@ class PPOTrainer:
                 f"reward={ep.total_reward:+.3f} | "
                 f"P&L={ep.total_pnl:+.2f} | "
                 f"loss={loss_info['policy_loss']:.4f}"
+                f"{scalping_detail}"
             ),
             "episode": {
                 "day_date": ep.day_date,
@@ -614,6 +661,10 @@ class PPOTrainer:
                 "policy_loss": loss_info["policy_loss"],
                 "value_loss": loss_info["value_loss"],
                 "entropy": loss_info["entropy"],
+                "arbs_completed": ep.arbs_completed,
+                "arbs_naked": ep.arbs_naked,
+                "locked_pnl": ep.locked_pnl,
+                "naked_pnl": ep.naked_pnl,
             },
         }
 

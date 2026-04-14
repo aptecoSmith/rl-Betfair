@@ -508,3 +508,97 @@ class TestScalpingReward:
         assert info["arbs_completed"] == 0
         assert info["arbs_naked"] == 0
         assert info["locked_pnl"] == 0.0
+
+
+# ── Session 3: gene / hyperparameter integration ───────────────────────────
+
+
+class TestScalpingGenes:
+    """Scalping-related hyperparameters wire through the search space, the
+    env, and the population manager cleanly.
+    """
+
+    def test_scalping_genes_in_schema(self):
+        """arb_spread_scale, naked_penalty_weight and early_lock_bonus_weight
+        are sampleable from config.yaml — so the schema inspector shows them
+        and the GA can evolve them."""
+        import yaml
+        from agents.population_manager import parse_search_ranges
+
+        with open("config.yaml") as f:
+            cfg = yaml.safe_load(f)
+        specs = {
+            s.name: s
+            for s in parse_search_ranges(cfg["hyperparameters"]["search_ranges"])
+        }
+        for name in (
+            "arb_spread_scale",
+            "naked_penalty_weight",
+            "early_lock_bonus_weight",
+        ):
+            assert name in specs, f"gene {name} missing from search_ranges"
+            assert specs[name].type == "float"
+
+    def test_population_manager_pins_scalping_mode_on_agents(self):
+        """Initialised agents carry the run-level scalping_mode flag in hp."""
+        import yaml
+        from registry.model_store import ModelStore
+        from agents.population_manager import PopulationManager
+
+        with open("config.yaml") as f:
+            cfg = yaml.safe_load(f)
+        cfg["training"]["scalping_mode"] = True
+        cfg["population"]["size"] = 2
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            store = ModelStore(
+                db_path=f"{td}/models.db", weights_dir=f"{td}/weights",
+            )
+            pm = PopulationManager(cfg, model_store=store)
+            agents = pm.initialise_population(generation=0, seed=42)
+            assert len(agents) == 2
+            for a in agents:
+                assert a.hyperparameters["scalping_mode"] is True
+
+    def test_env_respects_arb_spread_scale_override(self, scalping_config):
+        """arb_spread_scale expands / compresses the mapped tick range
+        within the hard [MIN_ARB_TICKS, MAX_ARB_TICKS] clamp."""
+        # A scale of 0.5 with arb_frac=1.0 halves the mapped range, so the
+        # resulting tick count is below MAX_ARB_TICKS — proving the gene took
+        # effect.  Default 1.0 would give MAX_ARB_TICKS exactly.
+        day = _make_day(n_races=1, n_pre_ticks=3)
+        env_fast = BetfairEnv(day, scalping_config,
+                              scalping_overrides={"arb_spread_scale": 0.5})
+        env_default = BetfairEnv(day, scalping_config)
+
+        assert env_fast._arb_spread_scale == 0.5
+        assert env_default._arb_spread_scale == 1.0
+
+    def test_env_reward_overrides_naked_penalty_weight(self, scalping_config):
+        """naked_penalty_weight flows through the existing reward-override
+        mechanism so the GA can evolve it per-agent."""
+        env = BetfairEnv(
+            _make_day(n_races=1),
+            scalping_config,
+            reward_overrides={"naked_penalty_weight": 3.5,
+                              "early_lock_bonus_weight": 0.7},
+        )
+        assert env._naked_penalty_weight == pytest.approx(3.5)
+        assert env._early_lock_bonus_weight == pytest.approx(0.7)
+
+    def test_evaluator_collects_scalping_metrics(self, scalping_config):
+        """EvaluationDayRecord carries arbs_completed / arbs_naked /
+        locked_pnl / naked_pnl sourced from the env's info dict."""
+        from registry.model_store import EvaluationDayRecord
+
+        rec = EvaluationDayRecord(
+            run_id="r", date="2026-04-01", day_pnl=1.0, bet_count=4,
+            winning_bets=2, bet_precision=0.5, pnl_per_bet=0.25,
+            early_picks=0, profitable=True,
+            arbs_completed=3, arbs_naked=1,
+            locked_pnl=1.14, naked_pnl=-0.14,
+        )
+        assert rec.arbs_completed == 3
+        assert rec.arbs_naked == 1
+        assert rec.locked_pnl == pytest.approx(1.14)
+        assert rec.naked_pnl == pytest.approx(-0.14)

@@ -211,6 +211,14 @@ class TrainingWorker:
         if params.get("starting_budget") is not None:
             run_config.setdefault("training", {})["starting_budget"] = params["starting_budget"]
 
+        # Forced-arbitrage (scalping) toggle (Issue 05). Run-level only —
+        # mixing scalping and non-scalping agents in one population is
+        # incoherent because the action / observation shapes differ.
+        if params.get("scalping_mode") is not None:
+            run_config.setdefault("training", {})["scalping_mode"] = bool(
+                params["scalping_mode"]
+            )
+
         # Betting constraints
         bc_cfg = run_config.setdefault("training", {}).setdefault("betting_constraints", {})
         if params.get("max_back_price") is not None:
@@ -637,6 +645,9 @@ class TrainingWorker:
                 OBS_SCHEMA_VERSION,
                 POSITION_DIM,
                 RUNNER_DIM,
+                SCALPING_ACTIONS_PER_RUNNER,
+                SCALPING_AGENT_STATE_DIM,
+                SCALPING_POSITION_DIM,
                 VELOCITY_DIM,
             )
 
@@ -659,14 +670,23 @@ class TrainingWorker:
                 console.print(f"[dim]Loaded {len(test_days)} test days[/dim]")
 
                 max_runners = config_for_run["training"]["max_runners"]
-                obs_dim = (
-                    MARKET_DIM
-                    + VELOCITY_DIM
-                    + (RUNNER_DIM * max_runners)
-                    + AGENT_STATE_DIM
-                    + (POSITION_DIM * max_runners)
-                )
-                action_dim = max_runners * ACTIONS_PER_RUNNER
+                # obs_dim / action_dim depend on whether the model was
+                # trained with scalping_mode — recompute per model below
+                # rather than up here, so a mixed-mode re-eval batch
+                # stays coherent even though the run_config is single-mode.
+                def _shapes_for(hp_: dict) -> tuple[int, int]:
+                    is_scalp = bool(hp_.get("scalping_mode", False))
+                    extra_pos = SCALPING_POSITION_DIM if is_scalp else 0
+                    extra_ag = SCALPING_AGENT_STATE_DIM if is_scalp else 0
+                    _obs_dim = (
+                        MARKET_DIM
+                        + VELOCITY_DIM
+                        + (RUNNER_DIM * max_runners)
+                        + AGENT_STATE_DIM + extra_ag
+                        + ((POSITION_DIM + extra_pos) * max_runners)
+                    )
+                    apr = SCALPING_ACTIONS_PER_RUNNER if is_scalp else ACTIONS_PER_RUNNER
+                    return _obs_dim, max_runners * apr
 
                 evaluator = Evaluator(
                     config=config_for_run,
@@ -703,6 +723,7 @@ class TrainingWorker:
                         hp = record.hyperparameters or {}
                         arch_name = record.architecture_name
                         market_type_filter = hp.get("market_type_filter", "BOTH")
+                        obs_dim, action_dim = _shapes_for(hp)
 
                         policy = create_policy(
                             name=arch_name,
@@ -723,6 +744,7 @@ class TrainingWorker:
                             test_days=test_days,
                             train_cutoff_date=train_cutoff,
                             market_type_filter=market_type_filter,
+                            hyperparameters=hp or None,
                         )
                         completed += 1
                     except Exception as exc:

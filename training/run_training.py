@@ -530,6 +530,7 @@ class TrainingOrchestrator:
                     test_days=test_days,
                     train_cutoff_date=train_cutoff,
                     market_type_filter=mtf,
+                    hyperparameters=agent.hyperparameters or None,
                 )
             except Exception:
                 logger.exception(
@@ -692,6 +693,7 @@ class TrainingOrchestrator:
                 test_days=test_days,
                 train_cutoff_date=train_cutoff,
                 market_type_filter=mtf,
+                hyperparameters=agent.hyperparameters or None,
             )
 
         agents_evaluated = 0

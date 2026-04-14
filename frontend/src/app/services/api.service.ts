@@ -176,6 +176,7 @@ export class ApiService {
     adaptive_mutation?: boolean | null;
     adaptive_mutation_increment?: number | null;
     adaptive_mutation_cap?: number | null;
+    scalping_mode?: boolean | null;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
@@ -205,6 +206,7 @@ export class ApiService {
       adaptive_mutation: params.adaptive_mutation ?? null,
       adaptive_mutation_increment: params.adaptive_mutation_increment ?? null,
       adaptive_mutation_cap: params.adaptive_mutation_cap ?? null,
+      scalping_mode: params.scalping_mode ?? null,
     });
   }
 

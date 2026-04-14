@@ -98,6 +98,34 @@ export class ModelDetail implements OnInit {
     return budget != null ? budget : null;
   });
 
+  /** Scalping totals (Issue 05). Returns null for directional models so
+   *  the template hides the whole block. Non-null only when any arb
+   *  activity was recorded across the evaluation days. */
+  readonly scalpingTotals = computed(() => {
+    const m = this.model();
+    if (!m || m.metrics_history.length === 0) return null;
+    const arbs_completed = m.metrics_history.reduce(
+      (s, d) => s + (d.arbs_completed ?? 0), 0,
+    );
+    const arbs_naked = m.metrics_history.reduce(
+      (s, d) => s + (d.arbs_naked ?? 0), 0,
+    );
+    if (arbs_completed === 0 && arbs_naked === 0) return null;
+    const total = arbs_completed + arbs_naked;
+    const fill_rate = total > 0 ? (arbs_completed / total) * 100 : 0;
+    return {
+      arbs_completed,
+      arbs_naked,
+      fill_rate,
+      locked_pnl: m.metrics_history.reduce(
+        (s, d) => s + (d.locked_pnl ?? 0), 0,
+      ),
+      naked_pnl: m.metrics_history.reduce(
+        (s, d) => s + (d.naked_pnl ?? 0), 0,
+      ),
+    };
+  });
+
   readonly meanDailyReturnPct = computed(() => {
     const m = this.model();
     if (!m || m.metrics_history.length === 0) return null;

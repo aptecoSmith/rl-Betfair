@@ -467,6 +467,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
         adaptive_mutation=body.adaptive_mutation,
         adaptive_mutation_increment=body.adaptive_mutation_increment,
         adaptive_mutation_cap=body.adaptive_mutation_cap,
+        scalping_mode=body.scalping_mode,
     )
     resp = await _send_to_worker(request, cmd, timeout=30.0)
 

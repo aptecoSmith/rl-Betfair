@@ -281,6 +281,11 @@ class PopulationManager:
         train_cfg = config["training"]
         self.default_architecture: str = train_cfg["architecture"]
         self.max_runners: int = train_cfg["max_runners"]
+        # Run-level scalping toggle (Issue 05). Off = byte-identical
+        # legacy action/obs shapes. Pinned into every agent's hp so the
+        # trainer / evaluator know which mode to instantiate the env in
+        # (especially important when re-evaluating from disk months later).
+        self.scalping_mode: bool = bool(train_cfg.get("scalping_mode", False))
 
         # Compute observation and action dimensions from env constants
         from env.betfair_env import (
@@ -289,19 +294,25 @@ class PopulationManager:
             OBS_SCHEMA_VERSION,
             POSITION_DIM,
             RUNNER_DIM,
+            SCALPING_ACTIONS_PER_RUNNER,
+            SCALPING_AGENT_STATE_DIM,
+            SCALPING_POSITION_DIM,
             VELOCITY_DIM,
         )
         self._obs_schema_version = OBS_SCHEMA_VERSION
 
+        extra_position_dim = SCALPING_POSITION_DIM if self.scalping_mode else 0
+        extra_agent_state_dim = SCALPING_AGENT_STATE_DIM if self.scalping_mode else 0
         self.obs_dim = (
             MARKET_DIM
             + VELOCITY_DIM
             + (RUNNER_DIM * self.max_runners)
-            + AGENT_STATE_DIM
-            + (POSITION_DIM * self.max_runners)
+            + AGENT_STATE_DIM + extra_agent_state_dim
+            + ((POSITION_DIM + extra_position_dim) * self.max_runners)
         )
         from env.betfair_env import ACTIONS_PER_RUNNER
-        self.action_dim = self.max_runners * ACTIONS_PER_RUNNER
+        apr = SCALPING_ACTIONS_PER_RUNNER if self.scalping_mode else ACTIONS_PER_RUNNER
+        self.action_dim = self.max_runners * apr
 
         # Parse hyperparameter search ranges
         raw_ranges = config["hyperparameters"]["search_ranges"]
@@ -398,6 +409,13 @@ class PopulationManager:
                     sampled_arch = rng.choice(arch_choices)
                 arch_name = sampled_arch or self.default_architecture
             hp["architecture_name"] = arch_name
+
+            # Pin the run-level scalping_mode flag onto every agent's
+            # hp dict so (a) the trainer constructs the env in the right
+            # mode without consulting config, and (b) re-evaluation from
+            # a stored model picks up the correct mode even after the
+            # project config has flipped.
+            hp["scalping_mode"] = self.scalping_mode
 
             # Apply per-arch LR override (if the plan configured one).
             if arch_lr_ranges and arch_name in arch_lr_ranges:
@@ -984,6 +1002,12 @@ class PopulationManager:
             child_hp, deltas = self.mutate(
                 child_hp, mutation_rate, rng, max_mutations=max_mutations,
             )
+
+            # Pin the run-level scalping_mode flag (not a gene — doesn't
+            # mutate / crossover). Parents from this run share the same
+            # value; studs from other runs may not, but the child runs
+            # in *this* population, so the run-level value wins.
+            child_hp["scalping_mode"] = self.scalping_mode
 
             arch_name = child_hp.get("architecture_name", self.default_architecture)
 

@@ -18,6 +18,12 @@ class DayMetric(BaseModel):
     early_picks: int
     profitable: bool
     starting_budget: float = 100.0
+    # Forced-arbitrage (scalping) metrics — Issue 05. Zero for
+    # directional models; non-zero rows flag a scalping model.
+    arbs_completed: int = 0
+    arbs_naked: int = 0
+    locked_pnl: float = 0.0
+    naked_pnl: float = 0.0
 
 
 class ScoreboardEntry(BaseModel):
@@ -420,6 +426,10 @@ class StartTrainingRequest(BaseModel):
     adaptive_mutation: bool | None = None
     adaptive_mutation_increment: float | None = None
     adaptive_mutation_cap: float | None = None
+    # Forced-arbitrage (scalping) toggle — Issue 05. When true, every
+    # aggressive fill auto-generates a passive counter-order N ticks
+    # away on the opposite side. None = use config default.
+    scalping_mode: bool | None = None
 
 
 class ResumeTrainingRequest(BaseModel):

@@ -28,6 +28,7 @@ import numpy as np
 import torch
 
 from agents.policy_network import BasePolicy, PolicyOutput
+from agents.ppo_trainer import _reward_overrides_from_hp
 from data.episode_builder import Day, Race
 from env.bet_manager import BetOutcome, BetSide
 from env.betfair_env import BetfairEnv
@@ -148,6 +149,7 @@ class Evaluator:
         test_days: list[Day],
         train_cutoff_date: str,
         market_type_filter: str = "BOTH",
+        hyperparameters: dict | None = None,
     ) -> tuple[str | None, list[EvaluationDayRecord]]:
         """Run the policy on each test day and record results.
 
@@ -199,6 +201,7 @@ class Evaluator:
             day_record, bet_records = self._evaluate_day(
                 policy, day, run_id or "",
                 market_type_filter=market_type_filter,
+                hyperparameters=hyperparameters,
             )
             day_elapsed = time.perf_counter() - day_start
             logger.info(
@@ -232,12 +235,28 @@ class Evaluator:
         day: Day,
         run_id: str,
         market_type_filter: str = "BOTH",
+        hyperparameters: dict | None = None,
     ) -> tuple[EvaluationDayRecord, list[EvaluationBetRecord]]:
         """Run one episode (one day) in eval mode and collect metrics."""
         t_env_start = time.perf_counter()
+        # Build per-agent env overrides from the model's stored genes —
+        # keeps the evaluator honest for scalping models (so the naked
+        # penalty / early-lock bonus and the arb_spread_scale gene are
+        # respected) and preserves directional-model reward shaping.
+        hp = hyperparameters or {}
+        reward_overrides = _reward_overrides_from_hp(hp) if hp else None
+        scalping_overrides: dict = {}
+        if "arb_spread_scale" in hp and hp["arb_spread_scale"] is not None:
+            scalping_overrides["arb_spread_scale"] = float(hp["arb_spread_scale"])
+        scalping_mode_override: bool | None = (
+            bool(hp["scalping_mode"]) if "scalping_mode" in hp else None
+        )
         env = BetfairEnv(day, self.config, feature_cache=self.feature_cache,
                          emit_debug_features=False,
-                         market_type_filter=market_type_filter)
+                         market_type_filter=market_type_filter,
+                         reward_overrides=reward_overrides,
+                         scalping_mode=scalping_mode_override,
+                         scalping_overrides=scalping_overrides or None)
         obs, info = env.reset()
         t_env_ready = time.perf_counter()
 
@@ -348,6 +367,13 @@ class Evaluator:
         race_records = info.get("race_records", [])
         early_picks = sum(rr.early_picks for rr in race_records)
 
+        # Scalping metrics (zero for directional runs — the env only
+        # increments these when scalping_mode is on).
+        arbs_completed = int(info.get("arbs_completed", 0) or 0)
+        arbs_naked = int(info.get("arbs_naked", 0) or 0)
+        locked_pnl = float(info.get("locked_pnl", 0.0) or 0.0)
+        naked_pnl = float(info.get("naked_pnl", 0.0) or 0.0)
+
         day_record = EvaluationDayRecord(
             run_id=run_id,
             date=day.date,
@@ -359,6 +385,10 @@ class Evaluator:
             early_picks=early_picks,
             profitable=day_pnl > 0,
             starting_budget=env.starting_budget,
+            arbs_completed=arbs_completed,
+            arbs_naked=arbs_naked,
+            locked_pnl=locked_pnl,
+            naked_pnl=naked_pnl,
         )
 
         t_metrics_done = time.perf_counter()

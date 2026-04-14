@@ -84,6 +84,13 @@ class EvaluationDayRecord:
     mean_opportunity_window_s: float = 0.0
     median_opportunity_window_s: float = 0.0
     starting_budget: float = 100.0
+    # Forced-arbitrage (scalping) metrics — Issue 05. Always zero for
+    # directional models; non-zero rows indicate the model was trained
+    # with training.scalping_mode=true.
+    arbs_completed: int = 0
+    arbs_naked: int = 0
+    locked_pnl: float = 0.0
+    naked_pnl: float = 0.0
 
 
 @dataclass
@@ -219,6 +226,20 @@ class ModelStore:
                 )
             except Exception:
                 pass  # column already exists
+            # Migration: add forced-arbitrage (scalping) columns — Issue 05.
+            for col, sql_type, default in (
+                ("arbs_completed", "INTEGER", "0"),
+                ("arbs_naked", "INTEGER", "0"),
+                ("locked_pnl", "REAL", "0.0"),
+                ("naked_pnl", "REAL", "0.0"),
+            ):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE evaluation_days ADD COLUMN {col} {sql_type} "
+                        f"NOT NULL DEFAULT {default}"
+                    )
+                except Exception:
+                    pass  # column already exists
             conn.commit()
         finally:
             conn.close()
@@ -603,8 +624,9 @@ class ModelStore:
                     (run_id, date, day_pnl, bet_count, winning_bets,
                      bet_precision, pnl_per_bet, early_picks, profitable,
                      mean_opportunity_window_s, median_opportunity_window_s,
-                     starting_budget)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     starting_budget,
+                     arbs_completed, arbs_naked, locked_pnl, naked_pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.run_id,
@@ -619,6 +641,10 @@ class ModelStore:
                     record.mean_opportunity_window_s,
                     record.median_opportunity_window_s,
                     record.starting_budget,
+                    record.arbs_completed,
+                    record.arbs_naked,
+                    record.locked_pnl,
+                    record.naked_pnl,
                 ),
             )
             conn.commit()
@@ -698,6 +724,22 @@ class ModelStore:
                     starting_budget=(
                         r["starting_budget"]
                         if "starting_budget" in col_names else 100.0
+                    ),
+                    arbs_completed=(
+                        r["arbs_completed"]
+                        if "arbs_completed" in col_names else 0
+                    ),
+                    arbs_naked=(
+                        r["arbs_naked"]
+                        if "arbs_naked" in col_names else 0
+                    ),
+                    locked_pnl=(
+                        r["locked_pnl"]
+                        if "locked_pnl" in col_names else 0.0
+                    ),
+                    naked_pnl=(
+                        r["naked_pnl"]
+                        if "naked_pnl" in col_names else 0.0
                     ),
                 )
                 for r in rows
@@ -1012,7 +1054,12 @@ CREATE TABLE IF NOT EXISTS evaluation_days (
     early_picks     INTEGER NOT NULL DEFAULT 0,
     profitable      INTEGER NOT NULL DEFAULT 0,
     mean_opportunity_window_s  REAL NOT NULL DEFAULT 0.0,
-    median_opportunity_window_s REAL NOT NULL DEFAULT 0.0
+    median_opportunity_window_s REAL NOT NULL DEFAULT 0.0,
+    starting_budget REAL NOT NULL DEFAULT 100.0,
+    arbs_completed  INTEGER NOT NULL DEFAULT 0,
+    arbs_naked      INTEGER NOT NULL DEFAULT 0,
+    locked_pnl      REAL NOT NULL DEFAULT 0.0,
+    naked_pnl       REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE INDEX IF NOT EXISTS idx_eval_days_run ON evaluation_days(run_id);

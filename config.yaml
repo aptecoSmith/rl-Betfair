@@ -204,6 +204,24 @@ hyperparameters:
       type: float
       min: 0.0
       max: 2.0
+    # Forced-arbitrage (scalping) genes — Issue 05, session 3.
+    # Only meaningful when training.scalping_mode is on (the env's
+    # 5th per-runner action dim and the naked/early-lock reward terms
+    # are no-ops when scalping_mode is off). Adding them to
+    # search_ranges keeps the schema inspector honest so the gene
+    # editor can render widgets for them even on non-scalping runs.
+    arb_spread_scale:
+      type: float
+      min: 0.5
+      max: 2.0
+    naked_penalty_weight:
+      type: float
+      min: 0.0
+      max: 5.0
+    early_lock_bonus_weight:
+      type: float
+      min: 0.0
+      max: 2.0
     market_type_filter:
       type: str_choice
       choices:

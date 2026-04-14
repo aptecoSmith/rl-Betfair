@@ -125,6 +125,10 @@ def get_model_detail(model_id: str, request: Request):
                 early_picks=d.early_picks,
                 profitable=d.profitable,
                 starting_budget=d.starting_budget,
+                arbs_completed=d.arbs_completed,
+                arbs_naked=d.arbs_naked,
+                locked_pnl=d.locked_pnl,
+                naked_pnl=d.naked_pnl,
             )
             for d in days
         ]

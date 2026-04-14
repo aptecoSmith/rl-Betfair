@@ -305,6 +305,39 @@
             </div>
           }
         </div>
+
+        <!-- Scalping metrics — only render when this model had any arb
+             pairs (completed or naked). Directional models have all zeros
+             so the whole block is hidden. -->
+        @if (scalpingTotals(); as s) {
+          <h3 style="margin-top: 1rem;">Scalping</h3>
+          <div class="metrics-grid" data-testid="scalping-metrics">
+            <div class="metric-card">
+              <span class="metric-label">Arbs completed</span>
+              <span class="metric-value">{{ s.arbs_completed }}</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Arbs naked</span>
+              <span class="metric-value">{{ s.arbs_naked }}</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Fill rate</span>
+              <span class="metric-value">{{ s.fill_rate | number:'1.0-1' }}%</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Locked P&amp;L</span>
+              <span class="metric-value" [class.profit]="s.locked_pnl >= 0" [class.loss]="s.locked_pnl < 0">
+                {{ s.locked_pnl | currency:'GBP':'symbol':'1.2-2' }}
+              </span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Naked P&amp;L</span>
+              <span class="metric-value" [class.profit]="s.naked_pnl >= 0" [class.loss]="s.naked_pnl < 0">
+                {{ s.naked_pnl | currency:'GBP':'symbol':'1.2-2' }}
+              </span>
+            </div>
+          </div>
+        }
       </section>
     }
   }

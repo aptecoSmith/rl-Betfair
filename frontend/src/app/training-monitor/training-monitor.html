@@ -427,6 +427,26 @@
                 } @else {
                   <p class="help-text">Loading admin defaults...</p>
                 }
+
+                <div class="wizard-form" data-testid="scalping-mode-field">
+                  <label class="form-field">
+                    <span class="field-label">
+                      <input type="checkbox" [(ngModel)]="scalpingMode" data-testid="scalping-mode-toggle" />
+                      Scalping mode (forced arbitrage)
+                    </span>
+                    <span class="field-help">
+                      Forces paired orders — every aggressive bet automatically
+                      generates a counter-order on the opposite side, N ticks
+                      away. The agent learns to profit from small price
+                      movements rather than predicting winners. Enables the
+                      <code>arb_spread</code>, <code>naked_penalty_weight</code>
+                      and <code>early_lock_bonus_weight</code> genes. Runs with
+                      this on evolve a fundamentally different strategy — mixing
+                      scalping and directional agents in one population is
+                      incompatible because the action space shapes differ.
+                    </span>
+                  </label>
+                </div>
               }
 
               <!-- STEP 4: Genetics -->

@@ -64,6 +64,7 @@ def make_start_cmd(
     adaptive_mutation: bool | None = None,
     adaptive_mutation_increment: float | None = None,
     adaptive_mutation_cap: float | None = None,
+    scalping_mode: bool | None = None,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -92,6 +93,7 @@ def make_start_cmd(
         "adaptive_mutation": adaptive_mutation,
         "adaptive_mutation_increment": adaptive_mutation_increment,
         "adaptive_mutation_cap": adaptive_mutation_cap,
+        "scalping_mode": scalping_mode,
     })
 
 

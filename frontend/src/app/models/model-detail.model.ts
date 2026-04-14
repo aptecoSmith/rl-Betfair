@@ -8,6 +8,12 @@ export interface DayMetric {
   early_picks: number;
   profitable: boolean;
   starting_budget?: number;
+  /** Forced-arbitrage (scalping) metrics — Issue 05. Zero for
+   * directional models; non-zero rows flag a scalping model. */
+  arbs_completed?: number;
+  arbs_naked?: number;
+  locked_pnl?: number;
+  naked_pnl?: number;
 }
 
 export interface ModelDetailResponse {

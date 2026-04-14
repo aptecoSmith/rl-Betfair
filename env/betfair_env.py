@@ -373,6 +373,7 @@ class BetfairEnv(gymnasium.Env):
         emit_debug_features: bool = True,
         market_type_filter: str = "BOTH",
         scalping_mode: bool | None = None,
+        scalping_overrides: dict | None = None,
     ) -> None:
         super().__init__()
         self.day = day
@@ -468,6 +469,17 @@ class BetfairEnv(gymnasium.Env):
         # apart from the skipped precision / early-pick bonuses.
         self._naked_penalty_weight = reward_cfg.get("naked_penalty_weight", 0.0)
         self._early_lock_bonus_weight = reward_cfg.get("early_lock_bonus_weight", 0.0)
+
+        # Scalping mechanics overrides (Issue 05, session 3). arb_spread_scale
+        # stretches / compresses the agent's [-1, 1] → tick-count mapping so
+        # the genetic search can tune how aggressively it spaces the second
+        # leg. 1.0 = default mapping (byte-identical to pre-session 3).
+        scalping_overrides = scalping_overrides or {}
+        self._arb_spread_scale = float(scalping_overrides.get("arb_spread_scale", 1.0))
+        if self._arb_spread_scale <= 0.0:
+            # Bad gene value → fall back to default rather than divide by zero
+            # in the mapping below.
+            self._arb_spread_scale = 1.0
 
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
@@ -1030,8 +1042,15 @@ class BetfairEnv(gymnasium.Env):
             if self.scalping_mode and apr > 4:
                 arb_raw = float(action[4 * self.max_runners + slot_idx])
                 arb_frac = float(np.clip((arb_raw + 1.0) / 2.0, 0.0, 1.0))
+                # arb_spread_scale stretches / compresses the mapped range.
+                # Always clamped to [MIN_ARB_TICKS, MAX_ARB_TICKS] so a gene
+                # out of bounds can't place a passive at a silly tick.
+                raw_ticks = (
+                    MIN_ARB_TICKS
+                    + arb_frac * (MAX_ARB_TICKS - MIN_ARB_TICKS)
+                ) * self._arb_spread_scale
                 arb_ticks = int(round(
-                    MIN_ARB_TICKS + arb_frac * (MAX_ARB_TICKS - MIN_ARB_TICKS)
+                    max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks))
                 ))
             else:
                 arb_ticks = MIN_ARB_TICKS
