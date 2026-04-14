@@ -70,6 +70,12 @@ training:
     min_seconds_before_off: 0
   retraining:
     min_days: 30
+  # Forced-arbitrage (scalping) mode — Issue 05. When true, every
+  # aggressive fill auto-generates a passive counter-order on the
+  # opposite side N ticks away. The policy action head gains a 5th
+  # dimension per runner (arb_spread) and the observation gains arb
+  # state features. Off by default — legacy behaviour is byte-identical.
+  scalping_mode: false
 discard_policy:
   min_win_rate: 0.35
   min_mean_pnl: 0.0

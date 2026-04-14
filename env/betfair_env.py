@@ -48,6 +48,7 @@ from env.features import (
     compute_obi,
     compute_traded_delta,
 )
+from env.tick_ladder import tick_offset, ticks_between
 from training.perf_log import perf_log
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,21 @@ OBS_SCHEMA_VERSION: int = 5
 ACTION_SCHEMA_VERSION: int = 2
 
 # Number of action values per runner slot.
+# The default (4) matches the non-scalping policy head: signal, stake,
+# aggression, cancel. When scalping_mode is enabled on the env, a 5th
+# dimension (arb_spread) is appended per runner — see SCALPING_ACTIONS_PER_RUNNER.
 ACTIONS_PER_RUNNER: int = 4  # signal, stake, aggression, cancel
+
+# Scalping mode action layout (Issue 05, session 1).
+# Per-runner: signal, stake, aggression, cancel, arb_spread.
+SCALPING_ACTIONS_PER_RUNNER: int = 5
+
+# Forced-arbitrage spread mapping — arb_spread action ∈ [-1, 1] maps to
+# [MIN_ARB_TICKS, MAX_ARB_TICKS] ticks on the Betfair ladder. Small ticks
+# are risky (commission dominates the spread); large ticks make the passive
+# counter-order unlikely to fill.
+MIN_ARB_TICKS: int = 1
+MAX_ARB_TICKS: int = 15
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
@@ -175,6 +190,12 @@ RUNNER_KEYS: list[str] = [
 
 AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
 POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
+
+# Extra obs dims appended when scalping_mode is enabled.
+# Per-runner (2): has_open_arb, passive_fill_proximity.
+# Global  (2):   locked_pnl_frac, naked_exposure_frac.
+SCALPING_POSITION_DIM = 2
+SCALPING_AGENT_STATE_DIM = 2
 
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
@@ -343,6 +364,7 @@ class BetfairEnv(gymnasium.Env):
         reward_overrides: dict | None = None,
         emit_debug_features: bool = True,
         market_type_filter: str = "BOTH",
+        scalping_mode: bool | None = None,
     ) -> None:
         super().__init__()
         self.day = day
@@ -357,6 +379,16 @@ class BetfairEnv(gymnasium.Env):
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
         actions_cfg = config.get("actions", {})
         self._force_aggressive: bool = actions_cfg.get("force_aggressive", False)
+        # Forced-arbitrage / scalping mode. When true, every aggressive
+        # fill auto-generates a passive counter-order N ticks away (the
+        # agent's 5th action dim picks N). Off by default → action/obs
+        # layouts are byte-identical to pre-session code.
+        if scalping_mode is None:
+            scalping_mode = bool(config["training"].get("scalping_mode", False))
+        self.scalping_mode: bool = bool(scalping_mode)
+        self._actions_per_runner: int = (
+            SCALPING_ACTIONS_PER_RUNNER if self.scalping_mode else ACTIONS_PER_RUNNER
+        )
 
         # Market type filter: WIN/EACH_WAY filter races; BOTH/FREE_CHOICE keep all.
         self.market_type_filter = market_type_filter.upper() if market_type_filter else "BOTH"
@@ -427,18 +459,22 @@ class BetfairEnv(gymnasium.Env):
         self._precompute(feature_cache)
 
         # Observation / action spaces
+        extra_position_dim = SCALPING_POSITION_DIM if self.scalping_mode else 0
+        extra_agent_state_dim = SCALPING_AGENT_STATE_DIM if self.scalping_mode else 0
         obs_dim = (
             MARKET_DIM
             + VELOCITY_DIM
             + (RUNNER_DIM * self.max_runners)
-            + AGENT_STATE_DIM
-            + (POSITION_DIM * self.max_runners)
+            + AGENT_STATE_DIM + extra_agent_state_dim
+            + ((POSITION_DIM + extra_position_dim) * self.max_runners)
         )
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32,
         )
         self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(self.max_runners * ACTIONS_PER_RUNNER,), dtype=np.float32,
+            low=-1.0, high=1.0,
+            shape=(self.max_runners * self._actions_per_runner,),
+            dtype=np.float32,
         )
 
         # Runtime state (initialised in reset)
@@ -573,17 +609,37 @@ class BetfairEnv(gymnasium.Env):
         bm = self.bet_manager
         assert bm is not None
         race_bets = bm.race_bet_count(race.market_id)
-        return np.array([
+        base = [
             1.0 if tick.in_play else 0.0,
             bm.budget / self.starting_budget,
             bm.open_liability / self.starting_budget if self.starting_budget > 0 else 0.0,
             race_bets / max(self.max_bets_per_race, 1),
             self._races_completed / max(self._total_races, 1),
             np.clip(self._day_pnl / self.starting_budget, -10.0, 10.0),
-        ], dtype=np.float32)
+        ]
+        if self.scalping_mode:
+            pairs = bm.get_paired_positions(
+                market_id=race.market_id, commission=self._commission,
+            )
+            locked = sum(p["locked_pnl"] for p in pairs if p["complete"])
+            naked = bm.get_naked_exposure(market_id=race.market_id)
+            base.append(
+                float(np.clip(locked / self.starting_budget, -10.0, 10.0))
+            )
+            base.append(
+                float(np.clip(naked / self.starting_budget, 0.0, 10.0))
+            )
+        return np.array(base, dtype=np.float32)
 
     def _get_position_vector(self) -> np.ndarray:
-        """Per-runner position features: back exposure, lay exposure, bet count."""
+        """Per-runner position features: back exposure, lay exposure, bet count.
+
+        When scalping_mode is on, appends two more features per runner:
+        ``has_open_arb`` (1.0 if a passive arb leg is resting on this runner,
+        else 0.0) and ``passive_fill_proximity`` (a number in [0, 1] that is
+        higher when the resting price is close to current LTP — traded
+        volume is more likely to reach it).
+        """
         bm = self.bet_manager
         assert bm is not None
         race = self.day.races[self._race_idx]
@@ -592,16 +648,45 @@ class BetfairEnv(gymnasium.Env):
         budget = max(self.starting_budget, 1.0)
         max_bets = max(self.max_bets_per_race, 1)
 
-        vec = np.zeros(self.max_runners * POSITION_DIM, dtype=np.float32)
+        per_runner = POSITION_DIM + (SCALPING_POSITION_DIM if self.scalping_mode else 0)
+        vec = np.zeros(self.max_runners * per_runner, dtype=np.float32)
+
+        # Build per-runner arb diagnostics once.
+        arb_by_sid: dict[int, tuple[bool, float]] = {}
+        if self.scalping_mode:
+            tick = self.day.races[self._race_idx].ticks[self._tick_idx]
+            ltp_by_sid = {
+                r.selection_id: r.last_traded_price for r in tick.runners
+            }
+            for order in bm.passive_book.orders:
+                if order.market_id != race.market_id:
+                    continue
+                if order.pair_id is None:
+                    continue
+                sid = order.selection_id
+                ltp = ltp_by_sid.get(sid) or 0.0
+                if ltp > 0:
+                    # Proximity: 1.0 when rest price == LTP, decaying with
+                    # tick distance. 5 ticks → 0.5, 15 ticks → ~0.14.
+                    dist = ticks_between(ltp, order.price)
+                    proximity = 1.0 / (1.0 + dist / 5.0)
+                else:
+                    proximity = 0.0
+                prev = arb_by_sid.get(sid, (False, 0.0))
+                arb_by_sid[sid] = (True, max(prev[1], proximity))
+
         for slot_idx in range(self.max_runners):
             sid = slot_map.get(slot_idx)
-            if sid is None or sid not in positions:
-                continue
-            pos = positions[sid]
-            offset = slot_idx * POSITION_DIM
-            vec[offset] = pos["back_exposure"] / budget
-            vec[offset + 1] = pos["lay_exposure"] / budget
-            vec[offset + 2] = pos["bet_count"] / max_bets
+            offset = slot_idx * per_runner
+            if sid is not None and sid in positions:
+                pos = positions[sid]
+                vec[offset] = pos["back_exposure"] / budget
+                vec[offset + 1] = pos["lay_exposure"] / budget
+                vec[offset + 2] = pos["bet_count"] / max_bets
+            if self.scalping_mode and sid is not None:
+                has_arb, proximity = arb_by_sid.get(sid, (False, 0.0))
+                vec[offset + POSITION_DIM] = 1.0 if has_arb else 0.0
+                vec[offset + POSITION_DIM + 1] = proximity
         return vec
 
     @property
@@ -884,6 +969,7 @@ class BetfairEnv(gymnasium.Env):
         slot_map = self._slot_maps[self._race_idx]
         runner_by_sid = {r.selection_id: r for r in tick.runners}
         action_debug: dict[int, dict] = {}
+        apr = self._actions_per_runner
 
         for slot_idx in range(self.max_runners):
             sid = slot_map.get(slot_idx)
@@ -916,6 +1002,16 @@ class BetfairEnv(gymnasium.Env):
             action_signal = float(action[slot_idx])
             stake_raw = float(action[self.max_runners + slot_idx])
             aggression_raw = float(action[2 * self.max_runners + slot_idx])
+            # Scalping: 5th dim controls the tick offset of the auto-paired
+            # passive counter-order. Defaults to mid-range when disabled.
+            if self.scalping_mode and apr > 4:
+                arb_raw = float(action[4 * self.max_runners + slot_idx])
+                arb_frac = float(np.clip((arb_raw + 1.0) / 2.0, 0.0, 1.0))
+                arb_ticks = int(round(
+                    MIN_ARB_TICKS + arb_frac * (MAX_ARB_TICKS - MIN_ARB_TICKS)
+                ))
+            else:
+                arb_ticks = MIN_ARB_TICKS
             # Map [-1, 1] → [0, 1] for stake fraction
             stake_fraction = np.clip((stake_raw + 1.0) / 2.0, 0.0, 1.0)
             stake = stake_fraction * bm.budget
@@ -949,26 +1045,39 @@ class BetfairEnv(gymnasium.Env):
 
             if is_aggressive:
                 # ── Aggressive path (cross the spread) ───────────────
+                pair_id: str | None = None
+                if self.scalping_mode:
+                    # Lazily generate a short unique id for this pair.
+                    import uuid as _uuid
+                    pair_id = _uuid.uuid4().hex[:12]
                 if side == BetSide.BACK and runner.available_to_lay:
                     bet = bm.place_back(
                         runner, stake, market_id=race.market_id,
                         max_price=self._max_back_price,
+                        pair_id=pair_id,
                     )
                     if bet is not None:
                         bet.tick_index = self._tick_idx
                         self._bet_times[len(bm.bets) - 1] = time_to_off
-                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": None}
+                        passive_placed = self._maybe_place_paired(
+                            runner, bet, arb_ticks, race, pair_id,
+                        ) if self.scalping_mode else False
+                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
                         action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_back_failed"}
                 elif side == BetSide.LAY and runner.available_to_back:
                     bet = bm.place_lay(
                         runner, stake, market_id=race.market_id,
                         max_price=self._max_lay_price,
+                        pair_id=pair_id,
                     )
                     if bet is not None:
                         bet.tick_index = self._tick_idx
                         self._bet_times[len(bm.bets) - 1] = time_to_off
-                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": None}
+                        passive_placed = self._maybe_place_paired(
+                            runner, bet, arb_ticks, race, pair_id,
+                        ) if self.scalping_mode else False
+                        action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
                         action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_lay_failed"}
                 else:
@@ -984,6 +1093,54 @@ class BetfairEnv(gymnasium.Env):
                     action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "passive_place_failed"}
 
         self._last_action_debug = action_debug
+
+    # ── Forced-arbitrage paired order placement (scalping mode) ──────────
+
+    def _maybe_place_paired(
+        self,
+        runner,
+        aggressive_bet,
+        arb_ticks: int,
+        race: Race,
+        pair_id: str,
+    ) -> bool:
+        """Auto-place the passive counter-order for *aggressive_bet*.
+
+        Called from ``_process_action`` when scalping_mode is on and an
+        aggressive bet matched. The paired order rests on the opposite
+        side of the same runner at ``fill_price ± arb_ticks`` ticks away:
+        an aggressive back fills at a higher price, so its passive lay
+        sits ``arb_ticks`` below; conversely for aggressive lay.
+
+        Returns True on successful placement. A failure (junk filter,
+        insufficient budget, empty opposite-side ladder at the computed
+        price) is silent — the aggressive leg remains naked.
+        """
+        bm = self.bet_manager
+        assert bm is not None
+        if aggressive_bet.side is BetSide.BACK:
+            # Back at high price → lay at lower price (profitable when
+            # traded down). The ladder moves *down* from the fill price.
+            passive_price = tick_offset(
+                aggressive_bet.average_price, arb_ticks, -1,
+            )
+            passive_side = BetSide.LAY
+        else:
+            passive_price = tick_offset(
+                aggressive_bet.average_price, arb_ticks, +1,
+            )
+            passive_side = BetSide.BACK
+
+        order = bm.passive_book.place(
+            runner,
+            stake=aggressive_bet.matched_stake,
+            side=passive_side,
+            market_id=race.market_id,
+            tick_index=self._tick_idx,
+            price=passive_price,
+            pair_id=pair_id,
+        )
+        return order is not None
 
     # ── Settlement & reward ───────────────────────────────────────────────
 

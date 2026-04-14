@@ -78,6 +78,11 @@ class Bet:
     number_of_places: int | None = None          # e.g. 3
     settlement_type: str = "standard"            # "standard" | "ew_winner" | "ew_placed" | "ew_unplaced"
     effective_place_odds: float | None = None    # (price-1)/divisor + 1, for display
+    # Forced-arbitrage / scalping — links an aggressive fill to its
+    # auto-generated passive counter-order (and vice-versa). None for
+    # bets placed outside scalping_mode. See plans/issues-12-04-2026/
+    # 05-forced-arbitrage/.
+    pair_id: str | None = None
 
     @property
     def liability(self) -> float:
@@ -109,6 +114,10 @@ class PassiveOrder:
     matched_stake: float = 0.0            # set to requested_stake on fill (session 26)
     cancelled: bool = False
     cancel_reason: str = ""                # e.g. "race-off" or "agent" (session 29)
+    # Forced-arbitrage pairing — matches a passive counter-order to its
+    # aggressive fill. None for ordinary passive orders placed directly
+    # by the agent outside scalping_mode.
+    pair_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -124,6 +133,7 @@ class PassiveOrder:
             "matched_stake": self.matched_stake,
             "cancelled": self.cancelled,
             "cancel_reason": self.cancel_reason,
+            "pair_id": self.pair_id,
         }
 
 
@@ -299,6 +309,9 @@ class PassiveOrderBook:
         side: BetSide,
         market_id: str,
         tick_index: int,
+        *,
+        price: float | None = None,
+        pair_id: str | None = None,
     ) -> PassiveOrder | None:
         """Record a resting order at the own-side best price and reserve budget.
 
@@ -335,27 +348,49 @@ class PassiveOrderBook:
             levels = runner.available_to_lay
             lower_is_better = True   # lowest lay price is best for a layer
 
-        top_price = self._matcher.pick_top_price(
-            levels,
-            reference_price=ltp,
-            lower_is_better=lower_is_better,
-        )
-        if top_price is None:
-            return None
-
-        # Snapshot the size at that level for queue_ahead_at_placement.
+        # Junk-filter bounds — reused below for both the top-of-book and the
+        # explicit-price paths.
         lo = ltp * (1.0 - self._matcher.max_price_deviation_pct)
         hi = ltp * (1.0 + self._matcher.max_price_deviation_pct)
-        filtered = [
-            lv for lv in levels
-            if lv.price > 0.0 and lv.size > 0.0 and lo <= lv.price <= hi
-        ]
-        if not filtered:
-            return None
-        if lower_is_better:
-            top_level = min(filtered, key=lambda lv: lv.price)
+
+        if price is None:
+            # ── Default path: rest at the best post-filter own-side price. ─
+            top_price = self._matcher.pick_top_price(
+                levels,
+                reference_price=ltp,
+                lower_is_better=lower_is_better,
+            )
+            if top_price is None:
+                return None
+
+            filtered = [
+                lv for lv in levels
+                if lv.price > 0.0 and lv.size > 0.0 and lo <= lv.price <= hi
+            ]
+            if not filtered:
+                return None
+            if lower_is_better:
+                top_level = min(filtered, key=lambda lv: lv.price)
+            else:
+                top_level = max(filtered, key=lambda lv: lv.price)
+            resting_price = top_level.price
+            queue_ahead = top_level.size
         else:
-            top_level = max(filtered, key=lambda lv: lv.price)
+            # ── Explicit-price path (forced arbitrage paired order). ──────
+            # The caller supplies the exact resting price. Still enforce the
+            # junk filter so a paired order that lands far outside the live
+            # book is refused — matches real exchange behaviour.
+            if not (lo <= price <= hi):
+                return None
+            resting_price = price
+            # Queue ahead: size already sitting at that level, or 0 if the
+            # level is currently empty (we'd be first in the queue).
+            existing = next(
+                (lv for lv in levels
+                 if lv.price > 0.0 and abs(lv.price - price) < 1e-9),
+                None,
+            )
+            queue_ahead = existing.size if existing is not None else 0.0
 
         # Budget reservation — must happen before the order is appended so
         # that a failed reservation leaves the book unchanged.
@@ -366,7 +401,7 @@ class PassiveOrderBook:
                     return None
                 bm.budget -= stake
             else:  # LAY
-                liability = stake * (top_level.price - 1.0)
+                liability = stake * (resting_price - 1.0)
                 if liability > bm.available_budget:
                     return None
                 bm._open_liability += liability
@@ -374,12 +409,13 @@ class PassiveOrderBook:
         order = PassiveOrder(
             selection_id=runner.selection_id,
             side=side,
-            price=top_level.price,
+            price=resting_price,
             requested_stake=stake,
-            queue_ahead_at_placement=top_level.size,
+            queue_ahead_at_placement=queue_ahead,
             placed_tick_index=tick_index,
             market_id=market_id,
             ltp_at_placement=ltp,
+            pair_id=pair_id,
         )
         self._orders.append(order)
         self._orders_by_sid.setdefault(order.selection_id, []).append(order)
@@ -485,6 +521,7 @@ class PassiveOrderBook:
                 average_price=order.price,
                 market_id=order.market_id,
                 ltp_at_placement=order.ltp_at_placement,
+                pair_id=order.pair_id,
             )
             self._bet_manager.bets.append(bet)
 
@@ -571,6 +608,8 @@ class BetManager:
         stake: float,
         market_id: str = "",
         max_price: float | None = None,
+        *,
+        pair_id: str | None = None,
     ) -> Bet | None:
         """Place a back bet via the :class:`ExchangeMatcher`.
 
@@ -620,6 +659,7 @@ class BetManager:
             market_id=market_id,
             ltp_at_placement=runner.last_traded_price or 0.0,
             available_at_price=result.top_level_size,
+            pair_id=pair_id,
         )
         # Back bets: the stake is the cost (paid up-front).
         self.budget -= result.matched_stake
@@ -634,6 +674,8 @@ class BetManager:
         stake: float,
         market_id: str = "",
         max_price: float | None = None,
+        *,
+        pair_id: str | None = None,
     ) -> Bet | None:
         """Place a lay bet via the :class:`ExchangeMatcher`.
 
@@ -706,6 +748,7 @@ class BetManager:
             market_id=market_id,
             ltp_at_placement=runner.last_traded_price or 0.0,
             available_at_price=result.top_level_size,
+            pair_id=pair_id,
         )
         # Reserve the liability from the budget.
         self._open_liability += liability
@@ -900,6 +943,123 @@ class BetManager:
     def race_bet_count(self, market_id: str) -> int:
         """Return the number of bets placed in a specific race."""
         return sum(1 for b in self.bets if b.market_id == market_id)
+
+    # ── Forced-arbitrage helpers ─────────────────────────────────────────
+
+    def get_paired_positions(
+        self, market_id: str = "", commission: float = 0.05,
+    ) -> list[dict]:
+        """Group matched bets by ``pair_id`` for scalping diagnostics.
+
+        Each returned dict describes one pair::
+
+            {
+                "pair_id": str,
+                "aggressive": Bet | None,
+                "passive":    Bet | None,
+                "complete":   bool,       # both legs matched
+                "locked_pnl": float,      # net PnL (after commission) if complete
+            }
+
+        Only matched/settled ``Bet`` objects are considered — unfilled
+        passive orders still sit in ``passive_book.orders`` and are not
+        counted here. ``market_id`` filters to a single race.
+        """
+        by_pair: dict[str, list[Bet]] = {}
+        for bet in self.bets:
+            if bet.pair_id is None:
+                continue
+            if market_id and bet.market_id != market_id:
+                continue
+            by_pair.setdefault(bet.pair_id, []).append(bet)
+
+        results: list[dict] = []
+        for pid, legs in by_pair.items():
+            # First leg is always the aggressive one (it triggered the
+            # pair creation); any later leg arriving via passive fill is
+            # the passive counter-order.
+            aggressive: Bet | None = None
+            passive: Bet | None = None
+            for leg in legs:
+                # Aggressive back pairs to a passive lay at a lower price;
+                # aggressive lay pairs to a passive back at a higher price.
+                # We distinguish by price ordering — the agent's higher-
+                # priced back leg is always the "sell" side.
+                pass
+            # Simpler: the aggressive leg is whichever back leg has the
+            # higher price (for back/lay pairs this is unambiguous).
+            backs = [b for b in legs if b.side is BetSide.BACK]
+            lays = [b for b in legs if b.side is BetSide.LAY]
+            if backs and lays:
+                # Back @ high price vs lay @ low price = scalping spread.
+                aggressive = max(backs, key=lambda b: b.average_price) \
+                    if max(backs, key=lambda b: b.average_price).average_price \
+                    > min(lays, key=lambda b: b.average_price).average_price else None
+                # Simpler assignment: just pick the first of each side —
+                # callers usually care about completion + locked_pnl, not
+                # which was aggressive/passive.
+                aggressive = backs[0] if aggressive is None else aggressive
+                passive = lays[0]
+            elif backs:
+                aggressive = backs[0]
+            elif lays:
+                aggressive = lays[0]
+
+            complete = bool(backs and lays)
+            locked = 0.0
+            if complete:
+                back = max(backs, key=lambda b: b.average_price)
+                lay = min(lays, key=lambda b: b.average_price)
+                stake = min(back.matched_stake, lay.matched_stake)
+                spread = back.average_price - lay.average_price
+                gross = stake * spread
+                locked = gross * (1.0 - commission) if gross > 0 else gross
+
+            results.append({
+                "pair_id": pid,
+                "aggressive": aggressive,
+                "passive": passive,
+                "complete": complete,
+                "locked_pnl": locked,
+            })
+        return results
+
+    def get_naked_exposure(self, market_id: str = "") -> float:
+        """Sum of worst-case loss on unpaired matched bets.
+
+        A "naked" bet is one whose ``pair_id`` is not shared with an
+        opposite-side matched bet — either it was placed without a pair
+        (ordinary directional bet) or its passive counter-leg never
+        filled. The returned figure is the £ amount the agent stands to
+        lose if every naked bet loses.
+        """
+        # Build pair index once — naked = bets whose pair has no
+        # opposite-side partner.
+        by_pair_side: dict[str, set[BetSide]] = {}
+        for bet in self.bets:
+            if bet.pair_id is None:
+                continue
+            if market_id and bet.market_id != market_id:
+                continue
+            by_pair_side.setdefault(bet.pair_id, set()).add(bet.side)
+
+        naked = 0.0
+        for bet in self.bets:
+            if market_id and bet.market_id != market_id:
+                continue
+            if bet.outcome is not BetOutcome.UNSETTLED:
+                continue
+            is_naked = True
+            if bet.pair_id is not None:
+                sides = by_pair_side.get(bet.pair_id, set())
+                if BetSide.BACK in sides and BetSide.LAY in sides:
+                    is_naked = False
+            if is_naked:
+                if bet.side is BetSide.BACK:
+                    naked += bet.matched_stake
+                else:
+                    naked += bet.matched_stake * (bet.average_price - 1.0)
+        return naked
 
     def get_positions(self, market_id: str) -> dict[int, dict]:
         """Get accumulated net position per runner for a race.
