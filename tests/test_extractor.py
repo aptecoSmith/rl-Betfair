@@ -192,6 +192,7 @@ class TestColumnSchemas:
             "number_of_active_runners", "traded_volume",
             "in_play", "snap_json", "winner_selection_id",
             "each_way_divisor", "number_of_each_way_places",
+            "placed_selection_ids",
             "race_status",
             "temperature", "precipitation", "wind_speed", "wind_direction",
             "humidity", "weather_code",

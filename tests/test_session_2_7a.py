@@ -628,4 +628,5 @@ class TestTicksColumnsUpdated:
 
     def test_ticks_columns_count(self):
         # 19 prior + each_way_divisor + number_of_each_way_places
-        assert len(TICKS_COLUMNS) == 21
+        # + placed_selection_ids (EW resolution)
+        assert len(TICKS_COLUMNS) == 22
