@@ -247,6 +247,12 @@ export class ApiService {
     return this.http.delete<{ deleted: boolean; plan_id: string }>(`${this.baseUrl}/training-plans/${planId}`);
   }
 
+  stopAutoContinue(planId: string): Observable<{ plan_id: string; auto_continue: boolean; changed: boolean }> {
+    return this.http.post<{ plan_id: string; auto_continue: boolean; changed: boolean }>(
+      `${this.baseUrl}/training-plans/${planId}/stop-auto-continue`, {},
+    );
+  }
+
   getTrainingPlanCoverage(): Observable<CoverageResponse> {
     return this.http.get<any>(`${this.baseUrl}/training-plans/coverage`).pipe(
       map(resp => {

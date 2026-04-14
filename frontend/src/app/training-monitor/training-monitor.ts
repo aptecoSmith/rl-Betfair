@@ -160,6 +160,46 @@ export class TrainingMonitor implements OnDestroy {
   });
 
   readonly activePlanId = computed(() => this.status().plan_id ?? null);
+
+  // ── Auto-continue control ───────────────────────────────────────
+  /** auto_continue + remaining-sessions state of the active plan, fetched on demand. */
+  readonly activePlanAutoContinue = signal<boolean>(false);
+  readonly activePlanHasRemainingSessions = signal<boolean>(false);
+  readonly isStoppingAutoContinue = signal(false);
+  readonly autoContinueStopped = signal(false);
+
+  readonly canStopAutoContinue = computed(() =>
+    this.isRunning()
+    && this.activePlanId() !== null
+    && this.activePlanAutoContinue()
+    && this.activePlanHasRemainingSessions()
+  );
+
+  private activePlanFetchEffect = effect(() => {
+    const planId = this.activePlanId();
+    if (!planId) {
+      this.activePlanAutoContinue.set(false);
+      this.activePlanHasRemainingSessions.set(false);
+      this.autoContinueStopped.set(false);
+      return;
+    }
+    this.api.getTrainingPlan(planId).subscribe({
+      next: (resp) => {
+        const p = resp.plan;
+        this.activePlanAutoContinue.set(!!p.auto_continue);
+        // Compute remaining sessions from n_generations / generations_per_session.
+        const n = p.n_generations ?? 3;
+        const gps = p.generations_per_session;
+        const total = (gps == null || gps <= 0 || gps >= n) ? 1 : Math.ceil(n / gps);
+        const cur = p.current_session ?? 0;
+        this.activePlanHasRemainingSessions.set(cur < total - 1);
+      },
+      error: () => {
+        this.activePlanAutoContinue.set(false);
+        this.activePlanHasRemainingSessions.set(false);
+      },
+    });
+  });
   readonly processBar = computed(() => this.status().process);
   readonly itemBar = computed(() => this.status().item);
 
@@ -495,6 +535,22 @@ export class TrainingMonitor implements OnDestroy {
     });
   }
 
+  onStopAutoContinue(): void {
+    const planId = this.activePlanId();
+    if (!planId) return;
+    this.isStoppingAutoContinue.set(true);
+    this.api.stopAutoContinue(planId).subscribe({
+      next: () => {
+        this.isStoppingAutoContinue.set(false);
+        this.activePlanAutoContinue.set(false);
+        this.autoContinueStopped.set(true);
+      },
+      error: () => {
+        this.isStoppingAutoContinue.set(false);
+      },
+    });
+  }
+
   onFinishTraining(): void {
     this.isFinishing.set(true);
     this.api.finishTraining().subscribe({
@@ -522,6 +578,7 @@ export class TrainingMonitor implements OnDestroy {
   ngOnDestroy(): void {
     this.agentEffect.destroy();
     this.stopResetEffect.destroy();
+    this.activePlanFetchEffect.destroy();
     this.autoScrollEffect.destroy();
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);

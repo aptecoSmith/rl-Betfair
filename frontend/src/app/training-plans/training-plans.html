@@ -128,6 +128,17 @@
             </div>
           }
           <a routerLink="/training" class="cross-link" data-testid="link-to-monitor">View in training monitor →</a>
+          @if (plan.auto_continue && planHasRemainingSessions(plan)) {
+            <button
+              class="btn-secondary"
+              (click)="stopAutoContinue()"
+              [disabled]="stoppingAutoContinue()"
+              data-testid="stop-auto-continue"
+              title="Disable auto-continue so the plan pauses after this session. Does not interrupt the current session."
+            >
+              {{ stoppingAutoContinue() ? 'Stopping…' : 'Stop auto-continuing' }}
+            </button>
+          }
         </div>
       } @else if (plan.status === 'paused') {
         <div class="plan-status-info">

@@ -122,6 +122,27 @@ def get_plan(plan_id: str, request: Request) -> dict[str, Any]:
     }
 
 
+@router.post("/{plan_id}/stop-auto-continue")
+def stop_auto_continue(plan_id: str, request: Request) -> dict[str, Any]:
+    """Disable auto_continue on a plan.
+
+    After this call, the plan will pause (not auto-launch the next
+    session) when the current session finishes.  The currently running
+    session is NOT interrupted -- use the normal /training/stop endpoint
+    for that.  Safe to call when the plan is not running.
+    """
+    reg = _registry(request)
+    try:
+        plan = reg.load(plan_id)
+    except KeyError:
+        raise HTTPException(404, f"No such plan: {plan_id}")
+    if not plan.auto_continue:
+        return {"plan_id": plan_id, "auto_continue": False, "changed": False}
+    plan.auto_continue = False
+    reg.save(plan)
+    return {"plan_id": plan_id, "auto_continue": False, "changed": True}
+
+
 @router.delete("/{plan_id}")
 def delete_plan(plan_id: str, request: Request) -> dict[str, Any]:
     """Delete a plan by ID. Returns 404 if the plan doesn't exist."""

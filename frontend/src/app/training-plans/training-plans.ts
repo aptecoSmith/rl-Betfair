@@ -396,6 +396,35 @@ export class TrainingPlans implements OnInit {
     });
   }
 
+  // ── Stop auto-continuing ────────────────────────────────────────
+  readonly stoppingAutoContinue = signal(false);
+
+  stopAutoContinue(): void {
+    const plan = this.selectedPlan();
+    if (!plan) return;
+    this.stoppingAutoContinue.set(true);
+    this.launchError.set(null);
+    this.api.stopAutoContinue(plan.plan_id).subscribe({
+      next: () => {
+        this.stoppingAutoContinue.set(false);
+        // Update local state so the button disappears immediately.
+        this.selectedPlan.set({ ...plan, auto_continue: false });
+      },
+      error: (err) => {
+        this.stoppingAutoContinue.set(false);
+        this.launchError.set(err?.error?.detail ?? err?.message ?? 'Failed to stop auto-continue');
+      },
+    });
+  }
+
+  planHasRemainingSessions(plan: TrainingPlan): boolean {
+    const n = plan.n_generations ?? 3;
+    const gps = plan.generations_per_session;
+    const total = (gps == null || gps <= 0 || gps >= n) ? 1 : Math.ceil(n / gps);
+    const cur = plan.current_session ?? 0;
+    return cur < total - 1;
+  }
+
   // ── Resume / Continue ──────────────────────────────────────────
   readonly resuming = signal(false);
 

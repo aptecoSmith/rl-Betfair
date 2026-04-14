@@ -99,7 +99,21 @@
                 [disabled]="isFinishing()">
           {{ isStopping() ? 'Stopping...' : 'Stop Training' }}
         </button>
+        @if (canStopAutoContinue()) {
+          <button class="btn btn-secondary"
+                  data-testid="stop-auto-continue-btn"
+                  (click)="onStopAutoContinue()"
+                  [disabled]="isStoppingAutoContinue()"
+                  title="Disable auto-continue so the plan pauses when the current session finishes. Does not interrupt the current session.">
+            {{ isStoppingAutoContinue() ? 'Stopping auto-continue...' : 'Stop auto-continuing' }}
+          </button>
+        }
       </div>
+      @if (autoContinueStopped()) {
+        <div class="message info" data-testid="auto-continue-stopped">
+          Auto-continue disabled — plan will pause after this session finishes.
+        </div>
+      }
 
       <!-- Stop Training Dialog -->
       @if (showStopDialog()) {
