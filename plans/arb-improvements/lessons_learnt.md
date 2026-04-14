@@ -167,6 +167,39 @@
   tests themselves explicitly set `max_runners=2, per_runner_action_dim=5`
   so the 5-head schema is actually exercised.
 
+## Session 3 — Signal-bias warmup & bet-rate diagnostics (2026-04-14)
+
+- **Optional kwarg, conditional pass.** Threading `signal_bias` as an
+  optional `forward()` kwarg is the natural API, but the Session 1/2
+  test stubs don't accept unknown kwargs and calling with the kwarg
+  unconditionally broke them. Fix: in `_collect_rollout`, call
+  `self.policy(obs, hidden, signal_bias=b)` only when `b != 0.0` and
+  fall back to the original two-arg signature otherwise. Keeps the
+  default-off path byte-identical AND preserves compatibility with
+  pre-session-3 stub policies. Worth remembering for future sessions
+  that extend the forward signature.
+
+- **`_apply_signal_bias` is duplication-free by being module-level.**
+  All three architectures build their `action_mean` the same way
+  (`actor_head` → `(batch, max_runners, per_runner_action_dim)` → cat
+  per head). A single helper that takes `actor_out` and adds to
+  index 0 means one place to test and one place to reason about the
+  "soft prior on head 0" contract. No inheritance games required.
+
+- **Signal is head index 0 everywhere — lean on it.** `_HEAD_NAMES[0]
+  == "signal"` from Session 2, the action layout is
+  `[signal × N | stake × N | …]`, and the env's back/lay decision
+  reads from the same slice. Session 3 added `bet_rate` on the same
+  index assumption. Any future change to head ordering will need to
+  touch all three (layout, bias, bet-rate). Low risk — the contract
+  is load-bearing enough that no-one's touched it since Session 2.
+
+- **`bet_rate` threshold matches the env's internal ±0.33 back/lay
+  gate.** Picking the same value means "step where bet_rate tripped"
+  and "step where the env placed a bet" don't diverge — which makes
+  the diagnostic a faithful proxy for the sparkline the operator
+  will read in the monitor.
+
 ## Open questions — decide as sessions land
 
 - **Oracle coverage on low-liquidity days.** Unknown how dense arb

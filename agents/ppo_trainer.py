@@ -64,6 +64,47 @@ _HEAD_NAMES: tuple[str, ...] = (
 )
 
 
+# -- Session 3 (arb-improvements) signal-bias warmup --------------------------
+
+#: Magnitude threshold on the sampled ``signal`` action above which we
+#: consider the step to have "placed a bet". Matches the env's internal
+#: back/lay decision band — anything beyond ±0.33 is taken as an
+#: affirmative signal for this diagnostic. Used for ``bet_rate`` only;
+#: the env's own threshold is authoritative for actual bet placement.
+_BET_SIGNAL_THRESHOLD: float = 0.33
+
+
+def _compute_arb_rate(arbs_completed: int, arbs_naked: int) -> float:
+    """Fraction of arb attempts that paired (``completed`` / total).
+
+    Returns ``0.0`` when there were no arb attempts at all — avoids
+    spurious NaN / divide-by-zero. Always in ``[0.0, 1.0]``.
+    """
+    total = int(arbs_completed) + int(arbs_naked)
+    if total <= 0:
+        return 0.0
+    return float(arbs_completed) / float(total)
+
+
+def _signal_bias_for_epoch(
+    epoch: int, warmup: int, magnitude: float,
+) -> float:
+    """Linearly-decaying additive bias on the signal head mean.
+
+    At epoch ``e``, returns ``magnitude * max(0, 1 - e/warmup)``. Returns
+    ``0.0`` when ``warmup <= 0`` or ``magnitude == 0.0`` — both are the
+    "bias off" conditions, yielding byte-identical training to the
+    unbiased path. At ``e >= warmup`` the return is ``0.0`` regardless
+    of ``magnitude``.
+    """
+    if warmup <= 0 or magnitude == 0.0:
+        return 0.0
+    frac = 1.0 - float(epoch) / float(warmup)
+    if frac <= 0.0:
+        return 0.0
+    return float(magnitude) * frac
+
+
 # -- Gene → env reward override mapping ---------------------------------------
 
 #: Maps a hyperparameter (gene) name to the key(s) it overrides inside
@@ -193,6 +234,16 @@ class EpisodeStats:
     arbs_naked: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
+    # Session 3 (arb-improvements) — action diagnostics.
+    # ``bet_rate`` = fraction of rollout steps where any runner's sampled
+    # ``signal`` action crossed the ±0.33 threshold (i.e. the policy
+    # indicated a bet). ``arb_rate`` = fraction of completed arbs among
+    # all arb attempts (paired + naked). Both are always in ``[0.0, 1.0]``.
+    # ``signal_bias`` records the bias actually applied during the rollout
+    # (0.0 when warmup is off or past-warmup).
+    bet_rate: float = 0.0
+    arb_rate: float = 0.0
+    signal_bias: float = 0.0
 
 
 @dataclass
@@ -324,6 +375,25 @@ class PPOTrainer:
         self.advantage_clip = float(hp.get("advantage_clip", 0.0) or 0.0)
         self.value_loss_clip = float(hp.get("value_loss_clip", 0.0) or 0.0)
 
+        # -- Session 3 (arb-improvements) signal-bias warmup ----------------
+        # Additive bias on the per-runner ``signal`` head mean during the
+        # first ``signal_bias_warmup`` epochs of training. Linear decay:
+        # at epoch ``e``, the bias passed into the policy is
+        # ``magnitude * max(0, 1 - e/warmup)``; at ``e >= warmup`` it is
+        # 0.0 and the policy is byte-identical to the unbiased path.
+        #
+        # Both knobs default to off: ``warmup=0`` OR ``magnitude=0`` →
+        # every rollout runs with ``signal_bias=0.0`` (see
+        # ``_current_signal_bias``). Positive ``magnitude`` biases toward
+        # "back"; negative toward "lay".
+        self.signal_bias_warmup = int(hp.get("signal_bias_warmup", 0) or 0)
+        self.signal_bias_magnitude = float(
+            hp.get("signal_bias_magnitude", 0.0) or 0.0
+        )
+        # Tracked by ``train()`` so ``_collect_rollout`` can compute the
+        # decayed bias for the current epoch without re-threading args.
+        self._current_epoch: int = 0
+
         # Build per-agent reward overrides from the sampled genes. This is
         # how reward-shaping hyperparameters reach BetfairEnv — previously
         # these genes were sampled but silently dropped here, so every
@@ -386,6 +456,9 @@ class PPOTrainer:
         all_bets: list[float] = []
 
         for epoch in range(n_epochs):
+            # Session 3: visible to _collect_rollout so it can compute the
+            # decayed signal bias for this epoch without extra args.
+            self._current_epoch = epoch
             for day in days:
                 # Collect rollout
                 rollout, ep_stats = self._collect_rollout(day)
@@ -454,6 +527,22 @@ class PPOTrainer:
         clipped_reward_total = 0.0
         n_steps = 0
         done = False
+        # Session 3: per-rollout diagnostics. ``bet_steps`` tallies steps
+        # whose sampled signal magnitude crossed the bet threshold for
+        # any runner — the numerator of ``bet_rate``. The signal bias
+        # for this rollout is frozen at the start of the epoch so the
+        # log line reflects what the policy actually saw.
+        current_signal_bias = _signal_bias_for_epoch(
+            self._current_epoch,
+            self.signal_bias_warmup,
+            self.signal_bias_magnitude,
+        )
+        bet_steps = 0
+        # Per-runner signal slice bounds on the flat action vector. Signal
+        # is head 0 in the ``[signal × N | stake × N | ...]`` layout, so
+        # it lives at indices ``[0, max_runners)``. Falls back to all
+        # dims for minimal stub policies without ``max_runners``.
+        max_runners = getattr(self.policy, "max_runners", None)
 
         # Pre-allocate a reusable GPU tensor for single-step observations
         obs_dim = obs.shape[0]
@@ -466,7 +555,18 @@ class PPOTrainer:
                 # Copy obs into pre-allocated GPU buffer (avoids tensor creation)
                 obs_buffer[0] = torch.as_tensor(obs, dtype=torch.float32)
 
-                out: PolicyOutput = self.policy(obs_buffer, hidden_state)
+                # Session 3: pass the current-epoch signal bias into the
+                # policy only when armed. Keeping the default-off path on
+                # the original two-arg signature means callers with
+                # pre-session-3 policy stubs (e.g. the Session 1/2 tests)
+                # continue to work unchanged.
+                if current_signal_bias != 0.0:
+                    out: PolicyOutput = self.policy(
+                        obs_buffer, hidden_state,
+                        signal_bias=current_signal_bias,
+                    )
+                else:
+                    out = self.policy(obs_buffer, hidden_state)
                 hidden_state = out.hidden_state
 
                 # Sample action — keep computation on GPU
@@ -507,6 +607,20 @@ class PPOTrainer:
                     training_reward=training_reward,
                 ))
 
+                # Session 3: bet_rate — count this step if any runner's
+                # sampled ``signal`` action magnitude exceeded the bet
+                # threshold. Signal occupies the first ``max_runners``
+                # dims of the flat action vector.
+                if max_runners is not None and action_np.shape[0] >= max_runners:
+                    signal_slice = np.abs(action_np[:max_runners])
+                    if signal_slice.max() > _BET_SIGNAL_THRESHOLD:
+                        bet_steps += 1
+                else:
+                    # Fallback for stub policies without max_runners —
+                    # treat the whole action vector as the "signal" head.
+                    if np.abs(action_np).max() > _BET_SIGNAL_THRESHOLD:
+                        bet_steps += 1
+
                 total_reward += raw_reward
                 clipped_reward_total += training_reward
                 n_steps += 1
@@ -539,6 +653,12 @@ class PPOTrainer:
             arbs_naked=int(info.get("arbs_naked", 0) or 0),
             locked_pnl=float(info.get("locked_pnl", 0.0) or 0.0),
             naked_pnl=float(info.get("naked_pnl", 0.0) or 0.0),
+            bet_rate=(float(bet_steps) / float(n_steps)) if n_steps > 0 else 0.0,
+            arb_rate=_compute_arb_rate(
+                int(info.get("arbs_completed", 0) or 0),
+                int(info.get("arbs_naked", 0) or 0),
+            ),
+            signal_bias=float(current_signal_bias),
         )
 
         return rollout, ep_stats
@@ -891,6 +1011,10 @@ class PPOTrainer:
             "arbs_naked": ep.arbs_naked,
             "locked_pnl": round(ep.locked_pnl, 4),
             "naked_pnl": round(ep.naked_pnl, 4),
+            # Session 3 — action-diagnostics rollup.
+            "bet_rate": round(ep.bet_rate, 6),
+            "arb_rate": round(ep.arb_rate, 6),
+            "signal_bias": round(ep.signal_bias, 6),
             "timestamp": time.time(),
         }
 
@@ -967,6 +1091,20 @@ class PPOTrainer:
                 },
             ),
         }
+        # Session 3 — bet-rate / arb-rate / bias-active diagnostics. Merged
+        # into the same ``action_stats`` dict as the entropy controller's
+        # per-head values so the monitor has a single observation channel.
+        action_stats = progress["action_stats"]
+        action_stats["bet_rate"] = float(max(0.0, min(1.0, ep.bet_rate)))
+        action_stats["arb_rate"] = float(max(0.0, min(1.0, ep.arb_rate)))
+        # ``bias_active`` is True while both the warmup window is open
+        # AND the magnitude is non-zero. When either knob is off the
+        # flag is False and the bias passed to the policy is 0.0.
+        action_stats["bias_active"] = bool(
+            self.signal_bias_warmup > 0
+            and self.signal_bias_magnitude != 0.0
+            and self._current_epoch < self.signal_bias_warmup
+        )
 
         if self.progress_queue is not None:
             try:

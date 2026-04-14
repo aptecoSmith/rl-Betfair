@@ -143,7 +143,76 @@ UI work deferred to Session 8 (consolidation pass).
 
 ### Session 3 — Signal-bias warmup & bet-rate diagnostics
 
-Not yet started.
+**Shipped 2026-04-14.** Linearly-decaying additive bias on the per-runner
+`signal` head mean during the first N training epochs, plus bet-rate /
+arb-rate / bias-active diagnostics on every progress event. Both new
+hyperparameters default to values that leave training byte-identical
+(`signal_bias_warmup=0` OR `signal_bias_magnitude=0` → bias is 0.0 at
+every epoch; the trainer calls the policy on its pre-session-3 signature
+so stub policies that don't accept the kwarg keep working).
+
+New hyperparameters on `PPOTrainer`:
+
+- `signal_bias_warmup` (int, default `0` = off). Number of epochs over
+  which the bias decays linearly to zero.
+- `signal_bias_magnitude` (float, default `0.0` = off). Positive biases
+  toward "back"; negative toward "lay". At epoch `e`, the effective
+  bias passed into the policy is
+  `magnitude * max(0, 1 - e/warmup)` — computed once per rollout.
+
+New policy API: `forward(obs, hidden_state, signal_bias=0.0)` on all
+three architectures (`ppo_lstm_v1`, `ppo_time_lstm_v1`,
+`ppo_transformer_v1`) plus the shared `get_action_distribution`. The
+bias is added to head index 0 (signal) of the per-runner actor output
+via a module-level helper `_apply_signal_bias()` so the code path is
+identical across architectures. `signal_bias == 0.0` returns the tensor
+untouched — no allocation, byte-identical output.
+
+Progress events now carry three new keys inside `action_stats`:
+
+- `bet_rate` — fraction of rollout steps where any runner's sampled
+  `signal` magnitude crossed the ±0.33 threshold. Computed in
+  `_collect_rollout` from `np.abs(action_np[:max_runners])`.
+- `arb_rate` — `arbs_completed / (arbs_completed + arbs_naked)` from
+  the episode's env-side rollup. Zero when no arb attempts were made.
+- `bias_active` — `True` while both knobs are armed AND the current
+  epoch is strictly less than `signal_bias_warmup`.
+
+These also land on `EpisodeStats` (`bet_rate`, `arb_rate`,
+`signal_bias`) and in the `episodes.jsonl` log line.
+
+Files changed:
+
+- `agents/policy_network.py` — `BasePolicy.forward` signature gains
+  `signal_bias: float = 0.0`; module-level `_apply_signal_bias()`
+  helper; three architectures (`PPOLSTMPolicy`, `PPOTimeLSTMPolicy`,
+  `PPOTransformerPolicy`) threading the bias through their actor paths.
+- `agents/ppo_trainer.py` — `signal_bias_warmup` / `signal_bias_magnitude`
+  hyperparameters; `_signal_bias_for_epoch()` formula; `_current_epoch`
+  tracking in `train()`; bet-step counting + signal-bias wiring in
+  `_collect_rollout`; `bet_rate`/`arb_rate`/`signal_bias` on
+  `EpisodeStats`; `bet_rate`/`arb_rate`/`bias_active` merged into
+  `action_stats` in `_publish_progress`; `_compute_arb_rate()` helper
+  (guards the zero-denominator case).
+- `tests/arb_improvements/test_signal_bias_warmup.py` — 15 CPU-only
+  tests (7 scenarios × the three-architecture parametrisation where
+  applicable) covering: bias shifts signal mean at epoch 0, linear
+  decay, bit-identical past warmup, off-by-default behaviour, no
+  leakage to non-signal heads, all three architectures honouring the
+  bias, and `bet_rate`/`arb_rate`/`bias_active` present in the progress
+  event with the correct boolean semantics.
+
+Test results: 15 / 15 new tests pass; `tests/arb_improvements/`,
+`tests/test_ppo_trainer.py`, `tests/test_forced_arbitrage.py`, and
+`tests/test_policy_network.py` together = 169 pass, no regressions.
+
+Phase-1 smoke test was skipped this session (deferred to Session 10 per
+`testing.md` golden rule #2 — "no full training runs during development").
+The isolated-piece tests exercise every knob individually; the
+head-to-head `90fcb25f` comparison is the only place all three knobs
+run together, and that's the Session 10 scope.
+
+UI work deferred to Session 8 (consolidation pass).
 
 ## Phase 2 — Make arbs perceivable
 

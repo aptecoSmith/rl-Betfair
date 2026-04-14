@@ -74,12 +74,42 @@ class BasePolicy(nn.Module, abc.ABC):
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        signal_bias: float = 0.0,
     ) -> PolicyOutput: ...
 
     @abc.abstractmethod
     def init_hidden(self, batch_size: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
         """Return a zero-initialised hidden-state 2-tuple."""
         ...
+
+
+# ── Session 3 (arb-improvements) — signal-bias warmup helper ───────────────
+
+
+def _apply_signal_bias(
+    actor_out: torch.Tensor,
+    signal_bias: float,
+    per_runner_action_dim: int,
+) -> torch.Tensor:
+    """Add ``signal_bias`` to the per-runner ``signal`` head (index 0).
+
+    ``actor_out`` has shape ``(batch, max_runners, per_runner_action_dim)``.
+    Signal is head index 0, matching ``_HEAD_NAMES`` in
+    ``agents/ppo_trainer.py``. When ``signal_bias == 0.0`` the tensor is
+    returned untouched so the default training path is byte-identical.
+
+    The bias is a *soft prior* on the Normal mean — decays linearly to
+    zero by the warmup epoch; never a hard override
+    (``hard_constraints.md §Stabilisation``).
+    """
+    if signal_bias == 0.0:
+        return actor_out
+    bias_vec = torch.zeros(
+        per_runner_action_dim, device=actor_out.device, dtype=actor_out.dtype,
+    )
+    bias_vec[0] = signal_bias
+    # Broadcasts across (batch, max_runners) and adds only to head 0.
+    return actor_out + bias_vec
 
 
 @dataclass
@@ -289,6 +319,7 @@ class PPOLSTMPolicy(BasePolicy):
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        signal_bias: float = 0.0,
     ) -> PolicyOutput:
         """Forward pass through the full network.
 
@@ -299,6 +330,9 @@ class PPOLSTMPolicy(BasePolicy):
         hidden_state :
             ``(h, c)`` each of shape ``(1, batch, lstm_hidden_size)``.
             Pass ``None`` on the first tick of an episode (zeros used).
+        signal_bias :
+            Session 3 (arb-improvements) warmup bias added to the per-runner
+            ``signal`` head mean only. Default ``0.0`` → byte-identical.
         """
         # Handle both 2-D (single timestep) and 3-D (sequence) inputs
         if obs.dim() == 2:
@@ -376,6 +410,11 @@ class PPOLSTMPolicy(BasePolicy):
         # Per-runner action params: (batch, max_runners, per_runner_action_dim)
         actor_out = self.actor_head(actor_input)
 
+        # Session 3: optional warmup bias on the signal head (index 0).
+        actor_out = _apply_signal_bias(
+            actor_out, signal_bias, self._per_runner_action_dim,
+        )
+
         # Flatten to action_dim: [signals..., stakes..., aggression...]
         # Each per-runner dim is scattered into its own contiguous block.
         parts = [actor_out[:, :, i] for i in range(self._per_runner_action_dim)]
@@ -407,12 +446,13 @@ class PPOLSTMPolicy(BasePolicy):
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        signal_bias: float = 0.0,
     ) -> tuple[Normal, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Return the action distribution, value, and new hidden state.
 
         Convenience method for PPO rollout collection.
         """
-        out = self.forward(obs, hidden_state)
+        out = self.forward(obs, hidden_state, signal_bias=signal_bias)
         std = out.action_log_std.exp()
         dist = Normal(out.action_mean, std)
         return dist, out.value, out.hidden_state
@@ -667,6 +707,7 @@ class PPOTimeLSTMPolicy(BasePolicy):
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        signal_bias: float = 0.0,
     ) -> PolicyOutput:
         """Forward pass — identical to PPOLSTMPolicy but using TimeLSTMCell."""
         if obs.dim() == 2:
@@ -767,6 +808,10 @@ class PPOTimeLSTMPolicy(BasePolicy):
         )
         actor_input = torch.cat([last_runner_embs, lstm_expanded], dim=-1)
         actor_out = self.actor_head(actor_input)
+        # Session 3: optional warmup bias on the signal head (index 0).
+        actor_out = _apply_signal_bias(
+            actor_out, signal_bias, self._per_runner_action_dim,
+        )
         parts = [actor_out[:, :, i] for i in range(self._per_runner_action_dim)]
         action_mean = torch.cat(parts, dim=-1)
 
@@ -796,9 +841,10 @@ class PPOTimeLSTMPolicy(BasePolicy):
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        signal_bias: float = 0.0,
     ) -> tuple[Normal, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Return the action distribution, value, and new hidden state."""
-        out = self.forward(obs, hidden_state)
+        out = self.forward(obs, hidden_state, signal_bias=signal_bias)
         std = out.action_log_std.exp()
         dist = Normal(out.action_mean, std)
         return dist, out.value, out.hidden_state
@@ -1053,6 +1099,7 @@ class PPOTransformerPolicy(BasePolicy):
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        signal_bias: float = 0.0,
     ) -> PolicyOutput:
         """Forward pass.
 
@@ -1107,6 +1154,10 @@ class PPOTransformerPolicy(BasePolicy):
         )
         actor_input = torch.cat([last_runner_embs, out_expanded], dim=-1)
         actor_out = self.actor_head(actor_input)
+        # Session 3: optional warmup bias on the signal head (index 0).
+        actor_out = _apply_signal_bias(
+            actor_out, signal_bias, self._per_runner_action_dim,
+        )
         parts = [actor_out[:, :, i] for i in range(self._per_runner_action_dim)]
         action_mean = torch.cat(parts, dim=-1)
 
@@ -1168,9 +1219,10 @@ class PPOTransformerPolicy(BasePolicy):
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        signal_bias: float = 0.0,
     ) -> tuple[Normal, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Return the action distribution, value, and new hidden state."""
-        out = self.forward(obs, hidden_state)
+        out = self.forward(obs, hidden_state, signal_bias=signal_bias)
         std = out.action_log_std.exp()
         dist = Normal(out.action_mean, std)
         return dist, out.value, out.hidden_state
