@@ -87,7 +87,12 @@ into two buckets and accumulates each separately for diagnostics:
 
 - **Raw** = `race_pnl` (actual cash P&L of the race) + terminal
   `day_pnl / starting_budget` bonus on the final step. These track
-  real money.
+  real money. **Scalping mode (2026-04-15):** raw becomes
+  `scalping_locked_pnl + min(0, naked_pnl)` — locked spreads + naked
+  losses, with naked windfalls still excluded. The asymmetry preserves
+  "no reward for directional luck" while making naked losses cost real
+  reward (instead of just a budget-normalised shaping cap that the agent
+  can outrun by sizing pairs aggressively).
 - **Shaped** = `early_pick_bonus + (precision − 0.5) × precision_bonus
   − bet_count × efficiency_penalty`. These are training-signal
   contributions that shouldn't (in expectation) add or remove money.

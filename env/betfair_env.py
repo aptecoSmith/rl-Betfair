@@ -91,7 +91,11 @@ SCALPING_ACTIONS_PER_RUNNER: int = 5
 # are risky (commission dominates the spread); large ticks make the passive
 # counter-order unlikely to fill.
 MIN_ARB_TICKS: int = 1
-MAX_ARB_TICKS: int = 15
+# Realistic upper bound: in scalping, a market move of 10–20 ticks per
+# race is already considered a strong opportunity; 80+ tick spreads
+# never get filled in real markets. Capping the action-space here keeps
+# the agent exploring useful spreads instead of fantasy zone.
+MAX_ARB_TICKS: int = 25
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
@@ -522,6 +526,17 @@ class BetfairEnv(gymnasium.Env):
         # this list keeps references so the evaluator can record the full
         # day's bet log, not just the last race.
         self._settled_bets: list = []
+        # Day-level paired-arb diagnostic counters. Accumulated across races
+        # since PassiveOrderBook is recreated with each BetManager. Drained
+        # in step() before the BetManager is replaced. See
+        # bet_manager.PassiveOrderBook for the per-reason breakdown.
+        self._paired_place_rejects_day: dict[str, int] = {
+            "no_ltp": 0,
+            "price_invalid": 0,
+            "budget_back": 0,
+            "budget_lay": 0,
+        }
+        self._paired_fill_skips_ltp_filter_day: int = 0
         # ── P1c runtime windowed history (Session 21) ────────────────────────
         # Per-runner deque of (timestamp_s, microprice, vol_delta) tuples,
         # keyed by selection_id.  Reset at race boundaries.  Used for
@@ -840,6 +855,24 @@ class BetfairEnv(gymnasium.Env):
             "arbs_naked": sum(r.arbs_naked for r in self._race_records),
             "locked_pnl": sum(r.locked_pnl for r in self._race_records),
             "naked_pnl": sum(r.naked_pnl for r in self._race_records),
+            # Paired-arb silent-failure diagnostics. ``paired_place_rejects``
+            # is a per-reason dict (no_ltp, price_invalid, budget_back,
+            # budget_lay) capturing aggressive→passive placements that the
+            # PassiveOrderBook refused. ``paired_fill_skips`` counts
+            # (order × tick) skips of the on-tick LTP-distance filter on
+            # paired orders that DID make it into the book — i.e. legs
+            # placed too far from current LTP for fills to be considered.
+            # Both include this race's live BetManager + every prior
+            # race's drained counters.
+            "paired_place_rejects": {
+                k: self._paired_place_rejects_day.get(k, 0)
+                + bm.passive_book._paired_place_rejects.get(k, 0)
+                for k in self._paired_place_rejects_day
+            },
+            "paired_fill_skips": (
+                self._paired_fill_skips_ltp_filter_day
+                + bm.passive_book._paired_fill_skips_ltp_filter
+            ),
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -873,6 +906,13 @@ class BetfairEnv(gymnasium.Env):
         self._cum_shaped_reward = 0.0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         self._settled_bets = []
+        self._paired_place_rejects_day = {
+            "no_ltp": 0,
+            "price_invalid": 0,
+            "budget_back": 0,
+            "budget_lay": 0,
+        }
+        self._paired_fill_skips_ltp_filter_day = 0
         self._last_action_debug: dict[int, dict] = {}
         # Running high-water / low-water of day_pnl for the drawdown
         # shaping term. Both start at 0.0 (the initial day_pnl) so the
@@ -931,6 +971,18 @@ class BetfairEnv(gymnasium.Env):
             # bets survive to evaluator/replay output (B1 in bugs.md).
             assert self.bet_manager is not None
             self._settled_bets.extend(self.bet_manager.bets)
+
+            # Drain paired-arb diagnostic counters from this race's
+            # PassiveOrderBook into the day-level accumulator before the
+            # BetManager (and its book) is discarded.
+            pb = self.bet_manager.passive_book
+            for k, v in pb._paired_place_rejects.items():
+                self._paired_place_rejects_day[k] = (
+                    self._paired_place_rejects_day.get(k, 0) + v
+                )
+            self._paired_fill_skips_ltp_filter_day += (
+                pb._paired_fill_skips_ltp_filter
+            )
 
             # Reset BetManager and windowed history for the next race.
             if self._race_idx < self._total_races:
@@ -1104,6 +1156,60 @@ class BetfairEnv(gymnasium.Env):
                     # Lazily generate a short unique id for this pair.
                     import uuid as _uuid
                     pair_id = _uuid.uuid4().hex[:12]
+
+                    # Joint-affordability pre-flight under Betfair's
+                    # freed-budget rule. Real Betfair recognises that a
+                    # back-and-lay on the same selection can never both
+                    # lose, so the worst-case loss for the pair is
+                    # ``max(back_stake, lay_liability)`` — NOT their sum.
+                    # For typical scalping prices (lay_price ≤ 2.0) the
+                    # back stake fully covers the lay liability and no
+                    # extra reservation is required → joint_factor = 1.
+                    # The actual reservation in passive_book.place mirrors
+                    # this; this pre-flight just stops the agent from
+                    # *over-sizing* relative to that reservation.
+                    #
+                    # The lay leg of any pair is the LOWER-priced leg:
+                    # - agg-back at A → pass-lay at A − N_ticks → lay = pass
+                    # - agg-lay at A → pass-back at A + N_ticks → lay = agg
+                    ltp = runner.last_traded_price
+                    if ltp is not None and ltp > 0.0:
+                        if side == BetSide.BACK:
+                            agg_price_est = bm.matcher.pick_top_price(
+                                runner.available_to_back,
+                                reference_price=ltp,
+                                lower_is_better=False,
+                            )
+                            if agg_price_est is not None:
+                                lay_leg_price = tick_offset(
+                                    agg_price_est, arb_ticks, -1,
+                                )
+                            else:
+                                lay_leg_price = None
+                        else:
+                            agg_price_est = bm.matcher.pick_top_price(
+                                runner.available_to_lay,
+                                reference_price=ltp,
+                                lower_is_better=True,
+                            )
+                            lay_leg_price = agg_price_est
+
+                        if lay_leg_price is not None and lay_leg_price > 0.0:
+                            # Freed-budget joint factor:
+                            # joint = max(stake, stake × (lay_price − 1))
+                            #       = stake × max(1, lay_price − 1)
+                            joint_factor = max(1.0, lay_leg_price - 1.0)
+                            max_joint_stake = bm.available_budget / joint_factor
+                            if stake > max_joint_stake:
+                                stake = max_joint_stake
+                            if stake < _MIN_STAKE:
+                                action_debug[sid] = {
+                                    "aggressive_placed": False,
+                                    "passive_placed": False,
+                                    "cancelled": did_cancel,
+                                    "skipped_reason": "scalping_joint_budget_too_small",
+                                }
+                                continue
                 if side == BetSide.BACK and runner.available_to_lay:
                     bet = bm.place_back(
                         runner, stake, market_id=race.market_id,
@@ -1408,14 +1514,42 @@ class BetfairEnv(gymnasium.Env):
             + naked_penalty_term
             + early_lock_term
         )
-        # Scalping reward-eligible P&L excludes naked bet outcomes: a
-        # naked back that happens to win is directional luck, not a
-        # scalping skill, and rewarding it would teach the agent to
-        # leave unpaired bets on purpose (defeating the strategy). The
-        # naked_penalty_term still covers the *exposure* downside on
-        # both sides — so leaving naked bets is strictly punished, not
-        # silently tolerated. Directional runs keep the legacy path.
-        race_reward_pnl = scalping_locked_pnl if self.scalping_mode else race_pnl
+        # Naked P&L = portion of race_pnl NOT explained by completed-arb
+        # spreads. When scalping_mode is off both branches fold to the
+        # same number (locked_pnl = 0), keeping the field meaningful.
+        # Computed BEFORE race_reward_pnl so the asymmetric loss term
+        # below can use it.
+        naked_pnl = race_pnl - scalping_locked_pnl
+
+        # Scalping reward-eligible P&L: locked spread profit + naked
+        # LOSSES (asymmetric — naked windfalls remain excluded).
+        #
+        # Rationale: a naked back that happens to win is directional luck
+        # and rewarding it would teach the agent to leave unpaired bets on
+        # purpose. But IGNORING naked LOSSES is just as bad — the agent
+        # never sees the cash cost of leaving exposure unhedged, only a
+        # shaping proxy capped at ~-weight per race regardless of how big
+        # the actual loss was. The 2026-04-15 diagnostic on the top model
+        # showed +£3,555 locked / −£3,356 naked / +£200 net across 4 days:
+        # naked variance dwarfed the locked signal because the agent had
+        # no incentive to size pairs to control it.
+        #
+        # The asymmetric form keeps the "no luck reward" guarantee while
+        # giving real cash teeth to naked exposure: locked profit → +,
+        # naked loss → − (full cash hit), naked windfall → 0.
+        if self.scalping_mode:
+            # Asymmetric naked-loss factor (2026-04-15 follow-up): full 1.0×
+            # weighting collapsed an under-trained policy to "no bets" — the
+            # raw cash hit on every bad rollout was harsher than 12 episodes
+            # of training could overcome. 0.5× softens early-training pain
+            # while still giving naked losses real reward teeth (the prior
+            # "shaping only, capped at -weight" regime was the bug we set
+            # out to fix). Tune up toward 1.0 once the agent has a reliable
+            # arb policy.
+            naked_loss_only = min(0.0, naked_pnl)
+            race_reward_pnl = scalping_locked_pnl + 0.5 * naked_loss_only
+        else:
+            race_reward_pnl = race_pnl
         self._day_reward_pnl += race_reward_pnl
         reward = race_reward_pnl + shaped
 
@@ -1423,11 +1557,6 @@ class BetfairEnv(gymnasium.Env):
         self._cum_raw_reward += race_reward_pnl
         self._cum_shaped_reward += shaped
         self._cum_spread_cost += spread_cost_term
-
-        # Naked P&L = the portion of race_pnl NOT explained by completed
-        # arb spreads. When scalping_mode is off both branches fold to the
-        # same number (locked_pnl = 0), keeping the field meaningful.
-        naked_pnl = race_pnl - scalping_locked_pnl
 
         self._race_records.append(RaceRecord(
             market_id=race.market_id,

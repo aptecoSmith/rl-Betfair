@@ -83,6 +83,15 @@ class Bet:
     # bets placed outside scalping_mode. See plans/issues-12-04-2026/
     # 05-forced-arbitrage/.
     pair_id: str | None = None
+    # Actual liability reserved at placement (after any paired-arb offset).
+    # ``None`` means "use the full ``self.liability`` value" — i.e. the bet
+    # was placed un-paired, so the standard reservation rules apply.
+    # Paired LAY bets where the partner BACK's stake fully covers the
+    # worst-case loss have ``reserved_liability = 0.0``. Settlement &
+    # cancellation paths must release this exact amount, NOT the full
+    # liability, or `_open_liability` will go negative. See bet_manager
+    # docstring on "freed budget" for the Betfair offset rationale.
+    reserved_liability: float | None = None
 
     @property
     def liability(self) -> float:
@@ -118,6 +127,11 @@ class PassiveOrder:
     # aggressive fill. None for ordinary passive orders placed directly
     # by the agent outside scalping_mode.
     pair_id: str | None = None
+    # Actual liability reserved at placement (after any paired-arb offset).
+    # See ``Bet.reserved_liability`` for full explanation. Carried over to
+    # the resulting Bet on fill, and to cancel_* on cancellation, so the
+    # release math always undoes exactly what was reserved.
+    reserved_liability: float | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -183,6 +197,20 @@ class PassiveOrderBook:
         self._last_cancels: list[dict] = []
         # History of cancelled orders — kept for the replay UI.
         self._cancelled_orders: list[PassiveOrder] = []
+        # Paired-order diagnostics — counts silent rejections of explicit-price
+        # passive placements (those carrying a ``pair_id``) broken down by
+        # reason, plus per-tick fill-check skips for paired orders that
+        # already rest in the book. Cumulative per BetManager (i.e. per race);
+        # BetfairEnv accumulates across races. See plans/arb-improvements/
+        # for context — until this counter existed, every paired-leg failure
+        # was invisible and the registry showed 0/7750 completed/naked arbs.
+        self._paired_place_rejects: dict[str, int] = {
+            "no_ltp": 0,
+            "price_invalid": 0,
+            "budget_back": 0,
+            "budget_lay": 0,
+        }
+        self._paired_fill_skips_ltp_filter: int = 0
 
     @property
     def orders(self) -> list[PassiveOrder]:
@@ -233,14 +261,20 @@ class PassiveOrderBook:
         order.cancelled = True
         order.cancel_reason = reason
 
-        # Release budget reservation.
+        # Release budget reservation. Honour the order's actual reservation
+        # if recorded (paired-arb freed-budget path); otherwise fall back to
+        # the textbook full-liability release.
         bm = self._bet_manager
         if bm is not None:
             if order.side is BetSide.BACK:
                 bm.budget += order.requested_stake
             else:  # LAY
-                liability = order.requested_stake * (order.price - 1.0)
-                bm._open_liability -= liability
+                released = (
+                    order.reserved_liability
+                    if order.reserved_liability is not None
+                    else order.requested_stake * (order.price - 1.0)
+                )
+                bm._open_liability -= released
 
         # Emit cancellation event.
         self._last_cancels.append({
@@ -279,13 +313,18 @@ class PassiveOrderBook:
             order.cancelled = True
             order.cancel_reason = reason
 
-            # Release budget reservation.
+            # Release budget reservation. Same freed-budget rule as
+            # cancel_oldest_for above.
             if bm is not None:
                 if order.side is BetSide.BACK:
                     bm.budget += order.requested_stake
                 else:  # LAY
-                    liability = order.requested_stake * (order.price - 1.0)
-                    bm._open_liability -= liability
+                    released = (
+                        order.reserved_liability
+                        if order.reserved_liability is not None
+                        else order.requested_stake * (order.price - 1.0)
+                    )
+                    bm._open_liability -= released
 
             # Emit cancellation event for info["passive_cancels"].
             self._last_cancels.append({
@@ -337,6 +376,8 @@ class PassiveOrderBook:
         """
         ltp = runner.last_traded_price
         if ltp is None or ltp <= 0.0:
+            if pair_id is not None:
+                self._paired_place_rejects["no_ltp"] += 1
             return None
 
         if side is BetSide.BACK:
@@ -377,10 +418,28 @@ class PassiveOrderBook:
             queue_ahead = top_level.size
         else:
             # ── Explicit-price path (forced arbitrage paired order). ──────
-            # The caller supplies the exact resting price. Still enforce the
-            # junk filter so a paired order that lands far outside the live
-            # book is refused — matches real exchange behaviour.
-            if not (lo <= price <= hi):
+            # The caller supplies the exact resting price, derived from a
+            # real fill via ``tick_offset`` (which already hard-clamps to
+            # Betfair's [1.01, 1000] price band). The LTP-relative junk
+            # filter that guards the default path does NOT apply here:
+            #
+            # - The risk it mitigates ("walking a stale £1000 parked
+            #   order") is irrelevant for a passive resting order — the
+            #   order rests at the agent's chosen price and only fills
+            #   when traded volume actually crosses it.
+            # - At MAX_ARB_TICKS=100 a paired leg can legitimately sit
+            #   well outside ±max_price_deviation_pct of the *fill-time*
+            #   LTP, especially on short-priced runners where each tick
+            #   is a small absolute move but compounds quickly. With the
+            #   junk filter on, every such pair was silently refused —
+            #   producing the "always-naked arb" symptom seen in the
+            #   registry (376 eval days, 7,750 naked, 0 completed).
+            #
+            # We still require a positive price (defensive — caller
+            # should never pass <=0).
+            if price <= 0.0:
+                if pair_id is not None:
+                    self._paired_place_rejects["price_invalid"] += 1
                 return None
             resting_price = price
             # Queue ahead: size already sitting at that level, or 0 if the
@@ -394,17 +453,73 @@ class PassiveOrderBook:
 
         # Budget reservation — must happen before the order is appended so
         # that a failed reservation leaves the book unchanged.
+        #
+        # Paired-arb "freed budget" rule (added 2026-04-15):
+        # Real Betfair recognises that a back-and-lay on the same selection
+        # can never both lose, and frees up the reservation accordingly.
+        # Worst-case loss = max(back_stake, lay_liability), NOT
+        # back_stake + lay_liability. For typical scalping prices (lay ≤ 2.0)
+        # the lay liability is fully covered by the back stake — zero new
+        # reservation. We model this for the paired LAY-after-BACK path
+        # below; the paired BACK-after-LAY path is left additive for now
+        # (TODO: symmetric handling once the LAY-aggressive path starts
+        # bumping into rej_bback in the diagnostic).
         bm = self._bet_manager
+        reserved_for_order: float | None = None
         if bm is not None:
             if side is BetSide.BACK:
                 if stake > bm.available_budget:
+                    if pair_id is not None:
+                        self._paired_place_rejects["budget_back"] += 1
                     return None
                 bm.budget -= stake
+                # Symmetric paired BACK-after-LAY freeing: when the second
+                # leg of a (LAY first → BACK second) pair lands, the
+                # aggressive lay's liability already covers part of the
+                # joint exposure. Release that overlap on the LAY side and
+                # mark the LAY's reserved_liability so settlement releases
+                # the same reduced amount (otherwise _open_liability would
+                # go negative). Mirrors the LAY-after-BACK case below.
+                if pair_id is not None:
+                    for prior in reversed(bm.bets):
+                        if (
+                            prior.pair_id == pair_id
+                            and prior.side is BetSide.LAY
+                        ):
+                            already_reserved = (
+                                prior.reserved_liability
+                                if prior.reserved_liability is not None
+                                else prior.matched_stake
+                                    * (prior.average_price - 1.0)
+                            )
+                            offset = min(stake, already_reserved)
+                            if offset > 0.0:
+                                bm._open_liability -= offset
+                                prior.reserved_liability = (
+                                    already_reserved - offset
+                                )
+                            break
             else:  # LAY
                 liability = stake * (resting_price - 1.0)
-                if liability > bm.available_budget:
+                # Paired LAY-after-BACK offset: find the matched aggressive
+                # back leg for this pair_id (most recent if multiple) and
+                # net its stake against the lay's liability.
+                offset = 0.0
+                if pair_id is not None:
+                    for prior in reversed(bm.bets):
+                        if (
+                            prior.pair_id == pair_id
+                            and prior.side is BetSide.BACK
+                        ):
+                            offset = min(prior.matched_stake, liability)
+                            break
+                reserved = max(0.0, liability - offset)
+                if reserved > bm.available_budget:
+                    if pair_id is not None:
+                        self._paired_place_rejects["budget_lay"] += 1
                     return None
-                bm._open_liability += liability
+                bm._open_liability += reserved
+                reserved_for_order = reserved
 
         order = PassiveOrder(
             selection_id=runner.selection_id,
@@ -416,6 +531,7 @@ class PassiveOrderBook:
             market_id=market_id,
             ltp_at_placement=ltp,
             pair_id=pair_id,
+            reserved_liability=reserved_for_order,
         )
         self._orders.append(order)
         self._orders_by_sid.setdefault(order.selection_id, []).append(order)
@@ -493,6 +609,12 @@ class PassiveOrderBook:
             lo = ltp * (1.0 - self._matcher.max_price_deviation_pct)
             hi = ltp * (1.0 + self._matcher.max_price_deviation_pct)
             if not (lo <= order.price <= hi):
+                # Diagnostic: for paired orders this is the second silent
+                # gate that blocks fills (the first being placement-time).
+                # Counted per (order × tick) so a long-lived paired leg
+                # outside the LTP window will rack up many skips.
+                if order.pair_id is not None:
+                    self._paired_fill_skips_ltp_filter += 1
                 continue
 
             # Passive self-depletion: shift the threshold by how much stake
@@ -523,6 +645,7 @@ class PassiveOrderBook:
                 ltp_at_placement=order.ltp_at_placement,
                 pair_id=order.pair_id,
                 tick_index=tick_index,
+                reserved_liability=order.reserved_liability,
             )
             self._bet_manager.bets.append(bet)
 
@@ -855,7 +978,14 @@ class BetManager:
                         bet.pnl = win_net - place_liability
                         self.budget += win_net - place_liability
 
-                    self._open_liability -= liability
+                    # Release whatever was actually reserved at placement
+                    # (paired-arb freed-budget rule), falling back to full
+                    # liability for non-paired lays.
+                    self._open_liability -= (
+                        bet.reserved_liability
+                        if bet.reserved_liability is not None
+                        else liability
+                    )
 
                 bet.is_each_way = True
                 bet.each_way_divisor = each_way_divisor
@@ -885,16 +1015,22 @@ class BetManager:
 
                 elif bet.side is BetSide.LAY:
                     liability = bet.matched_stake * (bet.average_price - 1.0)
+                    # Same freed-budget release rule for non-EW lays.
+                    released = (
+                        bet.reserved_liability
+                        if bet.reserved_liability is not None
+                        else liability
+                    )
                     if in_winners:
                         self.budget -= liability
-                        self._open_liability -= liability
+                        self._open_liability -= released
                         bet.pnl = -liability
                         bet.outcome = BetOutcome.LOST
                     else:
                         gross_profit = bet.matched_stake
                         net_profit = gross_profit * (1.0 - commission)
                         self.budget += net_profit
-                        self._open_liability -= liability
+                        self._open_liability -= released
                         bet.pnl = net_profit
                         bet.outcome = BetOutcome.WON
 
@@ -919,9 +1055,14 @@ class BetManager:
                 # Refund the stake that was deducted on placement
                 self.budget += bet.matched_stake
             elif bet.side is BetSide.LAY:
-                # Release the reserved liability
+                # Release the reserved liability — honour the actual
+                # paired-arb freed amount if recorded, else full liability.
                 liability = bet.matched_stake * (bet.average_price - 1.0)
-                self._open_liability -= liability
+                self._open_liability -= (
+                    bet.reserved_liability
+                    if bet.reserved_liability is not None
+                    else liability
+                )
 
             bet.pnl = 0.0
             bet.outcome = BetOutcome.VOID

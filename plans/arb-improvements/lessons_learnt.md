@@ -217,3 +217,162 @@
   arb-rate stays high through verification, Session 9 may be
   explicitly deferred or dropped. Document the decision in
   `progress.md` Session 10 entry.
+
+---
+
+## Session 2026-04-15 — "why does the top performer have zero lay bets?"
+
+What started as an investigation into a single weird scoreboard fact
+("model claims 427 arbs, bet explorer shows zero lay bets") turned
+into a deep audit of the whole forced-arb mechanic. The user was
+right: those 427 attempts produced **0 completes across the entire
+registry** (376 eval days, 7,750 naked, 0 paired). Every "arb" was a
+phantom — the aggressive leg matched, the passive counter-leg got
+silently rejected, race-off cleaned it up unfilled.
+
+### Diagnostic discipline beats intuition
+
+- **Don't trust the conclusion before looking at the cause.** When
+  the diagnostic showed zero completed arbs across the whole
+  registry, our first instinct was "the agent never saw arbs work,
+  so it learned to bet directionally." True, but useless. The
+  question is *why* the passive leg never filled. The answer needed
+  per-reason rejection counters (`paired_place_rejects` broken into
+  `no_ltp` / `price_invalid` / `budget_back` / `budget_lay`, plus
+  `paired_fill_skips` for the on-tick path). Once we plumbed those
+  through `info` → `EvaluationDayRecord` → SQLite columns, the
+  re-eval immediately fingered `paired_rejects_budget_lay = 418` as
+  the dominant cause.
+
+- **Silent failures are the bug.** Every place we returned `None`
+  from `passive_book.place` without recording why was a debugging
+  black hole. The fix is structural: when a path can refuse for
+  several reasons, give each reason its own counter and surface them
+  at the same level of the API as the success metric. In retrospect
+  the original Issue 05 plan should have shipped with these counters
+  from day one.
+
+- **Re-eval the same model after each mechanic change.** Iterating
+  in this order — relax filter → joint pre-flight → freed-budget
+  reservation — and re-running `scripts/reeval_top_model.py` after
+  each let us watch the diagnostic shift (5 → 38 → 294 completes for
+  the same trained policy). This is much cheaper than retraining and
+  isolates which mechanic moved the needle.
+
+### Two junk filters, two different jobs
+
+- **The placement-time LTP-relative filter** was the first silent
+  reject. It was originally bolted onto both the default-price path
+  (where it guards against "walking" stale £1000 parked levels — a
+  real exchange behaviour the simulator must match) and the
+  explicit-price path (where the price came from `tick_offset` of a
+  real fill, not the noisy ladder). On the explicit-price path it
+  was always wrong: the price is deterministic, can't be "stale", and
+  the order rests at exactly that price. **Lesson:** always ask
+  whether a filter's justification applies to *every* code path that
+  shares it. If a sibling path doesn't need the filter, factor it
+  out — don't leave the filter as a "defence in depth" that silently
+  refuses legitimate orders.
+
+- **The on-tick fill-time LTP filter** is the *second* silent reject
+  that's still partially in play. It exists to prevent phantom fills
+  from unrelated runner-level traded-volume crossing an order's
+  queue-ahead threshold while the market is nowhere near the order's
+  price. We left this one alone — it's load-bearing — but the
+  diagnostic counter (`paired_fill_skips`) makes it visible. The
+  proper fix is per-price-level traded volume, which requires
+  richer tick data; for now the diagnostic at least makes the
+  trade-off auditable.
+
+### Betfair's "freed budget" is a structural rule, not a tweak
+
+- **Real Betfair recognises a paired back+lay on the same selection
+  can never both lose.** Worst-case loss for the pair is
+  `max(back_stake, lay_liability)`, NOT their sum. For typical
+  scalping prices (lay ≤ 2.0) the back stake fully covers the lay
+  liability — Betfair frees 100% of the lay-side reservation. The
+  simulator was reserving additively, so a £20 budget supported one
+  paired position instead of many. That's why the 0/7,750 count
+  existed even before the user requested action.
+
+- **Per-bet `reserved_liability` field** is the cleanest way to track
+  the actual reservation through the bet lifecycle. PassiveOrder
+  carries it; on fill it's copied to the Bet; settle / cancel / void
+  release exactly that amount. Avoid trying to recompute the offset
+  at release time (depends on partner state which may have changed).
+  **Lesson:** when reservation math gets non-trivial, store the
+  reserved amount on the entity instead of recomputing it later.
+
+- **Both sides need symmetric handling.** The first implementation
+  only freed budget for LAY-after-BACK (the diagnostic's dominant
+  path). The user immediately flagged BACK-after-LAY needed the same
+  treatment. Adding it required retroactively reducing the partner
+  LAY's `reserved_liability` when the second leg lands. **Lesson:**
+  if a behaviour is "the system recognises an arb has formed", it
+  must do so regardless of which leg landed first.
+
+### Reward signals must scale with cash, not with budget fraction
+
+- **Budget-normalised shaping caps the wrong number.** The original
+  naked-penalty term `-weight × naked_exposure / starting_budget`
+  was capped at `-weight ≈ -£2.45` per race no matter how big the
+  actual cash loss. Meanwhile the agent could lose £11 of real cash
+  per naked. The agent learned the cash side dominates and the
+  penalty is cosmetic. **Lesson:** when shaping is intended to
+  punish a behaviour, it should scale with the same units the agent
+  actually feels in raw reward. Budget-fraction shaping is fine for
+  smooth gradients within a race; it's not enough to bound a real
+  failure mode.
+
+- **Asymmetric raw rewards are honest.** Replacing
+  `race_reward_pnl = scalping_locked_pnl` with
+  `scalping_locked_pnl + 0.5 × min(0, naked_pnl)` makes naked
+  *losses* hit reward at real cash value while keeping naked
+  *windfalls* excluded (so the agent can't farm directional luck).
+  The 0.5× factor is a calibration knob: 1.0 collapsed an
+  under-trained policy in 4 episodes; 0.5 turned training reward
+  positive (+28). The point isn't the magic number — it's that
+  asymmetric shaping captures "punish what you should have controlled,
+  don't reward luck" cleanly.
+
+### Hyperparameters tuned for one reward break under another
+
+- **The original gene pool was trained when arbs never worked.**
+  Models had `naked_penalty_weight ≈ 3.97` (chosen high to fight
+  the broken cap), `entropy_coefficient ≈ 0.001`, no `entropy_floor`,
+  no `reward_clip`. Under the new asymmetric raw reward those values
+  double-punish nakeds and one bad opening episode permanently
+  collapses the policy. v4's per-episode trajectory tells the
+  whole story: ep1 placed 141 bets and lost £95 of cash, then ep4
+  onwards the agent placed zero bets and ate the inactivity penalty
+  forever rather than try again. **Lesson:** changing reward
+  semantics invalidates every gene that was tuned against the old
+  semantics. A fresh GA generation is the right next step, not more
+  variants of the stale genome.
+
+- **`inactivity_penalty` doesn't rescue collapsed policies.** v4
+  showed 36 episodes of consistent −£25 to −£145 inactivity reward
+  and the agent never resumed betting. Once the policy mean is
+  parked in the BACK/LAY deadband `[-0.33, +0.33]`, a constant
+  per-step pull isn't enough to overcome the memory of one big
+  negative-cash episode. The fix is to prevent the collapse
+  (entropy floor, reward clip, lower naked weight) — not to harder
+  the punishment for the symptom.
+
+### Process
+
+- **Cheapest-first iteration is the right default for stuck
+  problems.** The user asked for retraining experiments "in order of
+  time cost." Doing 4 minutes of retraining 3 times to triangulate
+  the failure mode (high npw → low npw → softened raw → longer
+  training) was much cheaper than running a full GA generation and
+  staring at the result. **Lesson:** when a problem feels
+  open-ended, do the smallest experiment that distinguishes between
+  the leading hypotheses, then iterate.
+
+- **One-off scripts (`scripts/reeval_top_model.py`,
+  `scripts/retrain_clone.py`) are fine to keep around.** They make
+  the next iteration cheap — re-running the diagnostic after a code
+  change took 90 seconds. Don't gold-plate them; do delete them
+  once the related code path stabilises and the test suite covers
+  the same ground.

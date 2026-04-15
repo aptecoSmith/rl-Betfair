@@ -374,6 +374,11 @@ class Evaluator:
         locked_pnl = float(info.get("locked_pnl", 0.0) or 0.0)
         naked_pnl = float(info.get("naked_pnl", 0.0) or 0.0)
 
+        # Paired-arb silent-failure diagnostics. Always present in info as
+        # of 2026-04-15; defensively .get() in case an older env is mocked.
+        paired_rejects = info.get("paired_place_rejects", {}) or {}
+        paired_fill_skips = int(info.get("paired_fill_skips", 0) or 0)
+
         day_record = EvaluationDayRecord(
             run_id=run_id,
             date=day.date,
@@ -389,6 +394,17 @@ class Evaluator:
             arbs_naked=arbs_naked,
             locked_pnl=locked_pnl,
             naked_pnl=naked_pnl,
+            paired_rejects_no_ltp=int(paired_rejects.get("no_ltp", 0) or 0),
+            paired_rejects_price_invalid=int(
+                paired_rejects.get("price_invalid", 0) or 0
+            ),
+            paired_rejects_budget_back=int(
+                paired_rejects.get("budget_back", 0) or 0
+            ),
+            paired_rejects_budget_lay=int(
+                paired_rejects.get("budget_lay", 0) or 0
+            ),
+            paired_fill_skips=paired_fill_skips,
         )
 
         t_metrics_done = time.perf_counter()

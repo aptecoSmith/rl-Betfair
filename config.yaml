@@ -69,7 +69,7 @@ paths:
   mysql_bin: /c/Program Files/MySQL/MySQL Server 9.6/bin/mysql.exe
 training:
   architecture: ppo_lstm_v1
-  starting_budget: 20.0
+  starting_budget: 100.0
   max_runners: 14
   max_bets_per_race: 20
   require_gpu: true
@@ -85,7 +85,7 @@ training:
   # opposite side N ticks away. The policy action head gains a 5th
   # dimension per runner (arb_spread) and the observation gains arb
   # state features. Off by default — legacy behaviour is byte-identical.
-  scalping_mode: false
+  scalping_mode: true
 discard_policy:
   min_win_rate: 0.35
   min_mean_pnl: 0.0

@@ -91,6 +91,16 @@ class EvaluationDayRecord:
     arbs_naked: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
+    # Paired-arb silent-failure diagnostics (added 2026-04-15). Lets the
+    # operator distinguish "agent never tried to pair" (all zeros) from
+    # "agent tried but every paired leg was refused at placement"
+    # (paired_rejects_* > 0) from "paired leg placed but the LTP-distance
+    # fill filter rejected every tick" (paired_fill_skips > 0).
+    paired_rejects_no_ltp: int = 0
+    paired_rejects_price_invalid: int = 0
+    paired_rejects_budget_back: int = 0
+    paired_rejects_budget_lay: int = 0
+    paired_fill_skips: int = 0
 
 
 @dataclass
@@ -232,6 +242,12 @@ class ModelStore:
                 ("arbs_naked", "INTEGER", "0"),
                 ("locked_pnl", "REAL", "0.0"),
                 ("naked_pnl", "REAL", "0.0"),
+                # Paired-arb silent-failure diagnostics (added 2026-04-15).
+                ("paired_rejects_no_ltp", "INTEGER", "0"),
+                ("paired_rejects_price_invalid", "INTEGER", "0"),
+                ("paired_rejects_budget_back", "INTEGER", "0"),
+                ("paired_rejects_budget_lay", "INTEGER", "0"),
+                ("paired_fill_skips", "INTEGER", "0"),
             ):
                 try:
                     conn.execute(
@@ -625,8 +641,12 @@ class ModelStore:
                      bet_precision, pnl_per_bet, early_picks, profitable,
                      mean_opportunity_window_s, median_opportunity_window_s,
                      starting_budget,
-                     arbs_completed, arbs_naked, locked_pnl, naked_pnl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     arbs_completed, arbs_naked, locked_pnl, naked_pnl,
+                     paired_rejects_no_ltp, paired_rejects_price_invalid,
+                     paired_rejects_budget_back, paired_rejects_budget_lay,
+                     paired_fill_skips)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?)
                 """,
                 (
                     record.run_id,
@@ -645,6 +665,11 @@ class ModelStore:
                     record.arbs_naked,
                     record.locked_pnl,
                     record.naked_pnl,
+                    record.paired_rejects_no_ltp,
+                    record.paired_rejects_price_invalid,
+                    record.paired_rejects_budget_back,
+                    record.paired_rejects_budget_lay,
+                    record.paired_fill_skips,
                 ),
             )
             conn.commit()
@@ -740,6 +765,26 @@ class ModelStore:
                     naked_pnl=(
                         r["naked_pnl"]
                         if "naked_pnl" in col_names else 0.0
+                    ),
+                    paired_rejects_no_ltp=(
+                        r["paired_rejects_no_ltp"]
+                        if "paired_rejects_no_ltp" in col_names else 0
+                    ),
+                    paired_rejects_price_invalid=(
+                        r["paired_rejects_price_invalid"]
+                        if "paired_rejects_price_invalid" in col_names else 0
+                    ),
+                    paired_rejects_budget_back=(
+                        r["paired_rejects_budget_back"]
+                        if "paired_rejects_budget_back" in col_names else 0
+                    ),
+                    paired_rejects_budget_lay=(
+                        r["paired_rejects_budget_lay"]
+                        if "paired_rejects_budget_lay" in col_names else 0
+                    ),
+                    paired_fill_skips=(
+                        r["paired_fill_skips"]
+                        if "paired_fill_skips" in col_names else 0
                     ),
                 )
                 for r in rows
