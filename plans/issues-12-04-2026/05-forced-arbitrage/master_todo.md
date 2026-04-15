@@ -125,6 +125,37 @@
 
 ## Session 3: Training integration + UI
 
+**Status (2026-04-15):** genes + evaluator-metrics plumbing landed
+in sessions 1–2. Correctness-critical UI (pair classification
+badge in Bet Explorer) landed with the
+`scalping-asymmetric-hedging` fixes. The items below are the
+**operator-UX polish** that remains — none of them are blocking
+further training or correctness. Do them after validating the
+corrected reward signal on a fresh training run.
+
+### Deferred — do after the next scalping training run
+
+- [ ] Scoreboard: show scalping metrics
+  (arbs_completed, arbs_naked, locked_pnl, naked_pnl) on rows
+  whose run used `scalping_mode: True`.
+- [ ] Model-detail page: scalping card alongside existing
+  evaluation metrics.
+- [ ] Training monitor: arb events in the activity log
+  ("Arb completed: Back 5.0 / Lay 4.6 on Runner 3 → locked £0.38")
+  + per-episode arb-completion-rate / average-locked-spread /
+  naked-exposure-% stats.
+- [ ] Wizard: "Scalping mode" toggle with help text explaining
+  the paired-order mechanic.
+- [ ] Schema inspector: verify the three scalping genes
+  (scalping_mode, arb_spread_scale, naked_penalty_weight,
+  early_lock_bonus_weight) render correctly on the page — tests
+  confirm they're in search_ranges but the visual render wasn't
+  browser-verified.
+
+---
+
+### Original Session 3 spec (historical)
+
 ### Gene / hyperparameter integration
 
 - [ ] `scalping_mode` gene: boolean, evolvable in genetic algorithm

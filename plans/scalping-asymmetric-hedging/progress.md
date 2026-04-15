@@ -4,6 +4,51 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## 📋 After the next scalping training run — do this
+
+The code fixes are landed and verified by tests + a browser
+check. The open question is **does the agent actually learn to
+size pairs asymmetrically now that the reward signal is
+honest?** Answer it by training, then going through this list:
+
+1. **Open Bet Explorer**, pick the new model. Read the header
+   counters:
+   - `LOCKED` should be > 0 and trending up generation-on-generation.
+     If it's stuck at 0 across generations, the agent isn't
+     learning to size properly — that's when **Session 02
+     (worst-case-improvement shaping term)** becomes worth doing.
+     Until then it's premature.
+   - `NAKED` should trend down as training progresses (the agent
+     should learn to complete pairs rather than leave legs
+     exposed).
+2. **Spot-check a few LOCKED pairs.** Look at the back/lay stake
+   ratio in the pair. A properly-sized hedge will have
+   `lay_stake ≈ back_stake × back_price / lay_price` — i.e.
+   asymmetric, NOT equal like the Gen 0 Joyeuse / Gold Dancer
+   cases. If LOCKED pairs still show equal stakes, either the
+   classifier is miscategorising or the passive-sizing fix isn't
+   reaching the runtime path — investigate before trusting the
+   numbers.
+3. **Compare reward scale.** Pre-fix models' reward numbers are
+   NOT comparable to new runs (hard_constraints §18). The raw
+   reward is now strictly locked profit + naked losses — no
+   lucky credit. Expect absolute reward magnitudes to be smaller
+   than the old pre-fix runs even when the underlying
+   performance is better.
+4. **Decide on Session 02 (worst-case-improvement shaping).**
+   Only add it if training progress is too slow — the honest raw
+   signal may be enough on its own. Dense shaping terms that
+   fight the raw signal produce subtle bugs like the ones this
+   session just fixed.
+5. **If the signal is working, clear the Sprint 5 Session 3
+   polish backlog** listed in
+   `plans/issues-12-04-2026/05-forced-arbitrage/master_todo.md`:
+   scoreboard scalping card, model-detail card, training-monitor
+   arb events + stats, wizard scalping toggle, schema-inspector
+   browser verification. All are UX polish, none are blocking.
+
+---
+
 ## Session 01 + 04 merged — Asymmetric hedge sizing + correct locked_pnl (2026-04-15)
 
 **Scope collapsed.** Audit of the existing `_maybe_place_paired`
