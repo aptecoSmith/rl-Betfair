@@ -83,3 +83,45 @@ Implemented:
 Verified: `python -m pytest tests/ -q` → **1844 passed, 7 skipped,
 133 deselected, 1 xfailed**. Invariant `raw + shaped ≈ total_reward`
 holds across scalping rollouts (dedicated test).
+
+## Session 3 — Partial: evaluator plumbing + UI classification (2026-04-15)
+
+Session 3 was scoped for training integration + UI (genes,
+wizard toggle, evaluator metrics, scoreboard metrics, training
+monitor arb events). The genes/evaluator-metrics plumbing was
+already landed in sessions 1–2 (visible in `TestScalpingGenes`).
+What was outstanding in this session:
+
+### Done
+
+- **pair_id plumbing end-to-end.** `EvaluationBetRecord` gained
+  an optional `pair_id`; the evaluator writes it; parquet
+  write/read handles it; the `/bets` API response exposes it;
+  the frontend `ExplorerBet` model carries it.
+- **Bet Explorer classification badge.** Per-bet badge shows
+  locked / neutral / directional / naked based on the worst-case
+  floor of the pair the bet belongs to (same formula as the new
+  `get_paired_positions.locked_pnl`). Header bar counts each
+  category. The UI can no longer mistake lucky directional bets
+  for locked scalps.
+- **Reward-signal corrections** (see
+  `plans/scalping-asymmetric-hedging/progress.md`) — asymmetric
+  passive sizing and correct locked_pnl floor. These were
+  blocking: the existing scalping reward path was rewarding
+  lucky outcomes. Addressed here alongside the UI work because
+  the badge derivation reuses the same floor formula.
+
+### Intentionally deferred
+
+- **Wizard scalping toggle.** `scalping_mode` is already a
+  config flag and a gene. The wizard is operator-friendliness,
+  not a correctness gap.
+- **Scoreboard / model detail scalping metrics panel.** Metrics
+  are already persisted on `EvaluationDayRecord`. Surfacing them
+  on the scoreboard and model detail pages is a pure UI
+  addition — queue for a future UI-focused session.
+- **Training-monitor arb activity log.** Similar — nice-to-have
+  diagnostic, not a blocking correctness issue.
+
+Those three items remain open in `master_todo.md`. The
+correctness-critical portion of Session 3 is complete.

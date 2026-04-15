@@ -427,6 +427,77 @@ $bet-grid: 3rem 1fr 4.5rem 4.5rem 4.5rem 4rem 2rem 2rem 3.5rem 4.5rem 1.5rem;
   }
 }
 
+// Pair classification badge — reports the worst-case floor of a back/lay
+// pair. "Locked" is the only category that represents earned profit.
+.pair-class-badge {
+  font-weight: 700;
+  font-size: 0.62rem;
+  padding: 0.08rem 0.35rem;
+  border-radius: 3px;
+  text-align: center;
+  letter-spacing: 0.5px;
+
+  &.locked {
+    color: #4ade80;
+    background: rgba(74, 222, 128, 0.15);
+    border: 1px solid rgba(74, 222, 128, 0.4);
+  }
+
+  &.neutral {
+    color: #9ca3af;
+    background: rgba(156, 163, 175, 0.12);
+    border: 1px solid rgba(156, 163, 175, 0.3);
+  }
+
+  &.directional {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.12);
+    border: 1px solid rgba(251, 191, 36, 0.35);
+  }
+
+  &.naked {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+  }
+}
+
+// Pair-classification counter bar — same styling family as summary-bar
+// but a second row showing the locked/neutral/directional/naked split.
+.pair-class-bar {
+  display: flex;
+  gap: 1.25rem;
+  padding: 0.6rem 1rem;
+  background: #14141c;
+  border: 1px solid #2a2a38;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+
+.pair-class-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+
+  .pair-class-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #888;
+  }
+
+  .pair-class-value {
+    font-size: 1.15rem;
+    font-weight: 700;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+  }
+
+  &.locked .pair-class-value { color: #4ade80; }
+  &.neutral .pair-class-value { color: #9ca3af; }
+  &.directional .pair-class-value { color: #fbbf24; }
+  &.naked .pair-class-value { color: #f87171; }
+}
+
 .bet-pnl {
   font-weight: 700;
   font-family: 'Cascadia Code', 'Fira Code', monospace;

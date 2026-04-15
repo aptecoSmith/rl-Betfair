@@ -460,6 +460,7 @@ class Evaluator:
                 settlement_type=bet.settlement_type,
                 effective_place_odds=bet.effective_place_odds,
                 starting_budget=env.starting_budget,
+                pair_id=bet.pair_id,
             ))
 
         # Compute opportunity window aggregates for the day record

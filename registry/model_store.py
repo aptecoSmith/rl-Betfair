@@ -128,6 +128,10 @@ class EvaluationBetRecord:
     settlement_type: str = "standard"
     effective_place_odds: float | None = None
     starting_budget: float = 100.0
+    # Scalping: pair_id links the aggressive leg to its passive counter-order.
+    # None for non-scalping bets. Back/lay bets sharing a pair_id form a
+    # hedged pair whose locked P&L floor can be classified in the UI.
+    pair_id: str | None = None
 
 
 @dataclass
@@ -712,6 +716,7 @@ class ModelStore:
                 "settlement_type": r.settlement_type,
                 "effective_place_odds": r.effective_place_odds,
                 "starting_budget": r.starting_budget,
+                "pair_id": r.pair_id,
             }
             for r in records
         ])
@@ -810,6 +815,7 @@ class ModelStore:
         has_opp_window = "opportunity_window_s" in df.columns
         has_ew = "is_each_way" in df.columns
         has_budget = "starting_budget" in df.columns
+        has_pair_id = "pair_id" in df.columns
         return [
             EvaluationBetRecord(
                 run_id=str(row["run_id"]),
@@ -849,6 +855,11 @@ class ModelStore:
                 ),
                 starting_budget=(
                     float(row["starting_budget"]) if has_budget else 100.0
+                ),
+                pair_id=(
+                    str(row["pair_id"])
+                    if has_pair_id and pd.notna(row.get("pair_id"))
+                    else None
                 ),
             )
             for _, row in df.iterrows()

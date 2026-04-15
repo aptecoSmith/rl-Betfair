@@ -1152,10 +1152,28 @@ class BetManager:
             if complete:
                 back = max(backs, key=lambda b: b.average_price)
                 lay = min(lays, key=lambda b: b.average_price)
-                stake = min(back.matched_stake, lay.matched_stake)
-                spread = back.average_price - lay.average_price
-                gross = stake * spread
-                locked = gross * (1.0 - commission) if gross > 0 else gross
+                # Locked P&L = guaranteed floor across outcomes (the profit
+                # the pair nails down regardless of whether the runner
+                # wins or loses). Previous formula used stake × spread,
+                # which is the MAX outcome of an equal-stake pair — that
+                # rewarded lucky directional outcomes as if they were
+                # skilled scalps. The floor formula below correctly
+                # reports 0 for equal-stake pairs and the true lock amount
+                # for properly-sized asymmetric hedges
+                # (S_lay = S_back × P_back / P_lay).
+                #
+                # Commission is applied only to the winning leg in each
+                # outcome (losers don't pay commission on Betfair).
+                win_pnl = (
+                    back.matched_stake * (back.average_price - 1.0)
+                    * (1.0 - commission)
+                    - lay.matched_stake * (lay.average_price - 1.0)
+                )
+                lose_pnl = (
+                    -back.matched_stake
+                    + lay.matched_stake * (1.0 - commission)
+                )
+                locked = max(0.0, min(win_pnl, lose_pnl))
 
             results.append({
                 "pair_id": pid,

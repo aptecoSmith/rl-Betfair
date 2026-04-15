@@ -65,6 +65,26 @@
       }
     </div>
 
+    <!-- ── Pair classification counters ── -->
+    <div class="pair-class-bar" data-testid="pair-class-bar">
+      <div class="pair-class-stat locked">
+        <span class="pair-class-label">Locked</span>
+        <span class="pair-class-value">{{ classCounts().locked }}</span>
+      </div>
+      <div class="pair-class-stat neutral">
+        <span class="pair-class-label">Neutral</span>
+        <span class="pair-class-value">{{ classCounts().neutral }}</span>
+      </div>
+      <div class="pair-class-stat directional">
+        <span class="pair-class-label">Directional</span>
+        <span class="pair-class-value">{{ classCounts().directional }}</span>
+      </div>
+      <div class="pair-class-stat naked">
+        <span class="pair-class-label">Naked</span>
+        <span class="pair-class-value">{{ classCounts().naked }}</span>
+      </div>
+    </div>
+
     <!-- ── Filters ── -->
     <div class="filters" data-testid="filters">
       <div class="filter">
@@ -193,6 +213,14 @@
                                 [class.placed]="settlementBadge(bet) === 'PLACED'"
                                 [class.lost]="settlementBadge(bet) === 'LOST'">
                             {{ settlementBadge(bet) }}
+                          </span>
+                          <span class="pair-class-badge"
+                                [class.locked]="pairClass(bet) === 'locked'"
+                                [class.neutral]="pairClass(bet) === 'neutral'"
+                                [class.directional]="pairClass(bet) === 'directional'"
+                                [class.naked]="pairClass(bet) === 'naked'"
+                                [title]="'Pair classification: ' + pairClassLabel(pairClass(bet))">
+                            {{ pairClassLabel(pairClass(bet)) }}
                           </span>
                           <span class="bet-pnl mono" [class.positive]="bet.pnl > 0" [class.negative]="bet.pnl < 0">
                             {{ bet.pnl >= 0 ? '+' : '' }}{{ bet.pnl | number:'1.2-2' }}

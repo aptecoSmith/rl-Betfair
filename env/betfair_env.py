@@ -1291,9 +1291,31 @@ class BetfairEnv(gymnasium.Env):
             )
             passive_side = BetSide.BACK
 
+        # Asymmetric sizing — the passive stake must scale with the
+        # price ratio to LOCK profit across both race outcomes. With
+        # equal stakes a completed "scalp" nets £0 on the losing branch
+        # and a big directional payout on the winning branch: the pair
+        # is lucky, not locked. Proper formula (derived from demanding
+        # equal P&L in win and lose outcomes):
+        #
+        #     S_passive = S_aggressive × P_aggressive / P_passive
+        #
+        # Works symmetrically for BACK→LAY (passive_price < agg_price,
+        # so S_passive > S_aggressive) and LAY→BACK (passive_price >
+        # agg_price, so S_passive < S_aggressive). Guard against a
+        # zero/negative passive_price even though tick_offset should
+        # never produce one.
+        if passive_price is None or passive_price <= 0.0:
+            return False
+        passive_stake = (
+            aggressive_bet.matched_stake
+            * aggressive_bet.average_price
+            / passive_price
+        )
+
         order = bm.passive_book.place(
             runner,
-            stake=aggressive_bet.matched_stake,
+            stake=passive_stake,
             side=passive_side,
             market_id=race.market_id,
             tick_index=self._tick_idx,

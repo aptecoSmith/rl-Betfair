@@ -93,9 +93,17 @@ class TestPairedPositions:
         assert not pairs[0]["complete"]
         assert pairs[0]["locked_pnl"] == 0.0
 
-    def test_get_paired_positions_complete_yields_locked_spread(self):
+    def test_equal_stake_pair_locks_nothing(self):
+        """Equal stakes on a back+lay pair guarantee £0 in the worst case.
+
+        The pair's win outcome might be a large directional profit, but
+        the lose outcome is break-even. The LOCKED floor — what the
+        agent actually nailed down by sizing — is zero. Previously the
+        formula was ``stake × spread × (1-comm)`` which reported the
+        MAX outcome and masked the fact that the agent hadn't hedged
+        properly.
+        """
         bm = BetManager(starting_budget=100.0)
-        # Aggressive back at 5.0, passive lay leg at 4.5 — stake £10
         bm.place_back(
             _make_runner_snap(101, ltp=5.0, back_price=5.0, lay_price=5.2, size=200.0),
             stake=10.0, market_id="m1", pair_id="pp",
@@ -108,10 +116,58 @@ class TestPairedPositions:
         assert len(pairs) == 1
         p = pairs[0]
         assert p["complete"]
-        # Aggressive back matches the top of available_to_back (5.0);
-        # aggressive lay matches the top of available_to_lay (4.6).
-        # spread = 5.0 - 4.6 = 0.4, stake = 10, gross = 4.0, net = 3.8.
-        assert p["locked_pnl"] == pytest.approx(3.8, abs=0.01)
+        # back £10 @ 5.0, lay £10 @ 4.6 (equal stakes).
+        #   win_pnl  = 10×4×0.95 − 10×3.6 = £2.00
+        #   lose_pnl = −10 + 10×0.95     = −£0.50
+        # Floor = max(0, min) = 0. Equal-stake pairs never lock.
+        assert p["locked_pnl"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_properly_sized_pair_locks_positive_floor(self):
+        """Sizing the lay stake by S_back × P_back / P_lay locks profit."""
+        bm = BetManager(starting_budget=1000.0)
+        # Back £20 @ 12.5. To lock, lay stake = 20 × 12.5 / 6.0 ≈ £41.67.
+        bm.place_back(
+            _make_runner_snap(
+                101, ltp=12.5, back_price=12.5, lay_price=12.6, size=500.0,
+            ),
+            stake=20.0, market_id="m1", pair_id="pp",
+        )
+        bm.place_lay(
+            _make_runner_snap(
+                101, ltp=6.0, back_price=6.0, lay_price=6.0, size=500.0,
+            ),
+            stake=41.67, market_id="m1", pair_id="pp",
+        )
+        pairs = bm.get_paired_positions(market_id="m1", commission=0.05)
+        assert len(pairs) == 1
+        p = pairs[0]
+        assert p["complete"]
+        # win_pnl  = 20×11.5×0.95 − 41.67×5  = 218.50 − 208.35 = £10.15
+        # lose_pnl = −20 + 41.67×0.95        = −20 + 39.5865   = £19.59
+        # Floor ≈ £10.15 (commission on the back leg makes win the
+        # tighter side with these prices).
+        assert p["locked_pnl"] > 5.0
+        assert p["locked_pnl"] < 25.0
+
+    def test_backwards_pair_locks_zero(self):
+        """A pair where prices moved the wrong way after entry locks £0.
+
+        Back at 4.0, lay at 4.2 (price drifted out after backing). The
+        pair has a negative "spread" and will lose on every outcome;
+        locked_pnl must clamp to zero (the agent didn't earn anything,
+        even if realised P&L happens to be positive on a lucky outcome).
+        """
+        bm = BetManager(starting_budget=100.0)
+        bm.place_back(
+            _make_runner_snap(101, ltp=4.0, back_price=4.0, lay_price=4.1, size=200.0),
+            stake=10.0, market_id="m1", pair_id="pp",
+        )
+        bm.place_lay(
+            _make_runner_snap(101, ltp=4.2, back_price=4.2, lay_price=4.3, size=200.0),
+            stake=10.0, market_id="m1", pair_id="pp",
+        )
+        pairs = bm.get_paired_positions(market_id="m1", commission=0.05)
+        assert pairs[0]["locked_pnl"] == pytest.approx(0.0, abs=1e-6)
 
     def test_get_naked_exposure_back(self):
         bm = BetManager(starting_budget=100.0)
@@ -224,6 +280,43 @@ class TestScalpingPairedPlacement:
         assert resting[0].pair_id in pair_ids
         assert resting[0].side is BetSide.LAY
 
+    def test_paired_passive_stake_sized_asymmetrically(self, scalping_config):
+        """Passive leg stake = agg_stake × agg_price / passive_price.
+
+        This is the only stake ratio that locks profit across both race
+        outcomes. Any other ratio leaves the pair directional. A BACK→LAY
+        pair always places MORE lay stake than the aggressive back stake
+        (because passive_price < agg_price) — the magnitude of the
+        difference encodes the price movement.
+        """
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        env.reset()
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        a[56] = -1.0       # min ticks so fill probability stays high
+        env.step(a)
+
+        bm = env.bet_manager
+        agg = [b for b in bm.bets if b.pair_id is not None][0]
+        resting = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ][0]
+        # Agg is BACK, passive is LAY at a lower price.
+        assert agg.side is BetSide.BACK
+        assert resting.side is BetSide.LAY
+        assert resting.price < agg.average_price
+        # Correct asymmetric stake.
+        expected = (
+            agg.matched_stake * agg.average_price / resting.price
+        )
+        assert resting.requested_stake == pytest.approx(expected, rel=1e-6)
+        # And the passive stake must be STRICTLY larger than the agg
+        # stake for BACK→LAY on a lower-priced passive (proves the
+        # regression away from the old equal-stake behaviour).
+        assert resting.requested_stake > agg.matched_stake
+
     def test_scalping_off_no_paired_order(self, legacy_config):
         env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), legacy_config)
         env.reset()
@@ -287,7 +380,7 @@ class TestScalpingReward:
         a[0] = 1.0
         a[14] = -0.8
         a[28] = 1.0
-        a[56] = -1.0
+        a[56] = 1.0        # MAX ticks — large enough spread to beat commission
         env.step(a)
 
         bm = env.bet_manager
@@ -316,10 +409,12 @@ class TestScalpingReward:
             market_id=agg.market_id, commission=0.05,
         )
         assert pairs and pairs[0]["complete"]
-        # Completed pair: back 4.0, lay 4.2 → negative spread means the
-        # passive was at a worse price than the back; locked_pnl clamps
-        # to actual gross (which is negative here by construction).
-        assert pairs[0]["locked_pnl"] != 0.0
+        # Completed pair: passive leg auto-sized by ``_maybe_place_paired``
+        # (S_lay = S_back × P_back / P_lay). At MAX_ARB_TICKS the spread
+        # is large enough that the asymmetric sizing produces a positive
+        # floor even after commission — a real locked P&L rather than a
+        # lucky directional outcome.
+        assert pairs[0]["locked_pnl"] > 0.0
 
     def test_precision_and_early_pick_zeroed_in_scalping_mode(
         self, scalping_config,

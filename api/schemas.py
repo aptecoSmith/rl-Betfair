@@ -267,6 +267,9 @@ class ExplorerBet(BaseModel):
     number_of_places: int | None = None
     settlement_type: str = "standard"
     effective_place_odds: float | None = None
+    # Scalping: pair_id links the back/lay legs of a hedged pair.
+    # None for non-scalping (naked) bets.
+    pair_id: str | None = None
 
 
 class BetExplorerResponse(BaseModel):

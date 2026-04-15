@@ -156,6 +156,7 @@ def get_model_bets(model_id: str, request: Request):
             number_of_places=n_places,
             settlement_type=b.settlement_type,
             effective_place_odds=b.effective_place_odds,
+            pair_id=b.pair_id,
         ))
 
     total_bets = len(bets)

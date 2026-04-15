@@ -19,6 +19,8 @@ export interface ExplorerBet {
   number_of_places?: number | null;
   settlement_type?: string;
   effective_place_odds?: number | null;
+  // Scalping: pair_id links back+lay legs of a hedged pair; null for naked bets.
+  pair_id?: string | null;
 }
 
 export interface BetExplorerResponse {

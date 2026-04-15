@@ -46,6 +46,44 @@ interface EwLegs {
   place_pnl: number | null;
 }
 
+/**
+ * Scalping pair classification — derived from the worst-case floor of the
+ * back/lay legs sharing a pair_id. "locked" is the only category that
+ * represents earned profit; the others flag luck (neutral/directional) or
+ * unhedged exposure (naked).
+ */
+type PairClass = 'locked' | 'neutral' | 'directional' | 'naked';
+
+const COMMISSION = 0.05;
+
+/** Floor P&L across outcomes for a hedged back/lay pair. */
+function pairFloorPnl(back: ExplorerBet, lay: ExplorerBet): number {
+  // Runner wins → back collects at (price-1) × stake, lay pays liability.
+  const winPnl =
+    back.stake * (back.price - 1) * (1 - COMMISSION)
+    - lay.stake * (lay.price - 1);
+  // Runner loses → back forfeits stake, lay wins back's stake.
+  const losePnl = -back.stake + lay.stake * (1 - COMMISSION);
+  return Math.min(winPnl, losePnl);
+}
+
+/** Classify a bet given the lookup of pair legs. */
+function classifyBet(
+  bet: ExplorerBet,
+  legsByPair: Map<string, ExplorerBet[]>,
+): PairClass {
+  if (!bet.pair_id) return 'naked';
+  const legs = legsByPair.get(bet.pair_id);
+  if (!legs || legs.length < 2) return 'naked';
+  const back = legs.find(l => l.action === 'back');
+  const lay = legs.find(l => l.action === 'lay');
+  if (!back || !lay) return 'naked';
+  const floor = pairFloorPnl(back, lay);
+  if (floor > 0.005) return 'locked';
+  if (floor >= -0.005) return 'neutral';
+  return 'directional';
+}
+
 @Component({
   selector: 'app-bet-explorer',
   standalone: true,
@@ -85,6 +123,32 @@ export class BetExplorer implements OnInit {
 
   // ── Derived ──
   readonly allBets = computed(() => this.betData()?.bets ?? []);
+
+  /** Pair_id → both legs of the pair. Computed once per data load. */
+  readonly legsByPair = computed<Map<string, ExplorerBet[]>>(() => {
+    const m = new Map<string, ExplorerBet[]>();
+    for (const b of this.allBets()) {
+      if (!b.pair_id) continue;
+      const arr = m.get(b.pair_id) ?? [];
+      arr.push(b);
+      m.set(b.pair_id, arr);
+    }
+    return m;
+  });
+
+  /** Count per classification for the header counters. */
+  readonly classCounts = computed(() => {
+    const map = this.legsByPair();
+    let locked = 0, neutral = 0, directional = 0, naked = 0;
+    for (const b of this.allBets()) {
+      const c = classifyBet(b, map);
+      if (c === 'locked') locked++;
+      else if (c === 'neutral') neutral++;
+      else if (c === 'directional') directional++;
+      else naked++;
+    }
+    return { locked, neutral, directional, naked };
+  });
 
   readonly uniqueDates = computed(() => {
     const dates = new Set(this.allBets().map(b => b.date));
@@ -390,6 +454,21 @@ export class BetExplorer implements OnInit {
     }
 
     return { win_stake: halfStake, place_stake: halfStake, place_odds: placeOdds, win_pnl: winPnl, place_pnl: placePnl };
+  }
+
+  /** Classification badge for a bet: locked / neutral / directional / naked. */
+  pairClass(bet: ExplorerBet): PairClass {
+    return classifyBet(bet, this.legsByPair());
+  }
+
+  /** Human-readable label for the classification badge. */
+  pairClassLabel(c: PairClass): string {
+    switch (c) {
+      case 'locked': return 'LOCKED';
+      case 'neutral': return 'NEUTRAL';
+      case 'directional': return 'DIRECTIONAL';
+      case 'naked': return 'NAKED';
+    }
   }
 
   /** Format EW terms for a race header, e.g. "EW 1/4, 3 places" */

@@ -383,6 +383,7 @@ class TestEvaluationBetsParquet:
             "opportunity_window_s",
             "is_each_way", "each_way_divisor", "number_of_places",
             "settlement_type", "effective_place_odds", "starting_budget",
+            "pair_id",
         }
         assert set(df.columns) == expected_cols
 
