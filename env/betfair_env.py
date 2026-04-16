@@ -537,6 +537,11 @@ class BetfairEnv(gymnasium.Env):
             "budget_lay": 0,
         }
         self._paired_fill_skips_ltp_filter_day: int = 0
+        # Episode-scoped list of completed-arb summaries, used by the
+        # training-monitor activity log (Issue 05 — session 3). Each
+        # entry describes one completed pair: aggressive/passive prices,
+        # locked PnL, and which race it settled in. Reset per episode.
+        self._arb_events: list[dict] = []
         # ── P1c runtime windowed history (Session 21) ────────────────────────
         # Per-runner deque of (timestamp_s, microprice, vol_delta) tuples,
         # keyed by selection_id.  Reset at race boundaries.  Used for
@@ -873,6 +878,10 @@ class BetfairEnv(gymnasium.Env):
                 self._paired_fill_skips_ltp_filter_day
                 + bm.passive_book._paired_fill_skips_ltp_filter
             ),
+            # Per-pair completion events — one dict per locked pair. Used
+            # by the training monitor to surface arb activity in the
+            # activity log (Issue 05 — session 3).
+            "arb_events": list(self._arb_events),
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -913,6 +922,7 @@ class BetfairEnv(gymnasium.Env):
             "budget_lay": 0,
         }
         self._paired_fill_skips_ltp_filter_day = 0
+        self._arb_events = []
         self._last_action_debug: dict[int, dict] = {}
         # Running high-water / low-water of day_pnl for the drawdown
         # shaping term. Both start at 0.0 (the initial day_pnl) so the
@@ -1364,6 +1374,20 @@ class BetfairEnv(gymnasium.Env):
                 if p["complete"]:
                     scalping_arbs_completed += 1
                     scalping_locked_pnl += p["locked_pnl"]
+                    # Record a one-line summary for the activity log. The
+                    # aggressive/passive legs can be either side, so pull
+                    # the back and lay prices by side rather than role.
+                    agg = p["aggressive"]
+                    pas = p["passive"]
+                    back_bet = agg if agg.side is BetSide.BACK else pas
+                    lay_bet = agg if agg.side is BetSide.LAY else pas
+                    self._arb_events.append({
+                        "selection_id": agg.selection_id,
+                        "back_price": back_bet.average_price,
+                        "lay_price": lay_bet.average_price,
+                        "locked_pnl": p["locked_pnl"],
+                        "race_idx": self._race_idx,
+                    })
                 else:
                     scalping_arbs_naked += 1
             scalping_naked_exposure = bm.get_naked_exposure(

@@ -181,3 +181,44 @@ training.
 
 Those three items remain open in `master_todo.md`. The
 correctness-critical portion of Session 3 is complete.
+
+## Session 3 close-out — arb activity-log events (2026-04-16)
+
+Closed out the two remaining items listed above.
+
+Implemented:
+
+- **Per-pair arb completion events.** `BetfairEnv` accumulates
+  an episode-scoped `_arb_events` list inside
+  `_settle_current_race` — one dict per locked pair with
+  `selection_id`, `back_price`, `lay_price`, `locked_pnl`,
+  `race_idx`. Exposed as `info["arb_events"]` alongside the
+  existing `arbs_completed` / `locked_pnl` rollups.
+  `EpisodeStats.arb_events` carries the list into the trainer,
+  and `PPOTrainer._publish_progress` emits one `arb_completed`
+  WebSocket event per pair (capped at `_MAX_ARB_EVENTS_PER_EP
+  = 20` with a "… plus N more arb pair(s)" overflow line so
+  long episodes don't flood the queue). Each event's `detail`
+  reads "Arb completed: Back £5.00 / Lay £4.60 on runner 12345
+  → locked £+0.38" — matches the spec in `master_todo.md`
+  Session 3 and flows through the existing activity-log
+  pipeline without any frontend changes.
+- **Wizard scalping toggle** — confirmed already present at
+  `training-monitor.html:431-456` (step 3, Constraints)
+  carrying `data-testid="scalping-mode-toggle"`. The UI
+  status block that listed it as deferred was stale; the
+  end-to-end plumbing (`scalpingMode → startTraining.scalping_mode
+  → make_start_cmd → worker._apply_run_overrides`) had landed
+  with `3882332`. Master-todo updated to reflect.
+
+Tests: `tests/test_forced_arbitrage.py` gained one test
+(`test_info_arb_events_populated_on_completed_pair`) and
+extends `test_info_exposes_scalping_rollups` to check
+`info["arb_events"]` length matches `arbs_completed`. Full
+suite: 1919 passed (+1 from the baseline), 7 skipped, 133
+deselected, 1 xfailed. Same 13 pre-existing failures as the
+baseline run (all unrelated to this session — index-56 bound
+errors in directional rollout tests, independent of scalping
+work).
+
+Frontend build clean — only pre-existing SCSS-budget warnings.

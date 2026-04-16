@@ -131,8 +131,9 @@ classification badge in Bet Explorer) landed with the
 `scalping-asymmetric-hedging` fixes. Scoreboard tabs +
 model-detail scalping card + schema-inspector verify landed
 2026-04-16 after the Gen 1 training run made the gap obvious.
-Two operator-UX items remain (training monitor arb log,
-wizard scalping toggle) — neither blocks training.
+Training-monitor per-arb activity-log events + wizard
+scalping toggle confirmed end-to-end 2026-04-16 — Session 3
+complete.
 
 ### Done
 
@@ -161,15 +162,21 @@ wizard scalping toggle) — neither blocks training.
 
 ### Deferred — still open
 
-- [ ] **Training monitor: arb events in the activity log**
-  ("Arb completed: Back 5.0 / Lay 4.6 on Runner 3 → locked
-  £0.38") + per-episode arb-completion-rate /
-  average-locked-spread / naked-exposure-% stats. Different page
-  + WebSocket plumbing — own session worth of work.
-- [ ] **Wizard "Scalping mode" toggle** with help text explaining
-  the paired-order mechanic. Currently `scalping_mode` is set in
-  `config.yaml`; operators have to hand-edit. Independent UI
-  surface.
+- [x] **Training monitor: arb events in the activity log**
+  (2026-04-16). `BetfairEnv` records each locked pair in
+  `info["arb_events"]` (selection_id, back_price, lay_price,
+  locked_pnl, race_idx). `EpisodeStats.arb_events` carries the
+  list, and `PPOTrainer._publish_progress` emits one
+  `arb_completed` WS event per pair (capped at 20 per episode
+  with a "… plus N more" overflow line) so the existing
+  activity-log pipeline renders them without frontend changes.
+  Per-episode arb-completion / locked / naked stats were already
+  on the progress event's detail suffix from session 3.
+- [x] **Wizard "Scalping mode" toggle** — already live in
+  `training-monitor.html` step 3 (`data-testid=
+  scalping-mode-toggle`), wired through
+  `scalpingMode → startTraining.scalping_mode → make_start_cmd
+  → worker._apply_run_overrides`. Verified 2026-04-16.
 
 ---
 

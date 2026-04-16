@@ -73,6 +73,12 @@ _HEAD_NAMES: tuple[str, ...] = (
 #: the env's own threshold is authoritative for actual bet placement.
 _BET_SIGNAL_THRESHOLD: float = 0.33
 
+#: Cap on how many per-arb activity-log events are emitted per episode.
+#: Scalping episodes can complete dozens of pairs; flooding the WS queue
+#: with all of them degrades the training monitor. The overflow is
+#: summarised in a single "… plus N more arb pair(s)" line.
+_MAX_ARB_EVENTS_PER_EP: int = 20
+
 
 def _compute_arb_rate(arbs_completed: int, arbs_naked: int) -> float:
     """Fraction of arb attempts that paired (``completed`` / total).
@@ -244,6 +250,12 @@ class EpisodeStats:
     bet_rate: float = 0.0
     arb_rate: float = 0.0
     signal_bias: float = 0.0
+    # Forced-arbitrage — per-pair completion details. Each entry is
+    # ``{"selection_id": int, "back_price": float, "lay_price": float,
+    # "locked_pnl": float, "race_idx": int}``. Empty on directional runs.
+    # Consumed by ``_publish_progress`` to emit one activity-log line
+    # per completed pair (Issue 05 — session 3).
+    arb_events: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -659,6 +671,7 @@ class PPOTrainer:
                 int(info.get("arbs_naked", 0) or 0),
             ),
             signal_bias=float(current_signal_bias),
+            arb_events=list(info.get("arb_events", []) or []),
         )
 
         return rollout, ep_stats
@@ -1111,3 +1124,36 @@ class PPOTrainer:
                 self.progress_queue.put_nowait(progress)
             except Exception:
                 pass  # drop if consumer is behind
+
+            # Issue 05 — session 3: surface each completed arb pair as a
+            # separate activity-log line so scalping runs show per-pair
+            # detail, not just the per-episode rollup appended above.
+            # Capped to avoid flooding the WS queue on long episodes.
+            if ep.arb_events:
+                for idx, ev in enumerate(ep.arb_events[:_MAX_ARB_EVENTS_PER_EP]):
+                    try:
+                        self.progress_queue.put_nowait({
+                            "event": "arb_completed",
+                            "phase": "training",
+                            "detail": (
+                                f"Arb completed: Back £{ev['back_price']:.2f}"
+                                f" / Lay £{ev['lay_price']:.2f}"
+                                f" on runner {ev['selection_id']}"
+                                f" → locked £{ev['locked_pnl']:+.2f}"
+                            ),
+                            "arb_event": ev,
+                        })
+                    except Exception:
+                        break
+                if len(ep.arb_events) > _MAX_ARB_EVENTS_PER_EP:
+                    overflow = len(ep.arb_events) - _MAX_ARB_EVENTS_PER_EP
+                    try:
+                        self.progress_queue.put_nowait({
+                            "event": "arb_completed",
+                            "phase": "training",
+                            "detail": (
+                                f"… plus {overflow} more arb pair(s) this episode"
+                            ),
+                        })
+                    except Exception:
+                        pass

@@ -565,6 +565,66 @@ class TestScalpingReward:
         # Keys must exist even when no pairs completed.
         for key in ("arbs_completed", "arbs_naked", "locked_pnl", "naked_pnl"):
             assert key in info
+        # arb_events list is always present (Issue 05 — session 3
+        # activity-log plumbing) and its length matches arbs_completed.
+        assert "arb_events" in info
+        assert isinstance(info["arb_events"], list)
+        assert len(info["arb_events"]) == info["arbs_completed"]
+
+    def test_info_arb_events_populated_on_completed_pair(self, scalping_config):
+        """A completed pair produces one arb_events entry with back/lay prices."""
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        env.reset()
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        a[56] = 1.0      # MAX ticks
+        env.step(a)
+
+        # Force the paired passive to "fill" by creating a matching Bet
+        # (same harness shortcut used by the session-2 tests).
+        from env.bet_manager import Bet
+        bm = env.bet_manager
+        agg = [b for b in bm.bets if b.pair_id is not None][0]
+        resting = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ][0]
+        bm.bets.append(Bet(
+            selection_id=resting.selection_id,
+            side=resting.side,
+            requested_stake=resting.requested_stake,
+            matched_stake=resting.requested_stake,
+            average_price=resting.price,
+            market_id=resting.market_id,
+            ltp_at_placement=resting.ltp_at_placement,
+            pair_id=resting.pair_id,
+            tick_index=2,
+        ))
+        # Remove the resting order so settlement doesn't try to double
+        # up; use the same flush pattern as the existing tests.
+        bm.passive_book._orders = [
+            o for o in bm.passive_book._orders if id(o) != id(resting)
+        ]
+        for sid_orders in bm.passive_book._orders_by_sid.values():
+            sid_orders[:] = [
+                o for o in sid_orders if id(o) != id(resting)
+            ]
+
+        hold = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        terminated = False
+        info = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(hold)
+
+        assert info["arbs_completed"] == 1
+        events = info["arb_events"]
+        assert len(events) == 1
+        ev = events[0]
+        for key in ("selection_id", "back_price", "lay_price", "locked_pnl"):
+            assert key in ev
+        assert ev["back_price"] > 0.0
+        assert ev["lay_price"] > 0.0
 
     def test_unfilled_passives_cancelled_at_race_off(self, scalping_config):
         """Race-off cancels resting passive legs; their budget is released."""
