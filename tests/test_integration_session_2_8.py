@@ -24,7 +24,12 @@ pytestmark = pytest.mark.skipif(not _HAS_DATA, reason="No extracted data availab
 def _load_config() -> dict:
     config_path = Path(__file__).parent.parent / "config.yaml"
     with open(config_path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    # Session-2.8 integration tests assume directional layout.
+    # config.yaml defaults scalping_mode=true for active training runs,
+    # so pin it off here.
+    cfg.setdefault("training", {})["scalping_mode"] = False
+    return cfg
 
 
 def _first_date() -> str:

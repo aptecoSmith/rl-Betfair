@@ -151,7 +151,14 @@ class TestOrjsonParsing:
 def config():
     config_path = Path(__file__).parent.parent / "config.yaml"
     with open(config_path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    # These session-4.6 rollout tests predate scalping mode and compute
+    # action_dim from ACTIONS_PER_RUNNER (=4). config.yaml now defaults
+    # to scalping_mode=true for the active scalping training runs, so
+    # pin it off here to keep the directional action layout these tests
+    # were written against.
+    cfg.setdefault("training", {})["scalping_mode"] = False
+    return cfg
 
 
 @pytest.fixture

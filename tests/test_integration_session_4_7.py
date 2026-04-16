@@ -33,7 +33,12 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def config():
     with open(Path(__file__).parent.parent / "config.yaml") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    # Session-4.7 integration tests assume directional action layout.
+    # config.yaml defaults scalping_mode=true for active training runs,
+    # so pin it off here.
+    cfg.setdefault("training", {})["scalping_mode"] = False
+    return cfg
 
 
 @pytest.fixture(scope="module")

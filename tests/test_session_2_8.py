@@ -139,11 +139,20 @@ def _make_race(ticks: list[Tick] | None = None) -> Race:
 
 
 def _load_config() -> dict:
-    """Load the project config.yaml."""
+    """Load the project config.yaml.
+
+    Pins ``training.scalping_mode = False``. These session-2.8 tests
+    predate scalping mode and assert directional-only observation /
+    action shapes; config.yaml now defaults scalping_mode to true for
+    the active scalping training runs, so the override keeps the tests
+    on the layout they were written for.
+    """
     from pathlib import Path
     config_path = Path(__file__).parent.parent / "config.yaml"
     with open(config_path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    cfg.setdefault("training", {})["scalping_mode"] = False
+    return cfg
 
 
 # ── Feature engineer: time delta features ─────────────────────────────────────
