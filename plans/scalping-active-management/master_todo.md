@@ -136,6 +136,24 @@ When a session completes:
 
   **Exit criteria:** as above.
 
+---
+
+### 🔌 Activation gate — `activation_playbook.md`
+
+Sessions 02 and 03 land as **plumbing-off**
+(`fill_prob_loss_weight = 0.0`, `risk_loss_weight = 0.0`). Before the
+Phase 3 UI sessions below can show meaningful confidence / risk
+badges, the weights need to be turned up, swept, and promoted.
+
+See [`activation_playbook.md`](./activation_playbook.md) for the
+full protocol: zero-weight sanity run → per-head weight sweep →
+joint verification → promote into `config/scalping_gen1.yaml`.
+
+This is NOT numbered as a session because it's an operator procedure,
+not a code change (Step E does commit a config-value update). It must
+complete before Session 07's validation run or Session 07 will be
+measuring the re-quote mechanic in isolation.
+
 ## Phase 3 — UI
 
 - [ ] **Session 04 — Bet Explorer confidence / risk badges**
@@ -208,6 +226,11 @@ When a session completes:
 ## Phase 4 — Validation
 
 - [ ] **Session 07 — Training run + analysis**
+
+  **Prerequisite:** `activation_playbook.md` steps A–E completed.
+  Session 07 measures the plan's net effect with the aux-head
+  gradients active; at zero weight it only measures Session 01's
+  re-quote mechanic in isolation.
 
   Training run with all features enabled at small coefficients.
   Compare against the Gen 1 run (commit `7a3968a`):
