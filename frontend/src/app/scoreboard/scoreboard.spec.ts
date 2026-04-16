@@ -310,4 +310,228 @@ describe('Scoreboard', () => {
     expect(component.error()).toBeNull();
     expect(component.models().length).toBe(1);
   });
+
+  // ── Strategy tabs ──
+
+  describe('strategy tabs', () => {
+    it('counts directional and scalping models separately', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'a', is_scalping: false }),
+          makeEntry({ model_id: 'b', is_scalping: true }),
+          makeEntry({ model_id: 'c', is_scalping: true }),
+          makeEntry({ model_id: 'd', is_scalping: false }),
+        ],
+      });
+      const counts = component.tabCounts();
+      expect(counts.all).toBe(4);
+      expect(counts.directional).toBe(2);
+      expect(counts.scalping).toBe(2);
+    });
+
+    it('treats missing is_scalping as directional', () => {
+      // Older API responses (or directional-only registries) may omit
+      // the field entirely — must default to directional, not scalping.
+      setup({
+        models: [
+          makeEntry({ model_id: 'a' }),  // is_scalping not set
+          makeEntry({ model_id: 'b', is_scalping: true }),
+        ],
+      });
+      const counts = component.tabCounts();
+      expect(counts.directional).toBe(1);
+      expect(counts.scalping).toBe(1);
+    });
+
+    it('directional tab filters out scalping models', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'd1', is_scalping: false }),
+          makeEntry({ model_id: 's1', is_scalping: true }),
+          makeEntry({ model_id: 'd2', is_scalping: false }),
+        ],
+      });
+      component.setActiveTab('directional');
+      const ids = component.rankedModels().map(m => m.model_id);
+      expect(ids).toEqual(expect.arrayContaining(['d1', 'd2']));
+      expect(ids).not.toContain('s1');
+      expect(ids.length).toBe(2);
+    });
+
+    it('scalping tab filters out directional models', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'd1', is_scalping: false }),
+          makeEntry({ model_id: 's1', is_scalping: true }),
+          makeEntry({ model_id: 's2', is_scalping: true }),
+        ],
+      });
+      component.setActiveTab('scalping');
+      const ids = component.rankedModels().map(m => m.model_id);
+      expect(ids).toEqual(expect.arrayContaining(['s1', 's2']));
+      expect(ids).not.toContain('d1');
+    });
+
+    it('clears selection when switching tabs', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'a', is_scalping: true }),
+          makeEntry({ model_id: 'b', is_scalping: false }),
+        ],
+      });
+      component.selectedIds.set(new Set(['a']));
+      expect(component.selectedIds().size).toBe(1);
+      component.setActiveTab('directional');
+      expect(component.selectedIds().size).toBe(0);
+    });
+
+    it('all tab is the default and shows everything', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'd', is_scalping: false }),
+          makeEntry({ model_id: 's', is_scalping: true }),
+        ],
+      });
+      expect(component.activeTab()).toBe('all');
+      expect(component.rankedModels().length).toBe(2);
+    });
+  });
+
+  // ── L/N ratio ──
+
+  describe('locked-to-naked ratio', () => {
+    it('returns NaN for models with no bets', () => {
+      setup();
+      const m = makeEntry({ total_bets: 0, locked_pnl: 0, naked_pnl: 0 });
+      expect(Number.isNaN(component.lockedNakedRatio(m))).toBe(true);
+      expect(component.formatLockedNakedRatio(m)).toBe('—');
+      expect(component.lockedNakedRatioClass(m)).toBe(null);
+    });
+
+    it('returns Infinity for locked-only (no naked exposure)', () => {
+      setup();
+      const m = makeEntry({ total_bets: 100, locked_pnl: 50, naked_pnl: 0 });
+      expect(component.lockedNakedRatio(m)).toBe(Infinity);
+      expect(component.formatLockedNakedRatio(m)).toBe('∞');
+      expect(component.lockedNakedRatioClass(m)).toBe('positive');
+    });
+
+    it('computes ratio correctly when naked exposure exists', () => {
+      setup();
+      const m = makeEntry({ total_bets: 100, locked_pnl: 100, naked_pnl: -25 });
+      // 100 / |−25| = 4.0
+      expect(component.lockedNakedRatio(m)).toBeCloseTo(4.0, 5);
+      expect(component.formatLockedNakedRatio(m)).toBe('4.00');
+      expect(component.lockedNakedRatioClass(m)).toBe('positive');
+    });
+
+    it('classifies ratio < 1 as negative (naked exposure dominates)', () => {
+      setup();
+      const m = makeEntry({ total_bets: 50, locked_pnl: 10, naked_pnl: -50 });
+      expect(component.lockedNakedRatio(m)).toBeCloseTo(0.2, 5);
+      expect(component.lockedNakedRatioClass(m)).toBe('negative');
+    });
+
+    it('treats positive naked windfall as exposure (uses absolute value)', () => {
+      // A "naked windfall" (lucky positive) is still unhedged exposure;
+      // a properly-sized scalp wouldn't have any naked P&L either way.
+      setup();
+      const m = makeEntry({ total_bets: 100, locked_pnl: 30, naked_pnl: 60 });
+      expect(component.lockedNakedRatio(m)).toBeCloseTo(0.5, 5);
+    });
+
+    it('returns 0 for no locked and no naked at all', () => {
+      // Edge: a model with bets but everything netted to zero.
+      setup();
+      const m = makeEntry({ total_bets: 10, locked_pnl: 0, naked_pnl: 0 });
+      expect(component.lockedNakedRatio(m)).toBe(0);
+      expect(component.formatLockedNakedRatio(m)).toBe('0.00');
+    });
+  });
+
+  // ── Scalping-tab sort order ──
+
+  describe('scalping tab sort', () => {
+    it('ranks scalping models by L/N ratio descending', () => {
+      setup({
+        models: [
+          // L/N = 0.5
+          makeEntry({
+            model_id: 'low', is_scalping: true,
+            total_bets: 100, locked_pnl: 10, naked_pnl: -20,
+            composite_score: 0.9,
+          }),
+          // L/N = 5.0
+          makeEntry({
+            model_id: 'high', is_scalping: true,
+            total_bets: 100, locked_pnl: 50, naked_pnl: -10,
+            composite_score: 0.4,
+          }),
+          // L/N = 2.0
+          makeEntry({
+            model_id: 'mid', is_scalping: true,
+            total_bets: 100, locked_pnl: 20, naked_pnl: -10,
+            composite_score: 0.6,
+          }),
+        ],
+      });
+      component.setActiveTab('scalping');
+      const order = component.rankedModels().map(m => m.model_id);
+      // L/N order should win even though composite_score order is opposite.
+      expect(order).toEqual(['high', 'mid', 'low']);
+    });
+
+    it('all tab still ranks by composite score', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'low_score', composite_score: 0.2 }),
+          makeEntry({ model_id: 'high_score', composite_score: 0.9 }),
+          makeEntry({ model_id: 'mid_score', composite_score: 0.5 }),
+        ],
+      });
+      // No tab change — default is 'all'.
+      const order = component.rankedModels().map(m => m.model_id);
+      expect(order).toEqual(['high_score', 'mid_score', 'low_score']);
+    });
+
+    it('locked-only (∞) outranks any finite L/N', () => {
+      setup({
+        models: [
+          makeEntry({
+            model_id: 'finite_high', is_scalping: true,
+            total_bets: 100, locked_pnl: 100, naked_pnl: -10,
+          }),  // L/N = 10
+          makeEntry({
+            model_id: 'locked_only', is_scalping: true,
+            total_bets: 50, locked_pnl: 30, naked_pnl: 0,
+          }),  // L/N = ∞
+        ],
+      });
+      component.setActiveTab('scalping');
+      const order = component.rankedModels().map(m => m.model_id);
+      expect(order[0]).toBe('locked_only');
+      expect(order[1]).toBe('finite_high');
+    });
+
+    it('no-bet rows sink to the bottom of the scalping tab', () => {
+      setup({
+        models: [
+          makeEntry({
+            model_id: 'no_bets', is_scalping: true,
+            total_bets: 0, locked_pnl: 0, naked_pnl: 0,
+            composite_score: 0.9,  // high score but no activity
+          }),
+          makeEntry({
+            model_id: 'active', is_scalping: true,
+            total_bets: 100, locked_pnl: 20, naked_pnl: -10,
+            composite_score: 0.3,
+          }),
+        ],
+      });
+      component.setActiveTab('scalping');
+      const order = component.rankedModels().map(m => m.model_id);
+      expect(order[0]).toBe('active');
+      expect(order[1]).toBe('no_bets');
+    });
+  });
 });

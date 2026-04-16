@@ -551,3 +551,209 @@ class TestPercentageDiscard:
         candidates = board.check_discard_candidates(config)
         if score.win_rate < 0.35 and score.mean_daily_pnl < 0 and score.sharpe < -0.5:
             assert mid in candidates
+
+
+# ── Scalping aggregates (Sprint 5 Session 3 follow-up) ───────────────────────
+
+
+class TestScalpingAggregates:
+    """ModelScore must sum scalping fields across days so the scoreboard
+    can rank scalpers by completed pairs and locked profit."""
+
+    def _day(
+        self, run_id: str, date: str, *, day_pnl: float = 0.0,
+        bet_count: int = 0, winning_bets: int = 0, profitable: bool = False,
+        arbs_completed: int = 0, arbs_naked: int = 0,
+        locked_pnl: float = 0.0, naked_pnl: float = 0.0,
+    ) -> EvaluationDayRecord:
+        precision = winning_bets / bet_count if bet_count > 0 else 0.0
+        return EvaluationDayRecord(
+            run_id=run_id, date=date, day_pnl=day_pnl,
+            bet_count=bet_count, winning_bets=winning_bets,
+            bet_precision=precision,
+            pnl_per_bet=day_pnl / bet_count if bet_count > 0 else 0.0,
+            early_picks=0, profitable=profitable,
+            arbs_completed=arbs_completed, arbs_naked=arbs_naked,
+            locked_pnl=locked_pnl, naked_pnl=naked_pnl,
+        )
+
+    def test_directional_model_zero_scalping_fields(self, store, config):
+        """A model with no arb activity has all scalping aggregates at 0."""
+        board = Scoreboard(store, config)
+        days = [
+            self._day("r", f"d{i}", day_pnl=10.0, bet_count=5,
+                      winning_bets=3, profitable=True)
+            for i in range(3)
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.total_bets == 15
+        assert score.arbs_completed == 0
+        assert score.arbs_naked == 0
+        assert score.locked_pnl == 0.0
+        assert score.naked_pnl == 0.0
+
+    def test_scalping_model_sums_across_days(self, store, config):
+        """Aggregates must SUM, not average, so volume matters."""
+        board = Scoreboard(store, config)
+        days = [
+            self._day(
+                "r", "d1", day_pnl=20.0, bet_count=100,
+                winning_bets=50, profitable=True,
+                arbs_completed=10, arbs_naked=40,
+                locked_pnl=15.0, naked_pnl=5.0,
+            ),
+            self._day(
+                "r", "d2", day_pnl=-5.0, bet_count=80,
+                winning_bets=40, profitable=False,
+                arbs_completed=8, arbs_naked=32,
+                locked_pnl=12.0, naked_pnl=-17.0,
+            ),
+            self._day(
+                "r", "d3", day_pnl=15.0, bet_count=120,
+                winning_bets=60, profitable=True,
+                arbs_completed=12, arbs_naked=48,
+                locked_pnl=20.0, naked_pnl=-5.0,
+            ),
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.total_bets == 300
+        assert score.arbs_completed == 30
+        assert score.arbs_naked == 120
+        assert score.locked_pnl == pytest.approx(47.0)
+        assert score.naked_pnl == pytest.approx(-17.0)
+
+    def test_zero_bet_days_dont_break_aggregation(self, store, config):
+        """A model with some no-bet days still aggregates the rest correctly."""
+        board = Scoreboard(store, config)
+        days = [
+            self._day(
+                "r", "d1", day_pnl=10.0, bet_count=50,
+                winning_bets=25, profitable=True,
+                arbs_completed=5, arbs_naked=20,
+                locked_pnl=8.0, naked_pnl=2.0,
+            ),
+            # No-bet day
+            self._day("r", "d2", day_pnl=0.0, bet_count=0,
+                      winning_bets=0, profitable=False),
+            self._day(
+                "r", "d3", day_pnl=-3.0, bet_count=30,
+                winning_bets=10, profitable=False,
+                arbs_completed=3, arbs_naked=12,
+                locked_pnl=4.0, naked_pnl=-7.0,
+            ),
+        ]
+        score = board.compute_score(days)
+        assert score is not None
+        assert score.total_bets == 80
+        assert score.arbs_completed == 8
+        assert score.arbs_naked == 32
+        assert score.locked_pnl == pytest.approx(12.0)
+        assert score.naked_pnl == pytest.approx(-5.0)
+
+    def test_dataclass_default_values(self):
+        """Backward-compat: ModelScore can be constructed without scalping
+        kwargs, defaulting all fields to 0 (preserves old call sites)."""
+        s = ModelScore(
+            model_id="m1", win_rate=0.5, mean_daily_pnl=10.0,
+            sharpe=0.3, bet_precision=0.6, pnl_per_bet=2.0,
+            efficiency=0.4, composite_score=0.5,
+            test_days=4, profitable_days=2,
+        )
+        assert s.total_bets == 0
+        assert s.arbs_completed == 0
+        assert s.arbs_naked == 0
+        assert s.locked_pnl == 0.0
+        assert s.naked_pnl == 0.0
+
+
+class TestScoreboardEntryIsScalping:
+    """The /models API endpoint must derive is_scalping from the model's
+    scalping_mode hyperparameter so the frontend can tab-filter correctly."""
+
+    def _setup_two_models(
+        self, store: ModelStore, config: dict,
+    ) -> tuple[str, str, "Scoreboard"]:
+        """Create one scalping + one directional model, both with eval data."""
+        directional_id = store.create_model(
+            1, "ppo_lstm_v1", "directional",
+            {"scalping_mode": False, "learning_rate": 1e-4},
+        )
+        scalping_id = store.create_model(
+            1, "ppo_lstm_v1", "scalping",
+            {"scalping_mode": True, "arb_spread_scale": 1.2},
+        )
+        for mid in (directional_id, scalping_id):
+            rid = store.create_evaluation_run(mid, "2026-04-10", ["2026-04-11"])
+            store.record_evaluation_day(EvaluationDayRecord(
+                run_id=rid, date="2026-04-11",
+                day_pnl=5.0, bet_count=10, winning_bets=6,
+                bet_precision=0.6, pnl_per_bet=0.5,
+                early_picks=0, profitable=True,
+            ))
+        board = Scoreboard(store, config)
+        return directional_id, scalping_id, board
+
+    def test_score_to_entry_classifies_models(self, store, config):
+        """is_scalping must reflect the gene, not the runtime behaviour."""
+        from api.routers.models import _score_to_entry
+        directional_id, scalping_id, board = self._setup_two_models(store, config)
+
+        d_score = board.score_model(directional_id)
+        s_score = board.score_model(scalping_id)
+        assert d_score is not None and s_score is not None
+
+        d_entry = _score_to_entry(d_score, store)
+        s_entry = _score_to_entry(s_score, store)
+
+        assert d_entry.is_scalping is False
+        assert s_entry.is_scalping is True
+
+    def test_score_to_entry_passes_through_scalping_aggregates(
+        self, store, config,
+    ):
+        """Aggregate fields must reach the API entry verbatim."""
+        from api.routers.models import _score_to_entry
+
+        mid = store.create_model(
+            1, "ppo_lstm_v1", "scalping", {"scalping_mode": True},
+        )
+        rid = store.create_evaluation_run(mid, "2026-04-10", ["2026-04-11"])
+        store.record_evaluation_day(EvaluationDayRecord(
+            run_id=rid, date="2026-04-11",
+            day_pnl=20.0, bet_count=200, winning_bets=120,
+            bet_precision=0.6, pnl_per_bet=0.1,
+            early_picks=0, profitable=True,
+            arbs_completed=25, arbs_naked=85,
+            locked_pnl=42.5, naked_pnl=-22.5,
+        ))
+        board = Scoreboard(store, config)
+        score = board.score_model(mid)
+        assert score is not None
+        entry = _score_to_entry(score, store)
+        assert entry.is_scalping is True
+        assert entry.total_bets == 200
+        assert entry.arbs_completed == 25
+        assert entry.arbs_naked == 85
+        assert entry.locked_pnl == pytest.approx(42.5)
+        assert entry.naked_pnl == pytest.approx(-22.5)
+
+    def test_missing_scalping_mode_key_defaults_false(self, store, config):
+        """A model whose hyperparameters dict has no scalping_mode key is
+        treated as directional — bool(None) is False."""
+        from api.routers.models import _score_to_entry
+        mid = store.create_model(
+            1, "ppo_lstm_v1", "no-flag-set", {"learning_rate": 5e-5},
+        )
+        rid = store.create_evaluation_run(mid, "2026-04-10", ["2026-04-11"])
+        store.record_evaluation_day(EvaluationDayRecord(
+            run_id=rid, date="2026-04-11", day_pnl=1.0, bet_count=2,
+            winning_bets=1, bet_precision=0.5, pnl_per_bet=0.5,
+            early_picks=0, profitable=True,
+        ))
+        board = Scoreboard(store, config)
+        score = board.score_model(mid)
+        assert score is not None
+        entry = _score_to_entry(score, store)
+        assert entry.is_scalping is False
