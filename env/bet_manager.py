@@ -132,6 +132,12 @@ class PassiveOrder:
     # the resulting Bet on fill, and to cancel_* on cancellation, so the
     # release math always undoes exactly what was reserved.
     reserved_liability: float | None = None
+    # Time-to-off (seconds) at placement. Used by the observation builder
+    # to compute ``seconds_since_passive_placed`` — the elapsed real
+    # seconds between this order's placement and the current tick, as a
+    # per-runner obs feature in scalping mode. 0.0 for orders placed
+    # outside scalping mode or before this field was introduced.
+    placed_time_to_off: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -240,6 +246,55 @@ class PassiveOrderBook:
     def cancel_count(self) -> int:
         """Number of orders cancelled in this race."""
         return len(self._cancelled_orders)
+
+    def cancel_order(
+        self,
+        order: PassiveOrder,
+        reason: str = "requote",
+    ) -> PassiveOrder | None:
+        """Cancel a specific open passive order by identity.
+
+        Used by the Session 01 re-quote mechanic where the caller has
+        already resolved which paired passive to cancel. Releases budget
+        via the same freed-budget rule as ``cancel_oldest_for`` /
+        ``cancel_all``. Returns the cancelled order, or ``None`` if the
+        order is already cancelled or not tracked in the book (idempotent).
+        """
+        if order.cancelled:
+            return None
+        sid_orders = self._orders_by_sid.get(order.selection_id)
+        if not sid_orders or order not in sid_orders:
+            return None
+
+        order.cancelled = True
+        order.cancel_reason = reason
+
+        bm = self._bet_manager
+        if bm is not None:
+            if order.side is BetSide.BACK:
+                bm.budget += order.requested_stake
+            else:  # LAY
+                released = (
+                    order.reserved_liability
+                    if order.reserved_liability is not None
+                    else order.requested_stake * (order.price - 1.0)
+                )
+                bm._open_liability -= released
+
+        self._last_cancels.append({
+            "selection_id": order.selection_id,
+            "price": order.price,
+            "requested_stake": order.requested_stake,
+            "reason": reason,
+        })
+
+        self._cancelled_orders.append(order)
+
+        sid_orders.remove(order)
+        if not sid_orders:
+            del self._orders_by_sid[order.selection_id]
+        self._orders.remove(order)
+        return order
 
     def cancel_oldest_for(
         self,
@@ -351,6 +406,7 @@ class PassiveOrderBook:
         *,
         price: float | None = None,
         pair_id: str | None = None,
+        time_to_off: float = 0.0,
     ) -> PassiveOrder | None:
         """Record a resting order at the own-side best price and reserve budget.
 
@@ -532,6 +588,7 @@ class PassiveOrderBook:
             ltp_at_placement=ltp,
             pair_id=pair_id,
             reserved_liability=reserved_for_order,
+            placed_time_to_off=time_to_off,
         )
         self._orders.append(order)
         self._orders_by_sid.setdefault(order.selection_id, []).append(order)

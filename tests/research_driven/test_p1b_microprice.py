@@ -150,9 +150,11 @@ class TestSchemaVersionRefusesPreP1b:
         """A P1a checkpoint (obs_schema_version=2) is refused — now stale."""
         from env.betfair_env import OBS_SCHEMA_VERSION, validate_obs_schema
 
-        # P1a was version 2; P1b bumped to 3; P1c bumped to 4; P1e bumped to 5
-        assert OBS_SCHEMA_VERSION == 5, (
-            f"Expected OBS_SCHEMA_VERSION=5 after P1e bump, got {OBS_SCHEMA_VERSION}"
+        # P1a was version 2; P1b bumped to 3; P1c bumped to 4; P1e bumped to 5;
+        # scalping-active-management §01 bumped to 6. Future bumps keep this
+        # ≥ 3 — the test is locking in the refusal of the P1a version (2).
+        assert OBS_SCHEMA_VERSION >= 3, (
+            f"Expected OBS_SCHEMA_VERSION>=3 after P1b bump, got {OBS_SCHEMA_VERSION}"
         )
         p1a_checkpoint = {"obs_schema_version": 2, "weights": {}}
         with pytest.raises(ValueError, match="obs_schema_version"):

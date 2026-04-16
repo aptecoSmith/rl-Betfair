@@ -239,8 +239,10 @@ class TestSchemaVersionRefusesPreP1e:
     def test_refuses_p1c_checkpoint(self):
         from env.betfair_env import OBS_SCHEMA_VERSION, validate_obs_schema
 
-        assert OBS_SCHEMA_VERSION == 5, (
-            f"Expected OBS_SCHEMA_VERSION=5 after P1e bump, got {OBS_SCHEMA_VERSION}"
+        # P1e bumped to 5; later bumps keep this ≥ 5. The intent is to
+        # verify that a P1c checkpoint (version 4) stays refused.
+        assert OBS_SCHEMA_VERSION >= 5, (
+            f"Expected OBS_SCHEMA_VERSION>=5 after P1e bump, got {OBS_SCHEMA_VERSION}"
         )
         with pytest.raises(ValueError, match="obs_schema_version"):
             validate_obs_schema({"obs_schema_version": 4})

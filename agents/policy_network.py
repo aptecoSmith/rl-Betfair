@@ -47,6 +47,105 @@ MARKET_TOTAL_DIM = MARKET_DIM + VELOCITY_DIM + AGENT_STATE_DIM  # 37 + 11 + 6 = 
 RUNNER_INPUT_DIM = RUNNER_DIM + POSITION_DIM  # 110 + 3 = 113 (per-runner features + position)
 
 
+# ── Checkpoint migration (scalping-active-management session 01) ──────────
+
+
+def migrate_scalping_action_head(
+    state_dict: dict,
+    max_runners: int,
+    old_per_runner: int,
+    new_per_runner: int,
+) -> dict:
+    """Pad a pre-Session-01 scalping state_dict to the new per-runner dim.
+
+    Scalping-active-management session 01 bumped
+    :data:`~env.betfair_env.SCALPING_ACTIONS_PER_RUNNER` from 5 to 6 by
+    appending a ``requote_signal`` dim. Old checkpoints remain loadable:
+    the existing ``old_per_runner`` rows of the ``actor_head`` final
+    linear layer, its bias, and the ``action_log_std`` parameter are
+    preserved; the new row(s) are initialised fresh (small orthogonal
+    for the weight, zeros for bias / log-std — matching the fresh-init
+    rules in :class:`PPOLSTMPolicy._init_weights`).
+
+    The function is shape-based and architecture-agnostic: it looks for
+    parameter tensors whose output dim equals ``old_per_runner`` (or, for
+    ``action_log_std``, ``max_runners * old_per_runner``) and widens them
+    to the corresponding ``new_per_runner`` shape. Other tensors are
+    returned unchanged, so running this against an already-migrated or
+    non-scalping state_dict is a no-op.
+
+    Parameters
+    ----------
+    state_dict:
+        PyTorch state-dict mapping parameter names to tensors.
+    max_runners:
+        Number of runner slots the network was built for.
+    old_per_runner:
+        Per-runner action dim saved into ``state_dict`` (typically 5 for
+        a pre-Session-01 scalping checkpoint).
+    new_per_runner:
+        Per-runner action dim the loading network expects (typically 6
+        for a post-Session-01 scalping checkpoint).
+    """
+    if new_per_runner == old_per_runner:
+        return dict(state_dict)
+    if new_per_runner < old_per_runner:
+        raise ValueError(
+            f"Cannot shrink action head ({old_per_runner} → {new_per_runner})"
+        )
+
+    old_log_std_size = max_runners * old_per_runner
+    new_log_std_size = max_runners * new_per_runner
+
+    migrated: dict = {}
+    for key, val in state_dict.items():
+        if not isinstance(val, torch.Tensor):
+            migrated[key] = val
+            continue
+
+        # ── Actor-head final linear weight: (old_per_runner, hidden) ──
+        if (
+            val.ndim == 2
+            and val.shape[0] == old_per_runner
+            and "actor_head" in key
+            and key.endswith(".weight")
+        ):
+            new_weight = torch.empty(
+                new_per_runner, val.shape[1], dtype=val.dtype,
+            )
+            nn.init.orthogonal_(new_weight, gain=0.01)
+            new_weight[:old_per_runner] = val
+            migrated[key] = new_weight
+            continue
+
+        # ── Actor-head final linear bias: (old_per_runner,) ──────────
+        if (
+            val.ndim == 1
+            and val.shape[0] == old_per_runner
+            and "actor_head" in key
+            and key.endswith(".bias")
+        ):
+            new_bias = torch.zeros(new_per_runner, dtype=val.dtype)
+            new_bias[:old_per_runner] = val
+            migrated[key] = new_bias
+            continue
+
+        # ── Action log-std: flat (max_runners * old_per_runner,) ─────
+        if (
+            key == "action_log_std"
+            and val.ndim == 1
+            and val.shape[0] == old_log_std_size
+        ):
+            new_log_std = torch.zeros(new_log_std_size, dtype=val.dtype)
+            new_log_std[:old_log_std_size] = val
+            migrated[key] = new_log_std
+            continue
+
+        migrated[key] = val
+
+    return migrated
+
+
 # ── Base class ──────────────────────────────────────────────────────────────
 
 

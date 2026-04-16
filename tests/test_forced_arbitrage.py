@@ -6,14 +6,17 @@ import numpy as np
 import pytest
 
 from data.episode_builder import PriceSize
-from env.bet_manager import BetManager, BetSide
+from env.bet_manager import BetManager, BetSide, PassiveOrder, PassiveOrderBook
 from env.betfair_env import (
     ACTIONS_PER_RUNNER,
     MAX_ARB_TICKS,
     MIN_ARB_TICKS,
+    POSITION_DIM,
     SCALPING_ACTIONS_PER_RUNNER,
+    SCALPING_POSITION_DIM,
     BetfairEnv,
 )
+from env.exchange_matcher import ExchangeMatcher
 from env.tick_ladder import snap_to_tick, tick_offset, ticks_between
 
 from tests.test_betfair_env import _make_day, _make_runner_snap
@@ -241,8 +244,11 @@ class TestScalpingEnvSpaces:
     def test_obs_space_grows_when_scalping(self, scalping_config, legacy_config):
         env_on = BetfairEnv(_make_day(n_races=1), scalping_config)
         env_off = BetfairEnv(_make_day(n_races=1), legacy_config)
-        # 2 extra per runner + 2 global = 2*14 + 2 = 30 extra.
-        assert env_on.observation_space.shape[0] == env_off.observation_space.shape[0] + 30
+        # Session 01 of scalping-active-management grew
+        # SCALPING_POSITION_DIM from 2 → 4 (added
+        # seconds_since_passive_placed + passive_price_vs_current_ltp_ticks).
+        # 4 extra per runner + 2 global = 4*14 + 2 = 58 extra.
+        assert env_on.observation_space.shape[0] == env_off.observation_space.shape[0] + 58
 
     def test_legacy_step_matches_before_scalping(self, legacy_config):
         """Round-trip a random-seeded rollout to verify shape/behaviour invariance."""
@@ -805,3 +811,425 @@ class TestScalpingGenes:
         assert rec.arbs_naked == 1
         assert rec.locked_pnl == pytest.approx(1.14)
         assert rec.naked_pnl == pytest.approx(-0.14)
+
+
+# ── Scalping-active-management session 01: active re-quote ─────────────────
+
+
+def _scalping_action(
+    max_runners: int = 14,
+    *,
+    slot: int = 0,
+    signal: float = 0.0,
+    stake: float = -1.0,
+    aggression: float = -1.0,
+    cancel: float = -1.0,
+    arb_spread: float = -1.0,
+    requote: float = -1.0,
+) -> np.ndarray:
+    """Build a scalping-layout action vector with explicit per-dim values.
+
+    Defaults put every slot in a "do nothing" configuration; override the
+    specific values the test cares about. ``slot`` controls which runner
+    index receives the overrides.
+    """
+    action = np.zeros(
+        max_runners * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32,
+    )
+    action[slot] = signal
+    action[max_runners + slot] = stake
+    action[2 * max_runners + slot] = aggression
+    action[3 * max_runners + slot] = cancel
+    action[4 * max_runners + slot] = arb_spread
+    action[5 * max_runners + slot] = requote
+    return action
+
+
+class TestScalpingRequote:
+    """Active re-quote mechanic added in scalping-active-management §01."""
+
+    def _make_env(self, scalping_config, **kwargs) -> BetfairEnv:
+        return BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=5, n_inplay_ticks=2),
+            scalping_config,
+            **kwargs,
+        )
+
+    def _place_initial_pair(self, env: BetfairEnv) -> tuple:
+        """Drive env through one tick to produce an aggressive back + paired lay.
+
+        Returns ``(agg_bet, passive_order)`` for the placed pair. The
+        resting passive's ``queue_ahead_at_placement`` is set very high
+        so that ``on_tick`` does not auto-fill it on the next step —
+        without this the synthetic market (constant ``total_matched``
+        and ladder levels that don't match the paired price → queue
+        ahead of 0) instantly fills any paired passive, defeating the
+        cancel-and-replace tests.
+        """
+        a = _scalping_action(
+            signal=1.0, stake=-0.8, aggression=1.0, arb_spread=-1.0,
+        )
+        env.step(a)
+        bm = env.bet_manager
+        paired_bets = [b for b in bm.bets if b.pair_id is not None]
+        assert paired_bets, "expected an aggressive fill with a pair_id"
+        agg = paired_bets[0]
+        pairing = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ]
+        assert pairing, "expected a paired passive to rest after the fill"
+        # Fence against on_tick auto-fill; see docstring.
+        for o in bm.passive_book.orders:
+            if o.pair_id is not None:
+                o.queue_ahead_at_placement = 1e12
+        return agg, pairing[0]
+
+    # ── 1. Re-quote on a runner with no open passive is a no-op. ───────
+
+    def test_requote_noop_without_open_passive(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+
+        # Fire requote_signal with no prior aggressive placement on slot 0.
+        a = _scalping_action(requote=1.0)
+        env.step(a)
+
+        bm = env.bet_manager
+        # No bets placed; no paired passives resting.
+        assert bm.bets == []
+        assert bm.passive_book.orders == []
+        # Diagnostic tag recorded.
+        sid = env._slot_maps[env._race_idx].get(0)
+        debug = env._last_action_debug.get(sid, {})
+        assert debug.get("requote_attempted") is True
+        assert debug.get("requote_failed") is True
+        assert debug.get("requote_reason") == "no_open_passive"
+
+    # ── 2. Re-quote cancels old passive and re-places at new offset. ───
+
+    def test_requote_cancels_and_replaces(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+
+        agg, old_passive = self._place_initial_pair(env)
+        bm = env.bet_manager
+
+        # Capture the old price so we can assert it moved.
+        old_price = old_passive.price
+        old_id = id(old_passive)
+
+        # Fire requote at a wider offset. The placement path's tick math
+        # snaps price to tick grid, so the new price almost always differs
+        # unless arb_spread=-1 was used both times — here we flip to +1
+        # (MAX_ARB_TICKS) to force a large move.
+        a = _scalping_action(requote=1.0, arb_spread=1.0)
+        env.step(a)
+
+        # Old order no longer in the book (identity check — the book
+        # cancelled it, not silently duplicated).
+        assert not any(id(o) == old_id for o in bm.passive_book.orders)
+
+        # New passive present with the SAME pair_id.
+        new_passives = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ]
+        assert len(new_passives) == 1
+        new_order = new_passives[0]
+        assert new_order.price != old_price
+        # Bet history unchanged (no new Bet created — the passive hasn't filled).
+        assert len([b for b in bm.bets if b.pair_id is not None]) == 1
+
+    # ── 3. Pair-id preserved across the re-quote. ──────────────────────
+
+    def test_requote_preserves_pair_id(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+
+        agg, _ = self._place_initial_pair(env)
+        bm = env.bet_manager
+        a = _scalping_action(requote=1.0, arb_spread=1.0)
+        env.step(a)
+
+        new_passives = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ]
+        assert new_passives, "re-quoted passive must keep the aggressive bet's pair_id"
+
+        # Simulate the re-quoted passive filling by manually constructing
+        # a matching Bet (same harness shortcut used elsewhere in this file).
+        resting = new_passives[0]
+        from env.bet_manager import Bet
+        bm.bets.append(Bet(
+            selection_id=resting.selection_id,
+            side=resting.side,
+            requested_stake=resting.requested_stake,
+            matched_stake=resting.requested_stake,
+            average_price=resting.price,
+            market_id=resting.market_id,
+            ltp_at_placement=resting.ltp_at_placement,
+            pair_id=resting.pair_id,
+            tick_index=env._tick_idx,
+        ))
+        pairs = bm.get_paired_positions(
+            market_id=agg.market_id, commission=0.05,
+        )
+        assert len(pairs) == 1
+        assert pairs[0]["complete"]
+        assert pairs[0]["pair_id"] == agg.pair_id
+
+    # ── 4. Budget accounting: net change is just the liability delta. ──
+
+    def test_requote_budget_accounting(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+
+        agg, old_passive = self._place_initial_pair(env)
+        bm = env.bet_manager
+
+        old_reserved = (
+            old_passive.reserved_liability
+            if old_passive.reserved_liability is not None
+            else old_passive.requested_stake * (old_passive.price - 1.0)
+        )
+        avail_before = bm.available_budget
+
+        a = _scalping_action(requote=1.0, arb_spread=1.0)
+        env.step(a)
+
+        # Find the new paired passive.
+        new_passives = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ]
+        assert new_passives
+        new_order = new_passives[0]
+        new_reserved = (
+            new_order.reserved_liability
+            if new_order.reserved_liability is not None
+            else new_order.requested_stake * (new_order.price - 1.0)
+        )
+
+        # Net change in available_budget = old_reserved - new_reserved
+        # (old reservation returned, new reservation taken).
+        expected_delta = old_reserved - new_reserved
+        assert bm.available_budget == pytest.approx(
+            avail_before + expected_delta, abs=0.01,
+        )
+
+    # ── 5. Junk-band re-quote: old cancelled, new refused, tag set. ────
+
+    def test_requote_into_junk_band_silent_failure(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+
+        agg, old_passive = self._place_initial_pair(env)
+        bm = env.bet_manager
+        sid = old_passive.selection_id
+
+        # Tighten the junk-filter window so the re-quoted tick distance
+        # falls outside even a small arb offset.
+        bm.passive_book._matcher = ExchangeMatcher(
+            max_price_deviation_pct=0.001,
+        )
+
+        a = _scalping_action(requote=1.0, arb_spread=1.0)
+        env.step(a)
+
+        # No paired passive should remain — the old was cancelled and the
+        # new was refused by the junk-band guard.
+        assert [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ] == []
+        # Aggressive leg still exists (we never touch matched bets).
+        assert any(b.pair_id == agg.pair_id for b in bm.bets)
+        # Diagnostic tag set.
+        debug = env._last_action_debug.get(sid, {})
+        assert debug.get("requote_failed") is True
+        assert debug.get("requote_reason") == "junk_band"
+
+    # ── 6. The re-quote uses the same single-price path: no walking. ───
+
+    def test_requote_ladder_walk_prevented(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+        agg, _ = self._place_initial_pair(env)
+        bm = env.bet_manager
+
+        a = _scalping_action(requote=1.0, arb_spread=1.0)
+        env.step(a)
+
+        new_passives = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ]
+        assert len(new_passives) == 1
+        new_order = new_passives[0]
+        # The new order rests at a single snapped-to-tick price — it has
+        # not walked into a deeper level of the ladder. Asserting the
+        # price equals tick_offset(current_ltp, arb_ticks, direction)
+        # proves the placement did not spill across levels.
+        tick = env.day.races[0].ticks[env._tick_idx - 1]
+        runner = next(r for r in tick.runners if r.selection_id == agg.selection_id)
+        ltp = runner.last_traded_price
+        # arb=1.0 → MAX_ARB_TICKS ticks at default spread_scale=1.0.
+        expected_price = tick_offset(ltp, MAX_ARB_TICKS, -1)
+        assert new_order.price == expected_price
+        # Single resting order — we never doubled up on fills.
+        assert new_order.matched_stake == 0.0
+
+    # ── 7. New obs features are present and monotonic with elapsed time. ─
+
+    def test_obs_features_present(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+        agg, _ = self._place_initial_pair(env)
+
+        # Sample the feature block at two successive ticks: elapsed time
+        # must be non-decreasing, and the features must live at the
+        # expected per-runner offsets.
+        obs1 = env._get_position_vector()
+        # Hold (no new bet / no requote); let the env advance one tick.
+        env.step(np.zeros(env.action_space.shape, dtype=np.float32))
+        obs2 = env._get_position_vector()
+
+        slot = env._runner_maps[env._race_idx][agg.selection_id]
+        per_runner = POSITION_DIM + SCALPING_POSITION_DIM
+        base = slot * per_runner + POSITION_DIM
+        # Feature layout: [has_arb, proximity, seconds_since, price_delta]
+        has_arb_1 = obs1[base]
+        seconds_since_1 = obs1[base + 2]
+        price_delta_1 = obs1[base + 3]
+        has_arb_2 = obs2[base]
+        seconds_since_2 = obs2[base + 2]
+
+        # Paired passive is resting on both ticks.
+        assert has_arb_1 == pytest.approx(1.0)
+        assert has_arb_2 == pytest.approx(1.0)
+        # Seconds-since is non-negative in [0, 1] and strictly
+        # non-decreasing as time passes.
+        assert 0.0 <= seconds_since_1 <= 1.0
+        assert 0.0 <= seconds_since_2 <= 1.0
+        assert seconds_since_2 >= seconds_since_1
+        # Price-delta is bounded to [-1, 1].
+        assert -1.0 <= price_delta_1 <= 1.0
+
+    # ── 8. With no open passive, the new obs features are exactly 0. ────
+
+    def test_obs_features_zero_without_passive(self, scalping_config):
+        env = self._make_env(scalping_config)
+        env.reset()
+
+        # No bets placed → no paired passive.
+        obs = env._get_position_vector()
+        per_runner = POSITION_DIM + SCALPING_POSITION_DIM
+        for slot in range(env.max_runners):
+            base = slot * per_runner + POSITION_DIM
+            # has_open_arb
+            assert obs[base] == pytest.approx(0.0)
+            # proximity
+            assert obs[base + 1] == pytest.approx(0.0)
+            # seconds_since_passive_placed
+            assert obs[base + 2] == pytest.approx(0.0)
+            # passive_price_vs_current_ltp_ticks
+            assert obs[base + 3] == pytest.approx(0.0)
+
+    # ── 9. Action-space grows in scalping mode, unchanged otherwise. ────
+
+    def test_action_space_size_grows(self, scalping_config, legacy_config):
+        env_on = BetfairEnv(_make_day(n_races=1), scalping_config)
+        env_off = BetfairEnv(_make_day(n_races=1), legacy_config)
+        assert env_on.action_space.shape == (14 * 6,)
+        assert env_off.action_space.shape == (14 * 4,)
+
+    # ── 10. Pre-Session-01 checkpoints migrate cleanly. ─────────────────
+
+    def test_legacy_checkpoint_loads(self):
+        import torch
+        from agents.policy_network import (
+            PPOLSTMPolicy,
+            migrate_scalping_action_head,
+        )
+
+        max_runners = 14
+        obs_dim = 32  # size doesn't matter — we only inspect actor/log_std.
+        old_per_runner = 5
+        new_per_runner = 6
+        hp = {"lstm_hidden_size": 16, "mlp_hidden_size": 16, "mlp_layers": 1}
+
+        old_net = PPOLSTMPolicy(
+            obs_dim=obs_dim,
+            action_dim=max_runners * old_per_runner,
+            max_runners=max_runners,
+            hyperparams=hp,
+        )
+        # Checkpoint the pre-Session-01 state dict.
+        old_state = {k: v.clone() for k, v in old_net.state_dict().items()}
+
+        # Migrate: widen actor-head and log-std to the new per-runner dim.
+        migrated = migrate_scalping_action_head(
+            old_state,
+            max_runners=max_runners,
+            old_per_runner=old_per_runner,
+            new_per_runner=new_per_runner,
+        )
+
+        new_net = PPOLSTMPolicy(
+            obs_dim=obs_dim,
+            action_dim=max_runners * new_per_runner,
+            max_runners=max_runners,
+            hyperparams=hp,
+        )
+        # strict=True must succeed after migration.
+        missing, unexpected = new_net.load_state_dict(migrated, strict=True)
+        assert missing == [] and unexpected == []
+
+        # Original rows preserved bit-for-bit.
+        old_final_w = old_state["actor_head.2.weight"]
+        new_final_w = new_net.actor_head[2].weight.detach()
+        assert torch.allclose(
+            new_final_w[:old_per_runner], old_final_w,
+        )
+        # New row is present and not equal to a legacy row (freshly inited).
+        assert new_final_w.shape[0] == new_per_runner
+        assert not torch.allclose(
+            new_final_w[new_per_runner - 1], old_final_w[old_per_runner - 1],
+        )
+        # action_log_std: old entries preserved, new entries are zero init.
+        old_log_std = old_state["action_log_std"]
+        new_log_std = new_net.action_log_std.detach()
+        assert torch.allclose(
+            new_log_std[: max_runners * old_per_runner], old_log_std,
+        )
+        assert torch.allclose(
+            new_log_std[max_runners * old_per_runner :],
+            torch.zeros(max_runners * (new_per_runner - old_per_runner)),
+        )
+
+    # ── 11. raw + shaped ≈ total reward with re-quotes firing. ──────────
+
+    def test_raw_plus_shaped_invariant_holds(self, scalping_config):
+        cfg = dict(scalping_config)
+        cfg["reward"] = dict(cfg["reward"])
+        cfg["reward"]["naked_penalty_weight"] = 1.0
+        cfg["reward"]["early_lock_bonus_weight"] = 0.5
+
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=5, n_inplay_ticks=2), cfg,
+        )
+        obs, _ = env.reset()
+
+        # Every step: place + requote. The first tick's re-quote is a
+        # no-op (no passive yet); from the second tick onwards the
+        # outstanding paired passive gets cancelled and re-placed.
+        a = _scalping_action(
+            signal=1.0, stake=-0.8, aggression=1.0,
+            arb_spread=0.2, requote=1.0,
+        )
+        total_reward = 0.0
+        terminated = False
+        info = {}
+        while not terminated:
+            obs, r, terminated, _, info = env.step(a)
+            total_reward += r
+
+        assert total_reward == pytest.approx(
+            info["raw_pnl_reward"] + info["shaped_bonus"], abs=1e-6,
+        )

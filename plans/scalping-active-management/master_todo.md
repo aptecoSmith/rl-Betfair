@@ -13,7 +13,7 @@ When a session completes:
 
 ## Phase 1 — Active re-quote mechanic
 
-- [ ] **Session 01 — Re-quote action + env plumbing**
+- [x] **Session 01 — Re-quote action + env plumbing** (2026-04-16)
 
   Add a per-runner `requote_signal` to the action vector.
   When raised for a runner whose passive is unfilled, cancel

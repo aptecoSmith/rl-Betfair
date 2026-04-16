@@ -63,7 +63,10 @@ logger = logging.getLogger(__name__)
 #   Version 3 — added weighted_microprice per runner (session 20 / P1b)
 #   Version 4 — added traded_delta, mid_drift per runner (session 21 / P1c)
 #   Version 5 — added book_churn per runner (session 31b / P1e)
-OBS_SCHEMA_VERSION: int = 5
+#   Version 6 — scalping-active-management session 01: added
+#               seconds_since_passive_placed and
+#               passive_price_vs_current_ltp_ticks per runner (scalping only)
+OBS_SCHEMA_VERSION: int = 6
 
 # ── Action schema version ────────────────────────────────────────────────────
 # Bump this integer whenever the action vector layout changes.
@@ -74,17 +77,27 @@ OBS_SCHEMA_VERSION: int = 5
 #               Previously: [signal × N | stake × N] (no version tracked)
 #   Version 2 — added cancel flag per slot (session 29 / P3b)
 #               Layout: [signal × N | stake × N | aggression × N | cancel × N]
-ACTION_SCHEMA_VERSION: int = 2
+#   Version 3 — scalping-active-management session 01: added
+#               requote_signal per slot (scalping mode only, appended as
+#               the 6th per-runner dim). Non-scalping layout unchanged.
+ACTION_SCHEMA_VERSION: int = 3
 
 # Number of action values per runner slot.
 # The default (4) matches the non-scalping policy head: signal, stake,
-# aggression, cancel. When scalping_mode is enabled on the env, a 5th
-# dimension (arb_spread) is appended per runner — see SCALPING_ACTIONS_PER_RUNNER.
+# aggression, cancel. When scalping_mode is enabled on the env, additional
+# dimensions (arb_spread, requote_signal) are appended per runner — see
+# SCALPING_ACTIONS_PER_RUNNER.
 ACTIONS_PER_RUNNER: int = 4  # signal, stake, aggression, cancel
 
-# Scalping mode action layout (Issue 05, session 1).
-# Per-runner: signal, stake, aggression, cancel, arb_spread.
-SCALPING_ACTIONS_PER_RUNNER: int = 5
+# Scalping mode action layout.
+# Per-runner: signal, stake, aggression, cancel, arb_spread, requote_signal.
+#   Issue 05, session 1   — added arb_spread (5 total)
+#   Scalping-active-mgmt, session 01 (2026-04-16)
+#                         — added requote_signal (6 total). When raised
+#                           (> 0.5) for a runner with an outstanding paired
+#                           passive, the existing passive is cancelled and
+#                           re-placed at the current-LTP + arb_ticks offset.
+SCALPING_ACTIONS_PER_RUNNER: int = 6
 
 # Forced-arbitrage spread mapping — arb_spread action ∈ [-1, 1] maps to
 # [MIN_ARB_TICKS, MAX_ARB_TICKS] ticks on the Betfair ladder. Small ticks
@@ -196,9 +209,13 @@ AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, rac
 POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 
 # Extra obs dims appended when scalping_mode is enabled.
-# Per-runner (2): has_open_arb, passive_fill_proximity.
+# Per-runner (4): has_open_arb, passive_fill_proximity,
+#                 seconds_since_passive_placed,
+#                 passive_price_vs_current_ltp_ticks.
+#   The last two were added in scalping-active-management session 01 and
+#   lift OBS_SCHEMA_VERSION to 6 (scalping obs layout only).
 # Global  (2):   locked_pnl_frac, naked_exposure_frac.
-SCALPING_POSITION_DIM = 2
+SCALPING_POSITION_DIM = 4
 SCALPING_AGENT_STATE_DIM = 2
 
 # Derived constants
@@ -595,6 +612,13 @@ class BetfairEnv(gymnasium.Env):
         self._static_obs: list[list[np.ndarray]] = []
         self._runner_maps: list[dict[int, int]] = []   # sid → slot
         self._slot_maps: list[dict[int, int]] = []      # slot → sid
+        # Per-race reference duration (seconds) for normalising the
+        # ``seconds_since_passive_placed`` observation feature added in
+        # scalping-active-management session 01. Computed once from the
+        # first and last tick timestamps so the denominator is stable
+        # across all obs queries in the race. Clamped to 1.0 min to
+        # avoid division-by-zero on pathological single-tick races.
+        self._race_durations: list[float] = []
 
         for race_idx, race in enumerate(self.day.races):
             race_features = day_features[race_idx]
@@ -615,6 +639,15 @@ class BetfairEnv(gymnasium.Env):
             for feat_dict in race_features:
                 race_obs.append(self._features_to_array(feat_dict, runner_map))
             self._static_obs.append(race_obs)
+
+            # Race duration reference for normalising time-since-placement.
+            if len(race.ticks) >= 2:
+                span = (
+                    race.ticks[-1].timestamp - race.ticks[0].timestamp
+                ).total_seconds()
+            else:
+                span = 1.0
+            self._race_durations.append(max(span, 1.0))
 
     def _features_to_array(
         self,
@@ -686,11 +719,23 @@ class BetfairEnv(gymnasium.Env):
     def _get_position_vector(self) -> np.ndarray:
         """Per-runner position features: back exposure, lay exposure, bet count.
 
-        When scalping_mode is on, appends two more features per runner:
-        ``has_open_arb`` (1.0 if a passive arb leg is resting on this runner,
-        else 0.0) and ``passive_fill_proximity`` (a number in [0, 1] that is
-        higher when the resting price is close to current LTP — traded
-        volume is more likely to reach it).
+        When scalping_mode is on, appends four more features per runner:
+
+        - ``has_open_arb`` — 1.0 if a paired passive leg is resting, else 0.0.
+        - ``passive_fill_proximity`` — in [0, 1], higher when the resting
+          price is close to current LTP (fill-likely).
+        - ``seconds_since_passive_placed`` — elapsed real seconds since
+          the most-recently-placed paired passive was posted, divided by
+          the race's reference duration and clamped to [0, 1]. 0 when
+          there is no open paired passive. (Added in scalping-active-
+          management session 01.)
+        - ``passive_price_vs_current_ltp_ticks`` — signed tick distance
+          from the current LTP to the resting price, divided by
+          ``MAX_ARB_TICKS`` and clamped to [-1, 1]. Positive means the
+          passive is parked above the current LTP (drift away for a back
+          rest, drift toward for a lay rest — the sign is LTP-relative).
+          0 when there is no open paired passive. (Added in
+          scalping-active-management session 01.)
         """
         bm = self.bet_manager
         assert bm is not None
@@ -703,13 +748,21 @@ class BetfairEnv(gymnasium.Env):
         per_runner = POSITION_DIM + (SCALPING_POSITION_DIM if self.scalping_mode else 0)
         vec = np.zeros(self.max_runners * per_runner, dtype=np.float32)
 
-        # Build per-runner arb diagnostics once.
-        arb_by_sid: dict[int, tuple[bool, float]] = {}
+        # Build per-runner arb diagnostics once. The tuple captures every
+        # field the scalping obs slice needs for this runner.
+        arb_by_sid: dict[
+            int, tuple[bool, float, float, float]
+        ] = {}
         if self.scalping_mode:
             tick = self.day.races[self._race_idx].ticks[self._tick_idx]
             ltp_by_sid = {
                 r.selection_id: r.last_traded_price for r in tick.runners
             }
+            current_time_to_off = (
+                race.market_start_time - tick.timestamp
+            ).total_seconds()
+            race_duration = self._race_durations[self._race_idx]
+            max_arb_ticks = max(MAX_ARB_TICKS, 1)
             for order in bm.passive_book.orders:
                 if order.market_id != race.market_id:
                     continue
@@ -720,12 +773,35 @@ class BetfairEnv(gymnasium.Env):
                 if ltp > 0:
                     # Proximity: 1.0 when rest price == LTP, decaying with
                     # tick distance. 5 ticks → 0.5, 15 ticks → ~0.14.
-                    dist = ticks_between(ltp, order.price)
-                    proximity = 1.0 / (1.0 + dist / 5.0)
+                    unsigned_dist = ticks_between(ltp, order.price)
+                    proximity = 1.0 / (1.0 + unsigned_dist / 5.0)
+                    # Signed distance: positive when passive rests above LTP.
+                    signed_dist = unsigned_dist if order.price > ltp else -unsigned_dist
+                    price_delta = float(
+                        np.clip(signed_dist / max_arb_ticks, -1.0, 1.0)
+                    )
                 else:
                     proximity = 0.0
-                prev = arb_by_sid.get(sid, (False, 0.0))
-                arb_by_sid[sid] = (True, max(prev[1], proximity))
+                    price_delta = 0.0
+                # Elapsed real seconds = time-to-off at placement minus
+                # current time-to-off. Normalised by race duration so the
+                # feature range sits in [0, 1]. Clamped defensively.
+                elapsed = max(
+                    0.0, order.placed_time_to_off - current_time_to_off,
+                )
+                seconds_since = float(np.clip(elapsed / race_duration, 0.0, 1.0))
+                prev = arb_by_sid.get(sid)
+                if prev is None:
+                    arb_by_sid[sid] = (True, proximity, seconds_since, price_delta)
+                else:
+                    # Keep the MOST PROXIMATE resting order (highest
+                    # proximity) as the per-runner summary; carry its
+                    # timing/price fields so all four features describe
+                    # the same leg.
+                    if proximity > prev[1]:
+                        arb_by_sid[sid] = (
+                            True, proximity, seconds_since, price_delta,
+                        )
 
         for slot_idx in range(self.max_runners):
             sid = slot_map.get(slot_idx)
@@ -736,9 +812,13 @@ class BetfairEnv(gymnasium.Env):
                 vec[offset + 1] = pos["lay_exposure"] / budget
                 vec[offset + 2] = pos["bet_count"] / max_bets
             if self.scalping_mode and sid is not None:
-                has_arb, proximity = arb_by_sid.get(sid, (False, 0.0))
+                has_arb, proximity, seconds_since, price_delta = arb_by_sid.get(
+                    sid, (False, 0.0, 0.0, 0.0),
+                )
                 vec[offset + POSITION_DIM] = 1.0 if has_arb else 0.0
                 vec[offset + POSITION_DIM + 1] = proximity
+                vec[offset + POSITION_DIM + 2] = seconds_since
+                vec[offset + POSITION_DIM + 3] = price_delta
         return vec
 
     @property
@@ -1231,6 +1311,7 @@ class BetfairEnv(gymnasium.Env):
                         self._bet_times[len(bm.bets) - 1] = time_to_off
                         passive_placed = self._maybe_place_paired(
                             runner, bet, arb_ticks, race, pair_id,
+                            time_to_off=time_to_off,
                         ) if self.scalping_mode else False
                         action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
@@ -1246,6 +1327,7 @@ class BetfairEnv(gymnasium.Env):
                         self._bet_times[len(bm.bets) - 1] = time_to_off
                         passive_placed = self._maybe_place_paired(
                             runner, bet, arb_ticks, race, pair_id,
+                            time_to_off=time_to_off,
                         ) if self.scalping_mode else False
                         action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
@@ -1256,11 +1338,56 @@ class BetfairEnv(gymnasium.Env):
                 # ── Passive path (join the queue at own-side best) ────
                 order = bm.passive_book.place(
                     runner, stake, side, race.market_id, self._tick_idx,
+                    time_to_off=time_to_off,
                 )
                 if order is not None:
                     action_debug[sid] = {"aggressive_placed": False, "passive_placed": True, "cancelled": did_cancel, "skipped_reason": None}
                 else:
                     action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "passive_place_failed"}
+
+        # ── Re-quote pass (scalping-active-management session 01) ──
+        # Runs AFTER the main placement loop so it still fires on runners
+        # whose per-slot ``continue`` branches skipped the placement path
+        # above (e.g. no action signal, below-min stake, time-to-off
+        # gated). Each runner with ``requote_signal > 0.5`` gets one
+        # cancel-and-replace attempt on its outstanding paired passive;
+        # runners with nothing to manage are silent no-ops by design
+        # (hard_constraints §5 — never opens a naked position).
+        if self.scalping_mode and apr > 5:
+            for slot_idx in range(self.max_runners):
+                requote_raw = float(action[5 * self.max_runners + slot_idx])
+                if requote_raw <= 0.5:
+                    continue
+                sid = slot_map.get(slot_idx)
+                if sid is None:
+                    continue
+                runner = runner_by_sid.get(sid)
+                if runner is None or runner.status != "ACTIVE":
+                    continue
+                # Recompute arb_ticks from this tick's arb_raw, so the
+                # new passive price follows the current LTP with the
+                # agent's chosen spread — NOT the arb_raw that applied
+                # at the original aggressive fill.
+                arb_raw = float(action[4 * self.max_runners + slot_idx])
+                arb_frac = float(np.clip((arb_raw + 1.0) / 2.0, 0.0, 1.0))
+                raw_ticks = (
+                    MIN_ARB_TICKS
+                    + arb_frac * (MAX_ARB_TICKS - MIN_ARB_TICKS)
+                ) * self._arb_spread_scale
+                arb_ticks = int(round(
+                    max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks))
+                ))
+                time_to_off = (
+                    race.market_start_time - tick.timestamp
+                ).total_seconds()
+                self._attempt_requote(
+                    sid=sid,
+                    runner=runner,
+                    arb_ticks=arb_ticks,
+                    race=race,
+                    time_to_off=time_to_off,
+                    action_debug=action_debug,
+                )
 
         self._last_action_debug = action_debug
 
@@ -1273,6 +1400,7 @@ class BetfairEnv(gymnasium.Env):
         arb_ticks: int,
         race: Race,
         pair_id: str,
+        time_to_off: float = 0.0,
     ) -> bool:
         """Auto-place the passive counter-order for *aggressive_bet*.
 
@@ -1331,8 +1459,155 @@ class BetfairEnv(gymnasium.Env):
             tick_index=self._tick_idx,
             price=passive_price,
             pair_id=pair_id,
+            time_to_off=time_to_off,
         )
         return order is not None
+
+    # ── Active re-quote (scalping-active-management session 01) ──────────
+
+    def _attempt_requote(
+        self,
+        sid: int,
+        runner,
+        arb_ticks: int,
+        race: Race,
+        time_to_off: float,
+        action_debug: dict,
+    ) -> None:
+        """Cancel the outstanding paired passive on *sid* and re-post it.
+
+        The new resting price is ``current_ltp ± arb_ticks`` using the
+        same direction rule as :meth:`_maybe_place_paired` (an aggressive
+        back pairs to a lay below, an aggressive lay pairs to a back
+        above). Budget reservation is released on cancel before the new
+        liability is reserved via :meth:`PassiveOrderBook.place`.
+
+        On any failure (no existing paired passive, no LTP, new price
+        outside the junk-filter window, or PassiveOrderBook refusing the
+        placement) the runner is left with no passive and a
+        ``requote_failed`` tag is recorded on ``action_debug[sid]``. The
+        aggressive leg may therefore become naked as a result of a
+        failed re-quote — callers must accept that. The re-quote never
+        opens a new naked position (hard_constraints §5): if there was
+        no paired passive to manage, the call is a silent no-op in
+        terms of book state.
+        """
+        bm = self.bet_manager
+        assert bm is not None
+
+        def _mark(**flags: bool) -> None:
+            entry = action_debug.get(sid)
+            if entry is None:
+                entry = {
+                    "aggressive_placed": False,
+                    "passive_placed": False,
+                    "cancelled": False,
+                    "skipped_reason": None,
+                }
+                action_debug[sid] = entry
+            entry.update(flags)
+
+        # Locate the outstanding paired passive on this runner.
+        sid_orders = bm.passive_book._orders_by_sid.get(sid, [])
+        target: "PassiveOrder | None" = None
+        for order in sid_orders:
+            if (
+                order.pair_id is not None
+                and order.market_id == race.market_id
+                and not order.cancelled
+            ):
+                target = order
+                break
+
+        if target is None:
+            # Hard_constraints §5 — no-op when there's nothing to manage.
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="no_open_passive")
+            return
+
+        pair_id = target.pair_id
+
+        # Find the aggressive leg so we know which side the re-posted
+        # passive must rest on. A paired back → passive lay (below);
+        # paired lay → passive back (above).
+        agg_bet = None
+        for bet in bm.bets:
+            if bet.pair_id == pair_id:
+                agg_bet = bet
+                break
+        if agg_bet is None:
+            # Defensive — a paired passive without an aggressive partner
+            # should not occur, but we never open a new naked leg.
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="orphan_passive")
+            return
+
+        ltp = runner.last_traded_price
+        if ltp is None or ltp <= 0.0:
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="no_ltp")
+            return
+
+        if agg_bet.side is BetSide.BACK:
+            new_price = tick_offset(ltp, arb_ticks, -1)
+            new_side = BetSide.LAY
+        else:
+            new_price = tick_offset(ltp, arb_ticks, +1)
+            new_side = BetSide.BACK
+        if new_price is None or new_price <= 0.0:
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="price_invalid")
+            return
+
+        # Junk-filter window based on the current LTP. The default
+        # ``PassiveOrderBook.place`` path skips this check for explicit
+        # prices (paired auto-placement at aggressive fill time relies
+        # on that), but an active re-quote should respect the same
+        # filter — we are placing the leg relative to a live LTP, and
+        # sitting outside that window is exactly the stale-parked-
+        # order risk the filter guards against.
+        max_dev = bm.passive_book._matcher.max_price_deviation_pct
+        lo = ltp * (1.0 - max_dev)
+        hi = ltp * (1.0 + max_dev)
+        if not (lo <= new_price <= hi):
+            # Cancel the existing leg but do NOT re-place. The aggressive
+            # leg is now naked — operator sees this via the diagnostic tag.
+            bm.passive_book.cancel_order(target, reason="requote junk band")
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="junk_band",
+                  cancelled=True)
+            return
+
+        stake_to_replace = target.requested_stake
+
+        # Cancel first so budget reservation is released before the new
+        # reservation is made (hard_constraints §6).
+        cancelled_order = bm.passive_book.cancel_order(target, reason="requote")
+        if cancelled_order is None:
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="cancel_failed")
+            return
+
+        new_order = bm.passive_book.place(
+            runner,
+            stake=stake_to_replace,
+            side=new_side,
+            market_id=race.market_id,
+            tick_index=self._tick_idx,
+            price=new_price,
+            pair_id=pair_id,
+            time_to_off=time_to_off,
+        )
+        if new_order is None:
+            # Placement refused (insufficient budget post-cancel, or
+            # price <= 0 etc). Leg remains naked.
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="place_refused",
+                  cancelled=True)
+            return
+
+        _mark(requote_attempted=True, requote_placed=True,
+              cancelled=True)
 
     # ── Settlement & reward ───────────────────────────────────────────────
 
