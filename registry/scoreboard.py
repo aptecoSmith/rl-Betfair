@@ -53,6 +53,15 @@ class ModelScore:
     mean_opportunity_window_s: float = 0.0
     mean_daily_return_pct: float | None = None
     recorded_budget: float | None = None
+    # Forced-arbitrage (scalping) aggregates — Issue 05. Sum across the
+    # evaluation days, so callers can rank scalping models by completed
+    # pairs and locked profit. Zero for directional models (no pair_ids
+    # ever placed) so existing scoreboard ranking is unaffected.
+    total_bets: int = 0
+    arbs_completed: int = 0
+    arbs_naked: int = 0
+    locked_pnl: float = 0.0
+    naked_pnl: float = 0.0
 
 
 class Scoreboard:
@@ -141,6 +150,17 @@ class Scoreboard:
         opp_windows = [d.mean_opportunity_window_s for d in days]
         mean_opp_window = float(np.mean(opp_windows)) if opp_windows else 0.0
 
+        # Scalping aggregates — sum across days so scoreboard can rank
+        # models by completed pairs and locked profit. Sum (not mean)
+        # because volume matters: 100 completed pairs is more
+        # significant than 5 even if they happen to average the same
+        # per-day P&L.
+        total_bets = sum(d.bet_count for d in days)
+        arbs_completed = sum(d.arbs_completed for d in days)
+        arbs_naked = sum(d.arbs_naked for d in days)
+        locked_pnl_total = sum(d.locked_pnl for d in days)
+        naked_pnl_total = sum(d.naked_pnl for d in days)
+
         return ModelScore(
             model_id="",  # filled by caller
             win_rate=win_rate,
@@ -157,6 +177,11 @@ class Scoreboard:
             mean_opportunity_window_s=mean_opp_window,
             mean_daily_return_pct=mean_daily_return_pct,
             recorded_budget=recorded_budget,
+            total_bets=total_bets,
+            arbs_completed=arbs_completed,
+            arbs_naked=arbs_naked,
+            locked_pnl=locked_pnl_total,
+            naked_pnl=naked_pnl_total,
         )
 
     def score_model(self, model_id: str) -> ModelScore | None:

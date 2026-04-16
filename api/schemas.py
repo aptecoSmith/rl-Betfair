@@ -47,6 +47,17 @@ class ScoreboardEntry(BaseModel):
     garaged_at: str | None = None
     created_at: str | None = None
     last_evaluated_at: str | None = None
+    # Forced-arbitrage (scalping) fields — Issue 05. ``is_scalping``
+    # is set from the model's hyperparameters (``scalping_mode`` gene)
+    # and gates which scoreboard tab the row appears on. The numeric
+    # fields are summed across the latest evaluation run's days; zero
+    # for directional models.
+    is_scalping: bool = False
+    total_bets: int = 0
+    arbs_completed: int = 0
+    arbs_naked: int = 0
+    locked_pnl: float = 0.0
+    naked_pnl: float = 0.0
 
 
 class ScoreboardResponse(BaseModel):

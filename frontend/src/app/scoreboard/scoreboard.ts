@@ -38,6 +38,19 @@ export class Scoreboard implements OnInit, OnDestroy {
   readonly error = signal<string | null>(null);
   readonly selectedIds = signal<Set<string>>(new Set());
 
+  /** Active scoreboard tab. "all" shows every model with strategy-agnostic
+   *  columns; "directional" / "scalping" filter by the is_scalping flag and
+   *  show columns relevant to that strategy. */
+  readonly activeTab = signal<'all' | 'directional' | 'scalping'>('all');
+
+  /** Counts shown in the tab labels. */
+  readonly tabCounts = computed(() => {
+    const all = this.models();
+    const scalping = all.filter(m => m.is_scalping).length;
+    const directional = all.length - scalping;
+    return { all: all.length, directional, scalping };
+  });
+
   readonly allVisibleSelected = computed(() => {
     const all = this.rankedModels();
     if (all.length === 0) return false;
@@ -45,11 +58,62 @@ export class Scoreboard implements OnInit, OnDestroy {
     return all.every(m => sel.has(m.model_id));
   });
 
-  readonly rankedModels = computed(() =>
-    this.models()
-      .slice()
-      .sort((a, b) => (b.composite_score ?? -Infinity) - (a.composite_score ?? -Infinity))
-  );
+  readonly rankedModels = computed(() => {
+    const tab = this.activeTab();
+    const filtered = this.models().filter(m => {
+      if (tab === 'directional') return !m.is_scalping;
+      if (tab === 'scalping') return !!m.is_scalping;
+      return true;
+    });
+    // Scalping tab: rank by L/N ratio first (proper scalpers float to top),
+    // then by composite. Other tabs: composite as before.
+    if (tab === 'scalping') {
+      return filtered.slice().sort((a, b) => {
+        const lnA = this.lockedNakedRatio(a);
+        const lnB = this.lockedNakedRatio(b);
+        // ∞ (locked-only) wins over any finite. NaN (no bets) sinks.
+        const aSort = isNaN(lnA) ? -Infinity : lnA;
+        const bSort = isNaN(lnB) ? -Infinity : lnB;
+        if (aSort !== bSort) return bSort - aSort;
+        return (b.composite_score ?? -Infinity) - (a.composite_score ?? -Infinity);
+      });
+    }
+    return filtered.slice().sort(
+      (a, b) => (b.composite_score ?? -Infinity) - (a.composite_score ?? -Infinity),
+    );
+  });
+
+  /** Locked-to-naked ratio. Returns Infinity for locked-only (no naked exposure),
+   *  NaN for no bets at all, otherwise locked / |naked|. */
+  lockedNakedRatio(m: ScoreboardEntry): number {
+    const bets = m.total_bets ?? 0;
+    if (bets === 0) return NaN;
+    const locked = m.locked_pnl ?? 0;
+    const naked = Math.abs(m.naked_pnl ?? 0);
+    if (naked < 0.005) return locked > 0 ? Infinity : 0;
+    return locked / naked;
+  }
+
+  /** Display string for L/N ratio. */
+  formatLockedNakedRatio(m: ScoreboardEntry): string {
+    const r = this.lockedNakedRatio(m);
+    if (isNaN(r)) return '—';
+    if (!isFinite(r)) return '∞';
+    return r.toFixed(2);
+  }
+
+  /** "good" = ratio > 1 (locked exceeds naked exposure). */
+  lockedNakedRatioClass(m: ScoreboardEntry): 'positive' | 'negative' | null {
+    const r = this.lockedNakedRatio(m);
+    if (isNaN(r)) return null;
+    if (r > 1) return 'positive';
+    return 'negative';
+  }
+
+  setActiveTab(tab: 'all' | 'directional' | 'scalping'): void {
+    this.activeTab.set(tab);
+    this.clearSelection();
+  }
 
   /** Auto-reload scoreboard when a scoring phase completes during training. */
   private readonly refreshEffect = effect(() => {

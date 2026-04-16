@@ -19,6 +19,15 @@ export interface ScoreboardEntry {
   garaged_at: string | null;
   created_at: string | null;
   last_evaluated_at: string | null;
+  // Forced-arbitrage (scalping) fields. is_scalping reflects the
+  // model's training mode (its scalping_mode gene), which gates
+  // which scoreboard tab the row appears on.
+  is_scalping?: boolean;
+  total_bets?: number;
+  arbs_completed?: number;
+  arbs_naked?: number;
+  locked_pnl?: number;
+  naked_pnl?: number;
 }
 
 export interface ScoreboardResponse {

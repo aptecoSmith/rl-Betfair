@@ -123,5 +123,61 @@ What was outstanding in this session:
 - **Training-monitor arb activity log.** Similar — nice-to-have
   diagnostic, not a blocking correctness issue.
 
+## Session 3 follow-up — scoreboard tabs + scalping columns (2026-04-16)
+
+The Gen 1 training run made the deferred scoreboard work
+unavoidable. With a registry of 82 scalping models and only the
+existing directional metrics surfaced, operators couldn't
+distinguish lucky directional outcomes from properly-locked
+scalps without manual SQL — exactly the problem the new fix
+exists to solve.
+
+Implemented:
+
+- **`ModelScore` aggregation** (`registry/scoreboard.py`) gained
+  `total_bets`, `arbs_completed`, `arbs_naked`, `locked_pnl`,
+  `naked_pnl` summed across the latest evaluation run's days.
+  Sum (not mean) because volume matters: 100 completed pairs is
+  more significant than 5 even at the same per-day P&L.
+- **`ScoreboardEntry` schema** (`api/schemas.py`) now exposes
+  `is_scalping` (derived from the model's `scalping_mode`
+  hyperparameter) plus the five aggregate fields.
+  `_score_to_entry` derives `is_scalping = bool(hp.get(
+  "scalping_mode"))` so rows are tagged by their training intent,
+  not by what they happened to do at evaluation time.
+- **Scoreboard frontend tabs** (`frontend/src/app/scoreboard/`).
+  Three tabs: All / Directional / Scalping. The Scalping tab has
+  strategy-specific columns: Bets, Arbs Done, Arbs Naked,
+  Locked £, Naked £, L/N ratio, Mean Daily P&L, Sharpe. Sort
+  prioritises L/N ratio so proper scalpers float to the top.
+  ∞ for locked-only pairs, '—' for no-bet rows.
+
+Verified in browser:
+
+- Scoreboard tab bar reads "All 82 / Directional 0 / Scalping 82"
+  — registry is 100% scalping models, accurate reflection.
+- Scalping tab #1 = `ef453cd9` (Gen 2): L/N=5.18, locked £94.27,
+  naked −£18.20, +£19.02 mean daily P&L. Exactly what we
+  identified as the gem of the Gen 1 run.
+- Model-detail page scalping card already existed and renders
+  correctly for `ef453cd9` (arbs 29/171, fill rate 14.5%,
+  locked £94.27, naked −£18.20).
+- Schema inspector shows the three searchable scalping genes.
+  `scalping_mode` correctly absent — it's a top-level training
+  setting, not a gene. The earlier session prompt listed it by
+  mistake.
+
+Backend tests: 87 pass (test_scoreboard, test_api_admin,
+test_integration_api).
+
+### Still open
+
+- Training monitor arb log — different page + WebSocket
+  plumbing.
+- Wizard scalping toggle — independent UI surface.
+
+Both remain in `master_todo.md` Session 3 — neither blocks
+training.
+
 Those three items remain open in `master_todo.md`. The
 correctness-critical portion of Session 3 is complete.

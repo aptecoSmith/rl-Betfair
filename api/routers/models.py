@@ -32,6 +32,13 @@ def _scoreboard(request: Request) -> Scoreboard:
 
 def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
     rec = store.get_model(model.model_id)
+    hp = (rec.hyperparameters or {}) if rec else {}
+    # ``is_scalping`` reflects what the model was TRAINED to do (its
+    # gene), not what it managed to do in evaluation. A scalping-mode
+    # agent that placed zero bets still belongs on the scalping tab —
+    # otherwise an under-trained scalper looks identical on the UI to
+    # a directional model that just sat out.
+    is_scalping = bool(hp.get("scalping_mode"))
     return ScoreboardEntry(
         model_id=model.model_id,
         generation=rec.generation if rec else 0,
@@ -48,11 +55,17 @@ def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
         early_picks=model.total_early_picks,
         mean_daily_return_pct=model.mean_daily_return_pct,
         recorded_budget=model.recorded_budget,
-        market_type_filter=(rec.hyperparameters or {}).get("market_type_filter", "BOTH") if rec else "BOTH",
+        market_type_filter=hp.get("market_type_filter", "BOTH"),
         garaged=rec.garaged if rec else False,
         garaged_at=rec.garaged_at if rec else None,
         created_at=rec.created_at if rec else None,
         last_evaluated_at=rec.last_evaluated_at if rec else None,
+        is_scalping=is_scalping,
+        total_bets=model.total_bets,
+        arbs_completed=model.arbs_completed,
+        arbs_naked=model.arbs_naked,
+        locked_pnl=model.locked_pnl,
+        naked_pnl=model.naked_pnl,
     )
 
 

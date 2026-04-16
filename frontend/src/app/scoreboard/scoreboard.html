@@ -9,6 +9,30 @@
     <div class="error" data-testid="error">{{ err }}</div>
   }
 
+  @if (!loading() && !error()) {
+    <!-- ── Strategy tabs ── -->
+    <div class="tab-bar" data-testid="tab-bar">
+      <button type="button" class="tab"
+              [class.active]="activeTab() === 'all'"
+              (click)="setActiveTab('all')"
+              data-testid="tab-all">
+        All <span class="tab-count">{{ tabCounts().all }}</span>
+      </button>
+      <button type="button" class="tab"
+              [class.active]="activeTab() === 'directional'"
+              (click)="setActiveTab('directional')"
+              data-testid="tab-directional">
+        Directional <span class="tab-count">{{ tabCounts().directional }}</span>
+      </button>
+      <button type="button" class="tab"
+              [class.active]="activeTab() === 'scalping'"
+              (click)="setActiveTab('scalping')"
+              data-testid="tab-scalping">
+        Scalping <span class="tab-count">{{ tabCounts().scalping }}</span>
+      </button>
+    </div>
+  }
+
   @if (!loading() && !error() && selectedIds().size > 0) {
     <div class="bulk-toolbar" data-testid="bulk-toolbar">
       <span class="bulk-count">{{ selectedIds().size }} model{{ selectedIds().size === 1 ? '' : 's' }} selected</span>
@@ -19,7 +43,94 @@
     </div>
   }
 
-  @if (!loading() && !error()) {
+  @if (!loading() && !error() && activeTab() === 'scalping') {
+    <!-- ── Scalping table — strategy-specific columns ── -->
+    <table class="scoreboard-table" data-testid="scoreboard-table-scalping">
+      <thead>
+        <tr>
+          <th class="select-col">
+            <input type="checkbox"
+                   [checked]="allVisibleSelected()"
+                   (click)="toggleSelectAll($event)"
+                   data-testid="select-all-checkbox"
+                   title="Select all visible" />
+          </th>
+          <th>Rank</th>
+          <th class="garage-col"></th>
+          <th>Model ID</th>
+          <th>Gen</th>
+          <th>Architecture</th>
+          <th title="Total bets placed across the latest evaluation run">Bets</th>
+          <th title="Pairs where both back and lay legs filled">Arbs Done</th>
+          <th title="Aggressive legs whose passive counter-order never filled">Arbs Naked</th>
+          <th title="Sum of guaranteed-floor profit from completed pairs">Locked £</th>
+          <th title="Net P&L on unhedged exposure (negative = naked losses)">Naked £</th>
+          <th title="Locked / |Naked| — &gt;1 means scalping is winning, &lt;1 means naked exposure dominates">L / N</th>
+          <th>Mean Daily P&amp;L</th>
+          <th>Sharpe</th>
+          <th>Trained</th>
+          <th>Last Eval</th>
+          <th>Composite Score</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (model of rankedModels(); track model.model_id; let i = $index) {
+          <tr class="scoreboard-row"
+              [style.border-left]="'4px solid ' + generationColour(model.generation)"
+              (click)="onRowClick(model)"
+              [attr.data-testid]="'row-' + i"
+              [class.row-selected]="isSelected(model)">
+            <td class="select-col" (click)="$event.stopPropagation()">
+              <input type="checkbox"
+                     [checked]="isSelected(model)"
+                     (click)="toggleSelect($event, model)"
+                     [attr.data-testid]="'select-checkbox-' + i" />
+            </td>
+            <td>{{ i + 1 }}</td>
+            <td class="garage-col">
+              <button class="garage-btn"
+                      [class.garaged]="model.garaged"
+                      (click)="onToggleGarage($event, model)"
+                      [title]="model.garaged ? 'Remove from garage' : 'Add to garage'">
+                {{ model.garaged ? '\u2605' : '\u2606' }}
+              </button>
+            </td>
+            <td class="model-id" [title]="model.model_id">{{ shortId(model.model_id) }}</td>
+            <td>
+              <span class="gen-badge" [style.background-color]="generationColour(model.generation)">
+                {{ model.generation }}
+              </span>
+            </td>
+            <td>{{ model.architecture_name }}</td>
+            <td>{{ model.total_bets ?? 0 }}</td>
+            <td>{{ model.arbs_completed ?? 0 }}</td>
+            <td>{{ model.arbs_naked ?? 0 }}</td>
+            <td [class.positive]="(model.locked_pnl ?? 0) > 0">
+              {{ model.locked_pnl ?? 0 | currency:'GBP':'symbol':'1.2-2' }}
+            </td>
+            <td [class.positive]="(model.naked_pnl ?? 0) > 0" [class.negative]="(model.naked_pnl ?? 0) < 0">
+              {{ model.naked_pnl ?? 0 | currency:'GBP':'symbol':'1.2-2' }}
+            </td>
+            <td class="ln-ratio"
+                [class.positive]="lockedNakedRatioClass(model) === 'positive'"
+                [class.negative]="lockedNakedRatioClass(model) === 'negative'">
+              {{ formatLockedNakedRatio(model) }}
+            </td>
+            <td>{{ model.mean_daily_pnl | currency:'GBP':'symbol':'1.2-2' }}</td>
+            <td>{{ model.sharpe | number:'1.2-2' }}</td>
+            <td class="timestamp-col" [title]="model.created_at ?? ''">{{ formatTimestamp(model.created_at) }}</td>
+            <td class="timestamp-col" [title]="model.last_evaluated_at ?? ''">{{ formatTimestamp(model.last_evaluated_at) }}</td>
+            <td class="score">{{ model.composite_score !== null ? (model.composite_score | number:'1.4-4') : '—' }}</td>
+          </tr>
+        }
+        @empty {
+          <tr>
+            <td colspan="17" class="empty-state" data-testid="empty-state">No scalping models found</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  } @else if (!loading() && !error()) {
     <table class="scoreboard-table" data-testid="scoreboard-table">
       <thead>
         <tr>

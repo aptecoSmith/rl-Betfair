@@ -25,6 +25,63 @@
   color: #eb5757;
 }
 
+// Strategy tabs (All / Directional / Scalping)
+.tab-bar {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #2a2a5a;
+}
+
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #a0a0b8;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  padding: 0.6rem 1.2rem;
+  transition: color 0.15s, border-color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  &:hover {
+    color: #c0c0ff;
+  }
+
+  &.active {
+    color: #ffffff;
+    border-bottom-color: #6366f1;
+  }
+}
+
+.tab-count {
+  background: #2a2a5a;
+  color: #c0c0ff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  min-width: 1.6rem;
+  text-align: center;
+}
+
+.tab.active .tab-count {
+  background: #6366f1;
+  color: #fff;
+}
+
+// Locked / naked ratio cell
+.ln-ratio {
+  font-weight: 700;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+
+  &.positive { color: #4ade80; }
+  &.negative { color: #f87171; }
+}
+
 .bulk-toolbar {
   display: flex;
   align-items: center;

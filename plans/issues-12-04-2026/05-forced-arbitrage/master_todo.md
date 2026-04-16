@@ -125,32 +125,51 @@
 
 ## Session 3: Training integration + UI
 
-**Status (2026-04-15):** genes + evaluator-metrics plumbing landed
-in sessions 1–2. Correctness-critical UI (pair classification
-badge in Bet Explorer) landed with the
-`scalping-asymmetric-hedging` fixes. The items below are the
-**operator-UX polish** that remains — none of them are blocking
-further training or correctness. Do them after validating the
-corrected reward signal on a fresh training run.
+**Status (2026-04-16):** genes + evaluator-metrics plumbing
+landed in sessions 1–2. Correctness-critical UI (pair
+classification badge in Bet Explorer) landed with the
+`scalping-asymmetric-hedging` fixes. Scoreboard tabs +
+model-detail scalping card + schema-inspector verify landed
+2026-04-16 after the Gen 1 training run made the gap obvious.
+Two operator-UX items remain (training monitor arb log,
+wizard scalping toggle) — neither blocks training.
 
-### Deferred — do after the next scalping training run
+### Done
 
-- [ ] Scoreboard: show scalping metrics
-  (arbs_completed, arbs_naked, locked_pnl, naked_pnl) on rows
-  whose run used `scalping_mode: True`.
-- [ ] Model-detail page: scalping card alongside existing
-  evaluation metrics.
-- [ ] Training monitor: arb events in the activity log
-  ("Arb completed: Back 5.0 / Lay 4.6 on Runner 3 → locked £0.38")
-  + per-episode arb-completion-rate / average-locked-spread /
-  naked-exposure-% stats.
-- [ ] Wizard: "Scalping mode" toggle with help text explaining
-  the paired-order mechanic.
-- [ ] Schema inspector: verify the three scalping genes
-  (scalping_mode, arb_spread_scale, naked_penalty_weight,
-  early_lock_bonus_weight) render correctly on the page — tests
-  confirm they're in search_ranges but the visual render wasn't
-  browser-verified.
+- [x] **Scoreboard scalping metrics + tabs (2026-04-16).**
+  `ModelScore` aggregates `total_bets`, `arbs_completed`,
+  `arbs_naked`, `locked_pnl`, `naked_pnl` across the latest
+  evaluation run's days. `_score_to_entry` derives `is_scalping`
+  from the model's `scalping_mode` hyperparameter. Frontend
+  scoreboard now has three tabs (All / Directional / Scalping)
+  with strategy-specific column layouts. Scalping tab ranks by
+  L/N ratio first so proper scalpers float to the top — verified
+  in browser: `ef453cd9` (Gen 2 from the Gen 1 training run)
+  ranks #1 with L/N = 5.18.
+- [x] **Model-detail scalping card (already present, verified
+  2026-04-16).** The block at lines 309-340 of `model-detail.html`
+  was added in session 2 and gates correctly on `arbs_completed +
+  arbs_naked > 0`. Verified rendering for `ef453cd9` shows
+  arbs_completed=29, arbs_naked=171, fill_rate=14.5%,
+  locked=£94.27, naked=−£18.20.
+- [x] **Schema inspector browser verify (2026-04-16).** Page
+  correctly shows `arb_spread_scale`, `naked_penalty_weight`,
+  `early_lock_bonus_weight`. `scalping_mode` is intentionally
+  absent because it's a top-level training setting in
+  `config.yaml`, not a `search_ranges` entry — so it's not a
+  gene the GA evolves. (The session 1 plan listed it by mistake.)
+
+### Deferred — still open
+
+- [ ] **Training monitor: arb events in the activity log**
+  ("Arb completed: Back 5.0 / Lay 4.6 on Runner 3 → locked
+  £0.38") + per-episode arb-completion-rate /
+  average-locked-spread / naked-exposure-% stats. Different page
+  + WebSocket plumbing — own session worth of work.
+- [ ] **Wizard "Scalping mode" toggle** with help text explaining
+  the paired-order mechanic. Currently `scalping_mode` is set in
+  `config.yaml`; operators have to hand-edit. Independent UI
+  surface.
 
 ---
 
