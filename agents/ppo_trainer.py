@@ -27,7 +27,7 @@ import json
 import logging
 import os
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,6 +92,52 @@ def _compute_arb_rate(arbs_completed: int, arbs_naked: int) -> float:
     return float(arbs_completed) / float(total)
 
 
+def _compute_fill_prob_bce(
+    preds: torch.Tensor, labels: torch.Tensor, *, eps: float = 1e-7,
+) -> torch.Tensor:
+    """Masked BCE for the scalping-active-management §02 fill-prob head.
+
+    Parameters
+    ----------
+    preds:
+        Probabilities in ``[0, 1]``, shape ``(batch, max_runners)`` — the
+        sigmoid-applied output of the fill-prob head.
+    labels:
+        Labels in ``{0.0, 1.0}`` or NaN. Same shape as ``preds``. NaN
+        entries are masked out (no supervision from unresolved pairs).
+    eps:
+        Clamp bound for ``preds`` to avoid ``log(0)`` at contrived
+        extremes (tested predictions of exactly 0 or 1).
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar BCE averaged over non-NaN label cells. Returns a scalar
+        zero tensor on the same device as ``preds`` when every label is
+        NaN (the "no supervision available" case — the test
+        ``test_fill_prob_excluded_from_loss_when_outcome_unresolved``
+        pins this behaviour).
+
+    Notes
+    -----
+    Factored out of :meth:`PPOTrainer._ppo_update` so the invariants
+    exercised by the session-02 unit tests (gradient direction, zero
+    loss on perfect predictions, mask-out of unresolved samples) can
+    be tested without spinning up a full rollout.
+    """
+    mask = ~torch.isnan(labels)
+    if not mask.any():
+        return torch.zeros((), device=preds.device, dtype=preds.dtype)
+    p = preds.clamp(eps, 1.0 - eps)
+    safe_labels = torch.where(mask, labels, torch.zeros_like(labels))
+    per_elem_bce = -(
+        safe_labels * torch.log(p)
+        + (1.0 - safe_labels) * torch.log(1.0 - p)
+    )
+    mask_f = mask.to(preds.dtype)
+    return (per_elem_bce * mask_f).sum() / mask_f.sum()
+
+
 def _signal_bias_for_epoch(
     epoch: int, warmup: int, magnitude: float,
 ) -> float:
@@ -144,6 +190,13 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     # reads it off self.reward_overrides to clip the per-step reward
     # fed into the advantage/return computation.
     "reward_clip": ("reward_clip",),
+    # Scalping-active-management session 02: weight on the BCE fill-prob
+    # aux loss. Same passthrough pattern as ``reward_clip``: whitelisted
+    # in BetfairEnv._REWARD_OVERRIDE_KEYS so the env's unknown-key debug
+    # log stays quiet, but the env never reads it. Defaults to 0.0 →
+    # aux loss is plumbed-off and reward scale is unchanged from
+    # session 01.
+    "fill_prob_loss_weight": ("fill_prob_loss_weight",),
 }
 
 
@@ -180,6 +233,18 @@ class Transition:
     which case it is ``np.clip(reward, -c, +c)``. Keeping them separate
     preserves the raw+shaped≈total_reward invariant (clipping is a
     training-signal transform, not a reward-accumulator transform).
+
+    ``fill_prob_labels`` is the scalping-active-management §02 supervised
+    signal: per-slot binary outcome of each paired passive (1.0 =
+    completed before race-off, 0.0 = went naked). ``NaN`` means "no
+    resolved outcome for this tick-slot" — either no aggressive was
+    placed here, the episode ended before resolution, or the data is
+    from a pre-Session-02 rollout. The PPO update masks NaNs out of the
+    BCE loss so unresolved samples do not contribute (see test
+    ``test_fill_prob_excluded_from_loss_when_outcome_unresolved``). The
+    1-element NaN default keeps directional (non-scalping) runs cheap:
+    the update broadcasts the placeholder to ``(n, max_runners)`` of
+    NaN and the mask rejects every element, yielding a zero loss.
     """
 
     obs: np.ndarray
@@ -189,6 +254,9 @@ class Transition:
     reward: float
     done: bool
     training_reward: float = 0.0
+    fill_prob_labels: np.ndarray = field(
+        default_factory=lambda: np.array([np.nan], dtype=np.float32)
+    )
 
 
 @dataclass
@@ -387,6 +455,20 @@ class PPOTrainer:
         self.advantage_clip = float(hp.get("advantage_clip", 0.0) or 0.0)
         self.value_loss_clip = float(hp.get("value_loss_clip", 0.0) or 0.0)
 
+        # Scalping-active-management session 02: aux-head BCE loss weight.
+        # Default 0.0 → aux loss term contributes nothing to the total
+        # PPO objective, so this session's total loss is byte-identical
+        # to session 01 unless someone opts in. Sourced from hp first
+        # (per-agent gene), then ``config["reward"]["fill_prob_loss_weight"]``
+        # (project-wide default), then 0.0.
+        self.fill_prob_loss_weight = float(
+            hp.get(
+                "fill_prob_loss_weight",
+                config.get("reward", {}).get("fill_prob_loss_weight", 0.0),
+            )
+            or 0.0
+        )
+
         # -- Session 3 (arb-improvements) signal-bias warmup ----------------
         # Additive bias on the per-runner ``signal`` head mean during the
         # first ``signal_bias_warmup`` epochs of training. Linear decay:
@@ -556,6 +638,17 @@ class PPOTrainer:
         # dims for minimal stub policies without ``max_runners``.
         max_runners = getattr(self.policy, "max_runners", None)
 
+        # Scalping-active-management §02: decision-time capture store for
+        # the fill-prob head. Keyed by ``pair_id`` → ``(transition_idx,
+        # slot_idx)``. Populated below when the rollout loop observes an
+        # ``aggressive_placed=True`` entry in ``info["action_debug"]`` and
+        # finds a matching ``Bet`` in ``env.bet_manager.bets``. At episode
+        # end we walk ``env.all_settled_bets``, classify each pair
+        # (completed / naked), and write 0/1 labels into the corresponding
+        # ``Transition.fill_prob_labels[slot_idx]``. Empty on directional
+        # runs — every label stays NaN so the BCE mask rejects it.
+        pair_to_transition: dict[str, tuple[int, int]] = {}
+
         # Pre-allocate a reusable GPU tensor for single-step observations
         obs_dim = obs.shape[0]
         obs_buffer = torch.empty(
@@ -609,6 +702,36 @@ class PPOTrainer:
                 else:
                     training_reward = raw_reward
 
+                # Scalping-active-management §02: snapshot the per-runner
+                # fill-probability prediction at this tick. Shape
+                # ``(max_runners,)`` when the policy produces the head,
+                # scalar default (0.5) otherwise — we fall back to ``None``
+                # in that case so no stamping happens. ``.detach().cpu()``
+                # before the no-grad block exits avoids retaining
+                # computation graphs.
+                fp_tensor = getattr(out, "fill_prob_per_runner", None)
+                fp_per_runner_t: np.ndarray | None
+                if (
+                    fp_tensor is not None
+                    and max_runners is not None
+                    and fp_tensor.numel() >= max_runners
+                ):
+                    fp_per_runner_t = (
+                        fp_tensor.detach().cpu().numpy().reshape(-1)
+                    )
+                else:
+                    fp_per_runner_t = None
+
+                # Per-transition per-slot label array, filled with NaN;
+                # episode-end backfill will flip the slots that had a
+                # resolved pair outcome.
+                if max_runners is not None:
+                    labels_arr = np.full(
+                        max_runners, np.nan, dtype=np.float32,
+                    )
+                else:
+                    labels_arr = np.array([np.nan], dtype=np.float32)
+
                 rollout.append(Transition(
                     obs=obs,
                     action=action_np,
@@ -617,7 +740,45 @@ class PPOTrainer:
                     reward=raw_reward,
                     done=done,
                     training_reward=training_reward,
+                    fill_prob_labels=labels_arr,
                 ))
+
+                # Scalping-active-management §02: stamp the decision-time
+                # fill_prob onto newly-placed aggressive ``Bet`` objects.
+                # The paired passive inherits this later inside
+                # ``PassiveOrderBook.on_tick`` via ``pair_id`` lookup.
+                # Record the pair → (transition, slot) mapping so the
+                # episode-end backfill can write the 0/1 label into the
+                # right cell of ``fill_prob_labels``.
+                if fp_per_runner_t is not None:
+                    action_debug = next_info.get("action_debug", {})
+                    bm = getattr(env, "bet_manager", None)
+                    if bm is not None and action_debug:
+                        sid_to_slot = env.current_runner_to_slot()
+                        transition_idx = len(rollout) - 1
+                        for sid, entry in action_debug.items():
+                            if not entry.get("aggressive_placed", False):
+                                continue
+                            slot_idx = sid_to_slot.get(sid)
+                            if (
+                                slot_idx is None
+                                or slot_idx >= fp_per_runner_t.shape[0]
+                            ):
+                                continue
+                            fp_val = float(fp_per_runner_t[slot_idx])
+                            # Newest matching Bet — scan backwards so we
+                            # pick up the one just placed this tick.
+                            for bet in reversed(bm.bets):
+                                if (
+                                    bet.selection_id == sid
+                                    and bet.fill_prob_at_placement is None
+                                ):
+                                    bet.fill_prob_at_placement = fp_val
+                                    if bet.pair_id is not None:
+                                        pair_to_transition[bet.pair_id] = (
+                                            transition_idx, slot_idx,
+                                        )
+                                    break
 
                 # Session 3: bet_rate — count this step if any runner's
                 # sampled ``signal`` action magnitude exceeded the bet
@@ -638,6 +799,33 @@ class PPOTrainer:
                 n_steps += 1
                 obs = next_obs
                 info = next_info
+
+        # Scalping-active-management §02: episode-end label backfill.
+        # Classify each pair that placed an aggressive leg this episode:
+        # a pair with ≥2 settled bets (aggressive + passive) completed
+        # before race-off → label 1.0; a pair with only the aggressive
+        # leg went naked → label 0.0. Bets appear in
+        # ``env.all_settled_bets`` across races, so this is the correct
+        # source (per CLAUDE.md "realised_pnl is last-race-only"). When
+        # ``pair_to_transition`` is empty (directional run or no
+        # aggressives placed), this loop is a no-op.
+        if pair_to_transition:
+            pair_counts: Counter[str] = Counter(
+                b.pair_id
+                for b in env.all_settled_bets
+                if b.pair_id is not None
+            )
+            for pair_id, (tr_idx, slot_idx) in pair_to_transition.items():
+                count = pair_counts.get(pair_id, 0)
+                if count <= 0:
+                    # Defensive: aggressive never landed in all_settled_bets
+                    # (e.g. the race was aborted). Leave label as NaN so
+                    # the BCE mask rejects it — no fake supervision.
+                    continue
+                if 0 <= tr_idx < len(rollout.transitions):
+                    labels = rollout.transitions[tr_idx].fill_prob_labels
+                    if slot_idx < labels.shape[0]:
+                        labels[slot_idx] = 1.0 if count >= 2 else 0.0
 
         rollout_elapsed = time.perf_counter() - rollout_start
         logger.info(
@@ -732,17 +920,46 @@ class PPOTrainer:
         action_np = np.array([t.action for t in transitions], dtype=np.float32)
         lp_np = np.array([t.log_prob for t in transitions], dtype=np.float32)
 
+        # Scalping-active-management §02: build the fill-prob labels
+        # batch. Each transition carries either a ``(max_runners,)`` array
+        # (populated with NaN + optional 0/1 at resolved slots) or the
+        # 1-element NaN default. Pad placeholders to ``max_runners``
+        # width so stacking yields a uniform ``(n, max_runners)`` tensor
+        # the minibatch loop can slice. When the policy has no
+        # ``max_runners`` attribute (stub policies used in unit tests),
+        # fall back to width 1 — the BCE loss will see an all-NaN mask
+        # and contribute zero.
+        fp_max_runners = int(
+            getattr(self.policy, "max_runners", 0) or 0
+        )
+        if fp_max_runners <= 0:
+            # Width-1 fallback: every transition's labels fit directly.
+            fp_labels_np = np.stack(
+                [t.fill_prob_labels[:1] for t in transitions], axis=0,
+            ).astype(np.float32)
+        else:
+            fp_labels_np = np.full(
+                (n, fp_max_runners), np.nan, dtype=np.float32,
+            )
+            for i, t in enumerate(transitions):
+                src = t.fill_prob_labels
+                w = min(src.shape[0], fp_max_runners)
+                fp_labels_np[i, :w] = src[:w]
+
         if self.device != "cpu":
             obs_pin = torch.from_numpy(obs_np).pin_memory()
             action_pin = torch.from_numpy(action_np).pin_memory()
             lp_pin = torch.from_numpy(lp_np).pin_memory()
+            fp_pin = torch.from_numpy(fp_labels_np).pin_memory()
             obs_batch = obs_pin.to(self.device, non_blocking=True)
             action_batch = action_pin.to(self.device, non_blocking=True)
             old_log_probs = lp_pin.to(self.device, non_blocking=True)
+            fp_labels_batch = fp_pin.to(self.device, non_blocking=True)
         else:
             obs_batch = torch.from_numpy(obs_np)
             action_batch = torch.from_numpy(action_np)
             old_log_probs = torch.from_numpy(lp_np)
+            fp_labels_batch = torch.from_numpy(fp_labels_np)
 
         advantages, returns = self._compute_advantages(rollout)
         advantages = advantages.to(self.device)
@@ -757,6 +974,7 @@ class PPOTrainer:
         policy_losses = []
         value_losses = []
         entropies = []
+        fill_prob_losses: list[float] = []
         # Session 2: accumulate per-head entropy contributions across the
         # mini-batch loop so we can push a single average-per-head sample
         # to the rolling window at the end of this update. Only heads
@@ -830,11 +1048,34 @@ class PPOTrainer:
                 else:
                     value_loss = nn.functional.mse_loss(values, mb_returns)
 
-                # Total loss
+                # Scalping-active-management §02: auxiliary BCE loss on
+                # the fill-probability head. See :func:`_compute_fill_prob_bce`
+                # — only slots with a resolved label (non-NaN) contribute;
+                # unresolved samples are masked out (see
+                # ``test_fill_prob_excluded_from_loss_when_outcome_unresolved``).
+                fp_preds = getattr(out, "fill_prob_per_runner", None)
+                mb_fp_labels = fp_labels_batch[mb_idx]
+                if (
+                    fp_preds is not None
+                    and fp_preds.shape == mb_fp_labels.shape
+                ):
+                    fill_prob_loss = _compute_fill_prob_bce(
+                        fp_preds, mb_fp_labels,
+                    )
+                else:
+                    # Shape mismatch (e.g. stub policy with a 1-element
+                    # default fill_prob_per_runner) — no aux loss.
+                    fill_prob_loss = torch.zeros((), device=mb_obs.device)
+
+                # Total loss. ``fill_prob_loss_weight`` defaults to 0.0
+                # so the added term is exactly 0 and this session's loss
+                # is numerically identical to session 01 (verified by
+                # ``test_fill_prob_weight_zero_is_noop_on_total_loss``).
                 loss = (
                     policy_loss
                     + self.value_loss_coeff * value_loss
                     - self.entropy_coeff * entropy
+                    + self.fill_prob_loss_weight * fill_prob_loss
                 )
 
                 self.optimiser.zero_grad()
@@ -847,6 +1088,7 @@ class PPOTrainer:
                 policy_losses.append(float(policy_loss.item()))
                 value_losses.append(float(value_loss.item()))
                 entropies.append(float(entropy.item()))
+                fill_prob_losses.append(float(fill_prob_loss.item()))
 
         ppo_elapsed = time.perf_counter() - ppo_start
         n_updates = len(policy_losses)
@@ -869,6 +1111,14 @@ class PPOTrainer:
             "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
             "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
             "entropy": float(np.mean(entropies)) if entropies else 0.0,
+            # Scalping-active-management §02 diagnostic: mean per-update
+            # BCE on the fill-prob head, pre-weight. Always emitted so
+            # operators can see the head's behaviour even when
+            # ``fill_prob_loss_weight`` is 0 (plumbing-off mode).
+            "fill_prob_loss": (
+                float(np.mean(fill_prob_losses))
+                if fill_prob_losses else 0.0
+            ),
             "action_stats": action_stats,
         }
 

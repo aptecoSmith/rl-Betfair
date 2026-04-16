@@ -26,7 +26,7 @@ the agent to carry context from earlier races into later ones.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -146,6 +146,54 @@ def migrate_scalping_action_head(
     return migrated
 
 
+# ── Checkpoint migration (scalping-active-management session 02) ──────────
+
+
+def migrate_fill_prob_head(
+    state_dict: dict, fresh_policy: nn.Module,
+) -> dict:
+    """Extend a pre-Session-02 ``state_dict`` with the fill-prob head weights.
+
+    Scalping-active-management session 02 added a per-runner
+    fill-probability head (``fill_prob_head.weight`` / ``.bias``) sharing
+    the backbone with policy + value. Older checkpoints don't carry these
+    parameters, so a strict ``load_state_dict`` would fail with a
+    "Missing key(s)" error.
+
+    This helper injects fresh weights from ``fresh_policy.state_dict()``
+    for every ``fill_prob_head.*`` key not already present in the input
+    dict. The caller then calls ``load_state_dict(..., strict=True)``
+    normally. Chose this approach over the alternative (load with
+    ``strict=False``) because strict=False silently swallows unrelated
+    missing-key errors too — making the migration explicit keeps the
+    audit trail.
+
+    Parameters
+    ----------
+    state_dict:
+        PyTorch state-dict mapping parameter names to tensors. Typically
+        loaded from a pre-Session-02 checkpoint.
+    fresh_policy:
+        A freshly-constructed policy module with the new head in place.
+        Its ``fill_prob_head.*`` parameters are used as the source of
+        fresh weights for the missing keys.
+
+    Returns
+    -------
+    dict
+        A new dict: input contents plus ``fill_prob_head.*`` keys copied
+        from ``fresh_policy.state_dict()`` for any that were missing.
+    """
+    migrated = dict(state_dict)
+    fresh = fresh_policy.state_dict()
+    for key, value in fresh.items():
+        if key.startswith("fill_prob_head.") and key not in migrated:
+            # ``.clone()`` so later mutations on the fresh policy don't
+            # alias the migrated weights.
+            migrated[key] = value.detach().clone()
+    return migrated
+
+
 # ── Base class ──────────────────────────────────────────────────────────────
 
 
@@ -219,6 +267,21 @@ class PolicyOutput:
     action_log_std: torch.Tensor    # (batch, action_dim) — log std
     value: torch.Tensor             # (batch, 1) — state value estimate
     hidden_state: tuple[torch.Tensor, torch.Tensor]  # opaque 2-tuple (see BasePolicy)
+    # Scalping-active-management session 02 — per-runner fill-probability
+    # prediction, shape ``(batch, max_runners)``, every element in [0, 1].
+    # The sigmoid is applied inside each architecture's forward pass so
+    # ``PolicyOutput`` exposes probabilities directly: this matches the
+    # "0.5 = unsure" default below, lets the ``Bet`` record carry a
+    # human-readable number, and feeds cleanly into the trainer's masked
+    # BCE loss (with an ε-clamp to avoid log(0) on extreme predictions).
+    # BCEWithLogits would be marginally more numerically stable at the
+    # extremes, but the 0.5-default contract made probabilities the cleaner
+    # interface. Default is a same-shape ``0.5`` tensor so stub policies /
+    # legacy tests constructing ``PolicyOutput`` with positional args keep
+    # working (any consumer that reads the field sees "unsure").
+    fill_prob_per_runner: torch.Tensor = field(
+        default_factory=lambda: torch.full((1, 1), 0.5)
+    )
 
 
 # ── Helper: build an MLP stack ──────────────────────────────────────────────
@@ -362,6 +425,15 @@ class PPOLSTMPolicy(BasePolicy):
             n_layers=1,
         )
 
+        # ── Fill-probability head (scalping-active-management §02) ─────
+        # Auxiliary supervised head — per-runner probability that a paired
+        # passive will fill before race-off. Shares the LSTM backbone with
+        # policy + value; does NOT condition on the sampled action
+        # (hard_constraints.md §8). A single linear to logits, sigmoid
+        # applied in ``forward``. Initialised with orthogonal gain=0.01 so
+        # the pre-training output is ≈0.5 ("unsure") per runner.
+        self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
+
         # Orthogonal init for better PPO training stability
         self._init_weights()
 
@@ -380,6 +452,10 @@ class PPOLSTMPolicy(BasePolicy):
         for module in self.critic_head.modules():
             if isinstance(module, nn.Linear):
                 nn.init.orthogonal_(module.weight, gain=1.0)
+        # Session-02 fill-prob head: match actor-head small init so the
+        # head outputs ≈0 logits → sigmoid ≈ 0.5 ("unsure") at init.
+        nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
+        nn.init.zeros_(self.fill_prob_head.bias)
 
     def _split_obs(
         self, obs: torch.Tensor
@@ -522,11 +598,19 @@ class PPOLSTMPolicy(BasePolicy):
         # ── Critic: scalar V(s) ────────────────────────────────────────
         value = self.critic_head(lstm_last)  # (batch, 1)
 
+        # ── Fill-probability head (scalping-active-management §02) ────
+        # Conditions on the shared backbone (``lstm_last``), NOT the
+        # sampled action (hard_constraints.md §8). Sigmoid here so
+        # ``PolicyOutput`` carries a probability in [0, 1].
+        fill_prob_logits = self.fill_prob_head(lstm_last)
+        fill_prob = torch.sigmoid(fill_prob_logits)  # (batch, max_runners)
+
         return PolicyOutput(
             action_mean=action_mean,
             action_log_std=self.action_log_std.expand(batch, -1),
             value=value,
             hidden_state=new_hidden,
+            fill_prob_per_runner=fill_prob,
         )
 
     def init_hidden(
@@ -753,6 +837,9 @@ class PPOTimeLSTMPolicy(BasePolicy):
             n_layers=1,
         )
 
+        # Fill-probability head — see PPOLSTMPolicy for rationale.
+        self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -768,6 +855,9 @@ class PPOTimeLSTMPolicy(BasePolicy):
         for module in self.critic_head.modules():
             if isinstance(module, nn.Linear):
                 nn.init.orthogonal_(module.weight, gain=1.0)
+        # Session-02 fill-prob head: small init → sigmoid ≈ 0.5 at start.
+        nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
+        nn.init.zeros_(self.fill_prob_head.bias)
 
     def _split_obs(
         self, obs: torch.Tensor,
@@ -917,11 +1007,16 @@ class PPOTimeLSTMPolicy(BasePolicy):
         # Critic
         value = self.critic_head(lstm_last)
 
+        # Fill-probability head — see PPOLSTMPolicy for rationale.
+        fill_prob_logits = self.fill_prob_head(lstm_last)
+        fill_prob = torch.sigmoid(fill_prob_logits)
+
         return PolicyOutput(
             action_mean=action_mean,
             action_log_std=self.action_log_std.expand(batch, -1),
             value=value,
             hidden_state=new_hidden,
+            fill_prob_per_runner=fill_prob,
         )
 
     def init_hidden(
@@ -1112,6 +1207,10 @@ class PPOTransformerPolicy(BasePolicy):
             n_layers=1,
         )
 
+        # Fill-probability head — see PPOLSTMPolicy for rationale. Takes
+        # the final transformer tick output (``out_last``) as backbone.
+        self.fill_prob_head = nn.Linear(d_model, max_runners)
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -1127,6 +1226,9 @@ class PPOTransformerPolicy(BasePolicy):
         for module in self.critic_head.modules():
             if isinstance(module, nn.Linear):
                 nn.init.orthogonal_(module.weight, gain=1.0)
+        # Session-02 fill-prob head: small init → sigmoid ≈ 0.5 at start.
+        nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
+        nn.init.zeros_(self.fill_prob_head.bias)
 
     # ── Shared obs splitter ─────────────────────────────────────────────
     def _split_obs(
@@ -1263,11 +1365,17 @@ class PPOTransformerPolicy(BasePolicy):
         # ── Critic ────────────────────────────────────────────────────
         value = self.critic_head(out_last)
 
+        # Fill-probability head — backbone is the final-tick transformer
+        # output (``out_last``). See PPOLSTMPolicy for rationale.
+        fill_prob_logits = self.fill_prob_head(out_last)
+        fill_prob = torch.sigmoid(fill_prob_logits)
+
         return PolicyOutput(
             action_mean=action_mean,
             action_log_std=self.action_log_std.expand(batch, -1),
             value=value,
             hidden_state=(buffer, valid_count),
+            fill_prob_per_runner=fill_prob,
         )
 
     def init_hidden(

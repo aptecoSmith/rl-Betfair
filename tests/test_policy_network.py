@@ -244,11 +244,24 @@ class TestGradientFlow:
         loss = out.action_mean.sum()
         loss.backward()
 
-        # Check gradients exist on key actor components (not critic, not log_std)
-        # action_log_std only gets gradient when used in the distribution
+        # Check gradients exist on key actor components (not critic, not
+        # log_std, not sibling aux heads).
+        # - ``action_log_std`` only gets gradient when used in the
+        #   distribution (not this synthetic scalar loss).
+        # - ``fill_prob_head`` (scalping-active-management §02) shares the
+        #   backbone with the actor but is a SEPARATE head; it
+        #   legitimately doesn't receive gradient from an actor-mean-only
+        #   loss — see hard_constraints §8.
         for name, param in policy.named_parameters():
-            if param.requires_grad and "critic" not in name and name != "action_log_std":
-                assert param.grad is not None, f"No grad for {name}"
+            if not param.requires_grad:
+                continue
+            if "critic" in name:
+                continue
+            if name == "action_log_std":
+                continue
+            if "fill_prob_head" in name:
+                continue
+            assert param.grad is not None, f"No grad for {name}"
 
     def test_gradients_flow_through_critic(self, policy: PPOLSTMPolicy):
         obs = torch.randn(2, OBS_DIM)

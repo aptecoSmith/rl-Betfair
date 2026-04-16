@@ -461,6 +461,9 @@ class Evaluator:
                 effective_place_odds=bet.effective_place_odds,
                 starting_budget=env.starting_budget,
                 pair_id=bet.pair_id,
+                # Scalping-active-management §02 — decision-time capture.
+                # ``None`` for directional bets or pre-Session-02 runs.
+                fill_prob_at_placement=bet.fill_prob_at_placement,
             ))
 
         # Compute opportunity window aggregates for the day record

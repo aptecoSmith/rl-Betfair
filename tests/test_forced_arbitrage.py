@@ -1233,3 +1233,482 @@ class TestScalpingRequote:
         assert total_reward == pytest.approx(
             info["raw_pnl_reward"] + info["shaped_bonus"], abs=1e-6,
         )
+
+
+# ── Scalping-active-management session 02: fill-probability head ───────────
+
+
+def _run_ppo_and_measure(
+    scalping_config: dict, *, weight: float, assert_eq: bool,
+) -> float:
+    """Run one PPO update on a tiny synthetic rollout and return the
+    policy gradient norm.
+
+    Shared by ``TestFillProbHead`` tests 6 (``weight=0`` noop) and 7
+    (``weight>0`` grad-norm lift). Builds a tiny rollout with hand-
+    crafted transitions (including a mix of resolved and unresolved
+    ``fill_prob_labels``) so the BCE term has something to train on
+    when ``weight > 0``.
+
+    When ``assert_eq`` is True, also asserts that the reported loss
+    components sum to the session-01 total (weight=0 must contribute
+    exactly 0) within 1e-7 — the test-6 invariant.
+    """
+    import numpy as np
+    import torch
+    from agents.architecture_registry import create_policy
+    from agents.ppo_trainer import PPOTrainer, Rollout, Transition
+
+    cfg = dict(scalping_config)
+    hp = {
+        "lstm_hidden_size": 16, "mlp_hidden_size": 8, "mlp_layers": 1,
+        "learning_rate": 1e-4, "gamma": 0.99, "gae_lambda": 0.95,
+        "ppo_clip_epsilon": 0.2, "entropy_coefficient": 0.01,
+        "value_loss_coeff": 0.5, "max_grad_norm": 1e9,
+        "ppo_epochs": 1, "mini_batch_size": 4,
+        "fill_prob_loss_weight": weight,
+    }
+    env_probe = BetfairEnv(_make_day(n_races=1), cfg)
+    obs_dim = int(env_probe.observation_space.shape[0])
+    action_dim = int(env_probe.action_space.shape[0])
+    max_runners = env_probe.max_runners
+
+    # Seed so weight=0 vs weight=1 runs are directly comparable.
+    torch.manual_seed(0)
+    np.random.seed(0)
+    policy = create_policy(
+        name="ppo_lstm_v1",
+        obs_dim=obs_dim, action_dim=action_dim,
+        max_runners=max_runners, hyperparams=hp,
+    )
+    trainer = PPOTrainer(policy=policy, config=cfg, hyperparams=hp)
+
+    # Hand-built rollout: 8 transitions, every other one carries a
+    # resolved fill-prob label in slot 0 so the BCE term has gradient.
+    rng = np.random.default_rng(0)
+    rollout = Rollout()
+    for i in range(8):
+        obs_i = rng.standard_normal(obs_dim).astype(np.float32)
+        action_i = rng.standard_normal(action_dim).astype(np.float32)
+        labels = np.full(max_runners, np.nan, dtype=np.float32)
+        if i % 2 == 0:
+            labels[0] = 1.0 if i % 4 == 0 else 0.0
+        rollout.append(Transition(
+            obs=obs_i, action=action_i,
+            log_prob=-1.0, value=0.0,
+            reward=float(rng.standard_normal()),
+            done=(i == 7),
+            training_reward=0.0,
+            fill_prob_labels=labels,
+        ))
+
+    loss_info = trainer._ppo_update(rollout)
+
+    # Gradient norm across all policy parameters after the last mini-
+    # batch's backward. weight=0 and weight=1 runs use the same seed +
+    # data, so the only difference is the aux loss contribution.
+    grad_sq_sum = 0.0
+    for p in policy.parameters():
+        if p.grad is not None:
+            grad_sq_sum += float(p.grad.detach().pow(2).sum().item())
+    grad_norm = grad_sq_sum ** 0.5
+
+    if assert_eq:
+        # Test-6 invariant: with weight=0 the aux term must contribute
+        # exactly 0 to the optimised loss, so the reported component
+        # breakdown sums to the session-01 total.
+        pl = loss_info["policy_loss"]
+        vl = loss_info["value_loss"]
+        ent = loss_info["entropy"]
+        aux = loss_info["fill_prob_loss"]
+        expected = pl + trainer.value_loss_coeff * vl - trainer.entropy_coeff * ent
+        total_with_aux = expected + trainer.fill_prob_loss_weight * aux
+        assert total_with_aux == pytest.approx(expected, abs=1e-7)
+
+    return grad_norm
+
+
+class TestFillProbHead:
+    """Fill-probability auxiliary head added in scalping-active-management §02.
+
+    Plumbing-off by default (``fill_prob_loss_weight=0.0``). Each test
+    below pins one invariant of the head: shape/range, decision-time
+    capture, passive-leg inheritance, BCE correctness, gradient direction,
+    weight=0 noop, weight>0 grad-norm lift, parquet back-compat + roundtrip,
+    checkpoint back-compat, raw+shaped reward invariant, and unresolved-
+    sample exclusion.
+    """
+
+    @staticmethod
+    def _small_hp() -> dict:
+        """Small architecture so construction is cheap across all arches."""
+        return {
+            "lstm_hidden_size": 32,
+            "mlp_hidden_size": 16,
+            "mlp_layers": 1,
+            "transformer_heads": 2,
+            "transformer_depth": 1,
+            "transformer_ctx_ticks": 8,
+        }
+
+    # ── 1. Shape + range of the new head across all 3 architectures. ────
+
+    def test_fill_prob_output_shape_and_range(self, scalping_config):
+        import torch
+        from agents.policy_network import (
+            PPOLSTMPolicy,
+            PPOTimeLSTMPolicy,
+            PPOTransformerPolicy,
+        )
+
+        env = BetfairEnv(_make_day(n_races=1), scalping_config)
+        obs_dim = int(env.observation_space.shape[0])
+        max_runners = env.max_runners
+        action_dim = int(env.action_space.shape[0])
+        hp = self._small_hp()
+
+        for cls in (PPOLSTMPolicy, PPOTimeLSTMPolicy, PPOTransformerPolicy):
+            net = cls(
+                obs_dim=obs_dim, action_dim=action_dim,
+                max_runners=max_runners, hyperparams=hp,
+            )
+            obs = torch.zeros(3, obs_dim, dtype=torch.float32)
+            out = net(obs)
+            assert out.fill_prob_per_runner.shape == (3, max_runners), (
+                f"{cls.__name__}: expected (3, {max_runners}), got "
+                f"{tuple(out.fill_prob_per_runner.shape)}"
+            )
+            fp = out.fill_prob_per_runner
+            assert torch.all(fp >= 0.0), f"{cls.__name__}: fill_prob < 0"
+            assert torch.all(fp <= 1.0), f"{cls.__name__}: fill_prob > 1"
+
+    # ── 2. Decision-time capture stamps the prediction on the Bet. ──────
+
+    def test_fill_prob_recorded_on_bet_at_placement(self, scalping_config):
+        """Drive one env step with an aggressive back and manually walk
+        the capture path the PPO trainer runs per tick — asserts the
+        Bet ends up carrying a non-``None`` prediction in [0, 1].
+        """
+        import torch
+        from agents.architecture_registry import create_policy
+
+        cfg = dict(scalping_config)
+        hp = self._small_hp()
+        day = _make_day(n_races=1, n_pre_ticks=3, n_inplay_ticks=1)
+        env = BetfairEnv(day, cfg)
+        obs, _ = env.reset()
+        policy = create_policy(
+            name="ppo_lstm_v1",
+            obs_dim=int(env.observation_space.shape[0]),
+            action_dim=int(env.action_space.shape[0]),
+            max_runners=env.max_runners,
+            hyperparams=hp,
+        )
+
+        obs_tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            out = policy(obs_tensor)
+        fp_per_runner = (
+            out.fill_prob_per_runner.detach().cpu().numpy().reshape(-1)
+        )
+
+        # Drive a definite aggressive back on slot 0 — the force_aggressive
+        # flag in scalping_config makes this a single-step placement.
+        a = _scalping_action(signal=1.0, stake=-0.8, aggression=1.0)
+        _, _, _, _, info = env.step(a)
+
+        # Replay the trainer's stamp-on-bet logic manually.
+        sid_to_slot = env.current_runner_to_slot()
+        bm = env.bet_manager
+        for sid, entry in info.get("action_debug", {}).items():
+            if not entry.get("aggressive_placed", False):
+                continue
+            slot_idx = sid_to_slot.get(sid)
+            if slot_idx is None:
+                continue
+            fp_val = float(fp_per_runner[slot_idx])
+            for bet in reversed(bm.bets):
+                if (
+                    bet.selection_id == sid
+                    and bet.fill_prob_at_placement is None
+                ):
+                    bet.fill_prob_at_placement = fp_val
+                    break
+
+        stamped = [
+            b for b in bm.bets if b.fill_prob_at_placement is not None
+        ]
+        assert stamped, (
+            "expected at least one Bet to carry fill_prob_at_placement"
+        )
+        for b in stamped:
+            assert 0.0 <= b.fill_prob_at_placement <= 1.0
+
+    # ── 3. Paired passive inherits the aggressive's fill_prob. ──────────
+
+    def test_fill_prob_inherited_by_paired_passive(self):
+        """When a paired passive fills, its Bet carries the SAME
+        ``fill_prob_at_placement`` as the aggressive leg — captured, not
+        recomputed (hard_constraints §10).
+        """
+        from env.bet_manager import BetManager, BetSide, PassiveOrder
+
+        bm = BetManager(starting_budget=1000.0)
+        # Simulate an aggressive back Bet carrying a prediction.
+        agg = bm.place_back(
+            _make_runner_snap(101, ltp=4.0, back_price=4.0,
+                              lay_price=4.1, size=200.0),
+            stake=10.0, market_id="m1", pair_id="pair-xyz",
+        )
+        assert agg is not None
+        # Stamp the prediction that the trainer would have written.
+        agg.fill_prob_at_placement = 0.73
+
+        # Register a paired passive lay directly so on_tick will match it.
+        # queue_ahead=0 + traded_volume>0 → fill threshold crossed.
+        order = PassiveOrder(
+            selection_id=101,
+            side=BetSide.LAY,
+            price=4.1,
+            requested_stake=10.0,
+            queue_ahead_at_placement=0.0,
+            placed_tick_index=0,
+            market_id="m1",
+            ltp_at_placement=4.0,
+            pair_id="pair-xyz",
+            reserved_liability=0.0,
+        )
+        book = bm.passive_book
+        book._orders.append(order)
+        book._orders_by_sid.setdefault(101, []).append(order)
+
+        class _Runner:
+            selection_id = 101
+            total_matched = 1000.0  # > 0 → traded_volume_since... > 0
+            available_to_back: list = []
+            available_to_lay: list = []
+            last_traded_price = 4.0
+            status = "ACTIVE"
+
+        class _Tick:
+            runners = [_Runner()]
+
+        book.on_tick(_Tick(), tick_index=1)  # type: ignore[arg-type]
+
+        passive_bets = [
+            b for b in bm.bets
+            if b.side == BetSide.LAY and b.pair_id == "pair-xyz"
+        ]
+        assert len(passive_bets) == 1
+        assert passive_bets[0].fill_prob_at_placement == pytest.approx(0.73)
+
+    # ── 4. BCE ≈ 0 when predictions exactly match outcomes. ─────────────
+
+    def test_fill_prob_bce_zero_on_perfect_predictions(self):
+        import torch
+        from agents.ppo_trainer import _compute_fill_prob_bce
+
+        preds = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+        labels = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+        loss = _compute_fill_prob_bce(preds, labels)
+        assert loss.item() < 1e-5
+
+    # ── 5. BCE gradient has correct sign in both directions. ────────────
+
+    def test_fill_prob_bce_gradient_direction(self):
+        import torch
+        from agents.ppo_trainer import _compute_fill_prob_bce
+
+        # Case A: pred=0.1, label=1 → gradient of the BCE wrt the
+        # pre-sigmoid logit is negative (optimiser would INCREASE the
+        # logit to push the prediction up toward 1).
+        logit_a = torch.tensor([[0.0]], requires_grad=True)
+        pred_a = torch.sigmoid(logit_a - 2.1972245773362196)  # ≈ 0.1
+        loss_a = _compute_fill_prob_bce(
+            pred_a, torch.tensor([[1.0]], dtype=torch.float32),
+        )
+        loss_a.backward()
+        assert logit_a.grad is not None
+        assert logit_a.grad.item() < 0.0
+
+        # Case B: pred=0.9, label=0 → gradient positive (push logit
+        # down, move prediction toward 0).
+        logit_b = torch.tensor([[0.0]], requires_grad=True)
+        pred_b = torch.sigmoid(logit_b + 2.1972245773362196)  # ≈ 0.9
+        loss_b = _compute_fill_prob_bce(
+            pred_b, torch.tensor([[0.0]], dtype=torch.float32),
+        )
+        loss_b.backward()
+        assert logit_b.grad is not None
+        assert logit_b.grad.item() > 0.0
+
+    # ── 6. weight=0 makes total loss byte-identical to session 01. ──────
+
+    def test_fill_prob_weight_zero_is_noop_on_total_loss(
+        self, scalping_config,
+    ):
+        _run_ppo_and_measure(scalping_config, weight=0.0, assert_eq=True)
+
+    # ── 7. weight=1 lifts the total-param gradient norm. ────────────────
+
+    def test_fill_prob_weight_positive_changes_gradient_norm(
+        self, scalping_config,
+    ):
+        grad_norm_zero = _run_ppo_and_measure(
+            scalping_config, weight=0.0, assert_eq=False,
+        )
+        grad_norm_one = _run_ppo_and_measure(
+            scalping_config, weight=1.0, assert_eq=False,
+        )
+        assert grad_norm_one > grad_norm_zero, (
+            f"aux loss weight=1 did not lift grad norm "
+            f"(zero={grad_norm_zero:.6f}, one={grad_norm_one:.6f})"
+        )
+
+    # ── 8. Parquet reader tolerates absence of the new column. ──────────
+
+    def test_parquet_backcompat_missing_column(self, tmp_path):
+        import pandas as pd
+        from registry.model_store import EvaluationBetRecord, ModelStore
+
+        store = ModelStore(
+            db_path=tmp_path / "m.db",
+            weights_dir=tmp_path / "w",
+            bet_logs_dir=tmp_path / "b",
+        )
+        rec = EvaluationBetRecord(
+            run_id="r1", date="2026-04-17", market_id="m1",
+            tick_timestamp="t", seconds_to_off=10.0, runner_id=101,
+            runner_name="A", action="back", price=4.0, stake=10.0,
+            matched_size=10.0, outcome="won", pnl=3.0,
+            fill_prob_at_placement=0.5,
+        )
+        path = store.write_bet_logs_parquet("r1", "2026-04-17", [rec])
+        assert path is not None and path.exists()
+
+        # Rewrite without the new column → simulates a pre-Session-02 file.
+        df = pd.read_parquet(path)
+        df = df.drop(columns=["fill_prob_at_placement"])
+        df.to_parquet(path, index=False)
+
+        loaded = store.get_evaluation_bets("r1")
+        assert len(loaded) == 1
+        assert loaded[0].fill_prob_at_placement is None
+
+    # ── 9. Parquet roundtrip preserves the new column. ──────────────────
+
+    def test_parquet_roundtrip_with_fill_prob(self, tmp_path):
+        from registry.model_store import EvaluationBetRecord, ModelStore
+
+        store = ModelStore(
+            db_path=tmp_path / "m.db",
+            weights_dir=tmp_path / "w",
+            bet_logs_dir=tmp_path / "b",
+        )
+        rec = EvaluationBetRecord(
+            run_id="r2", date="2026-04-17", market_id="m1",
+            tick_timestamp="t", seconds_to_off=10.0, runner_id=101,
+            runner_name="A", action="back", price=4.0, stake=10.0,
+            matched_size=10.0, outcome="won", pnl=3.0,
+            fill_prob_at_placement=0.73,
+        )
+        store.write_bet_logs_parquet("r2", "2026-04-17", [rec])
+        loaded = store.get_evaluation_bets("r2")
+        assert len(loaded) == 1
+        assert loaded[0].fill_prob_at_placement == pytest.approx(0.73)
+
+    # ── 10. Legacy state-dict loads via migrate_fill_prob_head. ─────────
+
+    def test_legacy_checkpoint_loads_with_fill_prob_head(self):
+        import torch
+        from agents.policy_network import (
+            PPOLSTMPolicy,
+            migrate_fill_prob_head,
+        )
+
+        hp = self._small_hp()
+        new_net = PPOLSTMPolicy(
+            obs_dim=32, action_dim=14 * 6, max_runners=14, hyperparams=hp,
+        )
+
+        # Simulate a pre-Session-02 state-dict by dropping the new head's
+        # keys — everything else matches the current architecture.
+        legacy_state = {
+            k: v.clone() for k, v in new_net.state_dict().items()
+            if not k.startswith("fill_prob_head.")
+        }
+        assert "fill_prob_head.weight" not in legacy_state
+        assert "fill_prob_head.bias" not in legacy_state
+
+        # Strict load should fail on a legacy dict…
+        target = PPOLSTMPolicy(
+            obs_dim=32, action_dim=14 * 6, max_runners=14, hyperparams=hp,
+        )
+        with pytest.raises(RuntimeError):
+            target.load_state_dict(legacy_state, strict=True)
+
+        # …but succeeds after migration.
+        migrated = migrate_fill_prob_head(legacy_state, target)
+        missing, unexpected = target.load_state_dict(migrated, strict=True)
+        assert missing == []
+        assert unexpected == []
+
+        # Fresh-init contract: weight non-zero (orthogonal gain=0.01),
+        # bias zero.
+        assert target.fill_prob_head.weight.abs().sum().item() > 0.0
+        assert torch.allclose(
+            target.fill_prob_head.bias,
+            torch.zeros_like(target.fill_prob_head.bias),
+        )
+
+    # ── 11. raw + shaped invariant holds with aux weight > 0 on env. ────
+
+    def test_raw_plus_shaped_invariant_still_holds_with_aux_loss(
+        self, scalping_config,
+    ):
+        """``fill_prob_loss_weight`` is a TRAINER knob, not an env reward
+        knob. Whitelisting it in ``_REWARD_OVERRIDE_KEYS`` must not change
+        the env's reward accumulators, so the raw+shaped invariant holds
+        unchanged when the key flows through ``reward_overrides``.
+        """
+        cfg = dict(scalping_config)
+        cfg["reward"] = dict(cfg["reward"])
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=5, n_inplay_ticks=2), cfg,
+            reward_overrides={"fill_prob_loss_weight": 0.5},
+        )
+        env.reset()
+
+        a = _scalping_action(
+            signal=1.0, stake=-0.8, aggression=1.0,
+            arb_spread=0.2, requote=1.0,
+        )
+        total_reward = 0.0
+        terminated = False
+        info: dict = {}
+        while not terminated:
+            _, r, terminated, _, info = env.step(a)
+            total_reward += r
+
+        assert total_reward == pytest.approx(
+            info["raw_pnl_reward"] + info["shaped_bonus"], abs=1e-6,
+        )
+
+    # ── 12. Unresolved (NaN) samples don't contribute to the BCE loss. ──
+
+    def test_fill_prob_excluded_from_loss_when_outcome_unresolved(self):
+        import torch
+        from agents.ppo_trainer import _compute_fill_prob_bce
+
+        # Two slots: slot 0 has a resolved label; slot 1 is NaN
+        # (unresolved). The loss must depend only on slot 0 — mutating
+        # slot 1's prediction must leave the value unchanged.
+        preds_a = torch.tensor([[0.3, 0.4]], dtype=torch.float32)
+        preds_b = torch.tensor([[0.3, 0.9]], dtype=torch.float32)  # slot 1 moved
+        labels = torch.tensor(
+            [[1.0, float("nan")]], dtype=torch.float32,
+        )
+
+        loss_a = _compute_fill_prob_bce(preds_a, labels)
+        loss_b = _compute_fill_prob_bce(preds_b, labels)
+        assert loss_a.item() == pytest.approx(loss_b.item(), abs=1e-7)

@@ -132,6 +132,13 @@ class EvaluationBetRecord:
     # None for non-scalping bets. Back/lay bets sharing a pair_id form a
     # hedged pair whose locked P&L floor can be classified in the UI.
     pair_id: str | None = None
+    # Scalping-active-management §02: decision-time fill-probability
+    # prediction stamped on the ``Bet`` by the PPO rollout. Mirrored here
+    # so the Parquet bet log can be read back for calibration plots
+    # (predicted vs observed fill rate, bucketed). Optional — ``None``
+    # for pre-Session-02 runs and for any bet the scalping head did not
+    # produce a prediction for (directional bets, stub tests).
+    fill_prob_at_placement: float | None = None
 
 
 @dataclass
@@ -717,6 +724,10 @@ class ModelStore:
                 "effective_place_odds": r.effective_place_odds,
                 "starting_budget": r.starting_budget,
                 "pair_id": r.pair_id,
+                # Scalping-active-management §02. Nullable float — pandas
+                # stores ``None`` as NaN which the reader below maps back
+                # to ``None`` via ``pd.notna`` check.
+                "fill_prob_at_placement": r.fill_prob_at_placement,
             }
             for r in records
         ])
@@ -816,6 +827,10 @@ class ModelStore:
         has_ew = "is_each_way" in df.columns
         has_budget = "starting_budget" in df.columns
         has_pair_id = "pair_id" in df.columns
+        # Scalping-active-management §02 — Parquet files written before
+        # this column existed load as ``fill_prob_at_placement=None``
+        # (hard_constraints §11: new columns are optional).
+        has_fill_prob = "fill_prob_at_placement" in df.columns
         return [
             EvaluationBetRecord(
                 run_id=str(row["run_id"]),
@@ -859,6 +874,12 @@ class ModelStore:
                 pair_id=(
                     str(row["pair_id"])
                     if has_pair_id and pd.notna(row.get("pair_id"))
+                    else None
+                ),
+                fill_prob_at_placement=(
+                    float(row["fill_prob_at_placement"])
+                    if has_fill_prob
+                    and pd.notna(row.get("fill_prob_at_placement"))
                     else None
                 ),
             )

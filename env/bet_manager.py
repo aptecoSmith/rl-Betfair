@@ -92,6 +92,16 @@ class Bet:
     # liability, or `_open_liability` will go negative. See bet_manager
     # docstring on "freed budget" for the Betfair offset rationale.
     reserved_liability: float | None = None
+    # Scalping-active-management session 02 — policy's fill-probability
+    # prediction at the tick that placed the PAIR. The aggressive leg gets
+    # this stamped on it by the trainer's rollout-time capture; the passive
+    # leg inherits it from the aggressive partner (matched by ``pair_id``)
+    # when the passive fills inside :meth:`PassiveOrderBook.on_tick`. Per
+    # hard_constraints.md §10 the value is captured at decision time, never
+    # recomputed later. ``None`` for bets not produced by the scalping head
+    # (directional bets, pre-Session-02 data, stub tests constructing
+    # ``Bet`` directly).
+    fill_prob_at_placement: float | None = None
 
     @property
     def liability(self) -> float:
@@ -688,6 +698,21 @@ class PassiveOrderBook:
             # ── Fill ────────────────────────────────────────────────────
             order.matched_stake = order.requested_stake
 
+            # Scalping-active-management §02: the passive leg inherits its
+            # aggressive partner's decision-time fill-probability prediction
+            # via ``pair_id`` lookup. Per hard_constraints §10 the value is
+            # captured at decision time, never recomputed post-hoc — this
+            # keeps UI calibration plots honest. Aggressive legs are always
+            # appended to ``bm.bets`` before the passive order is registered,
+            # so the lookup succeeds whenever the aggressive carried a
+            # prediction.
+            inherited_fill_prob: float | None = None
+            if order.pair_id is not None and self._bet_manager is not None:
+                for existing in self._bet_manager.bets:
+                    if existing.pair_id == order.pair_id:
+                        inherited_fill_prob = existing.fill_prob_at_placement
+                        break
+
             # Convert to a Bet.  Fill price is the queue price (order.price),
             # not the opposite-side top — this is the key invariant of passive
             # orders (cheaper than crossing the spread).  Budget unchanged:
@@ -703,6 +728,7 @@ class PassiveOrderBook:
                 pair_id=order.pair_id,
                 tick_index=tick_index,
                 reserved_liability=order.reserved_liability,
+                fill_prob_at_placement=inherited_fill_prob,
             )
             self._bet_manager.bets.append(bet)
 

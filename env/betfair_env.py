@@ -389,6 +389,12 @@ class BetfairEnv(gymnasium.Env):
         # The env itself does NOT use this key — clipping happens
         # downstream of the env's reward output.
         "reward_clip",
+        # Scalping-active-management session 02: auxiliary fill-prob BCE
+        # loss weight, read by PPOTrainer to scale the aux-head gradient.
+        # Whitelisted here (even though the env itself does NOT consume
+        # it) so the gene passthrough path can forward it to the trainer
+        # without the "unknown overrides" debug log firing.
+        "fill_prob_loss_weight",
     })
 
     def __init__(
@@ -830,6 +836,21 @@ class BetfairEnv(gymnasium.Env):
         consumer that needs the full day's bet log (evaluator, replay).
         """
         return list(self._settled_bets)
+
+    def current_runner_to_slot(self) -> dict[int, int]:
+        """Return ``{selection_id: slot_idx}`` for the current race.
+
+        Added for scalping-active-management §02: the PPO trainer needs
+        to map a ``sid`` seen in ``info["action_debug"]`` back to the
+        slot index in the action / ``fill_prob_per_runner`` vectors so
+        the decision-time prediction can be stamped onto the newly-placed
+        ``Bet``. Returns a fresh dict (not a mutable view) so callers
+        can't accidentally corrupt the precomputed mapping. Empty dict
+        when called past the last race.
+        """
+        if 0 <= self._race_idx < len(self._runner_maps):
+            return dict(self._runner_maps[self._race_idx])
+        return {}
 
     def _terminal_obs(self) -> np.ndarray:
         """Return a zero observation for terminal states."""

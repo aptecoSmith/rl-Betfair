@@ -5,6 +5,74 @@ Most recent at the top.
 
 ---
 
+## Session 02 findings (2026-04-16)
+
+- **BCE-with-probabilities beat BCE-with-logits for this shape of
+  problem.** The spec required `PolicyOutput.fill_prob_per_runner` to
+  default to a `0.5`-tensor (the "unsure" prior), which is the
+  probability-space identity, not the logit-space identity (which would
+  be `0.0`). Exposing sigmoid-applied probabilities on the output and
+  using `F.binary_cross_entropy`-style math with an ε-clamp on the
+  predictions gave us: (a) a human-readable `[0, 1]` number written
+  directly into `Bet.fill_prob_at_placement` for UI / calibration plots
+  with no extra sigmoid at the consumer; (b) clean interop with the
+  "default 0.5 = unsure" contract; (c) identical gradient behaviour to
+  the logit variant for the valid `[ε, 1-ε]` range. The marginal
+  numerical-stability edge of `BCEWithLogits` at exact 0 / 1 predictions
+  didn't materialise as a problem — the ε-clamp is enough and the
+  ergonomics won.
+
+- **Rollout label storage: NaN-as-mask beats a separate mask array.**
+  Initial sketch had `Transition.fill_prob_labels` as `(max_runners,)`
+  plus a parallel `Transition.fill_prob_mask` boolean array. Collapsed
+  both into a single float32 array with `NaN` = "no label". Pros:
+  half the memory, no chance of the two arrays drifting out of sync, and
+  `~torch.isnan(labels)` is the one-liner mask inside the BCE helper.
+  Cons: `np.nan` operations need care (`torch.where` to replace NaN
+  before the `log` calls, or `log(NaN)` propagates through the masked
+  cells and poisons the sum). Mitigated by computing `safe_labels =
+  torch.where(mask, labels, zeros)` and multiplying the per-element BCE
+  by `mask.float()` before the sum — so even if the ε-clamp somehow
+  let a NaN through, the mask zero'd it out.
+
+- **`create_policy(name=..., ...)` vs `architecture_name=...`.** First
+  draft of the test helpers called `create_policy(architecture_name=)`
+  — the rollout/evaluator layers name it `architecture_name` as a field
+  on other dataclasses, so the naming was plausible but wrong. The
+  registry function takes `name` positionally. Cost 3 test failures
+  before I re-grepped the signature. Lesson: for helpers I've never
+  personally called before, `grep 'def <name>\\('` the signature
+  before writing the test, not after.
+
+- **`test_gradients_flow_through_actor` was over-broad.** It asserted
+  every non-critic / non-log-std parameter receives gradient from a
+  synthetic `action_mean.sum()` loss. The new `fill_prob_head` is a
+  sibling aux head — by design it gets zero gradient from that loss
+  (hard_constraints §8: shares the backbone, not the actor head).
+  Narrowed the filter to skip `fill_prob_head.*` using the same pattern
+  as the existing `critic` / `action_log_std` exceptions. Future aux
+  heads (risk head in §03) will hit the same skip list.
+
+- **`.detach().cpu().numpy().reshape(-1)` is the safe rollout-capture
+  idiom.** `out.fill_prob_per_runner` is a `(1, max_runners)` tensor on
+  the training device. Flattening to a 1-D numpy array on CPU before
+  the `for sid, entry in action_debug.items()` loop means the
+  per-tick stamp is a plain float read — no accidental device transfer
+  per stamp, no lingering autograd graph, no risk of a stale reference
+  into the training device's scratch buffer. Three independent gotchas
+  avoided by the single idiom.
+
+- **Migration helper vs `strict=False`.** Picked the explicit
+  `migrate_fill_prob_head(state_dict, fresh_policy)` helper over
+  loosening `load_state_dict(strict=False)` for the session-02 keys.
+  `strict=False` would have silently swallowed ANY missing-key error —
+  including future migrations that forgot to run. The helper injects
+  fresh weights for exactly the `fill_prob_head.*` keys and lets
+  strict-load catch everything else. Added cost: one more helper in
+  `policy_network.py`. Added value: audit trail stays intact.
+
+---
+
 ## Session 01 findings (2026-04-16)
 
 - **Re-quote must run OUTSIDE the main per-slot loop.** First

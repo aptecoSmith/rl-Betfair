@@ -4,6 +4,117 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 02 — Fill-probability aux head (2026-04-16)
+
+**Landed.**
+
+- Every policy architecture grows a `fill_prob_head = nn.Linear(backbone,
+  max_runners)`: `PPOLSTMPolicy` / `PPOTimeLSTMPolicy` take `lstm_last`
+  as backbone, `PPOTransformerPolicy` takes the last-tick transformer
+  output `out_last`. Sigmoid applied inside `forward`, so
+  `PolicyOutput.fill_prob_per_runner` is in `[0, 1]` with a same-shape
+  `0.5`-tensor default on the dataclass (stub policies / legacy callers
+  that construct `PolicyOutput` positionally keep working). Head init:
+  orthogonal gain `0.01` on the weight, zeros on the bias — matches the
+  actor-head small-init pattern so predictions start ≈ 0.5 ("unsure").
+  The head shares the backbone, NOT the actor head (hard_constraints §8:
+  conditions on state, not on sampled action).
+- **Capture → attach flow.** In `agents/ppo_trainer.py::_collect_rollout`
+  each tick snapshots the per-runner fill-prob prediction into a numpy
+  array, walks `info["action_debug"]` for `aggressive_placed=True`
+  entries, resolves the slot via a new
+  `BetfairEnv.current_runner_to_slot()` accessor, and stamps
+  `fill_prob_at_placement` on the newest matching `Bet` in
+  `bm.bets`. A `pair_to_transition: dict[pair_id, (tr_idx, slot_idx)]`
+  map records which transition owns each pair's label cell. At episode
+  end the trainer walks `env.all_settled_bets`, groups by `pair_id`
+  (≥2 bets = completed → label `1.0`; 1 bet = naked → label `0.0`),
+  and writes the label into `Transition.fill_prob_labels[slot_idx]`.
+  Pairs still unresolved (e.g. race aborted) stay NaN so the BCE mask
+  rejects them — no fake supervision.
+- **Paired passive inherits the aggressive partner's prediction.**
+  `PassiveOrderBook.on_tick` at fill-time looks up the matching
+  aggressive leg in `bm.bets` by `pair_id` and copies
+  `fill_prob_at_placement` into the newly-created passive `Bet`. Per
+  hard_constraints §10 the value is the decision-time capture, never
+  recomputed later.
+- **BCE aux loss in `_ppo_update`.** A new module-level
+  `_compute_fill_prob_bce(preds, labels)` helper does masked BCE with
+  an ε-clamp (`1e-7`) to avoid `log(0)` on contrived extreme
+  predictions; refactored into a helper so the gradient-direction and
+  zero-loss-on-perfect-predictions tests can exercise it directly.
+  Batch labels are built once at the top of `_ppo_update` from each
+  transition's `fill_prob_labels` (NaN-padded to `(n, max_runners)`),
+  moved to device alongside `obs_batch`, and sliced by `mb_idx` inside
+  the minibatch loop. Aux term is added to the total loss as
+  `self.fill_prob_loss_weight * fill_prob_loss`; the per-update mean is
+  reported in `loss_info["fill_prob_loss"]` so operators see the head's
+  behaviour even when the weight is 0.
+- **Plumbing-off default — reward scale unchanged.**
+  `fill_prob_loss_weight` defaults to `0.0` (read from `hp` first, then
+  `config["reward"]`). With weight `0.0` the aux term contributes
+  exactly nothing to the optimised loss. Verified by
+  `test_fill_prob_weight_zero_is_noop_on_total_loss`. The `raw + shaped
+  ≈ total_reward` invariant still holds — verified by
+  `test_raw_plus_shaped_invariant_still_holds_with_aux_loss` which
+  injects `fill_prob_loss_weight=0.5` via `reward_overrides` and checks
+  the env accumulators are undisturbed.
+- **Gene passthrough.** `fill_prob_loss_weight` added to
+  `agents/ppo_trainer.py::_REWARD_GENE_MAP` and to
+  `env/betfair_env.py::_REWARD_OVERRIDE_KEYS`. Mirrors the `reward_clip`
+  precedent: env never reads the key, but whitelisting suppresses the
+  "unknown overrides" debug log.
+- **Checkpoint back-compat strategy: explicit migration helper.** New
+  `migrate_fill_prob_head(state_dict, fresh_policy)` in
+  `agents/policy_network.py` injects fresh `fill_prob_head.*` weights
+  (cloned off the target policy) into any pre-Session-02 state-dict so
+  `load_state_dict(..., strict=True)` succeeds. Chosen over
+  `strict=False` because strict=False would silently swallow legitimate
+  missing-key errors from unrelated migrations — keeping the session-02
+  migration explicit preserves the audit trail.
+- **`Bet.fill_prob_at_placement: float | None = None`** added
+  (defaults to `None`, so existing positional-arg constructions in tests
+  keep working). Mirrored on
+  `registry/model_store.py::EvaluationBetRecord`. The parquet writer
+  emits the new column; the reader uses a `has_fill_prob` guard in the
+  same style as the existing `has_pair_id` check so older files without
+  the column load with `fill_prob_at_placement=None`.
+  `training/evaluator.py` forwards `bet.fill_prob_at_placement` into
+  each `EvaluationBetRecord`.
+- **Tests.** `TestFillProbHead` class (12 tests) covering: shape / range
+  on all 3 architectures; decision-time stamp onto a placed `Bet`;
+  passive-leg inheritance from the aggressive partner; BCE ≈ 0 on
+  perfect predictions; BCE gradient sign in both directions;
+  `weight=0` noop on total loss; `weight=1` lifts the policy-parameter
+  gradient norm relative to `weight=0`; parquet back-compat on missing
+  column; parquet roundtrip preserving the value; legacy state-dict
+  migration + strict load; raw+shaped invariant with aux weight on;
+  BCE exclusion of NaN-labelled samples. Full suite: `pytest tests/ -q`
+  → **1955 passed, 7 skipped, 1 xpassed**. Net +12 vs Session 01
+  (1943 → 1955).
+- **Incidental fix.** `test_gradients_flow_through_actor` in
+  `tests/test_policy_network.py` was asserting every non-critic /
+  non-log-std parameter receives gradient from `action_mean.sum()`.
+  The new `fill_prob_head` is a sibling aux head — by design it
+  doesn't receive gradient from actor-mean-only loss
+  (hard_constraints §8). Narrowed the filter to skip
+  `fill_prob_head.*` with the same pattern used for `critic` and
+  `action_log_std`.
+
+**Back-compat summary.**
+
+- Scalping OFF or scalping ON without the aux head enabled: byte-
+  identical total loss to Session 01 (`fill_prob_loss_weight` defaults
+  to 0.0, BCE term contributes exactly 0). Reward invariant untouched.
+- Pre-Session-02 checkpoints: strict-loadable after a single call to
+  `migrate_fill_prob_head(state_dict, fresh_policy)`. The
+  `fill_prob_head.*` keys are the only addition; all other parameter
+  shapes are unchanged.
+- Pre-Session-02 parquet files: readable unchanged — the optional
+  column returns `None` per hard_constraints §11.
+
+---
+
 ## 📋 When you open this plan for the first time
 
 Read in order:

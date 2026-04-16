@@ -384,6 +384,11 @@ class TestEvaluationBetsParquet:
             "is_each_way", "each_way_divisor", "number_of_places",
             "settlement_type", "effective_place_odds", "starting_budget",
             "pair_id",
+            # Scalping-active-management §02 — decision-time fill-prob
+            # prediction, nullable float. Reads on older files tolerate
+            # the column being absent (see
+            # ``TestFillProbHead.test_parquet_backcompat_missing_column``).
+            "fill_prob_at_placement",
         }
         assert set(df.columns) == expected_cols
 
