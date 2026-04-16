@@ -54,6 +54,24 @@ interface EwLegs {
  */
 type PairClass = 'locked' | 'neutral' | 'directional' | 'naked';
 
+/**
+ * Confidence-chip bucket for the fill-probability aux head (purpose.md §4).
+ * `null` means the chip is suppressed — either the prediction is missing
+ * (pre-Session-02 bet) or is within ± `CONFIDENCE_NEAR_DEFAULT` of 0.5,
+ * which indicates the aux head hasn't activated yet (playbook Step E).
+ */
+type ConfidenceBucket = 'high' | 'med' | 'low' | null;
+
+/** Thresholds from purpose.md §4 — named so Sessions 05/06 can reference them. */
+export const CONFIDENCE_HIGH_THRESHOLD = 0.7;
+export const CONFIDENCE_MED_THRESHOLD = 0.4;
+/**
+ * Untrained-head guard: until activation_playbook.md Step E lands, the
+ * fill-prob head emits values ≈ 0.5 for every bet. Hiding the chip within
+ * this band keeps noise out of the UI until the head is actually trained.
+ */
+export const CONFIDENCE_NEAR_DEFAULT = 0.02;
+
 const COMMISSION = 0.05;
 
 /** Floor P&L across outcomes for a hedged back/lay pair. */
@@ -471,6 +489,44 @@ export class BetExplorer implements OnInit {
     }
   }
 
+  /** Confidence bucket for a bet's fill-prob prediction; null ⇒ hide chip. */
+  confidenceBucket(bet: ExplorerBet): ConfidenceBucket {
+    return confidenceBucket(bet.fill_prob_at_placement);
+  }
+
+  /** Short label for the confidence chip. */
+  confidenceLabel(b: ConfidenceBucket): string {
+    switch (b) {
+      case 'high': return 'High';
+      case 'med': return 'Med';
+      case 'low': return 'Low';
+      default: return '';
+    }
+  }
+
+  /** Tooltip for the confidence chip — raw predicted fill percentage. */
+  confidenceTooltip(bet: ExplorerBet): string {
+    const p = bet.fill_prob_at_placement;
+    if (p == null) return '';
+    return `${(p * 100).toFixed(1)} % predicted fill rate at placement`;
+  }
+
+  /** Formatted risk tag (`±£X.XX`) or null if either risk field is missing. */
+  riskTag(bet: ExplorerBet): string | null {
+    // Both mean and stddev must be present — a stddev without a mean is
+    // meaningless since the tooltip reports the full distribution.
+    if (bet.predicted_locked_pnl_at_placement == null) return null;
+    return formatRiskTag(bet.predicted_locked_stddev_at_placement);
+  }
+
+  /** Tooltip for the risk tag — predicted locked P&L ± stddev. */
+  riskTooltip(bet: ExplorerBet): string {
+    const mean = bet.predicted_locked_pnl_at_placement;
+    const std = bet.predicted_locked_stddev_at_placement;
+    if (mean == null || std == null) return '';
+    return `Predicted locked P&L: £${mean.toFixed(2)} ± £${std.toFixed(2)} (stddev) at placement.`;
+  }
+
   /** Format EW terms for a race header, e.g. "EW 1/4, 3 places" */
   ewTerms(rg: RaceGroup): string | null {
     if (rg.ewDivisor == null || rg.numberOfPlaces == null) return null;
@@ -509,6 +565,31 @@ export class BetExplorer implements OnInit {
 /** Returns a compact fill-side label for a bet. */
 export function fillSideAnnotation(action: string): string {
   return action === 'back' ? 'L→B' : 'B→L';
+}
+
+/**
+ * Bucket a fill-prob prediction into high/med/low, or null to hide the chip.
+ * Hides for missing predictions and for values within ± CONFIDENCE_NEAR_DEFAULT
+ * of 0.5 (untrained head fallback — see purpose.md §4 and activation_playbook
+ * Step E).
+ */
+export function confidenceBucket(p: number | null | undefined): ConfidenceBucket {
+  if (p == null) return null;
+  if (Math.abs(p - 0.5) < CONFIDENCE_NEAR_DEFAULT) return null;
+  if (p >= CONFIDENCE_HIGH_THRESHOLD) return 'high';
+  if (p >= CONFIDENCE_MED_THRESHOLD) return 'med';
+  return 'low';
+}
+
+/**
+ * Format the risk-tag stddev as `±£X.XX`. Returns null when the stddev is
+ * missing (the tag is suppressed). A non-zero stddev that rounds to £0.00
+ * is rendered as `±£<0.01` so the tag never looks like exact certainty.
+ */
+export function formatRiskTag(stddev: number | null | undefined): string | null {
+  if (stddev == null) return null;
+  if (stddev > 0 && stddev < 0.01) return '±£<0.01';
+  return `±£${stddev.toFixed(2)}`;
 }
 
 export function formatTimeToOff(seconds: number): string {

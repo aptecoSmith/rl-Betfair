@@ -5,6 +5,56 @@ Most recent at the top.
 
 ---
 
+## Session 04 findings (2026-04-16)
+
+- **Untrained aux heads need explicit UI gating, not just a
+  "don't-render-if-null" check.** Before `activation_playbook`
+  Step E, the fill-prob head outputs a non-null value on every
+  bet — it's just always ≈ 0.5 because the weights are zero.
+  Without the ±0.02 near-default band, every row would have
+  rendered a middle-of-the-road "Med" chip during the weeks
+  between Session 02 landing and the activation completing,
+  training operators to ignore it. The fix is data-driven so
+  the switch flips itself: once the head is trained and values
+  spread away from 0.5, chips start appearing. Worth remembering
+  for Session 05 / 06 — any UI that consumes an aux head
+  should hide near the init default, not just on `None`.
+
+- **A UI-only "scope is tight" session still collided with a
+  pre-existing layout bug.** The `$bet-grid` had 11 columns
+  but `.bet-card-main` has been emitting 12 items since
+  Session 01 added the pair-class-badge — the replay button
+  was already wrapping to a second row. Adding the chip + risk
+  tag made 3 items wrap, which was when it became visible. Had
+  to widen the grid to 14 columns mid-session. Lesson: before
+  appending to a grid-based layout, count items vs columns and
+  assume the previous author got the count wrong — it's a
+  silent bug until someone adds one more item.
+
+- **A fixture script that merges into `data/processed/` is a
+  landmine.** The browser-verification fixture wrote synthetic
+  tick rows to `data/processed/2026-03-26.parquet` — which
+  turned out to be a real-extractor file path. My merge logic
+  "preserved" the existing schema only on paper; pandas
+  silently dropped columns my synthetic rows didn't have.
+  `test_real_extraction` then failed on 6 cases because
+  `placed_selection_ids` (and more) had vanished from the
+  shared file. **Next time:** fixtures for browser verification
+  must write to a scratch directory and be deleted after. Never
+  touch `data/processed/`.
+
+- **Question for operators: do they want the chip before
+  activation or not?** The near-default hide rule keeps the
+  UI clean, but an operator who knows the head is pre-
+  activation might actually want to see that it's being
+  queried at all (e.g. a tooltip "untrained — placeholder
+  0.5"). Current implementation hides entirely, which feels
+  right for training-run operators but may need a debug toggle
+  for anyone inspecting mid-training checkpoints. Revisit if
+  Session 05's calibration card surfaces similar gating.
+
+---
+
 ## Session 03 findings (2026-04-16)
 
 - **Clamping log-var at forward-pass boundary beats "let the NLL

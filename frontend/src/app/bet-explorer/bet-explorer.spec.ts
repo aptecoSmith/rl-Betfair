@@ -4,7 +4,15 @@ import { provideHttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { BetExplorer, formatTimeToOff, fillSideAnnotation } from './bet-explorer';
+import {
+  BetExplorer,
+  formatTimeToOff,
+  fillSideAnnotation,
+  confidenceBucket,
+  formatRiskTag,
+  CONFIDENCE_HIGH_THRESHOLD,
+  CONFIDENCE_MED_THRESHOLD,
+} from './bet-explorer';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardResponse, ScoreboardEntry } from '../models/scoreboard.model';
@@ -650,5 +658,204 @@ describe('fillSideAnnotation', () => {
 
   it('returns B→L for a lay bet', () => {
     expect(fillSideAnnotation('lay')).toBe('B→L');
+  });
+});
+
+// ── Session 04: confidence chip + risk tag ──────────────────────────
+
+describe('confidenceBucket', () => {
+  it('returns null when prediction is undefined', () => {
+    expect(confidenceBucket(undefined)).toBeNull();
+  });
+
+  it('returns null when prediction is null', () => {
+    expect(confidenceBucket(null)).toBeNull();
+  });
+
+  it('hides chip within ± 0.02 of 0.5 (untrained-head fallback)', () => {
+    expect(confidenceBucket(0.5)).toBeNull();
+    expect(confidenceBucket(0.49)).toBeNull();
+    expect(confidenceBucket(0.51)).toBeNull();
+    expect(confidenceBucket(0.515)).toBeNull();
+  });
+
+  it('renders as high when fill prob >= 0.7', () => {
+    expect(confidenceBucket(0.7)).toBe('high');
+    expect(confidenceBucket(0.85)).toBe('high');
+    expect(confidenceBucket(1.0)).toBe('high');
+  });
+
+  it('renders as med for 0.4 <= p < 0.7', () => {
+    expect(confidenceBucket(0.4)).toBe('med');
+    expect(confidenceBucket(0.55)).toBe('med');
+    expect(confidenceBucket(0.69)).toBe('med');
+  });
+
+  it('renders as low when fill prob < 0.4', () => {
+    expect(confidenceBucket(0.39)).toBe('low');
+    expect(confidenceBucket(0.3)).toBe('low');
+    expect(confidenceBucket(0.0)).toBe('low');
+  });
+
+  it('exposes the documented thresholds as named exports', () => {
+    expect(CONFIDENCE_HIGH_THRESHOLD).toBe(0.7);
+    expect(CONFIDENCE_MED_THRESHOLD).toBe(0.4);
+  });
+});
+
+describe('formatRiskTag', () => {
+  it('returns null when stddev is missing', () => {
+    expect(formatRiskTag(null)).toBeNull();
+    expect(formatRiskTag(undefined)).toBeNull();
+  });
+
+  it('formats normal stddev as ±£X.XX', () => {
+    expect(formatRiskTag(2.5)).toBe('±£2.50');
+    expect(formatRiskTag(1.25)).toBe('±£1.25');
+    expect(formatRiskTag(10)).toBe('±£10.00');
+  });
+
+  it('formats a 0.005 stddev as ±£<0.01 (avoid spurious ±£0.00)', () => {
+    expect(formatRiskTag(0.005)).toBe('±£<0.01');
+    expect(formatRiskTag(0.001)).toBe('±£<0.01');
+  });
+
+  it('keeps exactly-zero stddev as ±£0.00 (prediction exists, just certain)', () => {
+    // A present-but-zero stddev means the model said "no uncertainty" — we
+    // render that faithfully rather than hiding it behind the <0.01 fallback.
+    expect(formatRiskTag(0)).toBe('±£0.00');
+  });
+});
+
+describe('BetExplorer confidence chip + risk tag rendering', () => {
+  let fixture: ComponentFixture<BetExplorer>;
+  let component: BetExplorer;
+
+  function setup() {
+    TestBed.configureTestingModule({
+      imports: [BetExplorer],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: ApiService, useValue: new MockApiService() },
+      ],
+    });
+    fixture = TestBed.createComponent(BetExplorer);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  }
+
+  function populateAndExpand(bets: ExplorerBet[]) {
+    const resp = makeBetResponse({ bets, total_bets: bets.length });
+    component.betData.set(resp);
+    const venues = new Set<string>();
+    const races = new Set<string>();
+    for (const b of bets) {
+      venues.add(b.venue || 'Unknown');
+      races.add(b.race_id);
+    }
+    component.expandedVenues.set(venues);
+    component.expandedRaces.set(races);
+    fixture.detectChanges();
+  }
+
+  it('hides chip and risk tag when fill_prob is undefined', () => {
+    setup();
+    populateAndExpand([makeBet()]);
+    const chip = fixture.nativeElement.querySelector('[data-testid="confidence-chip"]');
+    const risk = fixture.nativeElement.querySelector('[data-testid="risk-tag"]');
+    expect(chip).toBeFalsy();
+    expect(risk).toBeFalsy();
+  });
+
+  it('hides chip when fill_prob is null', () => {
+    setup();
+    populateAndExpand([makeBet({ fill_prob_at_placement: null })]);
+    const chip = fixture.nativeElement.querySelector('[data-testid="confidence-chip"]');
+    expect(chip).toBeFalsy();
+  });
+
+  it('hides chip when |fill_prob - 0.5| < 0.02 (untrained head)', () => {
+    setup();
+    populateAndExpand([makeBet({ fill_prob_at_placement: 0.505 })]);
+    const chip = fixture.nativeElement.querySelector('[data-testid="confidence-chip"]');
+    expect(chip).toBeFalsy();
+  });
+
+  it('renders a high (green) chip when fill_prob >= 0.7', () => {
+    setup();
+    populateAndExpand([makeBet({ fill_prob_at_placement: 0.85 })]);
+    const chip = fixture.nativeElement.querySelector('[data-testid="confidence-chip"]') as HTMLElement | null;
+    expect(chip).toBeTruthy();
+    expect(chip!.classList.contains('high')).toBe(true);
+    expect(chip!.textContent?.trim()).toBe('High');
+  });
+
+  it('renders a med (amber) chip for 0.4 <= fill_prob < 0.7', () => {
+    setup();
+    populateAndExpand([makeBet({ fill_prob_at_placement: 0.55 })]);
+    const chip = fixture.nativeElement.querySelector('[data-testid="confidence-chip"]') as HTMLElement | null;
+    expect(chip!.classList.contains('med')).toBe(true);
+    expect(chip!.textContent?.trim()).toBe('Med');
+  });
+
+  it('renders a low (red) chip when fill_prob < 0.4', () => {
+    setup();
+    populateAndExpand([makeBet({ fill_prob_at_placement: 0.25 })]);
+    const chip = fixture.nativeElement.querySelector('[data-testid="confidence-chip"]') as HTMLElement | null;
+    expect(chip!.classList.contains('low')).toBe(true);
+    expect(chip!.textContent?.trim()).toBe('Low');
+  });
+
+  it('tooltip shows the raw predicted percentage to one decimal place', () => {
+    setup();
+    populateAndExpand([makeBet({ fill_prob_at_placement: 0.732 })]);
+    const chip = fixture.nativeElement.querySelector('[data-testid="confidence-chip"]') as HTMLElement | null;
+    expect(chip!.getAttribute('title')).toBe('73.2 % predicted fill rate at placement');
+  });
+
+  it('hides risk tag when either risk field is missing', () => {
+    setup();
+    // stddev present but mean missing → hidden
+    populateAndExpand([makeBet({
+      fill_prob_at_placement: 0.85,
+      predicted_locked_stddev_at_placement: 1.25,
+    })]);
+    let risk = fixture.nativeElement.querySelector('[data-testid="risk-tag"]');
+    expect(risk).toBeFalsy();
+
+    // mean present but stddev missing → hidden
+    populateAndExpand([makeBet({
+      fill_prob_at_placement: 0.85,
+      predicted_locked_pnl_at_placement: 3.5,
+    })]);
+    risk = fixture.nativeElement.querySelector('[data-testid="risk-tag"]');
+    expect(risk).toBeFalsy();
+  });
+
+  it('renders risk tag as ±£<0.01 for 0.005 stddev', () => {
+    setup();
+    populateAndExpand([makeBet({
+      fill_prob_at_placement: 0.85,
+      predicted_locked_pnl_at_placement: 0.1,
+      predicted_locked_stddev_at_placement: 0.005,
+    })]);
+    const risk = fixture.nativeElement.querySelector('[data-testid="risk-tag"]') as HTMLElement | null;
+    expect(risk).toBeTruthy();
+    expect(risk!.textContent?.trim()).toBe('±£<0.01');
+  });
+
+  it('renders risk tag as ±£2.50 for a normal stddev', () => {
+    setup();
+    populateAndExpand([makeBet({
+      fill_prob_at_placement: 0.85,
+      predicted_locked_pnl_at_placement: 1.75,
+      predicted_locked_stddev_at_placement: 2.5,
+    })]);
+    const risk = fixture.nativeElement.querySelector('[data-testid="risk-tag"]') as HTMLElement | null;
+    expect(risk!.textContent?.trim()).toBe('±£2.50');
+    expect(risk!.getAttribute('title')).toBe(
+      'Predicted locked P&L: £1.75 ± £2.50 (stddev) at placement.'
+    );
   });
 });

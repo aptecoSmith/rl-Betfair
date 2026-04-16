@@ -291,7 +291,9 @@
 
 // ── Shared grid for column alignment ──
 
-$bet-grid: 3rem 1fr 4.5rem 4.5rem 4.5rem 4rem 2rem 2rem 3.5rem 4.5rem 1.5rem;
+// Grid: action, runner, stake, price, matched, time, fill, type, outcome,
+// pair-class, confidence, risk, pnl, replay.
+$bet-grid: 3rem 1fr 4.5rem 4.5rem 4.5rem 4rem 2rem 2rem 3.5rem 4.5rem 2.5rem 3.75rem 4.5rem 1.5rem;
 
 .bet-card-header {
   display: grid;
@@ -460,6 +462,48 @@ $bet-grid: 3rem 1fr 4.5rem 4.5rem 4.5rem 4rem 2rem 2rem 3.5rem 4.5rem 1.5rem;
     background: rgba(248, 113, 113, 0.1);
     border: 1px solid rgba(248, 113, 113, 0.3);
   }
+}
+
+// Confidence chip — aux-head fill-probability prediction bucketed into
+// high/med/low (thresholds 0.7 / 0.4 from purpose.md §4). Sits next to the
+// pair-class badge; shape matches it so rows stay aligned when the chip is
+// absent (pre-Session-02 bets or untrained-head fallback).
+.confidence-chip {
+  font-weight: 700;
+  font-size: 0.62rem;
+  padding: 0.08rem 0.35rem;
+  border-radius: 3px;
+  text-align: center;
+  letter-spacing: 0.5px;
+
+  &.high {
+    color: #4ade80;
+    background: rgba(74, 222, 128, 0.15);
+    border: 1px solid rgba(74, 222, 128, 0.4);
+  }
+
+  &.med {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.12);
+    border: 1px solid rgba(251, 191, 36, 0.35);
+  }
+
+  &.low {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.35);
+  }
+}
+
+// Risk tag — predicted locked-P&L stddev at placement. Text only, no colour:
+// the confidence chip already carries the semantic weight, so this is purely
+// a numeric uncertainty annotation.
+.risk-tag {
+  font-size: 0.66rem;
+  color: #9ca3af;
+  padding: 0.08rem 0.25rem;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 // Pair-classification counter bar — same styling family as summary-bar

@@ -192,6 +192,9 @@
                       <span class="col-fill">Fill</span>
                       <span class="col-type">Type</span>
                       <span class="col-outcome">Outcome</span>
+                      <span class="col-pair"></span>
+                      <span class="col-chip"></span>
+                      <span class="col-risk"></span>
                       <span class="col-pnl">P&L</span>
                       <span class="col-replay"></span>
                     </div>
@@ -222,6 +225,27 @@
                                 [title]="'Pair classification: ' + pairClassLabel(pairClass(bet))">
                             {{ pairClassLabel(pairClass(bet)) }}
                           </span>
+                          @if (confidenceBucket(bet); as bucket) {
+                            <span class="confidence-chip"
+                                  data-testid="confidence-chip"
+                                  [class.high]="bucket === 'high'"
+                                  [class.med]="bucket === 'med'"
+                                  [class.low]="bucket === 'low'"
+                                  [title]="confidenceTooltip(bet)">
+                              {{ confidenceLabel(bucket) }}
+                            </span>
+                          } @else {
+                            <span class="confidence-chip-placeholder"></span>
+                          }
+                          @if (riskTag(bet); as rt) {
+                            <span class="risk-tag mono"
+                                  data-testid="risk-tag"
+                                  [title]="riskTooltip(bet)">
+                              {{ rt }}
+                            </span>
+                          } @else {
+                            <span class="risk-tag-placeholder"></span>
+                          }
                           <span class="bet-pnl mono" [class.positive]="bet.pnl > 0" [class.negative]="bet.pnl < 0">
                             {{ bet.pnl >= 0 ? '+' : '' }}{{ bet.pnl | number:'1.2-2' }}
                           </span>

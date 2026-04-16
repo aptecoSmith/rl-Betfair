@@ -509,3 +509,83 @@ class TestBetExplorer:
             assert bet["is_each_way"] is True
             assert bet["each_way_divisor"] == 5.0
             assert bet["number_of_places"] == 3
+
+    def test_scalping_aux_head_fields_present(self):
+        """Session 04: `/bets` response includes the three aux-head fields."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            date = "2026-03-26"
+            market_id = "1.111"
+            _create_tick_parquet(tmp, date, {market_id: 5})
+            model_id, _ = _seed_model_with_bets(store, date, market_id)
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+
+            resp = client.get(f"/replay/{model_id}/bets")
+            assert resp.status_code == 200
+            bet = resp.json()["bets"][0]
+            # Fields must be present (even if null) so the frontend can rely
+            # on reading them directly off the response.
+            assert "fill_prob_at_placement" in bet
+            assert "predicted_locked_pnl_at_placement" in bet
+            assert "predicted_locked_stddev_at_placement" in bet
+
+    def test_scalping_aux_head_values_preserved(self):
+        """A record with all three set round-trips through the endpoint."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            date = "2026-03-26"
+            market_id = "1.222"
+            _create_tick_parquet(tmp, date, {market_id: 3})
+
+            mid = store.create_model(0, "ppo_lstm_v1", "Test", {"lr": 0.001})
+            rid = store.create_evaluation_run(mid, "2026-03-25", [date])
+            store.record_evaluation_day(
+                EvaluationDayRecord(
+                    run_id=rid, date=date, day_pnl=3.50, bet_count=1,
+                    winning_bets=1, bet_precision=1.0, pnl_per_bet=3.50,
+                    early_picks=0, profitable=True,
+                )
+            )
+            bets = [
+                EvaluationBetRecord(
+                    run_id=rid, date=date, market_id=market_id,
+                    tick_timestamp="2026-03-26T14:00:05",
+                    seconds_to_off=1795.0, runner_id=101,
+                    runner_name="Fast Horse", action="back",
+                    price=3.5, stake=10.0, matched_size=10.0,
+                    outcome="won", pnl=3.50,
+                    fill_prob_at_placement=0.85,
+                    predicted_locked_pnl_at_placement=3.50,
+                    predicted_locked_stddev_at_placement=1.25,
+                ),
+            ]
+            store.write_bet_logs_parquet(rid, date, bets)
+
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+            resp = client.get(f"/replay/{mid}/bets")
+            assert resp.status_code == 200
+            bet = resp.json()["bets"][0]
+            assert bet["fill_prob_at_placement"] == pytest.approx(0.85)
+            assert bet["predicted_locked_pnl_at_placement"] == pytest.approx(3.50)
+            assert bet["predicted_locked_stddev_at_placement"] == pytest.approx(1.25)
+
+    def test_scalping_aux_head_null_when_missing(self):
+        """Bets without aux-head predictions return null for the three fields."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _create_store(tmp)
+            date = "2026-03-26"
+            market_id = "1.111"
+            _create_tick_parquet(tmp, date, {market_id: 5})
+            # _seed_model_with_bets() writes bets without the new aux-head
+            # fields, so they default to None.
+            model_id, _ = _seed_model_with_bets(store, date, market_id)
+            config = {"paths": {"processed_data": str(Path(tmp) / "processed")}}
+            client = _make_app(store, config)
+
+            resp = client.get(f"/replay/{model_id}/bets")
+            bet = resp.json()["bets"][0]
+            assert bet["fill_prob_at_placement"] is None
+            assert bet["predicted_locked_pnl_at_placement"] is None
+            assert bet["predicted_locked_stddev_at_placement"] is None

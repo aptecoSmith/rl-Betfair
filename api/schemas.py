@@ -281,6 +281,14 @@ class ExplorerBet(BaseModel):
     # Scalping: pair_id links the back/lay legs of a hedged pair.
     # None for non-scalping (naked) bets.
     pair_id: str | None = None
+    # Scalping aux-head predictions at placement time (Sessions 02 + 03).
+    # None for pre-Session-02 bets or bets that didn't produce a prediction
+    # (directional mode, stub tests). Surfaced in the Bet Explorer as a
+    # confidence chip + risk tag; hidden while values are still ≈ 0.5 before
+    # the aux heads activate (activation_playbook.md Step E).
+    fill_prob_at_placement: float | None = None
+    predicted_locked_pnl_at_placement: float | None = None
+    predicted_locked_stddev_at_placement: float | None = None
 
 
 class BetExplorerResponse(BaseModel):

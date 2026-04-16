@@ -21,6 +21,13 @@ export interface ExplorerBet {
   effective_place_odds?: number | null;
   // Scalping: pair_id links back+lay legs of a hedged pair; null for naked bets.
   pair_id?: string | null;
+  // Scalping aux-head predictions at placement time (Sessions 02 + 03).
+  // Null/undefined for pre-Session-02 bets or bets that didn't produce a
+  // prediction. Snake_case mirrors the API; the component reads them directly
+  // from the ExplorerBet to decide whether to show confidence/risk chips.
+  fill_prob_at_placement?: number | null;
+  predicted_locked_pnl_at_placement?: number | null;
+  predicted_locked_stddev_at_placement?: number | null;
 }
 
 export interface BetExplorerResponse {

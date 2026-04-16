@@ -4,6 +4,113 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 04 — Bet Explorer confidence + risk badges (2026-04-16)
+
+**Landed.**
+
+UI-only session. Surfaces the per-`Bet` aux-head predictions
+from Sessions 02 + 03 in the Bet Explorer as a confidence chip
+and a risk tag, one per row, next to the existing pair-class
+badge.
+
+**API contract.**
+
+Three optional fields added to `ExplorerBet` in
+[api/schemas.py:260](../../api/schemas.py) and forwarded from
+`EvaluationBetRecord` in [api/routers/replay.py:139](../../api/routers/replay.py):
+
+- `fill_prob_at_placement: float | None`
+- `predicted_locked_pnl_at_placement: float | None`
+- `predicted_locked_stddev_at_placement: float | None`
+
+All default to `None` so existing clients are unaffected and
+bets written before Session 02 keep returning without these
+fields populated. Confirmed by the three new
+`TestBetExplorer::test_scalping_aux_head_*` tests in
+[tests/test_api_replay.py](../../tests/test_api_replay.py).
+
+**Frontend chip logic.**
+
+Thresholds pinned as named constants in
+[frontend/src/app/bet-explorer/bet-explorer.ts](../../frontend/src/app/bet-explorer/bet-explorer.ts):
+
+- `CONFIDENCE_HIGH_THRESHOLD = 0.7` → green "High" chip.
+- `CONFIDENCE_MED_THRESHOLD = 0.4` → amber "Med" chip for
+  `[0.4, 0.7)`.
+- Below `0.4` → red "Low" chip.
+
+**Near-default hide rule.** When
+`|fillProbAtPlacement − 0.5| < CONFIDENCE_NEAR_DEFAULT` (=
+0.02), the chip is suppressed. This is the untrained-head
+fallback: until `activation_playbook.md` Step E lands and the
+aux heads are actually receiving gradients, every prediction
+is ≈ 0.5 and a chip would be noise. The sunset is explicit:
+once Step E completes, trained predictions move out of the
+band and the chip starts rendering automatically. No code
+change required to flip the switch — it's data-driven.
+
+**Risk tag.** Plain text (no colour), formatted `±£X.XX` with
+two special cases: returns `null` (hides the tag) if either
+`predicted_locked_pnl_at_placement` or
+`predicted_locked_stddev_at_placement` is missing, and
+renders `±£<0.01` for a non-zero stddev that would round to
+`£0.00`. Present-but-zero stddev renders faithfully as
+`±£0.00` (that's the model saying "no uncertainty", not a
+rounding artefact).
+
+**Layout.**
+
+Extended the shared `$bet-grid` from 11 to 14 columns in
+[frontend/src/app/bet-explorer/bet-explorer.scss](../../frontend/src/app/bet-explorer/bet-explorer.scss):
+`… 3.5rem 4.5rem 2.5rem 3.75rem 4.5rem 1.5rem` — slots added
+for pair-class / chip / risk respectively. Rows without a chip
+or risk render a zero-size placeholder span in each slot so
+the P&L and replay columns stay in fixed positions regardless
+of which bets carry predictions. Verified in browser with a
+fabricated fixture exercising all three chip buckets plus the
+hidden-row case.
+
+**Theme parity.** The existing pair-class-badge hard-codes
+colours (no CSS variables exist in the bet-explorer SCSS).
+The new `.confidence-chip` and `.risk-tag` follow the same
+pattern rather than introducing a theming scheme — scope-
+conservative, and anything broader belongs in a dedicated
+theming plan. The dark-only app renders both consistently.
+
+**Tests.**
+
+- Frontend: 10 new cases in
+  [frontend/src/app/bet-explorer/bet-explorer.spec.ts](../../frontend/src/app/bet-explorer/bet-explorer.spec.ts)
+  covering the `confidenceBucket` helper (null / near-default
+  / high / med / low / threshold constants), `formatRiskTag`
+  (missing / normal / near-zero / exactly-zero), and full
+  DOM-level rendering assertions for all six observable
+  states of the chip + risk tag. `ng test --watch=false` →
+  491 passed, 24 skipped.
+- API: 3 new contract tests on `TestBetExplorer`. Full pytest
+  suite → 1971 passed, 7 skipped, 1 xfailed.
+
+**Browser verification.**
+
+Fabricated three bets on a throwaway `SESSION04DEMO` model:
+- `fill_prob=0.85` → green "High" chip, tooltip
+  "85.0 % predicted fill rate at placement", risk tag
+  `±£1.25`, tooltip "Predicted locked P&L: £3.50 ± £1.25 …".
+- `fill_prob=0.30` → red "Low" chip, risk tag `±£0.80`.
+- `fill_prob=None` → no chip, no risk tag; row unchanged
+  from pre-Session-04 appearance.
+
+All three rendered correctly on the Bet Explorer at
+`http://localhost:4202/bets`; the P&L and replay button
+stayed aligned across all three row types thanks to the
+placeholder spans. Fixture + synthetic parquet were cleaned
+up after verification.
+
+**No reward-scale change.** Pure UI session — env, trainer,
+and aux heads all untouched.
+
+---
+
 ## Session 03 — Risk / predicted-variance aux head (2026-04-16)
 
 **Landed.**
