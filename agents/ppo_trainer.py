@@ -138,6 +138,54 @@ def _compute_fill_prob_bce(
     return (per_elem_bce * mask_f).sum() / mask_f.sum()
 
 
+def _compute_risk_nll(
+    means: torch.Tensor,
+    log_vars: torch.Tensor,
+    labels: torch.Tensor,
+) -> torch.Tensor:
+    """Masked Gaussian NLL for the scalping-active-management §03 risk head.
+
+    Parameters
+    ----------
+    means:
+        Predicted locked-P&L means, shape ``(batch, max_runners)``.
+    log_vars:
+        Predicted locked-P&L log-variances, already clamped inside each
+        architecture's ``forward`` so ``exp(log_vars)`` stays finite.
+    labels:
+        Realised ``locked_pnl`` (float £) per pair, same shape. ``NaN``
+        marks "no resolved outcome for this tick-slot" — naked pair or
+        unresolved at episode end — and is masked out.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar NLL averaged over non-NaN label cells. Returns a scalar
+        zero tensor on the same device as ``means`` when every label is
+        NaN (the "no supervision available" case — defensive zero-return
+        mirrors the BCE helper).
+
+    Notes
+    -----
+    The NLL is the Gaussian constant-free form
+    ``0.5 * (log_var + (target - mean)^2 / exp(log_var))``. The
+    ``log(2π)/2`` additive constant is omitted — it does not affect the
+    gradient and its absence gives a clean analytic target for
+    ``test_risk_nll_zero_on_perfect_predictions``. Factored out of
+    :meth:`PPOTrainer._ppo_update` so the session-03 unit tests can
+    exercise it directly (gradient direction, zero loss on perfect
+    predictions, mask-out of unresolved samples).
+    """
+    mask = ~torch.isnan(labels)
+    if not mask.any():
+        return torch.zeros((), device=means.device, dtype=means.dtype)
+    safe_labels = torch.where(mask, labels, torch.zeros_like(labels))
+    inv_var = torch.exp(-log_vars)
+    per_elem = 0.5 * (log_vars + (safe_labels - means).pow(2) * inv_var)
+    mask_f = mask.to(means.dtype)
+    return (per_elem * mask_f).sum() / mask_f.sum()
+
+
 def _signal_bias_for_epoch(
     epoch: int, warmup: int, magnitude: float,
 ) -> float:
@@ -197,6 +245,11 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     # aux loss is plumbed-off and reward scale is unchanged from
     # session 01.
     "fill_prob_loss_weight": ("fill_prob_loss_weight",),
+    # Scalping-active-management session 03: weight on the Gaussian NLL
+    # risk aux loss. Same plumbing-off-by-default contract as
+    # ``fill_prob_loss_weight`` — the env doesn't read it, but the
+    # passthrough whitelist keeps the unknown-key debug log quiet.
+    "risk_loss_weight": ("risk_loss_weight",),
 }
 
 
@@ -255,6 +308,17 @@ class Transition:
     done: bool
     training_reward: float = 0.0
     fill_prob_labels: np.ndarray = field(
+        default_factory=lambda: np.array([np.nan], dtype=np.float32)
+    )
+    # Scalping-active-management §03 — per-slot realised ``locked_pnl``
+    # (float £) of the paired scalp that placed on this tick, parallel
+    # to ``fill_prob_labels``. ``NaN`` means "no resolved outcome" —
+    # either no aggressive placed here, the pair went naked (no
+    # realised locked_pnl to supervise against), or pre-Session-03
+    # rollout data. Masked out of the Gaussian NLL the same way the
+    # fill-prob BCE masks unresolved pairs. Same 1-element NaN default
+    # so directional runs stay cheap.
+    risk_labels: np.ndarray = field(
         default_factory=lambda: np.array([np.nan], dtype=np.float32)
     )
 
@@ -465,6 +529,20 @@ class PPOTrainer:
             hp.get(
                 "fill_prob_loss_weight",
                 config.get("reward", {}).get("fill_prob_loss_weight", 0.0),
+            )
+            or 0.0
+        )
+
+        # Scalping-active-management session 03: Gaussian-NLL weight on
+        # the risk head. Default 0.0 → aux term contributes nothing and
+        # this session's total loss is byte-identical to session 02
+        # when ``fill_prob_loss_weight`` is also 0.0. Same precedence as
+        # the fill-prob knob: hp first (per-agent gene), then
+        # ``config["reward"]["risk_loss_weight"]``, then 0.0.
+        self.risk_loss_weight = float(
+            hp.get(
+                "risk_loss_weight",
+                config.get("reward", {}).get("risk_loss_weight", 0.0),
             )
             or 0.0
         )
@@ -722,6 +800,39 @@ class PPOTrainer:
                 else:
                     fp_per_runner_t = None
 
+                # Scalping-active-management §03: snapshot per-runner
+                # risk-head outputs (mean + stddev) using the same
+                # detach→cpu→numpy idiom. ``stddev = exp(0.5 * log_var)``
+                # is computed once here so the per-tick stamp on ``Bet``
+                # (and, later, parquet consumers) don't need to repeat
+                # the math. The log-var tensor coming out of the head is
+                # already clamped inside ``forward``.
+                risk_mean_tensor = getattr(
+                    out, "predicted_locked_pnl_per_runner", None,
+                )
+                risk_log_var_tensor = getattr(
+                    out, "predicted_locked_log_var_per_runner", None,
+                )
+                risk_mean_t: np.ndarray | None
+                risk_stddev_t: np.ndarray | None
+                if (
+                    risk_mean_tensor is not None
+                    and risk_log_var_tensor is not None
+                    and max_runners is not None
+                    and risk_mean_tensor.numel() >= max_runners
+                    and risk_log_var_tensor.numel() >= max_runners
+                ):
+                    risk_mean_t = (
+                        risk_mean_tensor.detach().cpu().numpy().reshape(-1)
+                    )
+                    risk_stddev_t = np.exp(
+                        0.5 * risk_log_var_tensor
+                        .detach().cpu().numpy().reshape(-1)
+                    )
+                else:
+                    risk_mean_t = None
+                    risk_stddev_t = None
+
                 # Per-transition per-slot label array, filled with NaN;
                 # episode-end backfill will flip the slots that had a
                 # resolved pair outcome.
@@ -729,8 +840,12 @@ class PPOTrainer:
                     labels_arr = np.full(
                         max_runners, np.nan, dtype=np.float32,
                     )
+                    risk_labels_arr = np.full(
+                        max_runners, np.nan, dtype=np.float32,
+                    )
                 else:
                     labels_arr = np.array([np.nan], dtype=np.float32)
+                    risk_labels_arr = np.array([np.nan], dtype=np.float32)
 
                 rollout.append(Transition(
                     obs=obs,
@@ -741,15 +856,17 @@ class PPOTrainer:
                     done=done,
                     training_reward=training_reward,
                     fill_prob_labels=labels_arr,
+                    risk_labels=risk_labels_arr,
                 ))
 
-                # Scalping-active-management §02: stamp the decision-time
-                # fill_prob onto newly-placed aggressive ``Bet`` objects.
-                # The paired passive inherits this later inside
-                # ``PassiveOrderBook.on_tick`` via ``pair_id`` lookup.
-                # Record the pair → (transition, slot) mapping so the
-                # episode-end backfill can write the 0/1 label into the
-                # right cell of ``fill_prob_labels``.
+                # Scalping-active-management §02/§03: stamp the decision-
+                # time aux-head predictions onto newly-placed aggressive
+                # ``Bet`` objects. The paired passive inherits them later
+                # inside ``PassiveOrderBook.on_tick`` via ``pair_id``
+                # lookup. Record the pair → (transition, slot) mapping so
+                # the episode-end backfill can write the 0/1 fill-prob
+                # label and the realised-locked-pnl risk label into the
+                # right cells of ``fill_prob_labels`` / ``risk_labels``.
                 if fp_per_runner_t is not None:
                     action_debug = next_info.get("action_debug", {})
                     bm = getattr(env, "bet_manager", None)
@@ -766,6 +883,18 @@ class PPOTrainer:
                             ):
                                 continue
                             fp_val = float(fp_per_runner_t[slot_idx])
+                            risk_mean_val: float | None = (
+                                float(risk_mean_t[slot_idx])
+                                if risk_mean_t is not None
+                                and slot_idx < risk_mean_t.shape[0]
+                                else None
+                            )
+                            risk_stddev_val: float | None = (
+                                float(risk_stddev_t[slot_idx])
+                                if risk_stddev_t is not None
+                                and slot_idx < risk_stddev_t.shape[0]
+                                else None
+                            )
                             # Newest matching Bet — scan backwards so we
                             # pick up the one just placed this tick.
                             for bet in reversed(bm.bets):
@@ -774,6 +903,12 @@ class PPOTrainer:
                                     and bet.fill_prob_at_placement is None
                                 ):
                                     bet.fill_prob_at_placement = fp_val
+                                    bet.predicted_locked_pnl_at_placement = (
+                                        risk_mean_val
+                                    )
+                                    bet.predicted_locked_stddev_at_placement = (
+                                        risk_stddev_val
+                                    )
                                     if bet.pair_id is not None:
                                         pair_to_transition[bet.pair_id] = (
                                             transition_idx, slot_idx,
@@ -800,32 +935,64 @@ class PPOTrainer:
                 obs = next_obs
                 info = next_info
 
-        # Scalping-active-management §02: episode-end label backfill.
+        # Scalping-active-management §02/§03: episode-end label backfill.
         # Classify each pair that placed an aggressive leg this episode:
         # a pair with ≥2 settled bets (aggressive + passive) completed
-        # before race-off → label 1.0; a pair with only the aggressive
-        # leg went naked → label 0.0. Bets appear in
-        # ``env.all_settled_bets`` across races, so this is the correct
-        # source (per CLAUDE.md "realised_pnl is last-race-only"). When
-        # ``pair_to_transition`` is empty (directional run or no
-        # aggressives placed), this loop is a no-op.
+        # before race-off → fill-prob label 1.0 + risk label = realised
+        # locked_pnl; a pair with only the aggressive leg went naked →
+        # fill-prob label 0.0 + risk label stays NaN (no realised
+        # locked_pnl defined for a naked pair — the NLL mask rejects it).
+        # Bets appear in ``env.all_settled_bets`` across races, so this
+        # is the correct source (per CLAUDE.md "realised_pnl is last-
+        # race-only"). When ``pair_to_transition`` is empty (directional
+        # run or no aggressives placed), this loop is a no-op.
         if pair_to_transition:
-            pair_counts: Counter[str] = Counter(
-                b.pair_id
-                for b in env.all_settled_bets
-                if b.pair_id is not None
-            )
+            pair_bets: dict[str, list] = {}
+            for b in env.all_settled_bets:
+                if b.pair_id is not None:
+                    pair_bets.setdefault(b.pair_id, []).append(b)
             for pair_id, (tr_idx, slot_idx) in pair_to_transition.items():
-                count = pair_counts.get(pair_id, 0)
+                legs = pair_bets.get(pair_id, [])
+                count = len(legs)
                 if count <= 0:
                     # Defensive: aggressive never landed in all_settled_bets
-                    # (e.g. the race was aborted). Leave label as NaN so
-                    # the BCE mask rejects it — no fake supervision.
+                    # (e.g. the race was aborted). Leave labels as NaN so
+                    # the BCE / NLL masks reject them — no fake supervision.
                     continue
-                if 0 <= tr_idx < len(rollout.transitions):
-                    labels = rollout.transitions[tr_idx].fill_prob_labels
-                    if slot_idx < labels.shape[0]:
-                        labels[slot_idx] = 1.0 if count >= 2 else 0.0
+                if not (0 <= tr_idx < len(rollout.transitions)):
+                    continue
+                tr = rollout.transitions[tr_idx]
+                if slot_idx < tr.fill_prob_labels.shape[0]:
+                    tr.fill_prob_labels[slot_idx] = 1.0 if count >= 2 else 0.0
+                # Risk label: realised ``locked_pnl`` of the completed
+                # pair. Inline the same math
+                # ``BetManager.get_paired_positions`` uses so we don't
+                # need a per-market BetManager here (races share
+                # ``env.all_settled_bets`` but their fresh-per-race
+                # BetManagers are gone by the time this backfills). Only
+                # completed pairs (both legs) contribute — naked pairs
+                # have no realised locked_pnl to supervise against.
+                if count >= 2 and slot_idx < tr.risk_labels.shape[0]:
+                    from env.bet_manager import BetSide as _BetSide
+                    backs = [b for b in legs if b.side is _BetSide.BACK]
+                    lays = [b for b in legs if b.side is _BetSide.LAY]
+                    if backs and lays:
+                        back = max(backs, key=lambda b: b.average_price)
+                        lay = min(lays, key=lambda b: b.average_price)
+                        commission = 0.05
+                        win_pnl = (
+                            back.matched_stake
+                            * (back.average_price - 1.0)
+                            * (1.0 - commission)
+                            - lay.matched_stake
+                            * (lay.average_price - 1.0)
+                        )
+                        lose_pnl = (
+                            -back.matched_stake
+                            + lay.matched_stake * (1.0 - commission)
+                        )
+                        locked = max(0.0, min(win_pnl, lose_pnl))
+                        tr.risk_labels[slot_idx] = float(locked)
 
         rollout_elapsed = time.perf_counter() - rollout_start
         logger.info(
@@ -937,29 +1104,43 @@ class PPOTrainer:
             fp_labels_np = np.stack(
                 [t.fill_prob_labels[:1] for t in transitions], axis=0,
             ).astype(np.float32)
+            # Scalping-active-management §03 — same width-1 fallback for
+            # the realised-locked-pnl labels that feed the risk NLL.
+            risk_labels_np = np.stack(
+                [t.risk_labels[:1] for t in transitions], axis=0,
+            ).astype(np.float32)
         else:
             fp_labels_np = np.full(
+                (n, fp_max_runners), np.nan, dtype=np.float32,
+            )
+            risk_labels_np = np.full(
                 (n, fp_max_runners), np.nan, dtype=np.float32,
             )
             for i, t in enumerate(transitions):
                 src = t.fill_prob_labels
                 w = min(src.shape[0], fp_max_runners)
                 fp_labels_np[i, :w] = src[:w]
+                r_src = t.risk_labels
+                r_w = min(r_src.shape[0], fp_max_runners)
+                risk_labels_np[i, :r_w] = r_src[:r_w]
 
         if self.device != "cpu":
             obs_pin = torch.from_numpy(obs_np).pin_memory()
             action_pin = torch.from_numpy(action_np).pin_memory()
             lp_pin = torch.from_numpy(lp_np).pin_memory()
             fp_pin = torch.from_numpy(fp_labels_np).pin_memory()
+            risk_pin = torch.from_numpy(risk_labels_np).pin_memory()
             obs_batch = obs_pin.to(self.device, non_blocking=True)
             action_batch = action_pin.to(self.device, non_blocking=True)
             old_log_probs = lp_pin.to(self.device, non_blocking=True)
             fp_labels_batch = fp_pin.to(self.device, non_blocking=True)
+            risk_labels_batch = risk_pin.to(self.device, non_blocking=True)
         else:
             obs_batch = torch.from_numpy(obs_np)
             action_batch = torch.from_numpy(action_np)
             old_log_probs = torch.from_numpy(lp_np)
             fp_labels_batch = torch.from_numpy(fp_labels_np)
+            risk_labels_batch = torch.from_numpy(risk_labels_np)
 
         advantages, returns = self._compute_advantages(rollout)
         advantages = advantages.to(self.device)
@@ -975,6 +1156,7 @@ class PPOTrainer:
         value_losses = []
         entropies = []
         fill_prob_losses: list[float] = []
+        risk_losses: list[float] = []
         # Session 2: accumulate per-head entropy contributions across the
         # mini-batch loop so we can push a single average-per-head sample
         # to the rolling window at the end of this update. Only heads
@@ -1067,15 +1249,42 @@ class PPOTrainer:
                     # default fill_prob_per_runner) — no aux loss.
                     fill_prob_loss = torch.zeros((), device=mb_obs.device)
 
-                # Total loss. ``fill_prob_loss_weight`` defaults to 0.0
-                # so the added term is exactly 0 and this session's loss
-                # is numerically identical to session 01 (verified by
-                # ``test_fill_prob_weight_zero_is_noop_on_total_loss``).
+                # Scalping-active-management §03: auxiliary Gaussian NLL
+                # loss on the risk head. Same shape contract as the
+                # fill-prob aux loss — unresolved slots (NaN labels) are
+                # masked out by :func:`_compute_risk_nll`, and a shape
+                # mismatch (stub policy with default zero-tensors) means
+                # this session's aux loss contributes zero.
+                risk_mean_preds = getattr(
+                    out, "predicted_locked_pnl_per_runner", None,
+                )
+                risk_log_var_preds = getattr(
+                    out, "predicted_locked_log_var_per_runner", None,
+                )
+                mb_risk_labels = risk_labels_batch[mb_idx]
+                if (
+                    risk_mean_preds is not None
+                    and risk_log_var_preds is not None
+                    and risk_mean_preds.shape == mb_risk_labels.shape
+                    and risk_log_var_preds.shape == mb_risk_labels.shape
+                ):
+                    risk_loss = _compute_risk_nll(
+                        risk_mean_preds, risk_log_var_preds, mb_risk_labels,
+                    )
+                else:
+                    risk_loss = torch.zeros((), device=mb_obs.device)
+
+                # Total loss. Both aux weights default to 0.0 so the
+                # added terms are exactly 0 and this session's loss is
+                # numerically identical to session 02 when both weights
+                # are 0 (verified by
+                # ``test_risk_weight_zero_is_noop_on_total_loss``).
                 loss = (
                     policy_loss
                     + self.value_loss_coeff * value_loss
                     - self.entropy_coeff * entropy
                     + self.fill_prob_loss_weight * fill_prob_loss
+                    + self.risk_loss_weight * risk_loss
                 )
 
                 self.optimiser.zero_grad()
@@ -1089,6 +1298,7 @@ class PPOTrainer:
                 value_losses.append(float(value_loss.item()))
                 entropies.append(float(entropy.item()))
                 fill_prob_losses.append(float(fill_prob_loss.item()))
+                risk_losses.append(float(risk_loss.item()))
 
         ppo_elapsed = time.perf_counter() - ppo_start
         n_updates = len(policy_losses)
@@ -1118,6 +1328,12 @@ class PPOTrainer:
             "fill_prob_loss": (
                 float(np.mean(fill_prob_losses))
                 if fill_prob_losses else 0.0
+            ),
+            # Scalping-active-management §03 diagnostic: same pattern —
+            # pre-weight Gaussian NLL on the risk head, always emitted.
+            "risk_loss": (
+                float(np.mean(risk_losses))
+                if risk_losses else 0.0
             ),
             "action_stats": action_stats,
         }

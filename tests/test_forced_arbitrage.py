@@ -1712,3 +1712,542 @@ class TestFillProbHead:
         loss_a = _compute_fill_prob_bce(preds_a, labels)
         loss_b = _compute_fill_prob_bce(preds_b, labels)
         assert loss_a.item() == pytest.approx(loss_b.item(), abs=1e-7)
+
+
+# ── Scalping-active-management session 03: risk / predicted-variance head ──
+
+
+def _run_ppo_with_risk_and_measure(
+    scalping_config: dict,
+    *,
+    fill_prob_weight: float,
+    risk_weight: float,
+    assert_eq: bool,
+) -> float:
+    """Run one PPO update with both aux weights set; return grad norm.
+
+    Shared by ``TestRiskHead`` tests 6 (``risk_weight=0`` noop) and 7
+    (``risk_weight=1`` grad-norm lift). Mirrors ``_run_ppo_and_measure``
+    but populates a non-NaN ``risk_labels`` on some transitions so the
+    NLL term has gradient when ``risk_weight > 0``.
+    """
+    import numpy as np
+    import torch
+    from agents.architecture_registry import create_policy
+    from agents.ppo_trainer import PPOTrainer, Rollout, Transition
+
+    cfg = dict(scalping_config)
+    hp = {
+        "lstm_hidden_size": 16, "mlp_hidden_size": 8, "mlp_layers": 1,
+        "learning_rate": 1e-4, "gamma": 0.99, "gae_lambda": 0.95,
+        "ppo_clip_epsilon": 0.2, "entropy_coefficient": 0.01,
+        "value_loss_coeff": 0.5, "max_grad_norm": 1e9,
+        "ppo_epochs": 1, "mini_batch_size": 4,
+        "fill_prob_loss_weight": fill_prob_weight,
+        "risk_loss_weight": risk_weight,
+    }
+    env_probe = BetfairEnv(_make_day(n_races=1), cfg)
+    obs_dim = int(env_probe.observation_space.shape[0])
+    action_dim = int(env_probe.action_space.shape[0])
+    max_runners = env_probe.max_runners
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+    policy = create_policy(
+        name="ppo_lstm_v1",
+        obs_dim=obs_dim, action_dim=action_dim,
+        max_runners=max_runners, hyperparams=hp,
+    )
+    trainer = PPOTrainer(policy=policy, config=cfg, hyperparams=hp)
+
+    rng = np.random.default_rng(0)
+    rollout = Rollout()
+    for i in range(8):
+        obs_i = rng.standard_normal(obs_dim).astype(np.float32)
+        action_i = rng.standard_normal(action_dim).astype(np.float32)
+        fp_labels = np.full(max_runners, np.nan, dtype=np.float32)
+        risk_labels = np.full(max_runners, np.nan, dtype=np.float32)
+        if i % 2 == 0:
+            # Resolved-pair slot: fill-prob completed + realised locked_pnl.
+            fp_labels[0] = 1.0 if i % 4 == 0 else 0.0
+            risk_labels[0] = float(rng.uniform(-5.0, 5.0))
+        rollout.append(Transition(
+            obs=obs_i, action=action_i,
+            log_prob=-1.0, value=0.0,
+            reward=float(rng.standard_normal()),
+            done=(i == 7),
+            training_reward=0.0,
+            fill_prob_labels=fp_labels,
+            risk_labels=risk_labels,
+        ))
+
+    loss_info = trainer._ppo_update(rollout)
+
+    grad_sq_sum = 0.0
+    for p in policy.parameters():
+        if p.grad is not None:
+            grad_sq_sum += float(p.grad.detach().pow(2).sum().item())
+    grad_norm = grad_sq_sum ** 0.5
+
+    if assert_eq:
+        pl = loss_info["policy_loss"]
+        vl = loss_info["value_loss"]
+        ent = loss_info["entropy"]
+        fp = loss_info["fill_prob_loss"]
+        risk = loss_info["risk_loss"]
+        expected = (
+            pl + trainer.value_loss_coeff * vl - trainer.entropy_coeff * ent
+            + trainer.fill_prob_loss_weight * fp
+        )
+        total_with_risk = expected + trainer.risk_loss_weight * risk
+        assert total_with_risk == pytest.approx(expected, abs=1e-7)
+
+    return grad_norm
+
+
+class TestRiskHead:
+    """Risk / predicted-variance auxiliary head (scalping-active-management §03).
+
+    Plumbing-off by default (``risk_loss_weight=0.0``). Each test pins one
+    invariant: shape / clamp band, decision-time capture, passive-leg
+    inheritance, NLL on perfect predictions, NLL gradient direction,
+    weight=0 noop, weight>0 grad-norm lift, parquet back-compat + roundtrip,
+    checkpoint back-compat, raw+shaped reward invariant, unresolved-sample
+    exclusion, and log-var clamp enforcement inside ``forward``.
+    """
+
+    @staticmethod
+    def _small_hp() -> dict:
+        return {
+            "lstm_hidden_size": 32,
+            "mlp_hidden_size": 16,
+            "mlp_layers": 1,
+            "transformer_heads": 2,
+            "transformer_depth": 1,
+            "transformer_ctx_ticks": 8,
+        }
+
+    # ── 1. Shape + clamp-band range across all 3 architectures. ─────────
+
+    def test_risk_output_shape_and_range(self, scalping_config):
+        import torch
+        from agents.policy_network import (
+            PPOLSTMPolicy,
+            PPOTimeLSTMPolicy,
+            PPOTransformerPolicy,
+            RISK_LOG_VAR_MAX,
+            RISK_LOG_VAR_MIN,
+        )
+
+        env = BetfairEnv(_make_day(n_races=1), scalping_config)
+        obs_dim = int(env.observation_space.shape[0])
+        max_runners = env.max_runners
+        action_dim = int(env.action_space.shape[0])
+        hp = self._small_hp()
+
+        for cls in (PPOLSTMPolicy, PPOTimeLSTMPolicy, PPOTransformerPolicy):
+            net = cls(
+                obs_dim=obs_dim, action_dim=action_dim,
+                max_runners=max_runners, hyperparams=hp,
+            )
+            obs = torch.zeros(3, obs_dim, dtype=torch.float32)
+            out = net(obs)
+            assert out.predicted_locked_pnl_per_runner.shape == (
+                3, max_runners,
+            ), f"{cls.__name__}: bad mean shape"
+            assert out.predicted_locked_log_var_per_runner.shape == (
+                3, max_runners,
+            ), f"{cls.__name__}: bad log-var shape"
+            lv = out.predicted_locked_log_var_per_runner
+            assert torch.all(lv >= RISK_LOG_VAR_MIN), (
+                f"{cls.__name__}: log_var below clamp min"
+            )
+            assert torch.all(lv <= RISK_LOG_VAR_MAX), (
+                f"{cls.__name__}: log_var above clamp max"
+            )
+
+    # ── 2. Decision-time capture stamps risk fields on the Bet. ─────────
+
+    def test_risk_recorded_on_bet_at_placement(self, scalping_config):
+        import numpy as np
+        import torch
+        from agents.architecture_registry import create_policy
+
+        cfg = dict(scalping_config)
+        hp = self._small_hp()
+        day = _make_day(n_races=1, n_pre_ticks=3, n_inplay_ticks=1)
+        env = BetfairEnv(day, cfg)
+        obs, _ = env.reset()
+        policy = create_policy(
+            name="ppo_lstm_v1",
+            obs_dim=int(env.observation_space.shape[0]),
+            action_dim=int(env.action_space.shape[0]),
+            max_runners=env.max_runners,
+            hyperparams=hp,
+        )
+
+        obs_tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            out = policy(obs_tensor)
+        risk_mean = (
+            out.predicted_locked_pnl_per_runner.detach()
+            .cpu().numpy().reshape(-1)
+        )
+        risk_stddev = np.exp(
+            0.5 * out.predicted_locked_log_var_per_runner.detach()
+            .cpu().numpy().reshape(-1)
+        )
+        fp = out.fill_prob_per_runner.detach().cpu().numpy().reshape(-1)
+
+        a = _scalping_action(signal=1.0, stake=-0.8, aggression=1.0)
+        _, _, _, _, info = env.step(a)
+
+        sid_to_slot = env.current_runner_to_slot()
+        bm = env.bet_manager
+        for sid, entry in info.get("action_debug", {}).items():
+            if not entry.get("aggressive_placed", False):
+                continue
+            slot_idx = sid_to_slot.get(sid)
+            if slot_idx is None:
+                continue
+            fp_val = float(fp[slot_idx])
+            risk_mean_val = float(risk_mean[slot_idx])
+            risk_stddev_val = float(risk_stddev[slot_idx])
+            for bet in reversed(bm.bets):
+                if (
+                    bet.selection_id == sid
+                    and bet.fill_prob_at_placement is None
+                ):
+                    bet.fill_prob_at_placement = fp_val
+                    bet.predicted_locked_pnl_at_placement = risk_mean_val
+                    bet.predicted_locked_stddev_at_placement = risk_stddev_val
+                    break
+
+        stamped = [
+            b for b in bm.bets
+            if b.predicted_locked_pnl_at_placement is not None
+        ]
+        assert stamped, "expected at least one Bet with risk fields stamped"
+        for b in stamped:
+            # Mean is any float; stddev must be strictly positive.
+            assert isinstance(b.predicted_locked_pnl_at_placement, float)
+            assert b.predicted_locked_stddev_at_placement is not None
+            assert b.predicted_locked_stddev_at_placement > 0.0
+
+    # ── 3. Paired passive inherits risk fields from the aggressive. ─────
+
+    def test_risk_inherited_by_paired_passive(self):
+        from env.bet_manager import BetManager, BetSide, PassiveOrder
+
+        bm = BetManager(starting_budget=1000.0)
+        agg = bm.place_back(
+            _make_runner_snap(101, ltp=4.0, back_price=4.0,
+                              lay_price=4.1, size=200.0),
+            stake=10.0, market_id="m1", pair_id="pair-risk",
+        )
+        assert agg is not None
+        agg.fill_prob_at_placement = 0.62
+        agg.predicted_locked_pnl_at_placement = 1.25
+        agg.predicted_locked_stddev_at_placement = 0.8
+
+        order = PassiveOrder(
+            selection_id=101,
+            side=BetSide.LAY,
+            price=4.1,
+            requested_stake=10.0,
+            queue_ahead_at_placement=0.0,
+            placed_tick_index=0,
+            market_id="m1",
+            ltp_at_placement=4.0,
+            pair_id="pair-risk",
+            reserved_liability=0.0,
+        )
+        book = bm.passive_book
+        book._orders.append(order)
+        book._orders_by_sid.setdefault(101, []).append(order)
+
+        class _Runner:
+            selection_id = 101
+            total_matched = 1000.0
+            available_to_back: list = []
+            available_to_lay: list = []
+            last_traded_price = 4.0
+            status = "ACTIVE"
+
+        class _Tick:
+            runners = [_Runner()]
+
+        book.on_tick(_Tick(), tick_index=1)  # type: ignore[arg-type]
+
+        passive_bets = [
+            b for b in bm.bets
+            if b.side == BetSide.LAY and b.pair_id == "pair-risk"
+        ]
+        assert len(passive_bets) == 1
+        p = passive_bets[0]
+        assert p.predicted_locked_pnl_at_placement == pytest.approx(1.25)
+        assert p.predicted_locked_stddev_at_placement == pytest.approx(0.8)
+
+    # ── 4. NLL analytic value on perfect predictions + clamp-min log_var.
+
+    def test_risk_nll_zero_on_perfect_predictions(self):
+        import torch
+        from agents.policy_network import RISK_LOG_VAR_MIN
+        from agents.ppo_trainer import _compute_risk_nll
+
+        means = torch.tensor([[1.0, -2.0]], dtype=torch.float32)
+        log_vars = torch.full(
+            (1, 2), float(RISK_LOG_VAR_MIN), dtype=torch.float32,
+        )
+        labels = torch.tensor([[1.0, -2.0]], dtype=torch.float32)
+
+        loss = _compute_risk_nll(means, log_vars, labels)
+        # NLL per element = 0.5 * (log_var + 0 / exp(log_var))
+        #                 = 0.5 * RISK_LOG_VAR_MIN
+        expected = 0.5 * RISK_LOG_VAR_MIN
+        assert loss.item() == pytest.approx(expected, abs=1e-5)
+
+    # ── 5. NLL gradient direction for a contrived bad prediction. ───────
+
+    def test_risk_nll_gradient_direction(self):
+        import torch
+        from agents.ppo_trainer import _compute_risk_nll
+
+        # mean=5.0, target=0.0, log_var=0.0. NLL wrt mean should be
+        # positive (push mean DOWN); wrt log_var should be negative
+        # (widen variance to explain the 5.0 residual).
+        mean = torch.tensor([[5.0]], requires_grad=True)
+        log_var = torch.tensor([[0.0]], requires_grad=True)
+        label = torch.tensor([[0.0]], dtype=torch.float32)
+
+        loss = _compute_risk_nll(mean, log_var, label)
+        loss.backward()
+        assert mean.grad is not None and mean.grad.item() > 0.0
+        assert log_var.grad is not None and log_var.grad.item() < 0.0
+
+    # ── 6. weight=0 makes total loss byte-identical to session 02. ──────
+
+    def test_risk_weight_zero_is_noop_on_total_loss(self, scalping_config):
+        _run_ppo_with_risk_and_measure(
+            scalping_config,
+            fill_prob_weight=0.0, risk_weight=0.0, assert_eq=True,
+        )
+
+    # ── 7. weight=1 lifts the total-param gradient norm. ────────────────
+
+    def test_risk_weight_positive_changes_gradient_norm(self, scalping_config):
+        gn_off = _run_ppo_with_risk_and_measure(
+            scalping_config,
+            fill_prob_weight=0.0, risk_weight=0.0, assert_eq=False,
+        )
+        gn_on = _run_ppo_with_risk_and_measure(
+            scalping_config,
+            fill_prob_weight=0.0, risk_weight=1.0, assert_eq=False,
+        )
+        assert gn_on > gn_off, (
+            f"risk weight=1 did not lift grad norm "
+            f"(off={gn_off:.6f}, on={gn_on:.6f})"
+        )
+
+    # ── 8. Parquet reader tolerates absence of the new columns. ─────────
+
+    def test_risk_parquet_backcompat_missing_columns(self, tmp_path):
+        import pandas as pd
+        from registry.model_store import EvaluationBetRecord, ModelStore
+
+        store = ModelStore(
+            db_path=tmp_path / "m.db",
+            weights_dir=tmp_path / "w",
+            bet_logs_dir=tmp_path / "b",
+        )
+        rec = EvaluationBetRecord(
+            run_id="r1", date="2026-04-17", market_id="m1",
+            tick_timestamp="t", seconds_to_off=10.0, runner_id=101,
+            runner_name="A", action="back", price=4.0, stake=10.0,
+            matched_size=10.0, outcome="won", pnl=3.0,
+            predicted_locked_pnl_at_placement=2.5,
+            predicted_locked_stddev_at_placement=1.5,
+        )
+        path = store.write_bet_logs_parquet("r1", "2026-04-17", [rec])
+        assert path is not None and path.exists()
+
+        # Strip both risk columns → simulates a pre-Session-03 file.
+        df = pd.read_parquet(path)
+        df = df.drop(columns=[
+            "predicted_locked_pnl_at_placement",
+            "predicted_locked_stddev_at_placement",
+        ])
+        df.to_parquet(path, index=False)
+
+        loaded = store.get_evaluation_bets("r1")
+        assert len(loaded) == 1
+        assert loaded[0].predicted_locked_pnl_at_placement is None
+        assert loaded[0].predicted_locked_stddev_at_placement is None
+
+    # ── 9. Parquet roundtrip preserves the new columns. ─────────────────
+
+    def test_risk_parquet_roundtrip(self, tmp_path):
+        from registry.model_store import EvaluationBetRecord, ModelStore
+
+        store = ModelStore(
+            db_path=tmp_path / "m.db",
+            weights_dir=tmp_path / "w",
+            bet_logs_dir=tmp_path / "b",
+        )
+        rec = EvaluationBetRecord(
+            run_id="r2", date="2026-04-17", market_id="m1",
+            tick_timestamp="t", seconds_to_off=10.0, runner_id=101,
+            runner_name="A", action="back", price=4.0, stake=10.0,
+            matched_size=10.0, outcome="won", pnl=3.0,
+            predicted_locked_pnl_at_placement=1.23,
+            predicted_locked_stddev_at_placement=2.5,
+        )
+        store.write_bet_logs_parquet("r2", "2026-04-17", [rec])
+        loaded = store.get_evaluation_bets("r2")
+        assert len(loaded) == 1
+        assert loaded[0].predicted_locked_pnl_at_placement == pytest.approx(
+            1.23,
+        )
+        assert loaded[0].predicted_locked_stddev_at_placement == pytest.approx(
+            2.5,
+        )
+
+    # ── 10. Legacy state-dict loads via migrate_risk_head. ──────────────
+
+    def test_legacy_checkpoint_loads_with_risk_head(self):
+        import torch
+        from agents.policy_network import (
+            PPOLSTMPolicy,
+            migrate_risk_head,
+        )
+
+        hp = self._small_hp()
+        new_net = PPOLSTMPolicy(
+            obs_dim=32, action_dim=14 * 6, max_runners=14, hyperparams=hp,
+        )
+
+        # Pre-Session-03 state-dict → drop only the risk_head.* keys.
+        # The fill_prob_head.* keys are present (Session 02 landed them).
+        legacy_state = {
+            k: v.clone() for k, v in new_net.state_dict().items()
+            if not k.startswith("risk_head.")
+        }
+        assert "risk_head.weight" not in legacy_state
+        assert "risk_head.bias" not in legacy_state
+
+        target = PPOLSTMPolicy(
+            obs_dim=32, action_dim=14 * 6, max_runners=14, hyperparams=hp,
+        )
+        with pytest.raises(RuntimeError):
+            target.load_state_dict(legacy_state, strict=True)
+
+        migrated = migrate_risk_head(legacy_state, target)
+        missing, unexpected = target.load_state_dict(migrated, strict=True)
+        assert missing == []
+        assert unexpected == []
+
+        # Fresh-init contract: weight non-zero (orthogonal gain=0.01),
+        # bias zero.
+        assert target.risk_head.weight.abs().sum().item() > 0.0
+        assert torch.allclose(
+            target.risk_head.bias,
+            torch.zeros_like(target.risk_head.bias),
+        )
+
+    # ── 11. raw + shaped invariant holds with risk weight > 0 on env. ───
+
+    def test_raw_plus_shaped_invariant_still_holds_with_risk_loss(
+        self, scalping_config,
+    ):
+        """``risk_loss_weight`` is a TRAINER knob; env whitelisting must
+        leave the reward accumulators alone. Same invariant as the
+        Session-02 equivalent, with both aux weights threaded through
+        ``reward_overrides``.
+        """
+        cfg = dict(scalping_config)
+        cfg["reward"] = dict(cfg["reward"])
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=5, n_inplay_ticks=2), cfg,
+            reward_overrides={
+                "fill_prob_loss_weight": 0.5,
+                "risk_loss_weight": 0.5,
+            },
+        )
+        env.reset()
+
+        a = _scalping_action(
+            signal=1.0, stake=-0.8, aggression=1.0,
+            arb_spread=0.2, requote=1.0,
+        )
+        total_reward = 0.0
+        terminated = False
+        info: dict = {}
+        while not terminated:
+            _, r, terminated, _, info = env.step(a)
+            total_reward += r
+
+        assert total_reward == pytest.approx(
+            info["raw_pnl_reward"] + info["shaped_bonus"], abs=1e-6,
+        )
+
+    # ── 12. Unresolved (NaN) samples don't contribute to the NLL. ───────
+
+    def test_risk_excluded_from_loss_when_outcome_unresolved(self):
+        import torch
+        from agents.ppo_trainer import _compute_risk_nll
+
+        means_a = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+        means_b = torch.tensor([[1.0, 9.0]], dtype=torch.float32)  # slot 1 moved
+        log_vars = torch.zeros((1, 2), dtype=torch.float32)
+        labels = torch.tensor(
+            [[0.5, float("nan")]], dtype=torch.float32,
+        )
+
+        loss_a = _compute_risk_nll(means_a, log_vars, labels)
+        loss_b = _compute_risk_nll(means_b, log_vars, labels)
+        assert loss_a.item() == pytest.approx(loss_b.item(), abs=1e-7)
+
+    # ── 13. Log-var clamping happens inside forward. ────────────────────
+
+    def test_log_var_clamped_in_forward(self, scalping_config):
+        """Drive the risk head to an extreme raw output and assert the
+        tensor reaching ``PolicyOutput`` is strictly within the clamp
+        band regardless. Without this, ``exp(log_var)`` overflows in
+        the NLL and poisons the optimiser.
+        """
+        import torch
+        from agents.policy_network import (
+            PPOLSTMPolicy,
+            RISK_LOG_VAR_MAX,
+            RISK_LOG_VAR_MIN,
+        )
+
+        env = BetfairEnv(_make_day(n_races=1), scalping_config)
+        obs_dim = int(env.observation_space.shape[0])
+        max_runners = env.max_runners
+        action_dim = int(env.action_space.shape[0])
+        hp = self._small_hp()
+
+        net = PPOLSTMPolicy(
+            obs_dim=obs_dim, action_dim=action_dim,
+            max_runners=max_runners, hyperparams=hp,
+        )
+        # Overwrite the risk head so its raw output is far outside the
+        # clamp band on both ends, regardless of input.
+        with torch.no_grad():
+            net.risk_head.weight.zero_()
+            # Alternate very-large-positive and very-large-negative biases
+            # so some slots would otherwise exceed MAX, others fall below
+            # MIN — one test covers both clamp edges.
+            big_bias = torch.tensor(
+                [100.0 if i % 2 == 0 else -100.0
+                 for i in range(max_runners * 2)],
+                dtype=net.risk_head.bias.dtype,
+            )
+            net.risk_head.bias.copy_(big_bias)
+
+        obs = torch.zeros(2, obs_dim, dtype=torch.float32)
+        out = net(obs)
+        lv = out.predicted_locked_log_var_per_runner
+        assert torch.all(lv >= RISK_LOG_VAR_MIN)
+        assert torch.all(lv <= RISK_LOG_VAR_MAX)

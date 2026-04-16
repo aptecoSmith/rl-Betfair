@@ -248,9 +248,10 @@ class TestGradientFlow:
         # log_std, not sibling aux heads).
         # - ``action_log_std`` only gets gradient when used in the
         #   distribution (not this synthetic scalar loss).
-        # - ``fill_prob_head`` (scalping-active-management §02) shares the
-        #   backbone with the actor but is a SEPARATE head; it
-        #   legitimately doesn't receive gradient from an actor-mean-only
+        # - ``fill_prob_head`` (scalping-active-management §02) and
+        #   ``risk_head`` (scalping-active-management §03) share the
+        #   backbone with the actor but are SEPARATE heads; they
+        #   legitimately don't receive gradient from an actor-mean-only
         #   loss — see hard_constraints §8.
         for name, param in policy.named_parameters():
             if not param.requires_grad:
@@ -260,6 +261,8 @@ class TestGradientFlow:
             if name == "action_log_std":
                 continue
             if "fill_prob_head" in name:
+                continue
+            if "risk_head" in name:
                 continue
             assert param.grad is not None, f"No grad for {name}"
 

@@ -4,6 +4,151 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 03 — Risk / predicted-variance aux head (2026-04-16)
+
+**Landed.**
+
+- Every policy architecture grows a `risk_head = nn.Linear(backbone,
+  max_runners * 2)` alongside the Session-02 `fill_prob_head`:
+  `PPOLSTMPolicy` / `PPOTimeLSTMPolicy` take `lstm_last` as backbone,
+  `PPOTransformerPolicy` takes the last-tick transformer output
+  `out_last`. Forward reshapes the linear output to
+  `(batch, max_runners, 2)`, splits into `mean` + `log_var`, and
+  clamps `log_var` to `[RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX] = [-8, 4]`
+  before writing to `PolicyOutput`. The clamp lives at the forward-pass
+  boundary so downstream consumers (UI, parquet, NLL) never see an
+  unsafe log-var — `exp(log_var)` stays finite inside the Gaussian NLL
+  regardless of what the raw head emits. Head init: orthogonal gain
+  `0.01` on the weight, zeros on the bias → at init the raw mean output
+  ≈ 0 and raw log_var ≈ 0 (stddev ≈ £1 on £100 budget — a reasonable
+  "unsure" prior). Shares the backbone, NOT the actor or fill-prob head
+  (hard_constraints §8: state-conditioned, not head-conditioned).
+- **`PolicyOutput` grows two fields**, both defaulting to
+  zero-tensors shape `(1, 1)` so stub policies / legacy callers that
+  construct the dataclass positionally keep working:
+  `predicted_locked_pnl_per_runner` (the clamped-input mean channel)
+  and `predicted_locked_log_var_per_runner` (the clamped log-var
+  channel). Zero / zero → mean=0, log_var=0 → stddev=1, matching the
+  "unsure" prior convention the Session-02 fill-prob default uses.
+- **Capture → attach flow.** In `_collect_rollout` each tick snapshots
+  both the per-runner mean and `exp(0.5 * log_var)` (computed once at
+  capture so parquet consumers don't replicate the math) into numpy
+  arrays alongside the existing fill-prob snapshot. The
+  `aggressive_placed=True` walk over `info["action_debug"]` now stamps
+  `predicted_locked_pnl_at_placement` and
+  `predicted_locked_stddev_at_placement` on the same newest-matching
+  `Bet` it already stamps `fill_prob_at_placement` on. The existing
+  `pair_to_transition` map is reused — one dict, two labels per pair.
+  At episode end the backfill loop computes realised `locked_pnl` for
+  completed pairs by inlining the same commission-aware math
+  `BetManager.get_paired_positions` uses (races share
+  `env.all_settled_bets` but per-race BetManagers are gone by backfill
+  time, so inlining avoids reconstructing them). Naked pairs
+  contribute nothing — `risk_labels` stays NaN and the NLL mask
+  rejects it.
+- **`Transition.risk_labels: np.ndarray` shape `(max_runners,)`**,
+  NaN default, parallel to `fill_prob_labels`. Same NaN-as-mask idiom;
+  same 1-element fallback for directional runs keeps them cheap.
+- **Gaussian NLL aux loss in `_ppo_update`.** A new module-level
+  `_compute_risk_nll(means, log_vars, labels)` helper mirrors
+  `_compute_fill_prob_bce`: masked NLL on the constant-free form
+  `0.5 * (log_var + (target - mean)^2 / exp(log_var))`, defensive
+  zero-return on all-NaN mask. Batch labels are built alongside the
+  existing fill-prob labels at the top of `_ppo_update`, moved to
+  device, sliced by `mb_idx`. A new aux term
+  `self.risk_loss_weight * risk_loss` lands in the total loss, and
+  `loss_info["risk_loss"]` (pre-weight mean per update) is emitted
+  every update so operators can watch head behaviour even when the
+  weight is 0.
+- **Plumbing-off default — reward scale unchanged.**
+  `risk_loss_weight` defaults to `0.0` (read from `hp` first, then
+  `config["reward"]`). With both aux weights at `0.0` this session's
+  total loss is numerically identical to Session 02. Verified by
+  `test_risk_weight_zero_is_noop_on_total_loss`. The
+  `raw + shaped ≈ total_reward` invariant still holds — verified by
+  `test_raw_plus_shaped_invariant_still_holds_with_risk_loss`, which
+  threads both `fill_prob_loss_weight=0.5` and `risk_loss_weight=0.5`
+  through `reward_overrides` and checks the env accumulators are
+  undisturbed.
+- **Gene passthrough.** `risk_loss_weight` added to
+  `agents/ppo_trainer.py::_REWARD_GENE_MAP` and to
+  `env/betfair_env.py::_REWARD_OVERRIDE_KEYS`. Same rationale as the
+  Session-02 fill-prob key: env never reads it, but whitelisting keeps
+  the "unknown overrides" debug log quiet on gene passthrough.
+- **Checkpoint back-compat: explicit migration helper.** New
+  `migrate_risk_head(state_dict, fresh_policy)` in
+  `agents/policy_network.py` mirrors `migrate_fill_prob_head` exactly
+  but keyed on `"risk_head."` — injects fresh weights for any missing
+  keys so `load_state_dict(..., strict=True)` succeeds. Chose a
+  parallel helper over extending the Session-02 one so each session's
+  migration story stays independently auditable. Test
+  `test_legacy_checkpoint_loads_with_risk_head` confirms a
+  pre-Session-03 dict (risk_head.* stripped) strict-loads after
+  migration and the fresh init contract (non-zero weight, zero bias)
+  holds.
+- **`Bet` + `EvaluationBetRecord` + parquet.** `Bet` gets
+  `predicted_locked_pnl_at_placement: float | None = None` and
+  `predicted_locked_stddev_at_placement: float | None = None`.
+  `PassiveOrderBook.on_tick` fill-path extends the existing
+  Session-02 inheritance lookup — one `pair_id` scan now copies
+  three fields (fill-prob + risk mean + risk stddev) from the
+  aggressive partner onto the newly-created passive `Bet`. Captured,
+  not recomputed (hard_constraints §10).
+  `registry/model_store.py::EvaluationBetRecord` mirrors both fields;
+  the parquet writer emits two nullable-float columns; the reader
+  uses `has_predicted_locked_pnl` + `has_predicted_locked_stddev`
+  guards in the same style as the existing `has_pair_id` /
+  `has_fill_prob` checks. Back-compat: missing columns read as
+  `None` (hard_constraints §11). `training/evaluator.py` forwards
+  both fields into each `EvaluationBetRecord` construction.
+- **Tests.** `TestRiskHead` class (13 tests) covering: shape +
+  clamp-band on all 3 architectures; decision-time stamp onto a
+  placed `Bet` (mean any float, stddev > 0); passive-leg inheritance
+  of both risk fields; analytic-value NLL on perfect predictions with
+  log_var at the clamp minimum; NLL gradient sign in both mean and
+  log_var directions; `risk_weight=0` noop on total loss;
+  `risk_weight=1` lifts the policy-parameter gradient norm relative
+  to 0; parquet back-compat on both missing columns; parquet
+  roundtrip preserving both values; legacy state-dict migration +
+  strict load with fresh-init contract; raw+shaped invariant with
+  both aux weights on; NLL exclusion of NaN-labelled samples; log-var
+  clamp enforcement inside `forward` (overwritten head bias forced
+  outside ±100, tensor reaching `PolicyOutput` still within clamp
+  band). Full suite: `pytest tests/ -q` → **1968 passed, 7 skipped,
+  1 xfailed**. Net +13 vs Session 02 (1955 → 1968) — matches exit-
+  criteria target exactly.
+- **Incidental fix.** `test_gradients_flow_through_actor` in
+  `tests/test_policy_network.py` already skipped `fill_prob_head.*`;
+  widened the filter to also skip `risk_head.*` for the same reason
+  (hard_constraints §8 — sibling aux head, no gradient from an
+  actor-mean-only loss). And updated
+  `tests/test_model_store.py::test_parquet_schema_correct` to include
+  the two new columns in the expected schema set so strict schema
+  checks stay locked on the intended column list (rather than stale
+  pre-Session-03 expectations).
+
+**Back-compat summary.**
+
+- Scalping OFF or scalping ON with both aux weights `0.0`: byte-
+  identical total loss to Session 02. Reward invariant untouched.
+- Pre-Session-03 checkpoints: strict-loadable after a single call to
+  `migrate_risk_head(state_dict, fresh_policy)`. The `risk_head.*`
+  keys are the only addition; all other parameter shapes are unchanged.
+  Sessions 01 + 02 migrations are still needed for pre-Session-01 /
+  pre-Session-02 dicts; stack the helpers in order.
+- Pre-Session-03 parquet files: readable unchanged — the two new
+  optional columns return `None` per hard_constraints §11.
+
+**Activation.** Session 03 exits plumbing-off.
+`plans/scalping-active-management/activation_playbook.md` is the
+protocol for turning both aux weights up — run the zero-weight
+baseline (Step A), sweep fill-prob (Step B), sweep risk (Step C),
+verify joint (Step D), promote to `config/scalping_gen1.yaml`
+(Step E). Do not promote a weight that fails the ± 20 % reward-delta
+bar.
+
+---
+
 ## Session 02 — Fill-probability aux head (2026-04-16)
 
 **Landed.**

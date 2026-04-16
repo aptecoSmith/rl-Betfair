@@ -464,6 +464,13 @@ class Evaluator:
                 # Scalping-active-management §02 — decision-time capture.
                 # ``None`` for directional bets or pre-Session-02 runs.
                 fill_prob_at_placement=bet.fill_prob_at_placement,
+                # Scalping-active-management §03 — risk-head capture.
+                predicted_locked_pnl_at_placement=(
+                    bet.predicted_locked_pnl_at_placement
+                ),
+                predicted_locked_stddev_at_placement=(
+                    bet.predicted_locked_stddev_at_placement
+                ),
             ))
 
         # Compute opportunity window aggregates for the day record

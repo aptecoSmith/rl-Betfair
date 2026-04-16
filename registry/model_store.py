@@ -139,6 +139,14 @@ class EvaluationBetRecord:
     # for pre-Session-02 runs and for any bet the scalping head did not
     # produce a prediction for (directional bets, stub tests).
     fill_prob_at_placement: float | None = None
+    # Scalping-active-management §03: decision-time risk-head outputs.
+    # Mean + stddev (``stddev = exp(0.5 * clamped_log_var)`` computed at
+    # capture time) of predicted locked P&L. Mirrors the Bet fields so
+    # the Parquet log can drive risk badges in the UI and scatter plots
+    # (predicted vs realised stddev) for calibration. Optional — ``None``
+    # for pre-Session-03 runs.
+    predicted_locked_pnl_at_placement: float | None = None
+    predicted_locked_stddev_at_placement: float | None = None
 
 
 @dataclass
@@ -728,6 +736,14 @@ class ModelStore:
                 # stores ``None`` as NaN which the reader below maps back
                 # to ``None`` via ``pd.notna`` check.
                 "fill_prob_at_placement": r.fill_prob_at_placement,
+                # Scalping-active-management §03. Nullable floats — same
+                # NaN-as-None convention as the fill-prob column.
+                "predicted_locked_pnl_at_placement": (
+                    r.predicted_locked_pnl_at_placement
+                ),
+                "predicted_locked_stddev_at_placement": (
+                    r.predicted_locked_stddev_at_placement
+                ),
             }
             for r in records
         ])
@@ -831,6 +847,15 @@ class ModelStore:
         # this column existed load as ``fill_prob_at_placement=None``
         # (hard_constraints §11: new columns are optional).
         has_fill_prob = "fill_prob_at_placement" in df.columns
+        # Scalping-active-management §03 — same back-compat pattern:
+        # pre-Session-03 parquet files load with the two risk fields as
+        # ``None``.
+        has_predicted_locked_pnl = (
+            "predicted_locked_pnl_at_placement" in df.columns
+        )
+        has_predicted_locked_stddev = (
+            "predicted_locked_stddev_at_placement" in df.columns
+        )
         return [
             EvaluationBetRecord(
                 run_id=str(row["run_id"]),
@@ -880,6 +905,18 @@ class ModelStore:
                     float(row["fill_prob_at_placement"])
                     if has_fill_prob
                     and pd.notna(row.get("fill_prob_at_placement"))
+                    else None
+                ),
+                predicted_locked_pnl_at_placement=(
+                    float(row["predicted_locked_pnl_at_placement"])
+                    if has_predicted_locked_pnl
+                    and pd.notna(row.get("predicted_locked_pnl_at_placement"))
+                    else None
+                ),
+                predicted_locked_stddev_at_placement=(
+                    float(row["predicted_locked_stddev_at_placement"])
+                    if has_predicted_locked_stddev
+                    and pd.notna(row.get("predicted_locked_stddev_at_placement"))
                     else None
                 ),
             )

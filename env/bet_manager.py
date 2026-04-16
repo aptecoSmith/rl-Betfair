@@ -102,6 +102,16 @@ class Bet:
     # (directional bets, pre-Session-02 data, stub tests constructing
     # ``Bet`` directly).
     fill_prob_at_placement: float | None = None
+    # Scalping-active-management session 03 — policy's risk-head outputs
+    # at the tick that placed the PAIR. ``predicted_locked_pnl`` is the
+    # mean channel (expected locked P&L in £); ``predicted_locked_stddev``
+    # is ``exp(0.5 * clamped_log_var)``, pre-computed at capture time so
+    # parquet consumers / UI badges don't have to replicate the math.
+    # Same capture→attach flow as Session 02 (aggressive stamped by the
+    # PPO rollout; passive inherits via ``pair_id``). ``None`` for
+    # directional bets, pre-Session-03 data, stub tests.
+    predicted_locked_pnl_at_placement: float | None = None
+    predicted_locked_stddev_at_placement: float | None = None
 
     @property
     def liability(self) -> float:
@@ -698,19 +708,27 @@ class PassiveOrderBook:
             # ── Fill ────────────────────────────────────────────────────
             order.matched_stake = order.requested_stake
 
-            # Scalping-active-management §02: the passive leg inherits its
-            # aggressive partner's decision-time fill-probability prediction
-            # via ``pair_id`` lookup. Per hard_constraints §10 the value is
-            # captured at decision time, never recomputed post-hoc — this
-            # keeps UI calibration plots honest. Aggressive legs are always
-            # appended to ``bm.bets`` before the passive order is registered,
-            # so the lookup succeeds whenever the aggressive carried a
-            # prediction.
+            # Scalping-active-management §02/§03: the passive leg inherits
+            # its aggressive partner's decision-time aux-head predictions
+            # (fill-prob, risk mean + stddev) via ``pair_id`` lookup. Per
+            # hard_constraints §10 the values are captured at decision
+            # time, never recomputed post-hoc — this keeps UI calibration
+            # plots honest. Aggressive legs are always appended to
+            # ``bm.bets`` before the passive order is registered, so the
+            # lookup succeeds whenever the aggressive carried predictions.
             inherited_fill_prob: float | None = None
+            inherited_risk_pnl: float | None = None
+            inherited_risk_stddev: float | None = None
             if order.pair_id is not None and self._bet_manager is not None:
                 for existing in self._bet_manager.bets:
                     if existing.pair_id == order.pair_id:
                         inherited_fill_prob = existing.fill_prob_at_placement
+                        inherited_risk_pnl = (
+                            existing.predicted_locked_pnl_at_placement
+                        )
+                        inherited_risk_stddev = (
+                            existing.predicted_locked_stddev_at_placement
+                        )
                         break
 
             # Convert to a Bet.  Fill price is the queue price (order.price),
@@ -729,6 +747,8 @@ class PassiveOrderBook:
                 tick_index=tick_index,
                 reserved_liability=order.reserved_liability,
                 fill_prob_at_placement=inherited_fill_prob,
+                predicted_locked_pnl_at_placement=inherited_risk_pnl,
+                predicted_locked_stddev_at_placement=inherited_risk_stddev,
             )
             self._bet_manager.bets.append(bet)
 

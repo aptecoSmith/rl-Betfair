@@ -395,6 +395,11 @@ class BetfairEnv(gymnasium.Env):
         # it) so the gene passthrough path can forward it to the trainer
         # without the "unknown overrides" debug log firing.
         "fill_prob_loss_weight",
+        # Scalping-active-management session 03: auxiliary Gaussian-NLL
+        # risk-head loss weight. Same pattern — trainer-only knob;
+        # whitelisted here so the passthrough doesn't trip the env's
+        # unknown-key debug log.
+        "risk_loss_weight",
     })
 
     def __init__(

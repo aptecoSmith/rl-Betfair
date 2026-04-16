@@ -194,6 +194,60 @@ def migrate_fill_prob_head(
     return migrated
 
 
+# ── Checkpoint migration (scalping-active-management session 03) ──────────
+
+
+#: Clamp bounds on the risk head's log-var output. Chosen so that
+#: ``stddev = exp(0.5 * log_var)`` spans ~£0.02 to ~£7.39 (on £100
+#: stakes), covering the realistic realised-locked-pnl stddev range
+#: while keeping ``exp(log_var)`` numerically well-behaved inside the
+#: Gaussian NLL. Bounds match master_todo.md's session-03 spec.
+RISK_LOG_VAR_MIN: float = -8.0
+RISK_LOG_VAR_MAX: float = 4.0
+
+
+def migrate_risk_head(
+    state_dict: dict, fresh_policy: nn.Module,
+) -> dict:
+    """Extend a pre-Session-03 ``state_dict`` with the risk-head weights.
+
+    Scalping-active-management session 03 added a per-runner risk head
+    (``risk_head.weight`` / ``.bias``) producing two outputs per runner
+    (predicted mean + log-var of locked P&L). Older checkpoints don't
+    carry these parameters, so strict ``load_state_dict`` would fail.
+
+    Mirrors :func:`migrate_fill_prob_head` exactly, but keyed on
+    ``"risk_head."``. Chose an explicit helper over ``strict=False``
+    for the same reason as Session 02 — strict=False silently swallows
+    unrelated missing-key errors too, and keeping the migration
+    explicit preserves the audit trail.
+
+    Parameters
+    ----------
+    state_dict:
+        PyTorch state-dict mapping parameter names to tensors. Typically
+        loaded from a pre-Session-03 checkpoint.
+    fresh_policy:
+        A freshly-constructed policy module with the new head in place.
+        Its ``risk_head.*`` parameters are used as the source of fresh
+        weights for the missing keys.
+
+    Returns
+    -------
+    dict
+        A new dict: input contents plus ``risk_head.*`` keys copied
+        from ``fresh_policy.state_dict()`` for any that were missing.
+    """
+    migrated = dict(state_dict)
+    fresh = fresh_policy.state_dict()
+    for key, value in fresh.items():
+        if key.startswith("risk_head.") and key not in migrated:
+            # ``.clone()`` so later mutations on the fresh policy don't
+            # alias the migrated weights.
+            migrated[key] = value.detach().clone()
+    return migrated
+
+
 # ── Base class ──────────────────────────────────────────────────────────────
 
 
@@ -281,6 +335,23 @@ class PolicyOutput:
     # working (any consumer that reads the field sees "unsure").
     fill_prob_per_runner: torch.Tensor = field(
         default_factory=lambda: torch.full((1, 1), 0.5)
+    )
+    # Scalping-active-management session 03 — per-runner risk head.
+    # Two tensors shape ``(batch, max_runners)``: predicted mean of
+    # locked_pnl and its (clamped) log-variance. The "stddev" exposed
+    # to consumers (UI, parquet) is ``exp(0.5 * log_var)``; the
+    # Gaussian NLL operates on log-var directly for numerical stability
+    # (gradients stay bounded; ``exp(log_var)`` stays finite given the
+    # clamp applied inside each architecture's ``forward``). Defaults
+    # are zero-tensors shape ``(1, 1)`` — mean=0, log_var=0 → stddev=1,
+    # matching the "unsure" prior used by the fill-prob head default.
+    # Stub policies / legacy callers constructing ``PolicyOutput``
+    # positionally continue to work with the default zero prior.
+    predicted_locked_pnl_per_runner: torch.Tensor = field(
+        default_factory=lambda: torch.zeros((1, 1))
+    )
+    predicted_locked_log_var_per_runner: torch.Tensor = field(
+        default_factory=lambda: torch.zeros((1, 1))
     )
 
 
@@ -434,6 +505,18 @@ class PPOLSTMPolicy(BasePolicy):
         # the pre-training output is ≈0.5 ("unsure") per runner.
         self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
 
+        # ── Risk head (scalping-active-management §03) ────────────────
+        # Second auxiliary supervised head — per-runner predicted
+        # locked-P&L distribution as (mean, log-var). Shares the same
+        # LSTM backbone as the fill-prob head; conditions on state only
+        # (hard_constraints.md §8). Output layout is ``(batch,
+        # max_runners * 2)``: the forward pass reshapes and splits into
+        # mean/log-var channels, clamps log-var to
+        # [RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX] before publishing on
+        # PolicyOutput so downstream consumers (UI, parquet, NLL) never
+        # see an unsafe log-var.
+        self.risk_head = nn.Linear(lstm_hidden, max_runners * 2)
+
         # Orthogonal init for better PPO training stability
         self._init_weights()
 
@@ -456,6 +539,11 @@ class PPOLSTMPolicy(BasePolicy):
         # head outputs ≈0 logits → sigmoid ≈ 0.5 ("unsure") at init.
         nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
         nn.init.zeros_(self.fill_prob_head.bias)
+        # Session-03 risk head: small orthogonal weight + zero bias → at
+        # init the raw mean output ≈ 0 and raw log-var ≈ 0 (i.e. stddev
+        # ≈ £1 on a £100 budget — a reasonable "unsure" prior).
+        nn.init.orthogonal_(self.risk_head.weight, gain=0.01)
+        nn.init.zeros_(self.risk_head.bias)
 
     def _split_obs(
         self, obs: torch.Tensor
@@ -605,12 +693,27 @@ class PPOLSTMPolicy(BasePolicy):
         fill_prob_logits = self.fill_prob_head(lstm_last)
         fill_prob = torch.sigmoid(fill_prob_logits)  # (batch, max_runners)
 
+        # ── Risk head (scalping-active-management §03) ────────────────
+        # Two outputs per runner: mean + log-var. Clamp log-var here so
+        # ``PolicyOutput`` consumers (UI, parquet, NLL) can trust the
+        # bounds without knowing the clamp values. Per purpose.md §3,
+        # clamping at the forward-pass boundary keeps ``exp(log_var)``
+        # finite in the NLL regardless of what the raw head emits.
+        risk_out = self.risk_head(lstm_last)
+        risk_out = risk_out.view(batch, self.max_runners, 2)
+        risk_mean = risk_out[..., 0]
+        risk_log_var = risk_out[..., 1].clamp(
+            RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX,
+        )
+
         return PolicyOutput(
             action_mean=action_mean,
             action_log_std=self.action_log_std.expand(batch, -1),
             value=value,
             hidden_state=new_hidden,
             fill_prob_per_runner=fill_prob,
+            predicted_locked_pnl_per_runner=risk_mean,
+            predicted_locked_log_var_per_runner=risk_log_var,
         )
 
     def init_hidden(
@@ -839,6 +942,9 @@ class PPOTimeLSTMPolicy(BasePolicy):
 
         # Fill-probability head — see PPOLSTMPolicy for rationale.
         self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
+        # Risk head — see PPOLSTMPolicy for rationale. Two outputs per
+        # runner (mean + log-var), clamped at forward time.
+        self.risk_head = nn.Linear(lstm_hidden, max_runners * 2)
 
         self._init_weights()
 
@@ -858,6 +964,9 @@ class PPOTimeLSTMPolicy(BasePolicy):
         # Session-02 fill-prob head: small init → sigmoid ≈ 0.5 at start.
         nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
         nn.init.zeros_(self.fill_prob_head.bias)
+        # Session-03 risk head: small init → mean ≈ 0, log_var ≈ 0 at start.
+        nn.init.orthogonal_(self.risk_head.weight, gain=0.01)
+        nn.init.zeros_(self.risk_head.bias)
 
     def _split_obs(
         self, obs: torch.Tensor,
@@ -1011,12 +1120,24 @@ class PPOTimeLSTMPolicy(BasePolicy):
         fill_prob_logits = self.fill_prob_head(lstm_last)
         fill_prob = torch.sigmoid(fill_prob_logits)
 
+        # Risk head — see PPOLSTMPolicy for rationale. Log-var clamp
+        # lives at the forward-pass boundary so downstream consumers
+        # see safe bounds regardless of the raw head output.
+        risk_out = self.risk_head(lstm_last)
+        risk_out = risk_out.view(batch, self.max_runners, 2)
+        risk_mean = risk_out[..., 0]
+        risk_log_var = risk_out[..., 1].clamp(
+            RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX,
+        )
+
         return PolicyOutput(
             action_mean=action_mean,
             action_log_std=self.action_log_std.expand(batch, -1),
             value=value,
             hidden_state=new_hidden,
             fill_prob_per_runner=fill_prob,
+            predicted_locked_pnl_per_runner=risk_mean,
+            predicted_locked_log_var_per_runner=risk_log_var,
         )
 
     def init_hidden(
@@ -1210,6 +1331,9 @@ class PPOTransformerPolicy(BasePolicy):
         # Fill-probability head — see PPOLSTMPolicy for rationale. Takes
         # the final transformer tick output (``out_last``) as backbone.
         self.fill_prob_head = nn.Linear(d_model, max_runners)
+        # Risk head — see PPOLSTMPolicy for rationale. Two outputs per
+        # runner (mean + log-var); log-var clamped inside ``forward``.
+        self.risk_head = nn.Linear(d_model, max_runners * 2)
 
         self._init_weights()
 
@@ -1229,6 +1353,9 @@ class PPOTransformerPolicy(BasePolicy):
         # Session-02 fill-prob head: small init → sigmoid ≈ 0.5 at start.
         nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
         nn.init.zeros_(self.fill_prob_head.bias)
+        # Session-03 risk head: small init → mean ≈ 0, log_var ≈ 0 at start.
+        nn.init.orthogonal_(self.risk_head.weight, gain=0.01)
+        nn.init.zeros_(self.risk_head.bias)
 
     # ── Shared obs splitter ─────────────────────────────────────────────
     def _split_obs(
@@ -1370,12 +1497,23 @@ class PPOTransformerPolicy(BasePolicy):
         fill_prob_logits = self.fill_prob_head(out_last)
         fill_prob = torch.sigmoid(fill_prob_logits)
 
+        # Risk head — same backbone, two outputs per runner, log-var
+        # clamped at forward-pass boundary. See PPOLSTMPolicy for rationale.
+        risk_out = self.risk_head(out_last)
+        risk_out = risk_out.view(batch, self.max_runners, 2)
+        risk_mean = risk_out[..., 0]
+        risk_log_var = risk_out[..., 1].clamp(
+            RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX,
+        )
+
         return PolicyOutput(
             action_mean=action_mean,
             action_log_std=self.action_log_std.expand(batch, -1),
             value=value,
             hidden_state=(buffer, valid_count),
             fill_prob_per_runner=fill_prob,
+            predicted_locked_pnl_per_runner=risk_mean,
+            predicted_locked_log_var_per_runner=risk_log_var,
         )
 
     def init_hidden(

@@ -389,6 +389,12 @@ class TestEvaluationBetsParquet:
             # the column being absent (see
             # ``TestFillProbHead.test_parquet_backcompat_missing_column``).
             "fill_prob_at_placement",
+            # Scalping-active-management §03 — decision-time risk-head
+            # outputs (mean + stddev), both nullable floats. Same
+            # back-compat tolerance (see
+            # ``TestRiskHead.test_risk_parquet_backcompat_missing_columns``).
+            "predicted_locked_pnl_at_placement",
+            "predicted_locked_stddev_at_placement",
         }
         assert set(df.columns) == expected_cols
 

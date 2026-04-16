@@ -5,6 +5,85 @@ Most recent at the top.
 
 ---
 
+## Session 03 findings (2026-04-16)
+
+- **Clamping log-var at forward-pass boundary beats "let the NLL
+  handle it".** Initial sketch had the risk head return raw log-var
+  and the NLL was responsible for keeping `exp(log_var)` finite
+  (either via a tight clamp at loss-compute time or via `clamp` inside
+  `_compute_risk_nll`). Switched to clamping inside each architecture's
+  `forward` so `PolicyOutput` exposes a log-var that's *already* safe.
+  Three independent benefits fell out: (a) parquet values can't store
+  a silently-NaN stddev because `exp(0.5 * log_var)` is well-defined;
+  (b) the NLL helper stays minimal — no defensive clamping duplicated
+  across modules; (c) `test_log_var_clamped_in_forward` — the one that
+  forces the head bias to ±100 and asserts the output stays in band —
+  is a direct test of the single clamp site. If the clamp moved, the
+  test would still catch it, but only because the UI and parquet paths
+  depend on the same tensor. Cheap guarantee at one site.
+
+- **Writing the realised locked_pnl in the backfill meant inlining
+  `get_paired_positions` math, not calling it.** The backfill runs on
+  `env.all_settled_bets` (episode-wide bet history — per CLAUDE.md
+  "realised_pnl is last-race-only"), but `get_paired_positions` is a
+  method on the per-race `BetManager` and each race gets a fresh
+  instance which is gone by backfill time. Options were: (a) index
+  `all_settled_bets` by market_id and reconstruct a minimal BetManager
+  per market; (b) inline the pair classification + locked_pnl math
+  directly in the trainer. Picked (b): it's 15 lines, the commission
+  stays hard-coded at 0.05 to match the reference helper, and the math
+  is already covered by `TestPairedPositions` tests in
+  `test_forced_arbitrage.py`. Option (a) would have been a second
+  abstraction layer to maintain and there's no caller that needs it.
+
+- **Gaussian NLL without the `log(2π)/2` constant gives a clean
+  analytic target for the zero-loss test.** The "full" NLL is
+  `0.5 * (log_var + residual^2 / var + log(2π))`. The `log(2π)/2`
+  additive constant cancels in every gradient — and adding it would
+  mean the "perfect prediction at clamp-min log_var" test has to
+  assert against `0.5 * (-8 + log(2π))` ≈ -3.0810, an opaque number.
+  Omitting the constant makes the target `0.5 * -8.0 = -4.0` and
+  every other test's gradient behaviour is unchanged. Pick the form
+  whose test assertions are the easiest to reason about; the
+  optimiser doesn't care either way.
+
+- **`torch.exp(-log_vars)` is cleaner than `1.0 / torch.exp(log_vars)`.**
+  First cut computed `var = log_vars.exp()` and then `(resid ** 2 /
+  var)`. Switched to `inv_var = torch.exp(-log_vars)` and `(resid **
+  2) * inv_var`. Two reasons: (a) one `exp` call instead of one `exp`
+  + one division, marginal but it's in the hot loop; (b) when
+  `log_var = RISK_LOG_VAR_MAX = 4.0`, `exp(log_var)` ≈ 54.6 and the
+  division is a regular float op — not a near-zero-denominator
+  gotcha, but `exp(-4.0)` ≈ 0.018 is the obviously-small multiplier
+  that matches the "wide variance down-weights the residual" mental
+  model for the reader. Tiny ergonomic win on a hot line.
+
+- **Inheritance for paired passives: fold the risk fields into the
+  existing Session-02 lookup.** The naive implementation added a
+  second `pair_id` scan for risk — walk `bm.bets` twice on every
+  passive fill. Instead, widened the Session-02 lookup to fetch all
+  three fields in the single pass: one loop, one check, three reads.
+  Also caught a would-be bug: if the aggressive carries risk
+  predictions but no fill-prob (impossible in practice given the
+  capture site, but possible in unit-test setups where the two are
+  stamped independently), the scan still inherits whatever's set.
+  Single-scan means the three fields can't desync on the passive
+  leg.
+
+- **Schema-check test needed updating — lesson for future additive
+  columns.** `test_parquet_schema_correct` in
+  `tests/test_model_store.py` hard-codes the expected column set. Any
+  new nullable column trips it. The test is intentionally strict
+  (catches *accidental* schema drift), so rather than loosening it to
+  "at least these columns", session adds simply update the expected
+  set. Mental model: adds are cheap, the test is an audit trail of
+  what shipped when. Same pattern as the Session-01 schema-version
+  tests that had to be loosened from `== 5` to `>= 5` — but here we
+  *want* strict equality because silent column drift would poison the
+  UI.
+
+---
+
 ## Session 02 findings (2026-04-16)
 
 - **BCE-with-probabilities beat BCE-with-logits for this shape of
