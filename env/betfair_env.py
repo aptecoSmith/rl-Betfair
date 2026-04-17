@@ -1698,10 +1698,21 @@ class BetfairEnv(gymnasium.Env):
             # passive leg filled. `tick_index` on passive Bets is set in
             # PassiveOrderBook.on_tick; a value of -1 (not recorded) falls
             # back to zero contribution so the bonus stays well-defined.
+            #
+            # Gate on locked_pnl > 0. When ``locked_pnl == 0`` the pair's
+            # worst-of-both-outcomes floor was negative and clamped to
+            # zero by get_paired_positions — i.e. the "scalp" round-tripped
+            # to nothing after commission. Without this gate the agent
+            # can maximise early_lock_bonus via 1-tick pairs that fill
+            # instantly (``remaining_frac ≈ 1``) but earn £0 real money,
+            # turning the bonus into free reward for busy-work. Observed
+            # in activation-A-baseline's gen-0 population (2026-04-17) as
+            # "Arb completed: Back £X / Lay £X−1tick → locked £+0.00"
+            # pages of log spam.
             total_ticks = max(len(race.ticks), 1)
             if self._early_lock_bonus_weight > 0.0:
                 for p in pairs:
-                    if not p["complete"]:
+                    if not p["complete"] or p["locked_pnl"] <= 0.0:
                         continue
                     passive = p["passive"]
                     aggressive = p["aggressive"]
