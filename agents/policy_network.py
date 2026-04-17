@@ -146,6 +146,42 @@ def migrate_scalping_action_head(
     return migrated
 
 
+# ── Checkpoint migration (scalping-close-signal session 01) ──────────────
+
+
+def migrate_scalping_action_head_v3_to_v4(
+    state_dict: dict, max_runners: int,
+) -> dict:
+    """Pad a v3 (post-requote) scalping state_dict for the v4 close_signal dim.
+
+    Scalping-close-signal session 01 bumped
+    :data:`~env.betfair_env.SCALPING_ACTIONS_PER_RUNNER` from 6 to 7 by
+    appending a ``close_signal`` dim. Old v3 checkpoints remain loadable:
+    the actor head's final linear, its bias, and ``action_log_std`` are
+    widened by one row per runner, zero-initialised so the unmigrated
+    agent outputs ``close_signal = 0`` identically to pre-plan behaviour.
+
+    Thin wrapper over :func:`migrate_scalping_action_head` — reuses the
+    same shape-based widening logic with ``old_per_runner=6`` /
+    ``new_per_runner=7`` so there's only one copy of the migration
+    code to maintain.
+
+    NOTE: the new row of ``actor_head``'s weight matrix is initialised
+    via the same small-orthogonal as ``_init_weights``. Combined with a
+    zero bias and zero log-std, the head's sampled ``close_signal``
+    stays centered at 0 for the first rollout — i.e. it fires on some
+    fraction of ticks due to exploration noise rather than being a
+    hard silent channel. This matches the v1→v2 behaviour and keeps
+    migration policy consistent across schema bumps.
+    """
+    return migrate_scalping_action_head(
+        state_dict,
+        max_runners=max_runners,
+        old_per_runner=6,
+        new_per_runner=7,
+    )
+
+
 # ── Checkpoint migration (scalping-active-management session 02) ──────────
 
 

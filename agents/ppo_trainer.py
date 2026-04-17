@@ -370,6 +370,10 @@ class EpisodeStats:
     # activity log / training monitor can surface arb activity.
     arbs_completed: int = 0
     arbs_naked: int = 0
+    # Scalping-close-signal session 01 — count of pairs the agent
+    # deliberately closed via ``close_signal`` (distinct from
+    # ``arbs_completed``, whose passive legs filled naturally).
+    arbs_closed: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
     # Session 3 (arb-improvements) — action diagnostics.
@@ -388,6 +392,13 @@ class EpisodeStats:
     # Consumed by ``_publish_progress`` to emit one activity-log line
     # per completed pair (Issue 05 — session 3).
     arb_events: list[dict] = field(default_factory=list)
+    # Scalping-close-signal session 01 — per-pair close events. Each
+    # entry is ``{"selection_id": int, "back_price": float,
+    # "lay_price": float, "realised_pnl": float, "race_idx": int}``
+    # for pairs the agent deliberately crossed the spread to close.
+    # Consumed by ``_publish_progress`` to emit one ``pair_closed``
+    # activity-log line per event.
+    close_events: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1018,6 +1029,7 @@ class PPOTrainer:
             clipped_reward_total=clipped_reward_total,
             arbs_completed=int(info.get("arbs_completed", 0) or 0),
             arbs_naked=int(info.get("arbs_naked", 0) or 0),
+            arbs_closed=int(info.get("arbs_closed", 0) or 0),
             locked_pnl=float(info.get("locked_pnl", 0.0) or 0.0),
             naked_pnl=float(info.get("naked_pnl", 0.0) or 0.0),
             bet_rate=(float(bet_steps) / float(n_steps)) if n_steps > 0 else 0.0,
@@ -1027,6 +1039,7 @@ class PPOTrainer:
             ),
             signal_bias=float(current_signal_bias),
             arb_events=list(info.get("arb_events", []) or []),
+            close_events=list(info.get("close_events", []) or []),
         )
 
         return rollout, ep_stats
@@ -1488,6 +1501,7 @@ class PPOTrainer:
             # Forced-arbitrage (scalping) rollups — zero for directional.
             "arbs_completed": ep.arbs_completed,
             "arbs_naked": ep.arbs_naked,
+            "arbs_closed": ep.arbs_closed,
             "locked_pnl": round(ep.locked_pnl, 4),
             "naked_pnl": round(ep.naked_pnl, 4),
             # Session 3 — action-diagnostics rollup.
@@ -1522,11 +1536,17 @@ class PPOTrainer:
     ) -> None:
         """Publish a progress event to the asyncio queue (if provided)."""
         scalping_detail = ""
-        if ep.arbs_completed or ep.arbs_naked:
+        if ep.arbs_completed or ep.arbs_naked or ep.arbs_closed:
             # Activity-log surface for scalping runs: "arb completed: 3
             # arbs, £0.38 locked, naked=1 £-0.02" — issue 05 session 3.
+            # Scalping-close-signal session 01 adds a ``closed=N`` term
+            # so operators can see close activity at a glance.
+            total_pairs = (
+                ep.arbs_completed + ep.arbs_closed + ep.arbs_naked
+            )
             scalping_detail = (
-                f" | arbs={ep.arbs_completed}/{ep.arbs_completed + ep.arbs_naked}"
+                f" | arbs={ep.arbs_completed}/{total_pairs}"
+                f" closed={ep.arbs_closed}"
                 f" locked=£{ep.locked_pnl:+.2f}"
                 f" naked=£{ep.naked_pnl:+.2f}"
             )
@@ -1552,6 +1572,7 @@ class PPOTrainer:
                 "entropy": loss_info["entropy"],
                 "arbs_completed": ep.arbs_completed,
                 "arbs_naked": ep.arbs_naked,
+                "arbs_closed": ep.arbs_closed,
                 "locked_pnl": ep.locked_pnl,
                 "naked_pnl": ep.naked_pnl,
             },
@@ -1619,6 +1640,38 @@ class PPOTrainer:
                             "phase": "training",
                             "detail": (
                                 f"… plus {overflow} more arb pair(s) this episode"
+                            ),
+                        })
+                    except Exception:
+                        pass
+
+            # Scalping-close-signal session 01 — distinct "pair_closed"
+            # activity-log line per close event. Same cap and overflow
+            # handling as arb_completed; the two lists are independent.
+            if ep.close_events:
+                for ev in ep.close_events[:_MAX_ARB_EVENTS_PER_EP]:
+                    try:
+                        self.progress_queue.put_nowait({
+                            "event": "pair_closed",
+                            "phase": "training",
+                            "detail": (
+                                f"Pair closed at loss: Back £{ev['back_price']:.2f}"
+                                f" / Lay £{ev['lay_price']:.2f}"
+                                f" on runner {ev['selection_id']}"
+                                f" → realised £{ev['realised_pnl']:+.2f}"
+                            ),
+                            "close_event": ev,
+                        })
+                    except Exception:
+                        break
+                if len(ep.close_events) > _MAX_ARB_EVENTS_PER_EP:
+                    overflow = len(ep.close_events) - _MAX_ARB_EVENTS_PER_EP
+                    try:
+                        self.progress_queue.put_nowait({
+                            "event": "pair_closed",
+                            "phase": "training",
+                            "detail": (
+                                f"… plus {overflow} more closed pair(s) this episode"
                             ),
                         })
                     except Exception:

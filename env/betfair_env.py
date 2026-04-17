@@ -81,24 +81,42 @@ OBS_SCHEMA_VERSION: int = 6
 #   Version 3 — scalping-active-management session 01: added
 #               requote_signal per slot (scalping mode only, appended as
 #               the 6th per-runner dim). Non-scalping layout unchanged.
-ACTION_SCHEMA_VERSION: int = 3
+#   Version 4 — scalping-close-signal session 01: added close_signal per
+#               slot (scalping mode only, appended as the 7th per-runner
+#               dim). When raised (> 0.5) for a runner with an open
+#               aggressive leg whose paired passive hasn't yet filled,
+#               the passive is cancelled and an aggressive opposite-side
+#               leg is crossed into the book to close the position at
+#               a known loss — bypassing the commission-feasibility gate.
+#               Non-scalping layout unchanged.
+ACTION_SCHEMA_VERSION: int = 4
 
 # Number of action values per runner slot.
 # The default (4) matches the non-scalping policy head: signal, stake,
 # aggression, cancel. When scalping_mode is enabled on the env, additional
-# dimensions (arb_spread, requote_signal) are appended per runner — see
-# SCALPING_ACTIONS_PER_RUNNER.
+# dimensions (arb_spread, requote_signal, close_signal) are appended per
+# runner — see SCALPING_ACTIONS_PER_RUNNER.
 ACTIONS_PER_RUNNER: int = 4  # signal, stake, aggression, cancel
 
 # Scalping mode action layout.
-# Per-runner: signal, stake, aggression, cancel, arb_spread, requote_signal.
+# Per-runner: signal, stake, aggression, cancel, arb_spread, requote_signal,
+# close_signal.
 #   Issue 05, session 1   — added arb_spread (5 total)
 #   Scalping-active-mgmt, session 01 (2026-04-16)
 #                         — added requote_signal (6 total). When raised
 #                           (> 0.5) for a runner with an outstanding paired
 #                           passive, the existing passive is cancelled and
 #                           re-placed at the current-LTP + arb_ticks offset.
-SCALPING_ACTIONS_PER_RUNNER: int = 6
+#   Scalping-close-signal, session 01 (2026-04-17)
+#                         — added close_signal (7 total). When raised
+#                           (> 0.5) on a runner with an open aggressive
+#                           leg whose paired passive hasn't yet filled,
+#                           the passive is cancelled and an aggressive
+#                           opposite-side leg closes the position at the
+#                           current market best. Bypasses the commission
+#                           gate — closing at a loss is a deliberate
+#                           operator choice.
+SCALPING_ACTIONS_PER_RUNNER: int = 7
 
 # Forced-arbitrage spread mapping — arb_spread action ∈ [-1, 1] maps to
 # [MIN_ARB_TICKS, MAX_ARB_TICKS] ticks on the Betfair ladder. Small ticks
@@ -317,6 +335,11 @@ class RaceRecord:
     # non-scalping races; populated when scalping_mode is on.
     arbs_completed: int = 0
     arbs_naked: int = 0
+    # Scalping-close-signal session 01: count of pairs whose second leg
+    # came from an agent-initiated close (_attempt_close) rather than a
+    # natural passive fill. Sum of arbs_completed + arbs_closed +
+    # arbs_naked equals total paired attempts.
+    arbs_closed: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
 
@@ -571,6 +594,15 @@ class BetfairEnv(gymnasium.Env):
         # entry describes one completed pair: aggressive/passive prices,
         # locked PnL, and which race it settled in. Reset per episode.
         self._arb_events: list[dict] = []
+        # Scalping-close-signal session 01 — episode-scoped list of
+        # agent-closed-pair summaries. Each entry describes one pair
+        # that was closed via ``_attempt_close`` (the aggressive close
+        # leg completed the pair at a market price, not a natural
+        # passive fill). Schema mirrors ``_arb_events`` plus a
+        # ``realised_pnl`` field: the pair's net P&L across outcomes
+        # (typically a small negative for close-at-loss). Reset per
+        # episode.
+        self._close_events: list[dict] = []
         # ── P1c runtime windowed history (Session 21) ────────────────────────
         # Per-runner deque of (timestamp_s, microprice, vol_delta) tuples,
         # keyed by selection_id.  Reset at race boundaries.  Used for
@@ -965,6 +997,9 @@ class BetfairEnv(gymnasium.Env):
                 r.arbs_completed for r in self._race_records
             ),
             "arbs_naked": sum(r.arbs_naked for r in self._race_records),
+            "arbs_closed": sum(
+                r.arbs_closed for r in self._race_records
+            ),
             "locked_pnl": sum(r.locked_pnl for r in self._race_records),
             "naked_pnl": sum(r.naked_pnl for r in self._race_records),
             # Paired-arb silent-failure diagnostics. ``paired_place_rejects``
@@ -989,6 +1024,11 @@ class BetfairEnv(gymnasium.Env):
             # by the training monitor to surface arb activity in the
             # activity log (Issue 05 — session 3).
             "arb_events": list(self._arb_events),
+            # Scalping-close-signal session 01: per-pair close events —
+            # one dict per pair the agent deliberately closed at market.
+            # Rendered as a distinct "Pair closed at loss" activity-log
+            # line by the trainer, separate from arb_events / nakeds.
+            "close_events": list(self._close_events),
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -1030,6 +1070,7 @@ class BetfairEnv(gymnasium.Env):
         }
         self._paired_fill_skips_ltp_filter_day = 0
         self._arb_events = []
+        self._close_events = []
         self._last_action_debug: dict[int, dict] = {}
         # Running high-water / low-water of day_pnl for the drawdown
         # shaping term. Both start at 0.0 (the initial day_pnl) so the
@@ -1447,6 +1488,36 @@ class BetfairEnv(gymnasium.Env):
                     action_debug=action_debug,
                 )
 
+        # ── Close-signal pass (scalping-close-signal session 01) ─────
+        # Third pass over slots: any runner whose ``close_signal`` dim
+        # (7th per-runner action) is raised gets its open pair closed
+        # at market — cancel the passive, cross the spread with an
+        # aggressive opposite-side leg. Runs AFTER the re-quote pass
+        # so a single tick can re-quote one runner and close another.
+        # Silent no-op for runners without an outstanding aggressive
+        # leg carrying a pair_id (hard_constraints §1).
+        if self.scalping_mode and apr > 6:
+            for slot_idx in range(self.max_runners):
+                close_raw = float(action[6 * self.max_runners + slot_idx])
+                if close_raw <= 0.5:
+                    continue
+                sid = slot_map.get(slot_idx)
+                if sid is None:
+                    continue
+                runner = runner_by_sid.get(sid)
+                if runner is None or runner.status != "ACTIVE":
+                    continue
+                time_to_off = (
+                    race.market_start_time - tick.timestamp
+                ).total_seconds()
+                self._attempt_close(
+                    sid=sid,
+                    runner=runner,
+                    race=race,
+                    time_to_off=time_to_off,
+                    action_debug=action_debug,
+                )
+
         self._last_action_debug = action_debug
 
     # ── Forced-arbitrage paired order placement (scalping mode) ──────────
@@ -1683,6 +1754,162 @@ class BetfairEnv(gymnasium.Env):
         _mark(requote_attempted=True, requote_placed=True,
               cancelled=True)
 
+    # ── Active close (scalping-close-signal session 01) ──────────────────
+
+    def _attempt_close(
+        self,
+        sid: int,
+        runner,
+        race: Race,
+        time_to_off: float,
+        action_debug: dict,
+    ) -> None:
+        """Close the open paired position on *sid* by crossing the spread.
+
+        Mirrors :meth:`_attempt_requote` in shape: look up the outstanding
+        paired passive, find its aggressive partner, then — instead of
+        re-posting another passive — cancel the passive and place an
+        *aggressive* opposite-side bet that fills at the current market
+        best. The pair's both legs become matched and it settles as a
+        closed pair (``arbs_closed``), not a naked leg.
+
+        Sizing follows the same equal-P&L rule as ``_maybe_place_paired``:
+        ``S_close = S_aggressive × P_aggressive / P_close`` (hard_constraints §3).
+
+        Commission-feasibility is **not** checked (hard_constraints §4):
+        closing at a loss is a deliberate loss-cap and the
+        ``min_arb_ticks_for_profit`` gate's job is to refuse *opening*
+        doomed pairs, not closing ones.
+
+        Silent no-op (with a diagnostic tag) when:
+        - no outstanding paired passive on this runner (``no_open_aggressive``);
+        - the aggressive partner can't be located (``orphan_passive``);
+        - the matcher can't price the close side (``no_close_price``);
+        - the passive cancel fails (``cancel_failed``);
+        - the aggressive placement is refused (``insufficient_liquidity``).
+        """
+        bm = self.bet_manager
+        assert bm is not None
+
+        def _mark(**flags) -> None:
+            entry = action_debug.get(sid)
+            if entry is None:
+                entry = {
+                    "aggressive_placed": False,
+                    "passive_placed": False,
+                    "cancelled": False,
+                    "skipped_reason": None,
+                }
+                action_debug[sid] = entry
+            entry.update(flags)
+
+        # Locate the outstanding paired passive on this runner.
+        sid_orders = bm.passive_book._orders_by_sid.get(sid, [])
+        target: "PassiveOrder | None" = None
+        for order in sid_orders:
+            if (
+                order.pair_id is not None
+                and order.market_id == race.market_id
+                and not order.cancelled
+            ):
+                target = order
+                break
+
+        if target is None:
+            # Hard_constraints §1 — never open a naked leg. If there's
+            # nothing to close, silent no-op.
+            _mark(close_attempted=True, close_placed=False,
+                  close_reason="no_open_aggressive")
+            return
+
+        pair_id = target.pair_id
+
+        # Find the aggressive partner so we know which side the close
+        # leg must cross to. An agg-back pair closes via an aggressive
+        # lay (cross down); an agg-lay pair closes via aggressive back.
+        agg_bet = None
+        for bet in bm.bets:
+            if bet.pair_id == pair_id:
+                agg_bet = bet
+                break
+        if agg_bet is None:
+            _mark(close_attempted=True, close_placed=False,
+                  close_reason="orphan_passive")
+            return
+
+        # Determine close side and peek the top opposite-side price so we
+        # can compute the stake up-front. The actual fill uses the same
+        # matcher path via place_back/place_lay so no ladder walking.
+        if agg_bet.side is BetSide.BACK:
+            # Close a back by laying at the aggressive-best lay price
+            # (the top of runner.available_to_lay).
+            close_side = BetSide.LAY
+            close_price = bm.matcher.pick_top_price(
+                runner.available_to_lay,
+                reference_price=runner.last_traded_price,
+                lower_is_better=True,
+            )
+        else:
+            close_side = BetSide.BACK
+            close_price = bm.matcher.pick_top_price(
+                runner.available_to_back,
+                reference_price=runner.last_traded_price,
+                lower_is_better=False,
+            )
+        if close_price is None or close_price <= 0.0:
+            _mark(close_attempted=True, close_placed=False,
+                  close_reason="no_close_price")
+            return
+
+        # Equal-P&L sizing: S_close × P_close = S_agg × P_agg.
+        close_stake = (
+            agg_bet.matched_stake * agg_bet.average_price / close_price
+        )
+
+        # Cancel the outstanding passive FIRST so its budget reservation
+        # is released before the close bet reserves new capital. Matches
+        # the order-of-operations in _attempt_requote.
+        cancelled_order = bm.passive_book.cancel_order(target, reason="close")
+        if cancelled_order is None:
+            _mark(close_attempted=True, close_placed=False,
+                  close_reason="cancel_failed")
+            return
+
+        # Place the aggressive close leg with the same pair_id — no
+        # commission gate, no tick-floor bump. place_back / place_lay
+        # routes through the single-price matcher, so no ladder walking
+        # (hard_constraints §2). A partial fill (matched_stake <
+        # close_stake, common when the top opposite-side level is thin)
+        # is accepted; the residual of the aggressive leg is left naked
+        # and will settle via raw P&L.
+        if close_side is BetSide.BACK:
+            close_bet = bm.place_back(
+                runner, close_stake, market_id=race.market_id,
+                max_price=self._max_back_price,
+                pair_id=pair_id,
+            )
+        else:
+            close_bet = bm.place_lay(
+                runner, close_stake, market_id=race.market_id,
+                max_price=self._max_lay_price,
+                pair_id=pair_id,
+            )
+        if close_bet is None:
+            _mark(close_attempted=True, close_placed=False,
+                  close_reason="insufficient_liquidity",
+                  cancelled=True)
+            return
+
+        # Mark the bet as a close leg so settlement can classify the
+        # pair as arbs_closed rather than arbs_completed.
+        close_bet.close_leg = True
+        close_bet.tick_index = self._tick_idx
+        self._bet_times[len(bm.bets) - 1] = time_to_off
+
+        _mark(close_attempted=True, close_placed=True,
+              close_reason=None,
+              cancelled=True)
+
     # ── Settlement & reward ───────────────────────────────────────────────
 
     def _settle_current_race(self, race: Race) -> float:
@@ -1712,6 +1939,7 @@ class BetfairEnv(gymnasium.Env):
         # WON/LOST/VOID and the helper would return zero).
         scalping_locked_pnl = 0.0
         scalping_arbs_completed = 0
+        scalping_arbs_closed = 0
         scalping_arbs_naked = 0
         scalping_naked_exposure = 0.0
         scalping_early_lock_bonus = 0.0
@@ -1721,22 +1949,62 @@ class BetfairEnv(gymnasium.Env):
             )
             for p in pairs:
                 if p["complete"]:
-                    scalping_arbs_completed += 1
-                    scalping_locked_pnl += p["locked_pnl"]
-                    # Record a one-line summary for the activity log. The
-                    # aggressive/passive legs can be either side, so pull
-                    # the back and lay prices by side rather than role.
+                    # Classify as "closed" if any leg was placed by
+                    # _attempt_close (carries close_leg=True). Otherwise
+                    # the pair's passive filled naturally — standard arb
+                    # completion. Per hard_constraints §5 a closed pair's
+                    # locked_pnl floors at 0 by the existing formula, so
+                    # closes do not double-count cash loss already in
+                    # race_pnl (the loss flows through day_pnl).
                     agg = p["aggressive"]
                     pas = p["passive"]
+                    is_closed = (
+                        (agg is not None and agg.close_leg)
+                        or (pas is not None and pas.close_leg)
+                    )
                     back_bet = agg if agg.side is BetSide.BACK else pas
                     lay_bet = agg if agg.side is BetSide.LAY else pas
-                    self._arb_events.append({
-                        "selection_id": agg.selection_id,
-                        "back_price": back_bet.average_price,
-                        "lay_price": lay_bet.average_price,
-                        "locked_pnl": p["locked_pnl"],
-                        "race_idx": self._race_idx,
-                    })
+                    if is_closed:
+                        scalping_arbs_closed += 1
+                        # realised_pnl ≈ min(win_pnl, lose_pnl) without
+                        # flooring at zero — this is the close's actual
+                        # cash cost (small negative for close-at-loss,
+                        # small positive for close-at-profit). Computed
+                        # here because get_paired_positions returns only
+                        # the floored locked_pnl; we want the signed
+                        # number for the activity log.
+                        b, l = back_bet, lay_bet
+                        win_pnl = (
+                            b.matched_stake * (b.average_price - 1.0)
+                            * (1.0 - self._commission)
+                            - l.matched_stake * (l.average_price - 1.0)
+                        )
+                        lose_pnl = (
+                            -b.matched_stake
+                            + l.matched_stake * (1.0 - self._commission)
+                        )
+                        self._close_events.append({
+                            "selection_id": agg.selection_id,
+                            "back_price": back_bet.average_price,
+                            "lay_price": lay_bet.average_price,
+                            "realised_pnl": min(win_pnl, lose_pnl),
+                            "race_idx": self._race_idx,
+                        })
+                    else:
+                        scalping_arbs_completed += 1
+                        # Record a one-line summary for the activity log. The
+                        # aggressive/passive legs can be either side, so pull
+                        # the back and lay prices by side rather than role.
+                        self._arb_events.append({
+                            "selection_id": agg.selection_id,
+                            "back_price": back_bet.average_price,
+                            "lay_price": lay_bet.average_price,
+                            "locked_pnl": p["locked_pnl"],
+                            "race_idx": self._race_idx,
+                        })
+                    # Locked-pnl floor contribution applies to both
+                    # completed and closed pairs (zero for close-at-loss).
+                    scalping_locked_pnl += p["locked_pnl"]
                 else:
                     scalping_arbs_naked += 1
             scalping_naked_exposure = bm.get_naked_exposure(
@@ -1920,12 +2188,35 @@ class BetfairEnv(gymnasium.Env):
             + naked_penalty_term
             + early_lock_term
         )
+        # Scalping-close-signal session 01: post-settlement, sum the
+        # realised cash P&L of every pair whose second leg came from
+        # ``_attempt_close`` (i.e. a pair the agent deliberately closed
+        # at market). This slice is carved out of ``naked_pnl`` below
+        # so the asymmetric naked-loss reward term does NOT claim the
+        # close's cash hit — per hard_constraints §5, a closed pair's
+        # contribution to raw reward is zero. The cash loss still
+        # flows through ``race_pnl`` → ``day_pnl``, visible to the
+        # operator and the terminal-bonus calculation.
+        scalping_closed_pnl = 0.0
+        if self.scalping_mode:
+            closed_pair_ids: set[str] = set()
+            for b in bm.bets:
+                if b.market_id == race.market_id and b.close_leg:
+                    if b.pair_id is not None:
+                        closed_pair_ids.add(b.pair_id)
+            for b in bm.bets:
+                if (
+                    b.market_id == race.market_id
+                    and b.pair_id in closed_pair_ids
+                ):
+                    scalping_closed_pnl += b.pnl
+
         # Naked P&L = portion of race_pnl NOT explained by completed-arb
-        # spreads. When scalping_mode is off both branches fold to the
-        # same number (locked_pnl = 0), keeping the field meaningful.
-        # Computed BEFORE race_reward_pnl so the asymmetric loss term
-        # below can use it.
-        naked_pnl = race_pnl - scalping_locked_pnl
+        # spreads NOR by agent-closed pairs. When scalping_mode is off
+        # both locked_pnl and closed_pnl are 0, collapsing this to
+        # race_pnl as before. Computed BEFORE race_reward_pnl so the
+        # asymmetric loss term below can use it.
+        naked_pnl = race_pnl - scalping_locked_pnl - scalping_closed_pnl
 
         # Scalping reward-eligible P&L: locked spread profit + naked
         # LOSSES (asymmetric — naked windfalls remain excluded).
@@ -1975,6 +2266,7 @@ class BetfairEnv(gymnasium.Env):
             budget_after=bm.budget,
             arbs_completed=scalping_arbs_completed,
             arbs_naked=scalping_arbs_naked,
+            arbs_closed=scalping_arbs_closed,
             locked_pnl=scalping_locked_pnl,
             naked_pnl=naked_pnl,
         ))

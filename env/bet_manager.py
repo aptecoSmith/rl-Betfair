@@ -112,6 +112,15 @@ class Bet:
     # directional bets, pre-Session-03 data, stub tests.
     predicted_locked_pnl_at_placement: float | None = None
     predicted_locked_stddev_at_placement: float | None = None
+    # Scalping-close-signal session 01 — marks a Bet placed by
+    # :meth:`BetfairEnv._attempt_close` as the aggressive close leg of
+    # a pair the agent deliberately crossed out of. A pair with any
+    # ``close_leg=True`` bet is classified as an ``arbs_closed`` event
+    # at settlement (distinct from ``arbs_completed`` which reserves
+    # pairs whose passive leg filled naturally). Default False for
+    # every non-close bet — including the original aggressive leg of
+    # the closed pair.
+    close_leg: bool = False
 
     @property
     def liability(self) -> float:

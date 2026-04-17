@@ -1245,7 +1245,8 @@ class TestScalpingRequote:
     def test_action_space_size_grows(self, scalping_config, legacy_config):
         env_on = BetfairEnv(_make_day(n_races=1), scalping_config)
         env_off = BetfairEnv(_make_day(n_races=1), legacy_config)
-        assert env_on.action_space.shape == (14 * 6,)
+        # scalping-close-signal session 01 bumped per-runner dim 6 → 7.
+        assert env_on.action_space.shape == (14 * 7,)
         assert env_off.action_space.shape == (14 * 4,)
 
     # ── 10. Pre-Session-01 checkpoints migrate cleanly. ─────────────────
