@@ -571,6 +571,9 @@ describe('TrainingMonitor — auto-continue toggle', () => {
       getGenetics: vi.fn(() => noop$),
       getScoreboard: vi.fn(() => noop$),
       getBettingConstraints: vi.fn(() => noop$),
+      getTrainingEpisodes: vi.fn(() =>
+        emitNext({ episodes: [], latest_ts: null, truncated: false }),
+      ),
     };
 
     TestBed.configureTestingModule({

@@ -1,0 +1,164 @@
+<section class="learning-curves" data-testid="learning-curves">
+  <header class="lc-header">
+    <h2>Learning diagnostics</h2>
+    <div class="lc-status">
+      @if (loading()) { <span class="loading-pill">Loading…</span> }
+      @if (error(); as err) { <span class="error-pill">Error: {{ err }}</span> }
+      <span class="poll-pill">Polls every 10 s</span>
+      <button class="btn-refresh" (click)="refresh()" data-testid="lc-refresh">Refresh now</button>
+    </div>
+  </header>
+
+  @if (allPanels().length === 0 && !loading()) {
+    <div class="lc-empty" data-testid="lc-empty">
+      No episodes yet — the learning panel populates once training has started
+      and written its first row to <code>logs/training/episodes.jsonl</code>.
+    </div>
+  } @else {
+    <div class="lc-summary" data-testid="lc-summary">
+      <span class="summary-item"><strong>{{ populationSummary().total }}</strong> agents</span>
+      <span class="summary-item verdict-learning">
+        <strong>{{ populationSummary().learning }}</strong> learning
+      </span>
+      <span class="summary-item verdict-collapsed">
+        <strong>{{ populationSummary().collapsed }}</strong> collapsed
+      </span>
+      <span class="summary-item verdict-unstable">
+        <strong>{{ populationSummary().unstable }}</strong> unstable
+      </span>
+      <span class="summary-item verdict-stagnant">
+        <strong>{{ populationSummary().stagnant }}</strong> stagnant
+      </span>
+      <span class="summary-item verdict-warming-up">
+        <strong>{{ populationSummary().warmingUp }}</strong> warming up
+      </span>
+    </div>
+
+    <div class="lc-filters" data-testid="lc-filters">
+      <label>
+        Agent
+        <select
+          [ngModel]="agentFilter()"
+          (ngModelChange)="agentFilter.set($event)"
+          data-testid="lc-agent-filter"
+        >
+          <option value="all">All ({{ availableAgents().length }})</option>
+          @for (a of availableAgents(); track a.id) {
+            <option [value]="a.id">{{ a.short }} — {{ a.verdict }}</option>
+          }
+        </select>
+      </label>
+      <label>
+        Verdict
+        <select
+          [ngModel]="verdictFilter()"
+          (ngModelChange)="verdictFilter.set($event)"
+          data-testid="lc-verdict-filter"
+        >
+          <option value="all">All verdicts</option>
+          <option value="learning">Learning</option>
+          <option value="collapsed">Collapsed</option>
+          <option value="unstable">Unstable</option>
+          <option value="stagnant">Stagnant</option>
+          <option value="warming_up">Warming up</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="lc-panels" data-testid="lc-panels">
+      @for (panel of filteredPanels(); track panel.modelId) {
+        <article
+          class="agent-panel"
+          [class]="verdictClass(panel.diagnostic.verdict)"
+          [attr.data-testid]="'lc-panel-' + panel.shortId"
+        >
+          <header class="panel-header">
+            <div class="panel-title">
+              <code class="agent-id">{{ panel.shortId }}</code>
+              <span class="arch">{{ panel.architecture }}</span>
+              <span class="episode-count">{{ panel.diagnostic.nEpisodes }} ep</span>
+            </div>
+            <span
+              class="verdict-chip"
+              [class]="verdictClass(panel.diagnostic.verdict)"
+              [attr.data-testid]="'lc-verdict-' + panel.shortId"
+            >
+              {{ panel.diagnostic.verdictLabel }}
+            </span>
+          </header>
+          <p class="panel-headline" data-testid="lc-headline">
+            {{ panel.diagnostic.headline }}
+          </p>
+
+          <div class="chart-row">
+            <div class="mini-chart">
+              <div class="chart-label">Reward</div>
+              <svg
+                [attr.viewBox]="'0 0 ' + chartWidth + ' ' + chartHeight"
+                preserveAspectRatio="none"
+                class="chart-svg"
+              >
+                <line x1="0" [attr.y1]="chartHeight / 2" [attr.x2]="chartWidth" [attr.y2]="chartHeight / 2" class="zero-line" />
+                <path [attr.d]="pathFor(panel, 'reward')" class="chart-line reward-line" />
+              </svg>
+              <p class="chart-caption">{{ panel.diagnostic.captions.reward }}</p>
+            </div>
+
+            <div class="mini-chart">
+              <div class="chart-label">Arb completion rate</div>
+              <svg
+                [attr.viewBox]="'0 0 ' + chartWidth + ' ' + chartHeight"
+                preserveAspectRatio="none"
+                class="chart-svg"
+              >
+                <path [attr.d]="pathFor(panel, 'arbRate')" class="chart-line arb-line" />
+              </svg>
+              <p class="chart-caption">
+                {{ panel.diagnostic.captions.arbRate ?? 'No arb data yet.' }}
+              </p>
+            </div>
+          </div>
+
+          <div class="chart-row">
+            <div class="mini-chart">
+              <div class="chart-label">Policy loss (log scale)</div>
+              <svg
+                [attr.viewBox]="'0 0 ' + chartWidth + ' ' + chartHeight"
+                preserveAspectRatio="none"
+                class="chart-svg"
+              >
+                <path [attr.d]="pathFor(panel, 'policyLoss')" class="chart-line loss-line" />
+                @for (s of spikeMarkers(panel); track $index) {
+                  <circle [attr.cx]="s.x" [attr.cy]="s.y" r="4" class="spike-marker" />
+                }
+              </svg>
+              <p class="chart-caption">
+                {{ panel.diagnostic.captions.policyLoss ?? 'No loss data yet.' }}
+              </p>
+            </div>
+
+            <div class="mini-chart">
+              <div class="chart-label">Entropy</div>
+              <svg
+                [attr.viewBox]="'0 0 ' + chartWidth + ' ' + chartHeight"
+                preserveAspectRatio="none"
+                class="chart-svg"
+              >
+                <path [attr.d]="pathFor(panel, 'entropy')" class="chart-line entropy-line" />
+              </svg>
+              <p class="chart-caption">
+                {{ panel.diagnostic.captions.entropy ?? 'No entropy data yet.' }}
+              </p>
+            </div>
+          </div>
+        </article>
+      }
+
+      @if (filteredPanels().length === 0 && allPanels().length > 0) {
+        <div class="lc-empty" data-testid="lc-no-matches">
+          No agents match the current filter.
+        </div>
+      }
+    </div>
+  }
+</section>

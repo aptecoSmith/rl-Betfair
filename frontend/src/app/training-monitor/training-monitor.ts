@@ -6,6 +6,7 @@ import { TrainingService } from '../services/training.service';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
 import { RunCompleteSummary, WSEvent } from '../models/training.model';
+import { LearningCurves } from '../learning-curves/learning-curves';
 
 /** Phase label mapping (same as header, but full labels). */
 const PHASE_LABELS: Record<string, string> = {
@@ -29,7 +30,7 @@ export interface AgentGridItem {
 @Component({
   selector: 'app-training-monitor',
   standalone: true,
-  imports: [DecimalPipe, FormsModule, RouterLink],
+  imports: [DecimalPipe, FormsModule, RouterLink, LearningCurves],
   templateUrl: './training-monitor.html',
   styleUrl: './training-monitor.scss',
 })

@@ -282,6 +282,17 @@ export class ApiService {
     return this.setAutoContinue(planId, false);
   }
 
+  getTrainingEpisodes(options: { sinceTs?: string | number | null; limit?: number } = {}):
+    Observable<{ episodes: any[]; latest_ts: string | number | null; truncated: boolean }> {
+    const params: Record<string, string> = {};
+    if (options.sinceTs != null) params['since_ts'] = String(options.sinceTs);
+    if (options.limit != null) params['limit'] = String(options.limit);
+    return this.http.get<{ episodes: any[]; latest_ts: string | number | null; truncated: boolean }>(
+      `${this.baseUrl}/training/episodes`,
+      { params },
+    );
+  }
+
   getTrainingPlanCoverage(): Observable<CoverageResponse> {
     return this.http.get<any>(`${this.baseUrl}/training-plans/coverage`).pipe(
       map(resp => {

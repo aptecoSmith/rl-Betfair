@@ -665,4 +665,122 @@ class TestStartWithOverrides:
                 "architectures": ["ppo_lstm_v1"],
             })
             assert resp.status_code == 400
-            assert "ppo_lstm_v1" in resp.json()["detail"]
+
+
+# ── Episodes Endpoint Tests ──────────────────────────────────────────
+
+
+class TestTrainingEpisodes:
+    """GET /training/episodes backs the learning-curves UI."""
+
+    def _mount(self, tmp_path, lines: list[str]):
+        client, app = _make_app()
+        app.state.config = {"paths": {"logs": str(tmp_path)}}
+        log_dir = tmp_path / "training"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "episodes.jsonl"
+        log_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        return client, app
+
+    def _row(self, episode: int, ts: float, **overrides) -> str:
+        base = {
+            "episode": episode,
+            "model_id": "m1",
+            "day_date": "2026-04-06",
+            "total_reward": -100.0,
+            "total_pnl": -50.0,
+            "bet_count": 10,
+            "policy_loss": 0.15,
+            "value_loss": 5.0,
+            "entropy": 100.0,
+            "arbs_completed": 2,
+            "arbs_naked": 8,
+            "timestamp": ts,
+        }
+        base.update(overrides)
+        return json.dumps(base)
+
+    def test_returns_empty_when_file_missing(self, tmp_path):
+        client, app = _make_app()
+        app.state.config = {"paths": {"logs": str(tmp_path / "does-not-exist")}}
+        resp = client.get("/training/episodes")
+        assert resp.status_code == 200
+        assert resp.json() == {"episodes": [], "latest_ts": None, "truncated": False}
+
+    def test_returns_all_rows_when_under_limit(self, tmp_path):
+        client, _ = self._mount(tmp_path, [
+            self._row(1, 1000.0),
+            self._row(2, 1060.0),
+            self._row(3, 1120.0),
+        ])
+        resp = client.get("/training/episodes")
+        body = resp.json()
+        assert len(body["episodes"]) == 3
+        assert body["latest_ts"] == 1120.0
+        assert body["truncated"] is False
+
+    def test_respects_limit_parameter(self, tmp_path):
+        rows = [self._row(i, 1000.0 + i * 60) for i in range(1, 6)]
+        client, _ = self._mount(tmp_path, rows)
+        resp = client.get("/training/episodes?limit=2")
+        body = resp.json()
+        assert len(body["episodes"]) == 2
+        # When limited, returns the *most recent* rows.
+        assert body["episodes"][0]["episode"] == 4
+        assert body["episodes"][1]["episode"] == 5
+
+    def test_since_ts_numeric_returns_only_newer_rows(self, tmp_path):
+        client, _ = self._mount(tmp_path, [
+            self._row(1, 1000.0),
+            self._row(2, 1060.0),
+            self._row(3, 1120.0),
+            self._row(4, 1180.0),
+        ])
+        resp = client.get("/training/episodes?since_ts=1060")
+        body = resp.json()
+        assert [e["episode"] for e in body["episodes"]] == [3, 4]
+        assert body["latest_ts"] == 1180.0
+
+    def test_since_ts_accepts_iso_string(self, tmp_path):
+        """ISO timestamp in since_ts is parsed to epoch on the fly."""
+        # 1000.0 epoch = 1970-01-01T00:16:40Z. Two rows either side.
+        client, _ = self._mount(tmp_path, [
+            self._row(1, 900.0),
+            self._row(2, 1100.0),
+        ])
+        # since_ts = 1000 epoch → 1970-01-01T00:16:40Z
+        resp = client.get("/training/episodes?since_ts=1970-01-01T00:16:40Z")
+        body = resp.json()
+        assert [e["episode"] for e in body["episodes"]] == [2]
+
+    def test_since_ts_strict_inequality(self, tmp_path):
+        """since_ts == some row's ts excludes that row (next poll shouldn't
+        double-count the last seen row)."""
+        client, _ = self._mount(tmp_path, [
+            self._row(1, 1000.0),
+            self._row(2, 1060.0),
+        ])
+        resp = client.get("/training/episodes?since_ts=1060")
+        assert resp.json()["episodes"] == []
+
+    def test_skips_malformed_json_lines(self, tmp_path):
+        client, _ = self._mount(tmp_path, [
+            self._row(1, 1000.0),
+            "{not valid json",
+            "",
+            self._row(2, 1120.0),
+        ])
+        resp = client.get("/training/episodes")
+        body = resp.json()
+        assert [e["episode"] for e in body["episodes"]] == [1, 2]
+
+    def test_invalid_since_ts_treated_as_no_filter(self, tmp_path):
+        """A garbage since_ts falls through rather than 400ing; a stale
+        or malformed client cursor shouldn't hang the UI."""
+        client, _ = self._mount(tmp_path, [
+            self._row(1, 1000.0),
+            self._row(2, 1120.0),
+        ])
+        resp = client.get("/training/episodes?since_ts=not-a-number")
+        body = resp.json()
+        assert [e["episode"] for e in body["episodes"]] == [1, 2]

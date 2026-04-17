@@ -141,6 +141,101 @@ def get_training_status(request: Request):
     )
 
 
+@router.get("/training/episodes")
+def get_training_episodes(
+    request: Request,
+    since_ts: str | None = None,
+    limit: int = 5000,
+):
+    """Return recent rows from ``logs/training/episodes.jsonl``.
+
+    Powers the learning-curves UI. Reads the jsonl log directly rather
+    than going through the WebSocket event stream — the stream already
+    emits some of this data but as parsed detail strings, not the full
+    per-episode record the UI needs.
+
+    Query params:
+
+    - ``since_ts``: ISO timestamp. Only return episodes whose ``timestamp``
+      strictly exceeds this. Used by the frontend to poll for deltas.
+    - ``limit``: cap the number of rows returned (default 5000). When
+      ``since_ts`` is omitted we return the last ``limit`` rows of the
+      file; when ``since_ts`` is supplied we return up to ``limit`` rows
+      after that timestamp (but the delta is usually tiny so the cap is
+      a safety net).
+
+    Response shape::
+
+        {
+          "episodes": [ {...}, ... ],
+          "latest_ts": "2026-04-17T13:48:03.142Z" | null,
+          "truncated": true | false
+        }
+
+    ``latest_ts`` echoes the timestamp of the last returned row, so the
+    client can pass it back as ``since_ts`` on the next poll.
+    """
+    config = request.app.state.config
+    log_path = Path(config["paths"]["logs"]) / "training" / "episodes.jsonl"
+    if not log_path.exists():
+        return {"episodes": [], "latest_ts": None, "truncated": False}
+
+    # Read backwards one line at a time when no since_ts, so we don't
+    # parse the whole file on every request. With since_ts, do a forward
+    # scan but short-circuit once we've crossed the cutoff.
+    rows: list[dict] = []
+    try:
+        with log_path.open("r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+    except OSError as exc:
+        raise HTTPException(500, f"Failed to read episodes log: {exc}")
+
+    # Timestamps in episodes.jsonl are Unix epoch floats. Accept either
+    # a numeric string (preferred, what the frontend sends) or an ISO
+    # timestamp (parsed on the spot). Invalid input is treated as "no
+    # filter" rather than 400'ing so a stale cursor never hangs the UI.
+    since_epoch: float | None = None
+    if since_ts is not None:
+        try:
+            since_epoch = float(since_ts)
+        except ValueError:
+            try:
+                from datetime import datetime
+                iso = since_ts.replace("Z", "+00:00")
+                since_epoch = datetime.fromisoformat(iso).timestamp()
+            except (ValueError, TypeError):
+                since_epoch = None
+
+    if since_epoch is None:
+        candidates = all_lines[-(limit * 2):] if limit > 0 else all_lines
+    else:
+        candidates = all_lines
+
+    for line in candidates:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if since_epoch is not None:
+            ts = row.get("timestamp")
+            try:
+                if ts is None or float(ts) <= since_epoch:
+                    continue
+            except (ValueError, TypeError):
+                continue
+        rows.append(row)
+
+    truncated = len(rows) > limit
+    if truncated:
+        rows = rows[-limit:] if since_ts is None else rows[:limit]
+
+    latest_ts = rows[-1].get("timestamp") if rows else None
+    return {"episodes": rows, "latest_ts": latest_ts, "truncated": truncated}
+
+
 @router.get("/training/info")
 def get_training_info(request: Request):
     """Return data availability and estimated training duration info.
