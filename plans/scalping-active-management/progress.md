@@ -4,6 +4,205 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 06 — Scoreboard MACE column (2026-04-17)
+
+**Landed.**
+
+Third and final UI-facing session. A new **MACE** column on the
+Scoreboard's Scalping tab surfaces each model's mean-absolute
+calibration error diagnostically — without touching the composite-score
+ranking (hard_constraints §14). Operators can now see at a glance
+which of their top-L/N scalpers also have the best-calibrated
+fill-probability head, which is exactly the question the activation
+playbook's Step B + Step E ask.
+
+**Shared-helper refactor.**
+
+Session 05's MACE math lived inside `api/calibration.py`, inside the
+API layer. Moving it into a new
+[registry/calibration.py](../../registry/calibration.py) turned out to
+be strictly additive:
+
+- Bucket edges (`BUCKET_EDGES`, `BUCKET_MIDPOINTS`, `BUCKET_LABELS`)
+  and thresholds (`MIN_BUCKET_SIZE = 20`, `MIN_BUCKETS_FOR_MACE = 2`)
+  are now module-level greppable constants.
+- `compute_bucket_outcomes(bets)` returns a 4-row `BucketOutcome`
+  list (label, midpoint, observed_rate, count, abs_error).
+  `compute_mace(bets, *, min_bucket_size=MIN_BUCKET_SIZE)` returns
+  the single MACE float (or `None` when < 2 buckets clear the
+  threshold).
+- `api/calibration.py::compute_calibration_stats` now delegates to
+  both helpers, rebuilding `ReliabilityBucket` entries from the
+  shared `BucketOutcome`s and keeping only the scatter-plot math
+  local. The API response shape is unchanged and Session 05's 10
+  tests still pass unchanged (verified).
+- `registry/scoreboard.py` imports `compute_mace` directly —
+  registry code no longer needs to cross into the api/ package.
+
+**`ModelScore` extension.**
+
+`ModelScore.mean_absolute_calibration_error: float | None = None`
+added in [registry/scoreboard.py](../../registry/scoreboard.py).
+`Scoreboard.compute_score`:
+
+1. Short-circuits on directional runs (`arbs_completed + arbs_naked
+   == 0`) so the parquet layer isn't touched at all.
+2. For scalping runs calls
+   `self.store.get_evaluation_bets(days[0].run_id)` then
+   `compute_mace(bets)`.
+3. Wraps the parquet read in `try/except Exception` so a single
+   model's missing/corrupt bet-log never crashes the scoreboard
+   pipeline — the field stays `None` and the rest of the ranking
+   proceeds.
+4. **Does not touch the existing composite-score math.** Added as a
+   sibling assignment on the returned `ModelScore`; grep the diff
+   against `ln_ratio` / `composite_score` / `win_rate * self.w_` and
+   nothing there changed.
+
+`api/schemas.py::ScoreboardEntry` mirrors the new field as
+`mean_absolute_calibration_error: float | None = None` so existing
+clients (older frontend caches, ai-betfair) keep working — the field
+is additive (hard_constraints §12).
+
+**Frontend — the column.**
+
+- Typescript `ScoreboardEntry` gets `mean_absolute_calibration_error?:
+  number | null` in
+  [frontend/src/app/models/scoreboard.model.ts](../../frontend/src/app/models/scoreboard.model.ts).
+- The scoreboard component in
+  [frontend/src/app/scoreboard/scoreboard.ts](../../frontend/src/app/scoreboard/scoreboard.ts)
+  gains a `scalpingSort` signal (`'default' | 'mace-asc' |
+  'mace-desc'`) plus helper methods `toggleMaceSort`,
+  `formatMace`, `maceClass`, `maceSortIndicator`, and a private
+  `sortByMace` that puts nulls last in both directions.
+- The template adds a single `<th class="mace-col mace-header">` +
+  `<td class="mace-col">` inside the existing Scalping-tab
+  `<table>` block. The Directional and All tabs use a separate
+  `<table>` further down the template, so **tab visibility falls
+  out naturally** from the existing pattern — no column-visibility
+  map required. (Prompt flagged this as an acceptable approach;
+  this was the simplest of the two.)
+- Traffic-light thresholds are exported constants
+  (`MACE_GREEN_BELOW = 0.10`, `MACE_AMBER_BELOW_OR_EQUAL = 0.20`),
+  matching Session 05's calibration-card badge so the two surfaces
+  agree at a glance. Green < 0.10, amber [0.10, 0.20], red > 0.20.
+  Boundary values are covered by four dedicated specs.
+- Cell rendering: `null` / `undefined` → `"—"`; number →
+  `.toFixed(2)` with the traffic-light class.
+- Sort cycle: `default → mace-asc → mace-desc → default` on repeat
+  clicks of the header. A `▲` / `▼` / empty indicator span sits in
+  the header so the active sort is visible.
+- `setActiveTab(...)` resets `scalpingSort` to `'default'` when
+  leaving the scalping tab — otherwise an operator who returned to
+  Scalping after clicking "Directional" would find MACE still
+  sorted.
+
+**Ranking invariant (the tripwire).**
+
+Hard_constraints §14 says the scoreboard ranks by L/N ratio >
+composite; MACE is diagnostic only. The invariant is enforced by two
+tests that will fail loudly if anything wires MACE into ranking:
+
+1. **Server-side** —
+   [tests/test_scoreboard_mace.py](../../tests/test_scoreboard_mace.py)::`TestRankingInvariant::test_rank_all_ordering_unchanged_with_and_without_mace`
+   builds three scalping models with composite scores `[0.9, 0.5, 0.2]`
+   twice. Run A: no parquet attached → MACE=None on every row.
+   Run B: parquet attached with **adversarial** MACE (best composite
+   gets worst MACE; worst composite gets best MACE). The returned
+   composite-score ordering must be byte-identical between runs. The
+   test also asserts MACE is non-null in Run B (so we're actually
+   testing the adversarial case, not a no-op) and that the adversarial
+   MACE values really do increase in the opposite direction from
+   composite. If someone ever sorts by or weights composite with
+   MACE, Run B's ordering flips and this test catches it.
+2. **Frontend** —
+   [frontend/src/app/scoreboard/scoreboard.spec.ts](../../frontend/src/app/scoreboard/scoreboard.spec.ts)::`MACE column (scalping tab) › ranking invariant: default sort ignores MACE entirely`
+   builds a three-scalping-model fixture where the top-L/N row has the
+   worst MACE (0.50) and the best-MACE row has middling L/N.
+   In default sort mode, asserts the ranked order is `top_ln > mid_ln
+   > low_ln` — L/N rules, MACE is ignored.
+
+Both tests are comment-tagged with "revert if this fails" so future
+readers don't try to "fix" the constraint.
+
+**Null-sort-last behaviour.**
+
+The ``sortByMace`` helper short-circuits nulls before comparing
+numbers: `aNull && bNull → 0` (stable), `aNull → 1` (sink),
+`bNull → -1` (sink). Both asc and desc paths reach the same null
+handling, so flipping the sort direction never moves a null up.
+Tested in both directions (`sort ascending: nulls sort last` /
+`sort descending: nulls still sort last`).
+
+**Tests.**
+
+- **Server-side** — 10 new tests in
+  [tests/test_scoreboard_mace.py](../../tests/test_scoreboard_mace.py):
+  empty / all-sparse / perfect-predictions / min-bucket-size override /
+  exported-constants-pinned / bucket-outcomes-always-4-rows /
+  ModelScore MACE populated for scalping / ModelScore MACE None for
+  directional / ModelScore MACE None when `get_evaluation_bets`
+  raises / ranking invariant. `pytest tests/ -q` →
+  **1991 passed**, 7 skipped, 1 xfailed. Net +10 vs Session 05
+  (1981 → 1991) — matches the exit-criteria target.
+- **Frontend** — 18 new specs in the existing
+  [frontend/src/app/scoreboard/scoreboard.spec.ts](../../frontend/src/app/scoreboard/scoreboard.spec.ts):
+  column visibility on each tab, dash-for-null, two-decimal format,
+  four traffic-light boundaries (0.0999 / 0.1 / 0.2 / 0.2001), null
+  → no class, header tooltip matches spec, sort cycle (default →
+  asc → desc → default), tab switch resets the sort, asc + desc
+  value order, asc + desc null-sinks, and the ranking invariant.
+  `ng test --watch=false` → **519 passed**, 24 skipped. Net +18
+  vs Session 05 (501 → 519).
+
+**Browser verification.**
+
+Seeded four demo models (throwaway `SESSION06DEMO_*` tag) on the real
+registry + API:
+
+1. `SESSION06DEMO_GREEN` — scalping, four dense buckets with observed
+   ≈ midpoint ± 0.05 → MACE = 0.05, rendered green.
+2. `SESSION06DEMO_RED` — scalping, four dense buckets deliberately
+   far off midpoint → MACE = 0.25, rendered red.
+3. `SESSION06DEMO_NULL` — scalping, only 5 sparse pairs in one bucket
+   → MACE = null, rendered as "—" with no traffic-light class.
+4. `SESSION06DEMO_DIR` — directional, no scalping bets → MACE null
+   (short-circuit path) and row does NOT appear on the Scalping tab.
+
+Verified through `preview_eval` against the live scoreboard at
+`http://localhost:4202/scoreboard`:
+
+- Scalping tab: MACE header present with the exact tooltip
+  `"Mean absolute calibration error on the latest eval run. Lower
+  is better. Null → insufficient eval-day data."`.
+- Demo GREEN cell carries class `mace-col mace-green`; demo RED has
+  `mace-col mace-red`; demo NULL has `mace-col` (no traffic-light).
+- First click → `mace-asc`, indicator `▲`, first three rows are
+  GREEN (0.05), RED (0.25), then all the nulls. Last row is a dash.
+- Second click → `mace-desc`, indicator `▼`, non-nulls flipped,
+  nulls still last.
+- Third click → `default`, indicator empty, **top row is back to
+  `ef453cd9`** — the pre-Session-06 L/N top. Ranking invariant holds
+  visually as well as in the unit test.
+- Directional tab: `data-testid="mace-header"` not in the DOM;
+  switching to Directional also resets `scalpingSort` to default
+  (asserted in a spec too).
+- `preview_console_logs level=error` empty at every state.
+
+Screenshot of the Scalping tab with the three demo rows was taken
+before cleanup. Demo models and their parquet files were torn down
+via a pair of throwaway scripts (`_session06_seed_demo.py` and
+`_session06_cleanup_demo.py`) which were deleted after the run —
+the cleanup just calls `ModelStore.delete_model` which already
+handles the parquet + eval-run + DB teardown in one transaction.
+
+**No reward-scale change.** Pure UI + API-additive + registry-level
+refactor session. Env, trainer, aux heads untouched. Both
+`raw + shaped ≈ total_reward` and "ranking is L/N > composite"
+invariants intact.
+
+---
+
 ## Session 05 — Model-detail calibration card (2026-04-17)
 
 **Landed.**

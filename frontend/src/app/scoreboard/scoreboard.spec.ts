@@ -5,7 +5,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { of, throwError, Observable } from 'rxjs';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { Scoreboard } from './scoreboard';
+import { Scoreboard, MACE_GREEN_BELOW, MACE_AMBER_BELOW_OR_EQUAL } from './scoreboard';
 import { ApiService } from '../services/api.service';
 import { SelectionStateService } from '../services/selection-state.service';
 import { ScoreboardEntry, ScoreboardResponse } from '../models/scoreboard.model';
@@ -532,6 +532,239 @@ describe('Scoreboard', () => {
       const order = component.rankedModels().map(m => m.model_id);
       expect(order[0]).toBe('active');
       expect(order[1]).toBe('no_bets');
+    });
+  });
+
+  // ── Scalping-active-management §06 — MACE column ──
+
+  describe('MACE column (scalping tab)', () => {
+    /** Scalping entry with an opinionated L/N and a MACE override. */
+    function scalpingWithMace(
+      id: string, mace: number | null | undefined,
+      ln: { locked: number; naked: number } = { locked: 20, naked: -10 },
+    ): ScoreboardEntry {
+      return makeEntry({
+        model_id: id, is_scalping: true,
+        total_bets: 100,
+        locked_pnl: ln.locked, naked_pnl: ln.naked,
+        composite_score: 0.5,
+        mean_absolute_calibration_error: mace,
+      });
+    }
+
+    it('renders the MACE column on the Scalping tab', () => {
+      setup({ models: [scalpingWithMace('s1', 0.12)] });
+      component.setActiveTab('scalping');
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="mace-header"]')).toBeTruthy();
+    });
+
+    it('omits the MACE column on the Directional tab', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'd1', is_scalping: false }),
+        ],
+      });
+      component.setActiveTab('directional');
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="mace-header"]')).toBeFalsy();
+    });
+
+    it('omits the MACE column on the All tab', () => {
+      setup({
+        models: [
+          makeEntry({ model_id: 'x1' }),
+        ],
+      });
+      // activeTab defaults to 'all'.
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="mace-header"]')).toBeFalsy();
+    });
+
+    it('renders a dash for null MACE, not 0.00', () => {
+      setup({ models: [scalpingWithMace('s1', null)] });
+      component.setActiveTab('scalping');
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const cell = el.querySelector('[data-testid="mace-cell-0"]');
+      expect(cell?.textContent?.trim()).toBe('—');
+    });
+
+    it('renders MACE values with two decimals', () => {
+      setup({ models: [scalpingWithMace('s1', 0.1234)] });
+      component.setActiveTab('scalping');
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const cell = el.querySelector('[data-testid="mace-cell-0"]');
+      expect(cell?.textContent?.trim()).toBe('0.12');
+    });
+
+    it('traffic-light boundary: < 0.10 is green (0.0999)', () => {
+      setup();
+      const m = scalpingWithMace('s', MACE_GREEN_BELOW - 0.0001);
+      expect(component.maceClass(m)).toBe('mace-green');
+    });
+
+    it('traffic-light boundary: 0.10 exactly is amber', () => {
+      setup();
+      const m = scalpingWithMace('s', MACE_GREEN_BELOW);
+      expect(component.maceClass(m)).toBe('mace-amber');
+    });
+
+    it('traffic-light boundary: 0.20 exactly is amber', () => {
+      setup();
+      const m = scalpingWithMace('s', MACE_AMBER_BELOW_OR_EQUAL);
+      expect(component.maceClass(m)).toBe('mace-amber');
+    });
+
+    it('traffic-light boundary: > 0.20 is red (0.2001)', () => {
+      setup();
+      const m = scalpingWithMace('s', MACE_AMBER_BELOW_OR_EQUAL + 0.0001);
+      expect(component.maceClass(m)).toBe('mace-red');
+    });
+
+    it('traffic-light class is null when MACE is absent', () => {
+      setup();
+      expect(component.maceClass(scalpingWithMace('s', null))).toBeNull();
+      expect(component.maceClass(scalpingWithMace('s', undefined))).toBeNull();
+    });
+
+    it('header tooltip matches spec', () => {
+      setup({ models: [scalpingWithMace('s1', 0.12)] });
+      component.setActiveTab('scalping');
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const header = el.querySelector('[data-testid="mace-header"]');
+      expect(header?.getAttribute('title')).toBe(
+        'Mean absolute calibration error on the latest eval run. ' +
+        'Lower is better. Null → insufficient eval-day data.',
+      );
+    });
+
+    it('click cycles sort: default → asc → desc → default', () => {
+      setup({ models: [scalpingWithMace('s1', 0.12)] });
+      component.setActiveTab('scalping');
+      expect(component.scalpingSort()).toBe('default');
+      component.toggleMaceSort();
+      expect(component.scalpingSort()).toBe('mace-asc');
+      component.toggleMaceSort();
+      expect(component.scalpingSort()).toBe('mace-desc');
+      component.toggleMaceSort();
+      expect(component.scalpingSort()).toBe('default');
+    });
+
+    it('switching away from Scalping tab resets MACE sort', () => {
+      setup({
+        models: [
+          scalpingWithMace('s1', 0.12),
+          makeEntry({ model_id: 'd1', is_scalping: false }),
+        ],
+      });
+      component.setActiveTab('scalping');
+      component.toggleMaceSort();
+      expect(component.scalpingSort()).toBe('mace-asc');
+      component.setActiveTab('directional');
+      expect(component.scalpingSort()).toBe('default');
+    });
+
+    it('sort ascending: values sorted low → high', () => {
+      setup({
+        models: [
+          scalpingWithMace('a', 0.25),
+          scalpingWithMace('b', 0.05),
+          scalpingWithMace('c', 0.15),
+        ],
+      });
+      component.setActiveTab('scalping');
+      component.toggleMaceSort();  // asc
+      expect(component.rankedModels().map(m => m.model_id))
+        .toEqual(['b', 'c', 'a']);
+    });
+
+    it('sort descending: values sorted high → low', () => {
+      setup({
+        models: [
+          scalpingWithMace('a', 0.25),
+          scalpingWithMace('b', 0.05),
+          scalpingWithMace('c', 0.15),
+        ],
+      });
+      component.setActiveTab('scalping');
+      component.toggleMaceSort();
+      component.toggleMaceSort();  // desc
+      expect(component.rankedModels().map(m => m.model_id))
+        .toEqual(['a', 'c', 'b']);
+    });
+
+    it('sort ascending: nulls sort last', () => {
+      setup({
+        models: [
+          scalpingWithMace('no_mace', null),
+          scalpingWithMace('good', 0.05),
+          scalpingWithMace('poor', 0.25),
+        ],
+      });
+      component.setActiveTab('scalping');
+      component.toggleMaceSort();  // asc
+      const order = component.rankedModels().map(m => m.model_id);
+      expect(order).toEqual(['good', 'poor', 'no_mace']);
+    });
+
+    it('sort descending: nulls still sort last', () => {
+      setup({
+        models: [
+          scalpingWithMace('no_mace', null),
+          scalpingWithMace('good', 0.05),
+          scalpingWithMace('poor', 0.25),
+        ],
+      });
+      component.setActiveTab('scalping');
+      component.toggleMaceSort();
+      component.toggleMaceSort();  // desc
+      const order = component.rankedModels().map(m => m.model_id);
+      expect(order).toEqual(['poor', 'good', 'no_mace']);
+    });
+
+    // ── Ranking invariant (critical) — hard_constraints §14 ──
+    //
+    // In ``default`` sort mode the scalping tab MUST rank purely by
+    // L/N ratio > composite score, ignoring MACE entirely. If this
+    // fails, someone wired MACE into the sort key — revert.
+    it('ranking invariant: default sort ignores MACE entirely', () => {
+      setup({
+        models: [
+          // Best L/N, worst MACE. Must sit at top on default sort.
+          makeEntry({
+            model_id: 'top_ln', is_scalping: true,
+            total_bets: 100, locked_pnl: 100, naked_pnl: -10,
+            composite_score: 0.4,
+            mean_absolute_calibration_error: 0.50,  // worst
+          }),
+          // Middle L/N, best MACE.
+          makeEntry({
+            model_id: 'mid_ln', is_scalping: true,
+            total_bets: 100, locked_pnl: 40, naked_pnl: -20,
+            composite_score: 0.5,
+            mean_absolute_calibration_error: 0.02,  // best
+          }),
+          // Worst L/N, middle MACE.
+          makeEntry({
+            model_id: 'low_ln', is_scalping: true,
+            total_bets: 100, locked_pnl: 10, naked_pnl: -50,
+            composite_score: 0.6,
+            mean_absolute_calibration_error: 0.15,
+          }),
+        ],
+      });
+      component.setActiveTab('scalping');
+      expect(component.scalpingSort()).toBe('default');
+      const order = component.rankedModels().map(m => m.model_id);
+      // L/N: top_ln=10, mid_ln=2, low_ln=0.2 → top_ln > mid_ln > low_ln.
+      // If MACE were feeding ranking, mid_ln (best MACE) would rise to
+      // the top. It must NOT.
+      expect(order).toEqual(['top_ln', 'mid_ln', 'low_ln']);
     });
   });
 });

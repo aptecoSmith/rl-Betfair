@@ -28,6 +28,11 @@ export interface ScoreboardEntry {
   arbs_naked?: number;
   locked_pnl?: number;
   naked_pnl?: number;
+  // Scalping-active-management §06: diagnostic-only MACE column on
+  // the Scalping tab. Does NOT feed composite ranking. Null when the
+  // run lacks enough eval-day data (< 2 fill-prob buckets with >= 20
+  // pairs) or when the bet log can't be read.
+  mean_absolute_calibration_error?: number | null;
 }
 
 export interface ScoreboardResponse {

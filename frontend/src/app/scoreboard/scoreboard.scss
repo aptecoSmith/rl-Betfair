@@ -82,6 +82,32 @@
   &.negative { color: #f87171; }
 }
 
+// Scalping-active-management §06 — MACE column. Traffic-light colours
+// match the Session-05 calibration card's MACE badge so the two
+// surfaces agree at a glance.
+.mace-col {
+  font-weight: 700;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+
+  &.mace-green { color: #4ade80; }
+  &.mace-amber { color: #fbbf24; }
+  &.mace-red   { color: #f87171; }
+}
+
+.mace-header {
+  cursor: pointer;
+  user-select: none;
+
+  &:hover { color: #c0c0ff; }
+}
+
+.mace-sort-indicator {
+  display: inline-block;
+  min-width: 0.8rem;
+  color: #a78bfa;
+  font-size: 0.7rem;
+}
+
 .bulk-toolbar {
   display: flex;
   align-items: center;

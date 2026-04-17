@@ -66,6 +66,12 @@
           <th title="Sum of guaranteed-floor profit from completed pairs">Locked £</th>
           <th title="Net P&L on unhedged exposure (negative = naked losses)">Naked £</th>
           <th title="Locked / |Naked| — &gt;1 means scalping is winning, &lt;1 means naked exposure dominates">L / N</th>
+          <th class="mace-col mace-header"
+              (click)="toggleMaceSort()"
+              title="Mean absolute calibration error on the latest eval run. Lower is better. Null → insufficient eval-day data."
+              data-testid="mace-header">
+            MACE <span class="mace-sort-indicator" data-testid="mace-sort-indicator">{{ maceSortIndicator() }}</span>
+          </th>
           <th>Mean Daily P&amp;L</th>
           <th>Sharpe</th>
           <th>Trained</th>
@@ -116,6 +122,13 @@
                 [class.negative]="lockedNakedRatioClass(model) === 'negative'">
               {{ formatLockedNakedRatio(model) }}
             </td>
+            <td class="mace-col"
+                [class.mace-green]="maceClass(model) === 'mace-green'"
+                [class.mace-amber]="maceClass(model) === 'mace-amber'"
+                [class.mace-red]="maceClass(model) === 'mace-red'"
+                [attr.data-testid]="'mace-cell-' + i">
+              {{ formatMace(model) }}
+            </td>
             <td>{{ model.mean_daily_pnl | currency:'GBP':'symbol':'1.2-2' }}</td>
             <td>{{ model.sharpe | number:'1.2-2' }}</td>
             <td class="timestamp-col" [title]="model.created_at ?? ''">{{ formatTimestamp(model.created_at) }}</td>
@@ -125,7 +138,7 @@
         }
         @empty {
           <tr>
-            <td colspan="17" class="empty-state" data-testid="empty-state">No scalping models found</td>
+            <td colspan="18" class="empty-state" data-testid="empty-state">No scalping models found</td>
           </tr>
         }
       </tbody>

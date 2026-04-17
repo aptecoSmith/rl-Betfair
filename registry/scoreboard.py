@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from registry.calibration import compute_mace
 from registry.model_store import EvaluationDayRecord, ModelRecord, ModelStore
 
 
@@ -62,6 +63,12 @@ class ModelScore:
     arbs_naked: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
+    # Scalping-active-management §06 — diagnostic only, does NOT feed
+    # ``composite_score``. ``None`` for directional runs, for scalping
+    # runs without enough eval-day data (< 2 buckets clear the count
+    # threshold), or when the run's eval-bet parquet can't be read.
+    # See hard_constraints.md §14.
+    mean_absolute_calibration_error: float | None = None
 
 
 class Scoreboard:
@@ -161,6 +168,22 @@ class Scoreboard:
         locked_pnl_total = sum(d.locked_pnl for d in days)
         naked_pnl_total = sum(d.naked_pnl for d in days)
 
+        # Scalping-active-management §06 — diagnostic MACE column.
+        # Only populated for runs that placed at least one paired
+        # scalping bet; directional runs short-circuit to None to skip
+        # the parquet read entirely. Graceful-degrade on any I/O error
+        # (missing parquet, corrupted file, ...) — a single model's
+        # bad bet-log must never crash the scoreboard pipeline. Does
+        # NOT feed ``composite`` — see hard_constraints.md §14.
+        mace: float | None = None
+        if (arbs_completed + arbs_naked) > 0:
+            try:
+                bets = self.store.get_evaluation_bets(days[0].run_id)
+            except Exception:
+                bets = []
+            if bets:
+                mace = compute_mace(bets)
+
         return ModelScore(
             model_id="",  # filled by caller
             win_rate=win_rate,
@@ -182,6 +205,7 @@ class Scoreboard:
             arbs_naked=arbs_naked,
             locked_pnl=locked_pnl_total,
             naked_pnl=naked_pnl_total,
+            mean_absolute_calibration_error=mace,
         )
 
     def score_model(self, model_id: str) -> ModelScore | None:

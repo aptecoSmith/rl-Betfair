@@ -58,6 +58,12 @@ class ScoreboardEntry(BaseModel):
     arbs_naked: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
+    # Scalping-active-management §06 — mean absolute calibration error
+    # on the latest eval run. Diagnostic only; does NOT feed the
+    # composite score (hard_constraints §14). ``None`` for directional
+    # runs, pre-Session-02 runs, and scalping runs without enough
+    # eval-day data (< 2 buckets with >= 20 pairs).
+    mean_absolute_calibration_error: float | None = None
 
 
 class ScoreboardResponse(BaseModel):

@@ -67,6 +67,7 @@ def _score_to_entry(model: "ModelScore", store: ModelStore) -> ScoreboardEntry:
         arbs_naked=model.arbs_naked,
         locked_pnl=model.locked_pnl,
         naked_pnl=model.naked_pnl,
+        mean_absolute_calibration_error=model.mean_absolute_calibration_error,
     )
 
 
