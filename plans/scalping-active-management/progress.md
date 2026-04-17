@@ -4,6 +4,166 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 05 — Model-detail calibration card (2026-04-17)
+
+**Landed.**
+
+Second UI-facing session. A new diagnostic card on the model-detail
+page surfaces the calibration of the Session-02 fill-prob head and
+the Session-03 risk head on the latest evaluation run. Diagnostic
+only — per hard_constraints §14 it does NOT feed composite-score
+ranking (Session 06 is where MACE lands on the scoreboard as an
+informational column).
+
+**API contract.**
+
+Three additive schema types in [api/schemas.py:76](../../api/schemas.py):
+`ReliabilityBucket`, `RiskScatterPoint`, `CalibrationStats`. The new
+`ModelDetail.calibration: CalibrationStats | None = None` field
+defaults to null so existing clients are unaffected (hard_constraints
+§12). `CalibrationStats.mace: float | None` is `None` when fewer than
+two buckets clear the server-side count threshold, with
+`insufficient_data: bool` as the explicit flag the UI branches on.
+
+**Server-side computation.**
+
+New [api/calibration.py](../../api/calibration.py)
+isolates the math from the router. `compute_calibration_stats(bets)`
+takes the parquet-read `EvaluationBetRecord`s from
+`ModelStore.get_evaluation_bets(run_id)` and:
+
+1. Groups by `pair_id`. ≥ 2 legs = completed, 1 leg = naked. Bets
+   without a fill-prob prediction are dropped (pre-Session-02).
+2. Picks the aggressive leg by lowest `tick_timestamp` and reads its
+   `fill_prob_at_placement`. By Session-02 design the passive
+   inherits the aggressive's value, so the choice is canonical rather
+   than load-bearing.
+3. Buckets each pair by prediction into four fixed bins (`<25%`,
+   `25-50%`, `50-75%`, `>75%`). `observed_rate = completed / total`
+   per bucket; `abs_calibration_error = |midpoint − observed_rate|`.
+4. MACE = mean of bucket errors where `count ≥ 20`. Fewer than two
+   qualifying buckets → `mace=None`, `insufficient_data=True`. The
+   sparse buckets still appear in the reliability diagram so operators
+   can see the raw bins.
+5. Scatter: one point per completed pair with non-null
+   predicted-pnl and predicted-stddev. Realised locked-pnl is
+   computed by inlining the same commission-aware floor math
+   `BetManager.get_paired_positions` uses — parquet records are the
+   source, BetManagers are long gone by the API layer, so duplicating
+   the math beats reconstructing them.
+6. Stddev bucket (`low` / `med` / `high`) is derived from this run's
+   own 25th / 75th percentiles with **strict** inequalities. This
+   makes the buckets self-scaling per run — a single-value run
+   collapses every point to `med` (p25 == p75 == value).
+
+Hard_constraints §13 ("calibration reported on eval-only days") is
+satisfied by construction: `get_evaluation_bets` reads
+`bet_logs_dir/{run_id}/*.parquet`, and those parquet files are
+written by the evaluator one-per-test-day from the `EvaluationRun`'s
+`test_days` list. The prompt flagged a potential concern that
+`get_model_detail` might accidentally average across training + eval
+days; it doesn't — the `evaluation_runs` / `evaluation_days` tables
+are test-only and always have been. No follow-up needed in
+`lessons_learnt.md`.
+
+`get_model_detail` in [api/routers/models.py:118](../../api/routers/models.py)
+calls `store.get_evaluation_bets(run.run_id)` after the metrics-history
+pull and attaches the computed card to the response (or `None` for
+directional runs / runs with no fill-prob predictions at all).
+
+**Frontend — the card.**
+
+New standalone component at
+[frontend/src/app/calibration-card/calibration-card.ts](../../frontend/src/app/calibration-card/calibration-card.ts)
+with signal-input `calibration: CalibrationStats | null | undefined`.
+Three observable states:
+
+- `null` / `undefined` → whole card is elided from the DOM (template
+  wraps in `@if (calibration(); as cal)`).
+- `cal.insufficient_data === true` → compact empty state with a link
+  to `activation_playbook.md` (plain text, consistent with the plan-
+  folder link convention used elsewhere).
+- Otherwise → MACE badge + reliability diagram + risk scatter.
+
+The **MACE badge** formats to two decimals. Traffic-light thresholds
+are exported as named constants
+(`MACE_GREEN_BELOW = 0.1`, `MACE_AMBER_BELOW_OR_EQUAL = 0.2`) so the
+spec test can assert the class at boundary values: < 0.1 → green,
+`[0.1, 0.2]` → amber, > 0.2 → red. Tooltip: "Mean absolute calibration
+error — average gap between predicted and observed fill rate across
+buckets. Lower is better. Target: < 0.05."
+
+The **reliability diagram** is an inline SVG: four vertical bars, bar
+height = `observed_rate` (in [0,1] plot coords), with a dashed
+diagonal from `(0,0)` to `(1,1)` as the reference. Bar colour maps to
+the bucket's `abs_calibration_error`: green < 0.05, amber `[0.05,
+0.15]`, red > 0.15.
+
+The **risk-vs-realised scatter** is a second inline SVG auto-fitted
+to the per-run data range. Points are coloured by `stddev_bucket`
+(low = green, med = amber, high = red). A dashed `y = x` diagonal
+gives a visual "perfect prediction" reference. When every point has
+an identical value (the single-stddev edge case), the axes pad by ± 1
+so the diagonal stays visible instead of collapsing to a corner.
+
+**Theme parity.** The card follows the same CSS-variable-free
+pattern the other model-detail cards use (see also Session 04's note
+on this). A `:host-context(.theme-light)` selector is included so a
+future theming pass can override the two canvas backgrounds in one
+place without touching the logic.
+
+**Tests.**
+
+- **Server-side** — 10 tests in
+  [tests/test_model_detail_calibration.py](../../tests/test_model_detail_calibration.py):
+  perfect predictions → MACE=0.0; sparse-bucket exclusion; insufficient
+  data (<2 qualifying buckets); scatter contains a completed pair
+  exactly once (locked=0 for symmetric equal-stake pair); scatter with
+  positive locked floor (asymmetric hedge sized for locked=1.2);
+  single-stddev collapses to `med`; directional records return `None`;
+  plus three API-contract tests via TestClient covering the
+  directional, insufficient, and populated response shapes. Full
+  suite: `pytest tests/ -q` → **1981 passed**, 7 skipped, 1 xfailed.
+  Net +10 vs Session 04 (1971 → 1981).
+- **Frontend** — 10 tests in
+  [frontend/src/app/calibration-card/calibration-card.spec.ts](../../frontend/src/app/calibration-card/calibration-card.spec.ts):
+  card hides on null; card hides on undefined; empty-state renders on
+  `insufficient_data`; four reliability bars render when sufficient;
+  dashed diagonal is present; MACE formats to two decimals; MACE
+  traffic-light boundaries at 0.09 / 0.1 / 0.2 / 0.2001; scatter
+  renders N points; scatter empty-state renders on `scatter=[]`;
+  scatter point colours match the stddev bucket. `ng test
+  --watch=false` → **501 passed**, 24 skipped. Net +10 vs Session 04.
+
+**Browser verification.**
+
+Three fabricated demo models (seeded via a throwaway script + deleted
+after verification) exercised all three card states:
+
+1. **Populated** — 160 pairs across four fill-prob buckets (40 each,
+   observed = midpoint → MACE = 0.00, badge green). Four green
+   reliability bars lined up with the dashed diagonal; 80 scatter
+   points coloured 20 low / 40 med / 20 high by stddev bucket (the
+   demo used `random.uniform(0.3, 8.0)` for stddevs so all three
+   colours appear).
+2. **Insufficient** — 5 pairs in one bucket → the card shows the
+   "Insufficient eval-day data — head not yet trained, or < 20 pairs
+   per bucket. See activation_playbook.md." empty state, with no
+   MACE badge and no bars.
+3. **Directional** — a single non-scalping bet → `calibration: null`
+   on the API response, and the card is absent from the DOM
+   entirely.
+
+Screenshots were confirmed via `preview_screenshot`; no browser
+console errors at any state (checked with `preview_console_logs
+level=error`). Demo models and seed script cleaned up after the
+check.
+
+**No reward-scale change.** Pure UI + API-additive session. Env,
+trainer, aux heads untouched.
+
+---
+
 ## Session 04 — Bet Explorer confidence + risk badges (2026-04-16)
 
 **Landed.**

@@ -73,6 +73,55 @@ class GarageToggleResponse(BaseModel):
     garaged: bool
 
 
+class ReliabilityBucket(BaseModel):
+    """One bucket of the fill-probability reliability diagram.
+
+    Scalping-active-management §05. Fill-probability predictions at
+    placement time are binned into four fixed buckets and compared
+    against the observed completion rate of the pairs that landed in
+    each bucket. A perfectly-calibrated head's ``observed_rate`` lines
+    up with ``predicted_midpoint``.
+    """
+
+    bucket_label: str  # "<25%", "25-50%", "50-75%", ">75%"
+    predicted_midpoint: float  # 0.125 / 0.375 / 0.625 / 0.875
+    observed_rate: float  # count_completed / (completed + naked) in bucket
+    count: int  # total pairs in the bucket (completed + naked)
+    abs_calibration_error: float  # |predicted_midpoint - observed_rate|
+
+
+class RiskScatterPoint(BaseModel):
+    """One point on the risk-vs-realised scatter.
+
+    Scalping-active-management §05. One record per completed pair. The
+    ``stddev_bucket`` is derived from the 25th / 75th percentiles of
+    this evaluation run's predicted stddev values, so it is
+    self-scaling per-run (single-value runs collapse every point to
+    ``"med"``).
+    """
+
+    predicted_pnl: float
+    realised_pnl: float
+    stddev_bucket: str  # "low" | "med" | "high"
+
+
+class CalibrationStats(BaseModel):
+    """Calibration diagnostics for the scalping aux heads on the
+    latest evaluation run.
+
+    ``None`` at the ``ModelDetail.calibration`` level means the run has
+    zero scalping pairs (directional model or pre-Session-02 run). When
+    non-null but ``insufficient_data`` is true, the head hasn't seen
+    enough eval-day pairs for meaningful bucket statistics — fewer than
+    two buckets cleared the ``count >= 20`` threshold.
+    """
+
+    reliability_buckets: list[ReliabilityBucket]
+    mace: float | None  # None → insufficient data
+    scatter: list[RiskScatterPoint]
+    insufficient_data: bool
+
+
 class ModelDetail(BaseModel):
     model_id: str
     generation: int
@@ -87,6 +136,10 @@ class ModelDetail(BaseModel):
     composite_score: float | None
     garaged: bool = False
     metrics_history: list[DayMetric]
+    # Scalping-active-management §05 — diagnostic-only calibration card.
+    # ``None`` for directional / pre-Session-02 runs. Does NOT feed
+    # composite_score ranking (hard_constraints §14).
+    calibration: CalibrationStats | None = None
 
 
 # ── Lineage ─────────────────────────────────────────────────────────

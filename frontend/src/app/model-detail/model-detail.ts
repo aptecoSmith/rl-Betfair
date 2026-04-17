@@ -13,6 +13,7 @@ import {
   GeneticEvent,
   GeneticsResponse,
 } from '../models/model-detail.model';
+import { CalibrationCard } from '../calibration-card/calibration-card';
 
 /** Generation colour palette — same as scoreboard. */
 const GEN_COLOURS = [
@@ -44,7 +45,7 @@ interface TreeEdge {
 @Component({
   selector: 'app-model-detail',
   standalone: true,
-  imports: [CommonModule, FormsModule, DecimalPipe, CurrencyPipe],
+  imports: [CommonModule, FormsModule, DecimalPipe, CurrencyPipe, CalibrationCard],
   templateUrl: './model-detail.html',
   styleUrl: './model-detail.scss',
 })

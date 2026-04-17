@@ -267,6 +267,11 @@
       }
     </section>
 
+    <!-- Calibration card — Scalping-active-management §05. Hides
+         itself when calibration is null (directional / pre-Session-02
+         run). Diagnostic only: does NOT feed composite score. -->
+    <app-calibration-card [calibration]="m.calibration"></app-calibration-card>
+
     <!-- Metrics Summary -->
     @if (m.metrics_history.length > 0) {
       <section class="card" data-testid="metrics-summary">

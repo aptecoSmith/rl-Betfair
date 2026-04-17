@@ -1,0 +1,121 @@
+.calibration-card {
+  h3 {
+    margin: 0 0 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #c0c0d8;
+  }
+
+  .empty-state {
+    color: #a0a0b8;
+    font-size: 0.9rem;
+    margin: 0;
+
+    code {
+      background: #2a2a4a;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 0.85em;
+    }
+  }
+
+  .mace-row {
+    margin-bottom: 12px;
+  }
+
+  .mace-badge {
+    display: inline-block;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.95rem;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 6px;
+    cursor: help;
+
+    &[data-mace='green'] {
+      background: rgba(76, 175, 80, 0.18);
+      color: #6fcf97;
+      border: 1px solid rgba(76, 175, 80, 0.4);
+    }
+
+    &[data-mace='amber'] {
+      background: rgba(255, 152, 0, 0.18);
+      color: #f2c94c;
+      border: 1px solid rgba(255, 152, 0, 0.4);
+    }
+
+    &[data-mace='red'] {
+      background: rgba(244, 67, 54, 0.18);
+      color: #eb5757;
+      border: 1px solid rgba(244, 67, 54, 0.4);
+    }
+  }
+
+  .diagrams-row {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+
+  .reliability, .scatter {
+    flex: 1;
+    min-width: 220px;
+  }
+
+  .reliability-svg, .scatter-svg {
+    width: 100%;
+    max-width: 260px;
+    height: auto;
+    background: #15152a;
+    border: 1px solid #2a2a4a;
+    border-radius: 6px;
+  }
+
+  .bar-label {
+    font-size: 10px;
+    fill: #a0a0b8;
+  }
+
+  .scatter-empty {
+    color: #a0a0b8;
+    font-size: 0.85rem;
+    font-style: italic;
+  }
+
+  .scatter-legend {
+    display: flex;
+    gap: 12px;
+    margin-top: 8px;
+    font-size: 0.75rem;
+    color: #a0a0b8;
+    flex-wrap: wrap;
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .swatch {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+
+      &.low { background: #4caf50; }
+      &.med { background: #ff9800; }
+      &.high { background: #f44336; }
+    }
+  }
+}
+
+// Light-theme parity: the broader app is dark-only today, but match
+// the same CSS-variable-free pattern the other cards use so a future
+// theme pass can override the colours here in one place.
+:host-context(.theme-light) .calibration-card {
+  .empty-state code { background: #e6e6ee; }
+  .reliability-svg, .scatter-svg {
+    background: #f6f6fb;
+    border-color: #d0d0e0;
+  }
+}

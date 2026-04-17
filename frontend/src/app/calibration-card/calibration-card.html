@@ -1,0 +1,102 @@
+@if (calibration(); as cal) {
+  <section class="card calibration-card" data-testid="calibration-card">
+    <h2>Calibration</h2>
+
+    @if (cal.insufficient_data) {
+      <p class="empty-state" data-testid="calibration-empty">
+        Insufficient eval-day data — head not yet trained, or
+        &lt; 20 pairs per bucket. See
+        <code>plans/scalping-active-management/activation_playbook.md</code>.
+      </p>
+    } @else {
+      <div class="mace-row">
+        <span
+          class="mace-badge"
+          [attr.data-mace]="maceClass()"
+          data-testid="mace-badge"
+          title="Mean absolute calibration error — average gap between predicted and observed fill rate across buckets. Lower is better. Target: < 0.05."
+        >
+          MACE: {{ maceDisplay() }}
+        </span>
+      </div>
+
+      <div class="diagrams-row">
+        <!-- Reliability diagram -->
+        <div class="reliability" data-testid="reliability-diagram">
+          <h3>Reliability</h3>
+          <svg
+            [attr.viewBox]="'0 0 ' + reliabilityCanvas + ' ' + reliabilityCanvas"
+            class="reliability-svg"
+          >
+            <!-- Dashed diagonal from (0,0) to (1,1) in plot coords -->
+            <line
+              x1="20" y1="180" x2="180" y2="20"
+              class="diagonal"
+              stroke="#888" stroke-dasharray="4 4" stroke-width="1"
+              data-testid="reliability-diagonal"
+            />
+            <!-- Bars -->
+            @for (bar of reliabilityBars(); track bar.label) {
+              <g class="reliability-bar">
+                <rect
+                  [attr.x]="bar.x" [attr.y]="bar.y"
+                  [attr.width]="bar.width" [attr.height]="bar.height"
+                  [attr.fill]="bar.colour"
+                  data-testid="reliability-bar"
+                >
+                  <title>{{ bar.label }} — observed {{ bar.observed | number:'1.0-2' }}, n={{ bar.count }}</title>
+                </rect>
+                <text
+                  [attr.x]="bar.x + bar.width / 2"
+                  y="195"
+                  text-anchor="middle"
+                  class="bar-label"
+                >{{ bar.label }}</text>
+              </g>
+            }
+          </svg>
+        </div>
+
+        <!-- Risk-vs-realised scatter -->
+        <div class="scatter" data-testid="scatter-plot">
+          <h3>Risk vs Realised</h3>
+          @if (scatter(); as sc) {
+            <svg
+              [attr.viewBox]="'0 0 ' + scatterCanvas + ' ' + scatterCanvas"
+              class="scatter-svg"
+            >
+              <line
+                [attr.x1]="sc.diagonalX1" [attr.y1]="sc.diagonalY1"
+                [attr.x2]="sc.diagonalX2" [attr.y2]="sc.diagonalY2"
+                class="diagonal"
+                stroke="#888" stroke-dasharray="4 4" stroke-width="1"
+                data-testid="scatter-diagonal"
+              />
+              @for (pt of sc.points; track $index) {
+                <circle
+                  [attr.cx]="pt.cx" [attr.cy]="pt.cy"
+                  r="3"
+                  [attr.fill]="pt.colour"
+                  [attr.data-bucket]="pt.stddevBucket"
+                  class="scatter-point"
+                  data-testid="scatter-point"
+                >
+                  <title>predicted £{{ pt.predicted | number:'1.2-2' }} → realised £{{ pt.realised | number:'1.2-2' }} ({{ pt.stddevBucket }} stddev)</title>
+                </circle>
+              }
+            </svg>
+          } @else {
+            <p class="scatter-empty" data-testid="scatter-empty">
+              No completed pairs with risk predictions.
+            </p>
+          }
+          <div class="scatter-legend">
+            <span class="legend-item"><span class="swatch low"></span>low stddev</span>
+            <span class="legend-item"><span class="swatch med"></span>med stddev</span>
+            <span class="legend-item"><span class="swatch high"></span>high stddev</span>
+          </div>
+        </div>
+      </div>
+    }
+  </section>
+}

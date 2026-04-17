@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from api.calibration import compute_calibration_stats
 from api.schemas import (
     GarageToggleRequest,
     GarageToggleResponse,
@@ -124,6 +125,7 @@ def get_model_detail(model_id: str, request: Request):
 
     # Get metrics history from latest evaluation run
     metrics: list[DayMetric] = []
+    calibration = None
     run = store.get_latest_evaluation_run(model_id)
     if run:
         days = store.get_evaluation_days(run.run_id)
@@ -145,6 +147,13 @@ def get_model_detail(model_id: str, request: Request):
             )
             for d in days
         ]
+        # Scalping-active-management §05 — diagnostic calibration card.
+        # ``get_evaluation_bets`` reads eval-day parquet files only, so
+        # the hard_constraints §13 "eval-only" requirement is satisfied
+        # by construction. ``compute_calibration_stats`` returns None
+        # for runs with no scalping pairs (directional models).
+        bets = store.get_evaluation_bets(run.run_id)
+        calibration = compute_calibration_stats(bets)
 
     return ModelDetail(
         model_id=rec.model_id,
@@ -160,6 +169,7 @@ def get_model_detail(model_id: str, request: Request):
         composite_score=rec.composite_score,
         garaged=rec.garaged,
         metrics_history=metrics,
+        calibration=calibration,
     )
 
 
