@@ -128,17 +128,6 @@
             </div>
           }
           <a routerLink="/training" class="cross-link" data-testid="link-to-monitor">View in training monitor →</a>
-          @if (plan.auto_continue && planHasRemainingSessions(plan)) {
-            <button
-              class="btn-secondary"
-              (click)="stopAutoContinue()"
-              [disabled]="stoppingAutoContinue()"
-              data-testid="stop-auto-continue"
-              title="Disable auto-continue so the plan pauses after this session. Does not interrupt the current session."
-            >
-              {{ stoppingAutoContinue() ? 'Stopping…' : 'Stop auto-continuing' }}
-            </button>
-          }
         </div>
       } @else if (plan.status === 'paused') {
         <div class="plan-status-info">
@@ -182,8 +171,34 @@
           <h3>Sessions</h3>
           <p class="help-text">
             Each session trains all {{ plan.population_size }} agents through {{ plan.generations_per_session }} generation{{ plan.generations_per_session > 1 ? 's' : '' }} (train → eval → score → breed), then checkpoints.
-            {{ plan.auto_continue ? 'Auto-continue is on — sessions run back-to-back.' : 'Auto-continue is off — the plan pauses between sessions.' }}
           </p>
+          @if (canShowAutoContinueToggle(plan)) {
+            <label class="auto-continue-toggle" data-testid="auto-continue-toggle">
+              <input
+                type="checkbox"
+                [checked]="!!plan.auto_continue"
+                [disabled]="togglingAutoContinue()"
+                (change)="onToggleAutoContinue($event)"
+                data-testid="auto-continue-checkbox"
+              />
+              <span class="toggle-label">
+                Auto-continue
+                <span class="toggle-state" [attr.data-state]="plan.auto_continue ? 'on' : 'off'">
+                  {{ plan.auto_continue ? 'ON' : 'OFF' }}
+                </span>
+                @if (togglingAutoContinue()) { <em class="toggle-saving">…saving</em> }
+              </span>
+              <span class="toggle-help">
+                {{ plan.auto_continue
+                    ? 'Sessions run back-to-back.'
+                    : 'Plan pauses between sessions — hit Continue each time.' }}
+              </span>
+            </label>
+          } @else {
+            <p class="help-text auto-continue-static" data-testid="auto-continue-static">
+              {{ plan.auto_continue ? 'Auto-continue is on — sessions run back-to-back.' : 'Auto-continue is off — the plan pauses between sessions.' }}
+            </p>
+          }
           <div class="session-list">
             @for (s of sessionBoundaries(plan); track s.start; let i = $index) {
               <div class="session-row">

@@ -116,14 +116,23 @@
                 [disabled]="isFinishing()">
           {{ isStopping() ? 'Stopping...' : 'Stop Training' }}
         </button>
-        @if (canStopAutoContinue()) {
-          <button class="btn btn-secondary"
-                  data-testid="stop-auto-continue-btn"
-                  (click)="onStopAutoContinue()"
-                  [disabled]="isStoppingAutoContinue()"
-                  title="Disable auto-continue so the plan pauses when the current session finishes. Does not interrupt the current session.">
-            {{ isStoppingAutoContinue() ? 'Stopping auto-continue...' : 'Stop auto-continuing' }}
-          </button>
+        @if (canToggleAutoContinue()) {
+          <label class="auto-continue-toggle"
+                 data-testid="auto-continue-toggle"
+                 title="Toggle whether the plan auto-launches the next session when this one finishes. Does not interrupt the current session.">
+            <input type="checkbox"
+                   data-testid="auto-continue-checkbox"
+                   [checked]="activePlanAutoContinue()"
+                   [disabled]="isStoppingAutoContinue()"
+                   (change)="onToggleAutoContinue($event)" />
+            <span class="toggle-label">
+              Auto-continue
+              <span class="toggle-state" [attr.data-state]="activePlanAutoContinue() ? 'on' : 'off'">
+                {{ activePlanAutoContinue() ? 'ON' : 'OFF' }}
+              </span>
+              @if (isStoppingAutoContinue()) { <em class="toggle-saving">…saving</em> }
+            </span>
+          </label>
         }
       </div>
       @if (autoContinueStopped()) {

@@ -122,25 +122,46 @@ def get_plan(plan_id: str, request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/{plan_id}/stop-auto-continue")
-def stop_auto_continue(plan_id: str, request: Request) -> dict[str, Any]:
-    """Disable auto_continue on a plan.
+@router.post("/{plan_id}/set-auto-continue")
+def set_auto_continue(plan_id: str, payload: dict, request: Request) -> dict[str, Any]:
+    """Enable or disable auto_continue on a plan.
 
-    After this call, the plan will pause (not auto-launch the next
-    session) when the current session finishes.  The currently running
-    session is NOT interrupted -- use the normal /training/stop endpoint
-    for that.  Safe to call when the plan is not running.
+    Body: ``{"enabled": bool}``.
+
+    When toggled OFF, the plan pauses (does not auto-launch the next
+    session) after the current session finishes; the currently running
+    session is NOT interrupted -- use ``/training/stop`` for that.
+    When toggled ON, the plan resumes the auto-cascade: if it is
+    currently paused between sessions, the operator still has to hit
+    Continue to launch the next session, but subsequent boundaries
+    will cascade automatically.
+
+    Idempotent: if the value is already in the requested state,
+    returns ``changed: false``.
     """
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(422, "Body must contain boolean 'enabled' field")
     reg = _registry(request)
     try:
         plan = reg.load(plan_id)
     except KeyError:
         raise HTTPException(404, f"No such plan: {plan_id}")
-    if not plan.auto_continue:
-        return {"plan_id": plan_id, "auto_continue": False, "changed": False}
-    plan.auto_continue = False
+    if plan.auto_continue == enabled:
+        return {"plan_id": plan_id, "auto_continue": enabled, "changed": False}
+    plan.auto_continue = enabled
     reg.save(plan)
-    return {"plan_id": plan_id, "auto_continue": False, "changed": True}
+    return {"plan_id": plan_id, "auto_continue": enabled, "changed": True}
+
+
+@router.post("/{plan_id}/stop-auto-continue")
+def stop_auto_continue(plan_id: str, request: Request) -> dict[str, Any]:
+    """Backward-compat shim: disable auto_continue on a plan.
+
+    New callers should use ``/set-auto-continue`` with
+    ``{"enabled": false}`` -- that endpoint is bidirectional.
+    """
+    return set_auto_continue(plan_id, {"enabled": False}, request)
 
 
 @router.delete("/{plan_id}")

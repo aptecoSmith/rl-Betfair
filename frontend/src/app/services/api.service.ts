@@ -267,10 +267,19 @@ export class ApiService {
     return this.http.delete<{ deleted: boolean; plan_id: string }>(`${this.baseUrl}/training-plans/${planId}`);
   }
 
-  stopAutoContinue(planId: string): Observable<{ plan_id: string; auto_continue: boolean; changed: boolean }> {
+  setAutoContinue(
+    planId: string,
+    enabled: boolean,
+  ): Observable<{ plan_id: string; auto_continue: boolean; changed: boolean }> {
     return this.http.post<{ plan_id: string; auto_continue: boolean; changed: boolean }>(
-      `${this.baseUrl}/training-plans/${planId}/stop-auto-continue`, {},
+      `${this.baseUrl}/training-plans/${planId}/set-auto-continue`,
+      { enabled },
     );
+  }
+
+  /** @deprecated Use setAutoContinue(planId, false). Kept for backward compat. */
+  stopAutoContinue(planId: string): Observable<{ plan_id: string; auto_continue: boolean; changed: boolean }> {
+    return this.setAutoContinue(planId, false);
   }
 
   getTrainingPlanCoverage(): Observable<CoverageResponse> {

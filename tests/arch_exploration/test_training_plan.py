@@ -1045,3 +1045,98 @@ class TestApiCreatePlanWithSessions:
         assert data["plan"]["generations_per_session"] == 2
         assert data["plan"]["auto_continue"] is True
         assert data["plan"]["current_session"] == 0
+
+
+class TestSetAutoContinue:
+    """POST /training-plans/{plan_id}/set-auto-continue toggles both ways."""
+
+    def _client_and_plan(self, tmp_path, hp_ranges, *, auto_continue: bool):
+        reg = PlanRegistry(tmp_path / "plans")
+        plan = TrainingPlan.new(
+            name="toggle-plan",
+            population_size=10,
+            architectures=["ppo_lstm_v1"],
+            hp_ranges=hp_ranges,
+            min_arch_samples=5,
+            n_generations=4,
+            generations_per_session=1,
+            auto_continue=auto_continue,
+        )
+        reg.save(plan)
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = {"hyperparameters": {"search_ranges": hp_ranges}}
+        return TestClient(app), reg, plan
+
+    def test_enable_when_off(self, tmp_path, hp_ranges):
+        client, reg, plan = self._client_and_plan(tmp_path, hp_ranges, auto_continue=False)
+        resp = client.post(
+            f"/api/training-plans/{plan.plan_id}/set-auto-continue",
+            json={"enabled": True},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body == {"plan_id": plan.plan_id, "auto_continue": True, "changed": True}
+        assert reg.load(plan.plan_id).auto_continue is True
+
+    def test_disable_when_on(self, tmp_path, hp_ranges):
+        client, reg, plan = self._client_and_plan(tmp_path, hp_ranges, auto_continue=True)
+        resp = client.post(
+            f"/api/training-plans/{plan.plan_id}/set-auto-continue",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body == {"plan_id": plan.plan_id, "auto_continue": False, "changed": True}
+        assert reg.load(plan.plan_id).auto_continue is False
+
+    def test_idempotent_enable(self, tmp_path, hp_ranges):
+        client, _, plan = self._client_and_plan(tmp_path, hp_ranges, auto_continue=True)
+        resp = client.post(
+            f"/api/training-plans/{plan.plan_id}/set-auto-continue",
+            json={"enabled": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["changed"] is False
+
+    def test_idempotent_disable(self, tmp_path, hp_ranges):
+        client, _, plan = self._client_and_plan(tmp_path, hp_ranges, auto_continue=False)
+        resp = client.post(
+            f"/api/training-plans/{plan.plan_id}/set-auto-continue",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["changed"] is False
+
+    def test_missing_enabled_field_returns_422(self, tmp_path, hp_ranges):
+        client, _, plan = self._client_and_plan(tmp_path, hp_ranges, auto_continue=False)
+        resp = client.post(
+            f"/api/training-plans/{plan.plan_id}/set-auto-continue",
+            json={},
+        )
+        assert resp.status_code == 422
+
+    def test_non_bool_enabled_returns_422(self, tmp_path, hp_ranges):
+        client, _, plan = self._client_and_plan(tmp_path, hp_ranges, auto_continue=False)
+        resp = client.post(
+            f"/api/training-plans/{plan.plan_id}/set-auto-continue",
+            json={"enabled": "yes"},
+        )
+        assert resp.status_code == 422
+
+    def test_unknown_plan_returns_404(self, tmp_path, hp_ranges):
+        client, _, _ = self._client_and_plan(tmp_path, hp_ranges, auto_continue=False)
+        resp = client.post(
+            "/api/training-plans/does-not-exist/set-auto-continue",
+            json={"enabled": True},
+        )
+        assert resp.status_code == 404
+
+    def test_backcompat_stop_endpoint_still_works(self, tmp_path, hp_ranges):
+        """Legacy /stop-auto-continue is a shim over set-auto-continue(false)."""
+        client, reg, plan = self._client_and_plan(tmp_path, hp_ranges, auto_continue=True)
+        resp = client.post(f"/api/training-plans/{plan.plan_id}/stop-auto-continue")
+        assert resp.status_code == 200
+        assert resp.json() == {"plan_id": plan.plan_id, "auto_continue": False, "changed": True}
+        assert reg.load(plan.plan_id).auto_continue is False

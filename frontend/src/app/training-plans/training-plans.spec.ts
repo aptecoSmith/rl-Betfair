@@ -83,6 +83,10 @@ class MockApiService {
     { name: 'ppo_transformer_v1', description: 'Transformer' },
   ]);
   createResp$: Observable<TrainingPlanDetailResponse> | null = null;
+  setAutoContinueCalls: Array<{ planId: string; enabled: boolean }> = [];
+  setAutoContinueResp$:
+    | Observable<{ plan_id: string; auto_continue: boolean; changed: boolean }>
+    | null = null;
 
   getHyperparameterSchema() { return this.schema$; }
   listTrainingPlans() { return this.list$; }
@@ -90,6 +94,11 @@ class MockApiService {
   createTrainingPlan(_p: TrainingPlanPayload) { return this.createResp$ ?? this.detail$; }
   getTrainingPlanCoverage() { return this.coverage$; }
   getArchitectures() { return this.archs$; }
+  setAutoContinue(planId: string, enabled: boolean) {
+    this.setAutoContinueCalls.push({ planId, enabled });
+    return this.setAutoContinueResp$
+      ?? of({ plan_id: planId, auto_continue: enabled, changed: true });
+  }
 }
 
 describe('TrainingPlans', () => {
@@ -263,6 +272,123 @@ describe('TrainingPlans', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('Test plan');
     expect(fixture.nativeElement.textContent).toContain('test-plan-1');
+  });
+
+  // ── Auto-continue toggle ────────────────────────────────────
+  function setupWithPlan(overrides: Partial<TrainingPlanDetailResponse['plan']>) {
+    mockApi = new MockApiService();
+    mockApi.detail$ = of({
+      plan: {
+        plan_id: 'toggle-plan',
+        name: 'Toggle plan',
+        created_at: '2026-04-17',
+        population_size: 16,
+        architectures: ['ppo_lstm_v1'],
+        arch_mix: null,
+        hp_ranges: {},
+        arch_lr_ranges: null,
+        seed: 42,
+        min_arch_samples: 5,
+        notes: '',
+        outcomes: [],
+        n_generations: 4,
+        generations_per_session: 1,
+        auto_continue: true,
+        current_session: 0,
+        status: 'running',
+        ...overrides,
+      },
+      validation: [],
+    });
+    TestBed.configureTestingModule({
+      imports: [TrainingPlans],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: ApiService, useValue: mockApi },
+      ],
+    });
+    fixture = TestBed.createComponent(TrainingPlans);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    component.openDetail('toggle-plan');
+    fixture.detectChanges();
+  }
+
+  it('shows auto-continue toggle as ON when plan is running with remaining sessions', () => {
+    setupWithPlan({});
+    const toggle = fixture.nativeElement.querySelector('[data-testid="auto-continue-toggle"]');
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement | null;
+    expect(toggle).toBeTruthy();
+    expect(checkbox?.checked).toBe(true);
+    expect(toggle.textContent).toContain('ON');
+  });
+
+  it('shows auto-continue toggle as OFF when plan has it disabled', () => {
+    setupWithPlan({ auto_continue: false });
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement | null;
+    const toggle = fixture.nativeElement.querySelector('[data-testid="auto-continue-toggle"]');
+    expect(checkbox?.checked).toBe(false);
+    expect(toggle.textContent).toContain('OFF');
+  });
+
+  it('shows toggle on paused plan so operator can re-enable before Continue', () => {
+    setupWithPlan({ status: 'paused', auto_continue: false });
+    const toggle = fixture.nativeElement.querySelector('[data-testid="auto-continue-toggle"]');
+    expect(toggle).toBeTruthy();
+  });
+
+  it('hides toggle when session splitting is off', () => {
+    setupWithPlan({ generations_per_session: null });
+    const toggle = fixture.nativeElement.querySelector('[data-testid="auto-continue-toggle"]');
+    expect(toggle).toBeNull();
+  });
+
+  it('hides toggle when no sessions remain', () => {
+    setupWithPlan({ n_generations: 2, generations_per_session: 1, current_session: 1 });
+    const toggle = fixture.nativeElement.querySelector('[data-testid="auto-continue-toggle"]');
+    expect(toggle).toBeNull();
+  });
+
+  it('PATCHes auto_continue=false when toggled off', () => {
+    setupWithPlan({ auto_continue: true });
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement;
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(mockApi.setAutoContinueCalls).toEqual([{ planId: 'toggle-plan', enabled: false }]);
+    expect(component.selectedPlan()?.auto_continue).toBe(false);
+  });
+
+  it('PATCHes auto_continue=true when toggled on', () => {
+    setupWithPlan({ auto_continue: false });
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(mockApi.setAutoContinueCalls).toEqual([{ planId: 'toggle-plan', enabled: true }]);
+    expect(component.selectedPlan()?.auto_continue).toBe(true);
+  });
+
+  it('reverts checkbox and surfaces error when setAutoContinue fails', () => {
+    setupWithPlan({ auto_continue: true });
+    mockApi.setAutoContinueResp$ = throwError(() => ({ error: { detail: 'boom' } }));
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement;
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(checkbox.checked).toBe(true); // reverted
+    expect(component.selectedPlan()?.auto_continue).toBe(true); // unchanged
   });
 
   // ── Coverage panel renders in list mode when report is available ──

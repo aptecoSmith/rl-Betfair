@@ -404,23 +404,28 @@ export class TrainingPlans implements OnInit {
     });
   }
 
-  // ── Stop auto-continuing ────────────────────────────────────────
-  readonly stoppingAutoContinue = signal(false);
+  // ── Toggle auto-continue ────────────────────────────────────────
+  readonly togglingAutoContinue = signal(false);
 
-  stopAutoContinue(): void {
+  onToggleAutoContinue(event: Event): void {
     const plan = this.selectedPlan();
     if (!plan) return;
-    this.stoppingAutoContinue.set(true);
+    const target = event.target as HTMLInputElement;
+    const enabled = target.checked;
+    this.togglingAutoContinue.set(true);
     this.launchError.set(null);
-    this.api.stopAutoContinue(plan.plan_id).subscribe({
-      next: () => {
-        this.stoppingAutoContinue.set(false);
-        // Update local state so the button disappears immediately.
-        this.selectedPlan.set({ ...plan, auto_continue: false });
+    this.api.setAutoContinue(plan.plan_id, enabled).subscribe({
+      next: (resp) => {
+        this.togglingAutoContinue.set(false);
+        this.selectedPlan.set({ ...plan, auto_continue: resp.auto_continue });
       },
       error: (err) => {
-        this.stoppingAutoContinue.set(false);
-        this.launchError.set(err?.error?.detail ?? err?.message ?? 'Failed to stop auto-continue');
+        this.togglingAutoContinue.set(false);
+        // Revert the visible checkbox on failure.
+        target.checked = plan.auto_continue ?? false;
+        this.launchError.set(
+          err?.error?.detail ?? err?.message ?? 'Failed to toggle auto-continue',
+        );
       },
     });
   }
@@ -431,6 +436,13 @@ export class TrainingPlans implements OnInit {
     const total = (gps == null || gps <= 0 || gps >= n) ? 1 : Math.ceil(n / gps);
     const cur = plan.current_session ?? 0;
     return cur < total - 1;
+  }
+
+  /** Whether the auto-continue toggle is meaningful for this plan state. */
+  canShowAutoContinueToggle(plan: TrainingPlan): boolean {
+    if (!plan.generations_per_session) return false;
+    if (!this.planHasRemainingSessions(plan)) return false;
+    return plan.status === 'running' || plan.status === 'paused' || plan.status === 'failed';
   }
 
   // ── Resume / Continue ──────────────────────────────────────────

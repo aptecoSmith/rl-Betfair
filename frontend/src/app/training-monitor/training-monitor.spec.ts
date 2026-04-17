@@ -7,6 +7,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { TrainingMonitor, AgentGridItem } from './training-monitor';
 import { TrainingService } from '../services/training.service';
 import { SelectionStateService } from '../services/selection-state.service';
+import { ApiService } from '../services/api.service';
 import { TrainingStatus, WSEvent } from '../models/training.model';
 
 function idleStatus(): TrainingStatus {
@@ -509,5 +510,133 @@ describe('TrainingMonitor', () => {
       unevaluated_count: 5,
     });
     expect(component.evalCurrentEstimate()).toBe('~2 min');
+  });
+});
+
+// ── Auto-continue toggle ──────────────────────────────────────────
+describe('TrainingMonitor — auto-continue toggle', () => {
+  let fixture: ComponentFixture<TrainingMonitor>;
+  let component: TrainingMonitor;
+
+  function setupWithPlan(planOverrides: Record<string, any>): {
+    setAutoContinueCalls: Array<{ planId: string; enabled: boolean }>;
+  } {
+    const statusSignal = signal<TrainingStatus>({
+      ...runningStatus(),
+      plan_id: 'toggle-plan',
+    });
+    const mockTraining = {
+      status: statusSignal,
+      isRunning: signal(true),
+      latestEvent: signal(null),
+      rewardHistory: signal<any[]>([]),
+      lossHistory: signal<any[]>([]),
+      lastRunCompletedAt: signal<number | null>(null),
+      lastActivityAt: signal(Date.now()),
+      activityLog: signal([]),
+      phase: signal('training'),
+      connect: vi.fn(),
+      clearHistory: vi.fn(),
+    };
+
+    const setAutoContinueCalls: Array<{ planId: string; enabled: boolean }> = [];
+    const emitNext = (value: any) => ({
+      subscribe: (handlers: any) => {
+        handlers.next?.(value);
+        return { unsubscribe: () => {} };
+      },
+    } as any);
+    const noop$ = { subscribe: () => ({ unsubscribe: () => {} }) } as any;
+    const mockApi = {
+      getTrainingPlan: vi.fn(() =>
+        emitNext({
+          plan: {
+            plan_id: 'toggle-plan',
+            n_generations: 4,
+            generations_per_session: 1,
+            current_session: 0,
+            auto_continue: true,
+            ...planOverrides,
+          },
+        }),
+      ),
+      setAutoContinue: vi.fn((planId: string, enabled: boolean) => {
+        setAutoContinueCalls.push({ planId, enabled });
+        return emitNext({ plan_id: planId, auto_continue: enabled, changed: true });
+      }),
+      // Stubs for constructor/ngOnInit-time calls that we don't assert on.
+      getTrainingInfo: vi.fn(() => noop$),
+      getArchitectures: vi.fn(() => noop$),
+      getArchitectureDefaults: vi.fn(() => noop$),
+      getGenetics: vi.fn(() => noop$),
+      getScoreboard: vi.fn(() => noop$),
+      getBettingConstraints: vi.fn(() => noop$),
+    };
+
+    TestBed.configureTestingModule({
+      imports: [TrainingMonitor],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: TrainingService, useValue: mockTraining },
+        { provide: ApiService, useValue: mockApi },
+      ],
+    });
+
+    fixture = TestBed.createComponent(TrainingMonitor);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    return { setAutoContinueCalls };
+  }
+
+  it('renders the toggle as ON when active plan has auto_continue', () => {
+    setupWithPlan({ auto_continue: true });
+    const toggle = fixture.nativeElement.querySelector('[data-testid="auto-continue-toggle"]');
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement | null;
+    expect(toggle).toBeTruthy();
+    expect(checkbox?.checked).toBe(true);
+    expect(toggle.textContent).toContain('ON');
+  });
+
+  it('renders the toggle as OFF when active plan has auto_continue disabled', () => {
+    setupWithPlan({ auto_continue: false });
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement | null;
+    expect(checkbox?.checked).toBe(false);
+    expect(component.activePlanAutoContinue()).toBe(false);
+  });
+
+  it('calls setAutoContinue(true) when toggled on', () => {
+    const { setAutoContinueCalls } = setupWithPlan({ auto_continue: false });
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(setAutoContinueCalls).toEqual([{ planId: 'toggle-plan', enabled: true }]);
+    expect(component.activePlanAutoContinue()).toBe(true);
+  });
+
+  it('calls setAutoContinue(false) when toggled off', () => {
+    const { setAutoContinueCalls } = setupWithPlan({ auto_continue: true });
+    const checkbox = fixture.nativeElement.querySelector(
+      '[data-testid="auto-continue-checkbox"]',
+    ) as HTMLInputElement;
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(setAutoContinueCalls).toEqual([{ planId: 'toggle-plan', enabled: false }]);
+    expect(component.activePlanAutoContinue()).toBe(false);
+  });
+
+  it('hides toggle when no remaining sessions', () => {
+    setupWithPlan({ n_generations: 2, generations_per_session: 1, current_session: 1 });
+    const toggle = fixture.nativeElement.querySelector('[data-testid="auto-continue-toggle"]');
+    expect(toggle).toBeNull();
   });
 });

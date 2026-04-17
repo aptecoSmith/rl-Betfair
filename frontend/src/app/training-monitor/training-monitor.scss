@@ -584,7 +584,59 @@
   display: flex;
   gap: 0.75rem;
   justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
   margin-top: 0.75rem;
+
+  .auto-continue-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.85rem;
+    background: rgba(108, 99, 255, 0.08);
+    border: 1px solid rgba(108, 99, 255, 0.3);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    color: #c0c0d8;
+
+    input[type="checkbox"] {
+      width: 1rem;
+      height: 1rem;
+      accent-color: #6c63ff;
+      cursor: pointer;
+      margin: 0;
+    }
+
+    .toggle-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-weight: 600;
+    }
+
+    .toggle-state {
+      font-family: monospace;
+      font-size: 0.7rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 3px;
+
+      &[data-state="on"] {
+        background: rgba(76, 175, 80, 0.2);
+        color: #81c784;
+      }
+      &[data-state="off"] {
+        background: rgba(255, 152, 0, 0.15);
+        color: #ffb74d;
+      }
+    }
+
+    .toggle-saving {
+      color: #808098;
+      font-style: italic;
+      font-size: 0.7rem;
+    }
+  }
 }
 
 .error-message {

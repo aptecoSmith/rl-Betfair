@@ -196,10 +196,16 @@ export class TrainingMonitor implements OnDestroy {
   readonly isStoppingAutoContinue = signal(false);
   readonly autoContinueStopped = signal(false);
 
-  readonly canStopAutoContinue = computed(() =>
+  /**
+   * Show the auto-continue toggle whenever it could meaningfully change
+   * behaviour for the active plan — i.e. there is more than one session
+   * left. Unlike the old one-way `canStopAutoContinue`, this does not
+   * gate on the current value (user needs to be able to flip it back
+   * on after disabling).
+   */
+  readonly canToggleAutoContinue = computed(() =>
     this.isRunning()
     && this.activePlanId() !== null
-    && this.activePlanAutoContinue()
     && this.activePlanHasRemainingSessions()
   );
 
@@ -653,18 +659,25 @@ export class TrainingMonitor implements OnDestroy {
     });
   }
 
-  onStopAutoContinue(): void {
+  onToggleAutoContinue(event: Event): void {
     const planId = this.activePlanId();
     if (!planId) return;
+    const target = event.target as HTMLInputElement;
+    const enabled = target.checked;
+    const previous = this.activePlanAutoContinue();
     this.isStoppingAutoContinue.set(true);
-    this.api.stopAutoContinue(planId).subscribe({
-      next: () => {
+    this.api.setAutoContinue(planId, enabled).subscribe({
+      next: (resp) => {
         this.isStoppingAutoContinue.set(false);
-        this.activePlanAutoContinue.set(false);
-        this.autoContinueStopped.set(true);
+        this.activePlanAutoContinue.set(resp.auto_continue);
+        // Keep the existing "auto-continue disabled" notice only when
+        // the user just turned it OFF; clear it when turning back on.
+        this.autoContinueStopped.set(resp.auto_continue === false);
       },
       error: () => {
         this.isStoppingAutoContinue.set(false);
+        // Revert visible checkbox on failure.
+        target.checked = previous;
       },
     });
   }
