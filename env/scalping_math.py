@@ -1,0 +1,160 @@
+"""env/scalping_math.py - commission-aware scalping feasibility helpers.
+
+The BetManager sizes paired legs with ``S_passive = S_agg * P_agg / P_passive``,
+which makes the two Betfair outcomes' P&L sum to the same
+exposure-weighted amount. Under a non-zero commission, the *same* spread
+that gave a zero-lock at c=5% gives a materially-negative lock at c=10%;
+a fixed ``MIN_ARB_TICKS`` floor would have to be re-chosen whenever the
+fee schedule moves.
+
+This module exposes two pure functions:
+
+- :func:`locked_pnl_per_unit_stake` - closed-form of what the
+  BetManager's ``get_paired_positions`` computes, but scale-free (the
+  aggressive stake is 1 unit) so the result is a pure function of prices
+  and commission.
+- :func:`min_arb_ticks_for_profit` - smallest Betfair-ladder tick offset
+  between the aggressive and passive legs that clears a given profit
+  floor at the given commission. Returns ``None`` when no offset within
+  ``max_ticks`` can achieve it (the runner is mathematically
+  unscalpable at that price / commission).
+
+Both functions are dependency-free (only ``env.tick_ladder``), so they
+can be vendored into the live ``ai-betfair`` inference project.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from env.tick_ladder import tick_offset
+
+AggressiveSide = Literal["back", "lay"]
+
+
+def locked_pnl_per_unit_stake(
+    back_price: float,
+    lay_price: float,
+    commission: float,
+) -> float:
+    """Return ``min(win_pnl, lose_pnl)`` of an equal-P&L-sized scalp
+    pair, per 1 unit of aggressive stake.
+
+    The formula mirrors ``env.bet_manager.BetManager.get_paired_positions``'s
+    locked-pnl calculation, specialised to S_agg=1 and the
+    ``S_pass = S_agg * P_agg / P_pass`` sizing rule. Negative values
+    indicate the pair would round-trip to a loss after commission.
+    The BetManager floors this at zero for reward accumulation; here
+    we return the raw value so callers can reason about margins and
+    safety buffers.
+
+    Parameters
+    ----------
+    back_price, lay_price:
+        Decimal Betfair prices for the back and lay legs. For back-first
+        scalps ``back_price > lay_price``; for lay-first ``lay_price >
+        back_price``.
+    commission:
+        Fractional commission applied to the winning leg only (Betfair
+        charges losers nothing). ``0.05`` = 5%.
+
+    Returns
+    -------
+    float
+        ``min(win_pnl, lose_pnl)`` per unit of aggressive stake.
+    """
+    if back_price <= 1.0 or lay_price <= 1.0:
+        # Invalid odds — treat as catastrophically unscalpable.
+        return float("-inf")
+    c = commission
+    # With S_back * P_back = S_lay * P_lay (sizing invariant), parameterise
+    # by exposure k = S_back * P_back. Then S_back = k/P_back, S_lay = k/P_lay.
+    # With S_agg=1 per caller contract, k depends on which leg is aggressive,
+    # but since we're returning per-unit-aggressive-stake and both outcomes
+    # scale linearly in the aggressive stake, we can compute with k = 1 and
+    # scale back at the end by the aggressive side's P.
+    #
+    # Equivalently (and more directly): compute with S_back=1, S_lay=P_back/P_lay,
+    # then divide by (P_back if aggressive is back else 1) ... but that re-
+    # introduces the aggressive-side dependence. The simpler approach: the
+    # locked value as a fraction of aggressive stake is identical regardless
+    # of which leg is aggressive (the sizing equation makes both legs
+    # "worth" the same exposure). Verify with direct calculation for each
+    # case:
+    #   back-first: S_b=1, S_l=P_b/P_l
+    #     win  = 1*(P_b-1)(1-c) - (P_b/P_l)*(P_l-1)
+    #     lose = -1 + (P_b/P_l)*(1-c)
+    #   lay-first: S_l=1, S_b=P_l/P_b
+    #     win  = (P_l/P_b)*(P_b-1)(1-c) - 1*(P_l-1)
+    #     lose = -(P_l/P_b) + 1*(1-c)
+    # The locked-pnl formula is NOT identical between the two cases per
+    # aggressive-unit-stake, because the aggressive stake is a different
+    # leg. We return the BACK-FIRST form as the canonical "per 1 unit
+    # of back stake" figure. Callers that need lay-first should feed
+    # the helper the back and lay prices directly regardless of which
+    # is aggressive — the sign + magnitude are the same for a given
+    # (P_b, P_l, c) triple, differing only in the scale factor.
+    S_b = 1.0
+    S_l = S_b * back_price / lay_price
+    win = S_b * (back_price - 1.0) * (1.0 - c) - S_l * (lay_price - 1.0)
+    lose = -S_b + S_l * (1.0 - c)
+    return min(win, lose)
+
+
+def min_arb_ticks_for_profit(
+    aggressive_price: float,
+    aggressive_side: AggressiveSide,
+    commission: float,
+    *,
+    profit_floor: float = 0.0,
+    max_ticks: int = 25,
+) -> int | None:
+    """Smallest tick offset at which an equal-P&L-sized scalp pair locks
+    at least ``profit_floor`` per unit of aggressive stake.
+
+    Walks the real Betfair tick ladder from ``aggressive_price`` in the
+    appropriate direction (down for back-first, up for lay-first) and
+    returns the first tick count whose locked-pnl clears the floor.
+
+    Returns ``None`` if no count in ``[1, max_ticks]`` qualifies - i.e.
+    the runner is mathematically unscalpable at the current price and
+    commission. Caller should refuse the placement.
+
+    Parameters
+    ----------
+    aggressive_price:
+        Price at which the aggressive leg fills.
+    aggressive_side:
+        ``"back"`` if the aggressive leg is a back bet (passive lay
+        sits below); ``"lay"`` if aggressive is a lay (passive back
+        sits above).
+    commission:
+        Fractional commission on the winning leg. Reads from
+        ``config.yaml:reward.commission`` in production.
+    profit_floor:
+        Minimum locked-pnl per unit of aggressive stake. Defaults to 0
+        meaning "just break even"; set positive to require a safety
+        buffer (e.g. 0.005 = 0.5% of stake locked).
+    max_ticks:
+        Upper bound on the search. Matches
+        ``env.betfair_env.MAX_ARB_TICKS``.
+    """
+    if aggressive_side not in ("back", "lay"):
+        raise ValueError(
+            f"aggressive_side must be 'back' or 'lay', got {aggressive_side!r}",
+        )
+    direction = -1 if aggressive_side == "back" else 1
+    for ticks in range(1, max_ticks + 1):
+        passive = tick_offset(aggressive_price, ticks, direction)
+        if aggressive_side == "back":
+            back_price, lay_price = aggressive_price, passive
+        else:
+            back_price, lay_price = passive, aggressive_price
+        # Ladder clamping at MIN_PRICE / MAX_PRICE means further ticks
+        # can stop moving — bail out if we're stuck.
+        if back_price <= 1.0 or lay_price <= 1.0:
+            return None
+        locked = locked_pnl_per_unit_stake(back_price, lay_price, commission)
+        if locked >= profit_floor:
+            return ticks
+    return None

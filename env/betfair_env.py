@@ -48,6 +48,7 @@ from env.features import (
     compute_obi,
     compute_traded_delta,
 )
+from env.scalping_math import locked_pnl_per_unit_stake, min_arb_ticks_for_profit
 from env.tick_ladder import tick_offset, ticks_between
 from training.perf_log import perf_log
 
@@ -1296,6 +1297,42 @@ class BetfairEnv(gymnasium.Env):
                                 reference_price=ltp,
                                 lower_is_better=False,
                             )
+                            agg_side_str = "back"
+                        else:
+                            agg_price_est = bm.matcher.pick_top_price(
+                                runner.available_to_lay,
+                                reference_price=ltp,
+                                lower_is_better=True,
+                            )
+                            agg_side_str = "lay"
+                        # Commission-aware feasibility floor. Bumps
+                        # the agent's chosen ``arb_ticks`` up to the
+                        # minimum that leaves ``locked_pnl > 0`` at the
+                        # current commission (scalping_math honours
+                        # ``reward.commission`` automatically — no
+                        # rebuilding needed when Betfair changes the
+                        # fee schedule). Returns None when the runner
+                        # is mathematically unscalpable at these
+                        # prices; the pair is refused entirely in that
+                        # case rather than left as a naked directional.
+                        if agg_price_est is not None:
+                            floor = min_arb_ticks_for_profit(
+                                agg_price_est,
+                                agg_side_str,  # type: ignore[arg-type]
+                                self._commission,
+                                max_ticks=MAX_ARB_TICKS,
+                            )
+                            if floor is None:
+                                action_debug[sid] = {
+                                    "aggressive_placed": False,
+                                    "passive_placed": False,
+                                    "cancelled": did_cancel,
+                                    "skipped_reason": "commission_infeasible",
+                                }
+                                continue
+                            if floor > arb_ticks:
+                                arb_ticks = floor
+                        if side == BetSide.BACK:
                             if agg_price_est is not None:
                                 lay_leg_price = tick_offset(
                                     agg_price_est, arb_ticks, -1,
@@ -1303,11 +1340,6 @@ class BetfairEnv(gymnasium.Env):
                             else:
                                 lay_leg_price = None
                         else:
-                            agg_price_est = bm.matcher.pick_top_price(
-                                runner.available_to_lay,
-                                reference_price=ltp,
-                                lower_is_better=True,
-                            )
                             lay_leg_price = agg_price_est
 
                         if lay_leg_price is not None and lay_leg_price > 0.0:
@@ -1583,6 +1615,22 @@ class BetfairEnv(gymnasium.Env):
         if new_price is None or new_price <= 0.0:
             _mark(requote_attempted=True, requote_failed=True,
                   requote_reason="price_invalid")
+            return
+
+        # Commission-aware feasibility check on the candidate pair.
+        # The re-quote positions the passive at ``tick_offset(ltp, N, …)``
+        # — so if LTP has drifted far from the aggressive fill, a
+        # tick-count that would have been feasible at placement can
+        # round-trip to zero/negative locked-pnl now. Refuse the re-quote
+        # entirely in that case; leave the existing passive alone so the
+        # hedge survives.
+        if agg_bet.side is BetSide.BACK:
+            b_price, l_price = agg_bet.average_price, new_price
+        else:
+            b_price, l_price = new_price, agg_bet.average_price
+        if locked_pnl_per_unit_stake(b_price, l_price, self._commission) <= 0.0:
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="commission_infeasible")
             return
 
         # Junk-filter window based on the current LTP. The default

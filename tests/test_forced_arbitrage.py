@@ -557,71 +557,90 @@ class TestScalpingReward:
         activation-A-baseline gen-0 population as many
         ``Arb completed: Back £X / Lay £X−1tick → locked £+0.00`` lines.
         """
-        cfg = dict(scalping_config)
-        cfg["reward"] = dict(cfg["reward"])
-        cfg["reward"]["early_lock_bonus_weight"] = 10.0
-        cfg["reward"]["naked_penalty_weight"] = 0.0
-
-        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=10), cfg)
-        env.reset()
-        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
-        a[0] = 1.0
-        a[14] = -0.8
-        a[28] = 1.0
-        a[56] = -1.0
-        env.step(a)
-
         from env.bet_manager import Bet
-        bm = env.bet_manager
-        agg = [b for b in bm.bets if b.pair_id is not None][0]
-        resting = [
-            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
-        ][0]
 
-        # Configure a ZERO-LOCK pair: aggressive BACK £10 @ 4.00,
-        # passive LAY @ 3.95 (1-tick). By the formulas above, locked_pnl
-        # floors to 0 after the 5 % commission hit on the winning leg.
-        agg.matched_stake = 10.0
-        agg.average_price = 4.0
-        zero_lock_stake = 10.0 * 4.0 / 3.95
-        bm.bets.append(Bet(
-            selection_id=resting.selection_id,
-            side=resting.side,
-            requested_stake=zero_lock_stake,
-            matched_stake=zero_lock_stake,
-            average_price=3.95,
-            market_id=resting.market_id,
-            ltp_at_placement=resting.ltp_at_placement,
-            pair_id=resting.pair_id,
-            tick_index=1,  # very early fill — max remaining_frac
-        ))
-        bm.passive_book._orders = [
-            o for o in bm.passive_book._orders if id(o) != id(resting)
-        ]
-        for sid_orders in bm.passive_book._orders_by_sid.values():
-            for o in sid_orders[:]:
-                if id(o) == id(resting):
-                    sid_orders.remove(o)
+        def run_with_passive_price(passive_price: float) -> tuple[float, float]:
+            """Replay an identical setup with a specified passive-leg
+            price. Returns (shaped_bonus, locked_pnl)."""
+            cfg = dict(scalping_config)
+            cfg["reward"] = dict(cfg["reward"])
+            cfg["reward"]["early_lock_bonus_weight"] = 10.0
+            cfg["reward"]["naked_penalty_weight"] = 0.0
+            # Zero out early_pick_bonus so shaped_bonus is dominated by
+            # the early_lock_bonus term we're probing.
+            cfg["reward"]["early_pick_bonus_min"] = 1.0
+            cfg["reward"]["early_pick_bonus_max"] = 1.0
+            # Efficiency penalty lands on bet_count; keep deterministic.
+            cfg["reward"]["efficiency_penalty"] = 0.0
+            cfg["reward"]["precision_bonus"] = 0.0
 
-        terminated = False
-        info: dict = {}
-        while not terminated:
-            _, _, terminated, _, info = env.step(a)
+            env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=10), cfg)
+            env.reset()
+            a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+            a[0] = 1.0
+            a[14] = -0.8
+            a[28] = 1.0
+            a[56] = -1.0
+            env.step(a)
+            bm = env.bet_manager
+            agg = [b for b in bm.bets if b.pair_id is not None][0]
+            resting = [
+                o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+            ][0]
 
-        # Confirm the pair really is zero-locked AND completed — otherwise
-        # the test is not exercising the gate.
-        pairs = bm.get_paired_positions()
-        zero_lock_pairs = [p for p in pairs if p["complete"] and p["locked_pnl"] == 0.0]
-        assert zero_lock_pairs, "test setup failed: expected ≥1 complete zero-locked pair"
+            # Override aggressive BACK £10 @ 4.00, passive LAY @ given
+            # price. Equal-P&L sizing S_lay = 10 × 4.00 / passive_price.
+            agg.matched_stake = 10.0
+            agg.average_price = 4.0
+            lock_stake = 10.0 * 4.0 / passive_price
+            bm.bets.append(Bet(
+                selection_id=resting.selection_id,
+                side=resting.side,
+                requested_stake=lock_stake,
+                matched_stake=lock_stake,
+                average_price=passive_price,
+                market_id=resting.market_id,
+                ltp_at_placement=resting.ltp_at_placement,
+                pair_id=resting.pair_id,
+                tick_index=1,  # very early fill — max remaining_frac
+            ))
+            bm.passive_book._orders = [
+                o for o in bm.passive_book._orders if id(o) != id(resting)
+            ]
+            for sid_orders in bm.passive_book._orders_by_sid.values():
+                for o in sid_orders[:]:
+                    if id(o) == id(resting):
+                        sid_orders.remove(o)
+            pairs = bm.get_paired_positions()
+            locked_pnls = [p["locked_pnl"] for p in pairs if p["complete"]]
 
-        # The only positive shaped contribution in this config would come
-        # from early_lock_bonus (naked_penalty off, precision bonus is
-        # centred so random perf is zero). With the gate, shaped_bonus
-        # should NOT include the +10×remaining_frac the old formula
-        # would have awarded.
-        assert info["shaped_bonus"] < 5.0, (
-            "zero-locked completed pair should not farm early_lock_bonus; "
-            f"got shaped_bonus={info['shaped_bonus']:.3f}"
+            terminated = False
+            info: dict = {}
+            while not terminated:
+                _, _, terminated, _, info = env.step(a)
+            return info["shaped_bonus"], max(locked_pnls) if locked_pnls else 0.0
+
+        # Zero-locked pair: 1-tick below (4.00 → 3.95) round-trips to
+        # min(−1.38, −0.38) = −1.38 after 5% commission, floored to 0.
+        zero_bonus, zero_locked = run_with_passive_price(3.95)
+        # Positive-locked pair: 3.40 is wide enough to lock +£0.39.
+        positive_bonus, positive_locked = run_with_passive_price(3.40)
+
+        # Test setup sanity — must exercise both regimes.
+        assert zero_locked == 0.0, (
+            f"test setup failed: expected zero-locked, got {zero_locked}"
+        )
+        assert positive_locked > 0.0, (
+            f"test setup failed: expected positive-locked, got {positive_locked}"
+        )
+        # With the gate, the zero-lock scenario earns NO early_lock_bonus
+        # and the positive-lock scenario DOES earn the full bonus. So
+        # positive_bonus should exceed zero_bonus by roughly
+        # weight × remaining_frac ≈ 10 × 1 = 10.
+        assert positive_bonus - zero_bonus > 5.0, (
+            "positive-locked pair should earn substantially more shaped "
+            f"bonus than zero-locked. zero={zero_bonus:.3f} "
+            f"positive={positive_bonus:.3f}"
         )
 
     def test_invariant_raw_plus_shaped_equals_total_reward(
