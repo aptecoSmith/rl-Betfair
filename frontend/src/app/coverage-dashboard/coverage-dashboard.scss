@@ -1,0 +1,155 @@
+.coverage-dashboard {
+  padding: 1.5rem;
+  max-width: 1200px;
+  margin: 0 auto;
+
+  h1 { margin-bottom: 1rem; }
+  h2 { margin-bottom: 0.75rem; font-size: 1.1rem; }
+}
+
+.summary-strip {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+
+  .stat {
+    display: flex;
+    flex-direction: column;
+    padding: 0.75rem 1rem;
+    background: var(--surface, #1e1e2e);
+    border-radius: 8px;
+    min-width: 120px;
+
+    .label { font-size: 0.75rem; opacity: 0.7; text-transform: uppercase; }
+    .value { font-size: 1.5rem; font-weight: 600; }
+    .value.warning { color: #ff9800; }
+  }
+}
+
+.section {
+  margin-bottom: 2rem;
+}
+
+// Architecture breakdown
+.arch-bars {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+
+  .arch-bar-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    background: var(--surface, #1e1e2e);
+    border-radius: 6px;
+
+    .arch-name { font-size: 0.85rem; }
+    .arch-name.undercovered { color: #ff9800; }
+    .arch-count { font-weight: 600; font-size: 1.1rem; }
+  }
+}
+
+// Per-gene heat map grid
+.gene-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.gene-card {
+  background: var(--surface, #1e1e2e);
+  border-radius: 8px;
+  padding: 0.75rem;
+  border: 1px solid transparent;
+
+  &.poorly-covered { border-color: #ff9800; }
+
+  .gene-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+
+    .gene-name { font-size: 0.8rem; font-weight: 500; }
+    .gene-fraction { font-size: 0.8rem; opacity: 0.7; }
+  }
+}
+
+.histogram {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 48px;
+
+  .bar {
+    flex: 1;
+    min-height: 2px;
+    border-radius: 2px 2px 0 0;
+    transition: height 0.3s ease;
+
+    &.empty   { background: #333; }
+    &.sparse  { background: #ff9800; }
+    &.covered { background: #4caf50; }
+  }
+}
+
+// Data table
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+
+  th, td {
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  th { opacity: 0.7; font-weight: 500; text-transform: uppercase; font-size: 0.75rem; }
+}
+
+.mono { font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 0.8rem; }
+.seed-preview { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.chip {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: rgba(255,255,255,0.1);
+
+  &[data-strategy="sobol"]    { background: #1565c0; color: #fff; }
+  &[data-strategy="coverage"] { background: #2e7d32; color: #fff; }
+  &[data-strategy="manual"]   { background: #6a1b9a; color: #fff; }
+}
+
+.seed-json {
+  background: var(--surface, #1e1e2e);
+  padding: 1rem;
+  border-radius: 8px;
+  font-family: 'Fira Code', monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.hint {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  &.warning { color: #ff9800; opacity: 1; }
+}
+
+.message.error {
+  padding: 0.75rem;
+  background: rgba(244, 67, 54, 0.15);
+  border: 1px solid #f44336;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+
+.loading {
+  padding: 2rem;
+  text-align: center;
+  opacity: 0.6;
+}

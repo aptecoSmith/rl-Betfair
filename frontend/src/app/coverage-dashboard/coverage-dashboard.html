@@ -1,0 +1,122 @@
+<div class="coverage-dashboard">
+  <h1>Coverage Dashboard</h1>
+
+  @if (error()) {
+    <div class="message error">{{ error() }}</div>
+  }
+
+  @if (loading()) {
+    <div class="loading">Loading coverage data...</div>
+  } @else {
+
+    <!-- Summary strip -->
+    <div class="summary-strip">
+      <div class="stat">
+        <span class="label">Total models</span>
+        <span class="value">{{ totalAgents() }}</span>
+      </div>
+      <div class="stat">
+        <span class="label">Gene coverage</span>
+        <span class="value">{{ coveragePct() | percent:'1.0-0' }}</span>
+      </div>
+      <div class="stat">
+        <span class="label">Exploration runs</span>
+        <span class="value">{{ runs().length }}</span>
+      </div>
+      <div class="stat">
+        <span class="label">Poorly covered</span>
+        <span class="value" [class.warning]="poorlyCoveredGenes().length > 0">
+          {{ poorlyCoveredGenes().length }} gene(s)
+        </span>
+      </div>
+    </div>
+
+    <!-- Architecture breakdown -->
+    <section class="section">
+      <h2>Architecture breakdown</h2>
+      <div class="arch-bars">
+        @for (entry of archCounts() | keyvalue; track entry.key) {
+          <div class="arch-bar-item">
+            <span class="arch-name" [class.undercovered]="archUndercovered().includes(entry.key)">
+              {{ entry.key }}
+            </span>
+            <span class="arch-count">{{ entry.value }}</span>
+          </div>
+        }
+      </div>
+      @if (archUndercovered().length > 0) {
+        <p class="hint warning">Under-covered: {{ archUndercovered().join(', ') }}</p>
+      }
+    </section>
+
+    <!-- Per-gene coverage heat maps -->
+    <section class="section">
+      <h2>Per-gene coverage</h2>
+      <div class="gene-grid">
+        @for (gc of genes(); track gc.name) {
+          <div class="gene-card" [class.poorly-covered]="!gc.well_covered">
+            <div class="gene-header">
+              <span class="gene-name">{{ gc.name }}</span>
+              <span class="gene-fraction">{{ gc.coverage_fraction | percent:'1.0-0' }}</span>
+            </div>
+            <div class="histogram">
+              @for (idx of bucketIndices(gc); track idx) {
+                <div
+                  class="bar"
+                  [class]="barClass(gc, idx)"
+                  [style.height.%]="barHeight(gc, idx)"
+                  [title]="gc.bucket_counts[idx] + ' model(s)'"
+                ></div>
+              }
+            </div>
+          </div>
+        }
+      </div>
+    </section>
+
+    <!-- Seed point history -->
+    @if (runs().length > 0) {
+      <section class="section">
+        <h2>Exploration run history</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Strategy</th>
+              <th>Run ID</th>
+              <th>Created</th>
+              <th>Seed point (summary)</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (run of runs(); track run.id) {
+              <tr>
+                <td>{{ run.id }}</td>
+                <td><span class="chip" [attr.data-strategy]="run.strategy">{{ run.strategy }}</span></td>
+                <td class="mono">{{ run.run_id | slice:0:8 }}</td>
+                <td>{{ run.created_at | slice:0:16 }}</td>
+                <td class="mono seed-preview">{{ run.seed_point | json | slice:0:80 }}</td>
+                <td>{{ run.notes ?? '-' }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </section>
+    }
+
+    <!-- Suggested next point -->
+    @if (suggestedSeed()) {
+      <section class="section">
+        <h2>Suggested next seed point</h2>
+        <p class="hint">
+          Based on coverage gaps
+          @if (poorlyCoveredGenes().length > 0) {
+            in: {{ poorlyCoveredGenes().join(', ') }}
+          }
+        </p>
+        <pre class="seed-json">{{ suggestedSeed() | json }}</pre>
+      </section>
+    }
+  }
+</div>
