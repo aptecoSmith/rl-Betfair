@@ -240,6 +240,16 @@
         <dt>created_at</dt><dd>{{ shortDate(plan.created_at) }}</dd>
       </dl>
 
+      @if (plan.reward_overrides && (plan.reward_overrides | keyvalue).length > 0) {
+        <h3>reward_overrides</h3>
+        <dl class="plan-fields" data-testid="reward-overrides-display">
+          @for (entry of plan.reward_overrides | keyvalue; track entry.key) {
+            <dt><code>{{ entry.key }}</code></dt>
+            <dd><code>{{ entry.value }}</code></dd>
+          }
+        </dl>
+      }
+
       <h3>hp_ranges</h3>
       <pre class="json-block">{{ plan.hp_ranges | json }}</pre>
 
@@ -467,6 +477,27 @@
         <label>notes</label>
         <textarea rows="3" [ngModel]="editorNotes()" (ngModelChange)="editorNotes.set($event)"></textarea>
         <span class="field-help">Free-text notes for your own reference — what you're testing, why you chose these settings, etc.</span>
+      </div>
+
+      <div class="form-field" data-testid="reward-overrides-field">
+        <label for="reward-overrides-input">reward_overrides (JSON)</label>
+        <textarea
+          id="reward-overrides-input"
+          data-testid="reward-overrides-input"
+          rows="4"
+          placeholder='{"fill_prob_loss_weight": 0.1, "risk_loss_weight": 0.05}'
+          [ngModel]="editorRewardOverridesText()"
+          (ngModelChange)="editorRewardOverridesText.set($event)"
+          style="font-family: monospace;"
+        ></textarea>
+        <span class="field-help">
+          Optional. Per-plan overrides for <code>config.yaml:reward.*</code>.
+          Keys must exist in the loaded config; values must be numbers.
+          Leave blank to use the config defaults.
+        </span>
+        @if (editorRewardOverridesError(); as err) {
+          <div class="message error" data-testid="reward-overrides-error">{{ err }}</div>
+        }
       </div>
 
       <div class="form-section">

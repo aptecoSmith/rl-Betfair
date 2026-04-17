@@ -202,6 +202,13 @@ class TrainingPlan:
     adaptive_mutation: bool | None = None
     adaptive_mutation_increment: float | None = None
     adaptive_mutation_cap: float | None = None
+    #: Per-plan ``config.yaml:reward:*`` overrides. Any key here is
+    #: merged into the env's reward config before construction so the
+    #: plan can tweak individual reward-weight terms (e.g.
+    #: ``fill_prob_loss_weight``) without editing global config. Unknown
+    #: keys are rejected at create time to prevent silent typos training
+    #: at defaults. None means "no overrides".
+    reward_overrides: dict[str, float] | None = None
 
     # ---- session helpers ----
     def session_boundaries(self) -> list[tuple[int, int]]:
@@ -266,6 +273,9 @@ class TrainingPlan:
             "adaptive_mutation": self.adaptive_mutation,
             "adaptive_mutation_increment": self.adaptive_mutation_increment,
             "adaptive_mutation_cap": self.adaptive_mutation_cap,
+            "reward_overrides": (
+                dict(self.reward_overrides) if self.reward_overrides else None
+            ),
         }
 
     @classmethod
@@ -308,6 +318,10 @@ class TrainingPlan:
             adaptive_mutation=raw.get("adaptive_mutation"),
             adaptive_mutation_increment=raw.get("adaptive_mutation_increment"),
             adaptive_mutation_cap=raw.get("adaptive_mutation_cap"),
+            reward_overrides=(
+                dict(raw["reward_overrides"])
+                if raw.get("reward_overrides") else None
+            ),
         )
 
     @staticmethod
@@ -338,6 +352,7 @@ class TrainingPlan:
         adaptive_mutation: bool | None = None,
         adaptive_mutation_increment: float | None = None,
         adaptive_mutation_cap: float | None = None,
+        reward_overrides: dict[str, float] | None = None,
     ) -> "TrainingPlan":
         """Construct a fresh plan with a new ``plan_id`` and ``created_at``."""
         return TrainingPlan(
@@ -368,6 +383,7 @@ class TrainingPlan:
             adaptive_mutation=adaptive_mutation,
             adaptive_mutation_increment=adaptive_mutation_increment,
             adaptive_mutation_cap=adaptive_mutation_cap,
+            reward_overrides=dict(reward_overrides) if reward_overrides else None,
         )
 
 

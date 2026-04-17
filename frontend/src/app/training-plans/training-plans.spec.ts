@@ -378,6 +378,122 @@ describe('TrainingPlans', () => {
     expect(component.selectedPlan()?.auto_continue).toBe(true);
   });
 
+  // ── reward_overrides ─────────────────────────────────────────
+  it('parses empty reward_overrides as undefined', () => {
+    setup();
+    component.openEditor();
+    component.editorRewardOverridesText.set('');
+    expect(component.parseRewardOverrides()).toBeUndefined();
+    expect(component.editorRewardOverridesError()).toBeNull();
+  });
+
+  it('parses valid JSON reward_overrides into a dict', () => {
+    setup();
+    component.openEditor();
+    component.editorRewardOverridesText.set('{"fill_prob_loss_weight": 0.1}');
+    expect(component.parseRewardOverrides()).toEqual({ fill_prob_loss_weight: 0.1 });
+    expect(component.editorRewardOverridesError()).toBeNull();
+  });
+
+  it('rejects malformed JSON reward_overrides with an error', () => {
+    setup();
+    component.openEditor();
+    component.editorRewardOverridesText.set('{not json');
+    expect(component.parseRewardOverrides()).toBeNull();
+    expect(component.editorRewardOverridesError()).toContain('Invalid JSON');
+  });
+
+  it('rejects reward_overrides that are not a plain object', () => {
+    setup();
+    component.openEditor();
+    component.editorRewardOverridesText.set('["fill_prob_loss_weight", 0.1]');
+    expect(component.parseRewardOverrides()).toBeNull();
+    expect(component.editorRewardOverridesError()).toContain('JSON object');
+  });
+
+  it('rejects reward_overrides with non-numeric values', () => {
+    setup();
+    component.openEditor();
+    component.editorRewardOverridesText.set('{"fill_prob_loss_weight": "huge"}');
+    expect(component.parseRewardOverrides()).toBeNull();
+    expect(component.editorRewardOverridesError()).toContain('must be a number');
+  });
+
+  it('sends reward_overrides in the save payload when set', () => {
+    setup();
+    let capturedPayload: TrainingPlanPayload | null = null;
+    mockApi.createTrainingPlan = (p: TrainingPlanPayload) => {
+      capturedPayload = p;
+      return of({
+        plan: {
+          plan_id: 'new',
+          name: p.name,
+          created_at: '2026-04-17',
+          population_size: p.population_size,
+          architectures: p.architectures,
+          arch_mix: null,
+          hp_ranges: p.hp_ranges,
+          arch_lr_ranges: null,
+          seed: p.seed ?? null,
+          min_arch_samples: p.min_arch_samples ?? 5,
+          notes: p.notes ?? '',
+          outcomes: [],
+          reward_overrides: p.reward_overrides ?? null,
+        },
+        validation: [],
+      }) as any;
+    };
+    component.openEditor();
+    component.editorName.set('plan-with-overrides');
+    component.toggleArchSelection('ppo_lstm_v1');
+    component.editorRewardOverridesText.set('{"fill_prob_loss_weight": 0.1}');
+    component.savePlan();
+    expect(capturedPayload).not.toBeNull();
+    expect(capturedPayload!.reward_overrides).toEqual({ fill_prob_loss_weight: 0.1 });
+  });
+
+  it('renders reward_overrides on the detail view when present', () => {
+    mockApi = new MockApiService();
+    mockApi.detail$ = of({
+      plan: {
+        plan_id: 'p',
+        name: 'p',
+        created_at: '2026-04-17',
+        population_size: 16,
+        architectures: ['ppo_lstm_v1'],
+        arch_mix: null,
+        hp_ranges: {},
+        arch_lr_ranges: null,
+        seed: 42,
+        min_arch_samples: 5,
+        notes: '',
+        outcomes: [],
+        reward_overrides: { fill_prob_loss_weight: 0.1, risk_loss_weight: 0.05 },
+      },
+      validation: [],
+    });
+    TestBed.configureTestingModule({
+      imports: [TrainingPlans],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        { provide: ApiService, useValue: mockApi },
+      ],
+    });
+    fixture = TestBed.createComponent(TrainingPlans);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    component.openDetail('p');
+    fixture.detectChanges();
+
+    const block = fixture.nativeElement.querySelector('[data-testid="reward-overrides-display"]');
+    expect(block).toBeTruthy();
+    expect(block.textContent).toContain('fill_prob_loss_weight');
+    expect(block.textContent).toContain('0.1');
+    expect(block.textContent).toContain('risk_loss_weight');
+    expect(block.textContent).toContain('0.05');
+  });
+
   it('reverts checkbox and surfaces error when setAutoContinue fails', () => {
     setupWithPlan({ auto_continue: true });
     mockApi.setAutoContinueResp$ = throwError(() => ({ error: { detail: 'boom' } }));

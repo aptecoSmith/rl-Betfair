@@ -501,6 +501,206 @@ def test_orchestrator_uses_global_budget_when_plan_has_none(hp_ranges):
     assert orch.config["training"]["starting_budget"] == 100.0
 
 
+# -- 8b. Per-plan reward_overrides -------------------------------------------
+
+
+class TestRewardOverrides:
+    """``reward_overrides`` lets plans patch individual reward-weight terms."""
+
+    def _config_with_reward(self, hp_ranges: dict) -> dict:
+        return {
+            "training": {
+                "starting_budget": 100.0,
+                "max_runners": 14,
+                "max_bets_per_race": 20,
+                "architecture": "ppo_lstm_v1",
+            },
+            "reward": {
+                "fill_prob_loss_weight": 0.0,
+                "risk_loss_weight": 0.0,
+                "naked_penalty_weight": 0.5,
+                "early_lock_bonus_weight": 1.0,
+            },
+            "population": {
+                "size": 5, "n_elite": 1, "selection_top_pct": 0.5, "mutation_rate": 0.1,
+            },
+            "hyperparameters": {"search_ranges": hp_ranges},
+            "paths": {"processed_data": "/tmp/fake"},
+        }
+
+    def test_plan_round_trips_reward_overrides(self, registry, hp_ranges):
+        plan = TrainingPlan.new(
+            name="overrides-test",
+            population_size=10,
+            architectures=["ppo_lstm_v1"],
+            hp_ranges=hp_ranges,
+            reward_overrides={"fill_prob_loss_weight": 0.1, "risk_loss_weight": 0.05},
+        )
+        registry.save(plan)
+        reloaded = registry.load(plan.plan_id)
+        assert reloaded.reward_overrides == {
+            "fill_prob_loss_weight": 0.1,
+            "risk_loss_weight": 0.05,
+        }
+
+    def test_plan_without_overrides_defaults_to_none(self, registry, hp_ranges):
+        plan = TrainingPlan.new(
+            name="no-overrides",
+            population_size=5,
+            architectures=["ppo_lstm_v1"],
+            hp_ranges=hp_ranges,
+        )
+        registry.save(plan)
+        assert registry.load(plan.plan_id).reward_overrides is None
+
+    def test_to_dict_includes_overrides(self, hp_ranges):
+        plan = TrainingPlan.new(
+            name="dict-test",
+            population_size=5,
+            architectures=["ppo_lstm_v1"],
+            hp_ranges=hp_ranges,
+            reward_overrides={"fill_prob_loss_weight": 0.25},
+        )
+        d = plan.to_dict()
+        assert d["reward_overrides"] == {"fill_prob_loss_weight": 0.25}
+
+    def test_from_dict_without_overrides_key(self, hp_ranges):
+        """Plans saved before this field existed round-trip cleanly."""
+        plan = TrainingPlan.new(
+            name="legacy",
+            population_size=5,
+            architectures=["ppo_lstm_v1"],
+            hp_ranges=hp_ranges,
+        )
+        raw = plan.to_dict()
+        raw.pop("reward_overrides")
+        restored = TrainingPlan.from_dict(raw)
+        assert restored.reward_overrides is None
+
+    def test_orchestrator_applies_overrides_to_config(self, hp_ranges):
+        import copy
+        from training.run_training import TrainingOrchestrator
+
+        config = self._config_with_reward(hp_ranges)
+        plan = TrainingPlan.new(
+            name="orch-test",
+            population_size=5,
+            architectures=["ppo_lstm_v1"],
+            hp_ranges=hp_ranges,
+            reward_overrides={
+                "fill_prob_loss_weight": 0.1,
+                "risk_loss_weight": 0.05,
+            },
+        )
+        test_config = copy.deepcopy(config)
+        orch = TrainingOrchestrator(test_config, model_store=None, training_plan=plan)
+        assert orch.config["reward"]["fill_prob_loss_weight"] == 0.1
+        assert orch.config["reward"]["risk_loss_weight"] == 0.05
+        # Untouched keys stay at their config defaults.
+        assert orch.config["reward"]["naked_penalty_weight"] == 0.5
+        assert orch.config["reward"]["early_lock_bonus_weight"] == 1.0
+
+    def test_orchestrator_no_plan_means_no_patch(self, hp_ranges):
+        import copy
+        from training.run_training import TrainingOrchestrator
+
+        config = self._config_with_reward(hp_ranges)
+        test_config = copy.deepcopy(config)
+        orch = TrainingOrchestrator(test_config, model_store=None, training_plan=None)
+        assert orch.config["reward"]["fill_prob_loss_weight"] == 0.0
+        assert orch.config["reward"]["risk_loss_weight"] == 0.0
+
+    def test_api_create_plan_with_overrides(self, tmp_path, hp_ranges):
+        """POST /training-plans accepts reward_overrides and persists them."""
+        reg = PlanRegistry(tmp_path / "plans")
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = self._config_with_reward(hp_ranges)
+        client = TestClient(app)
+
+        resp = client.post("/api/training-plans", json={
+            "name": "api-overrides",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1"],
+            "hp_ranges": hp_ranges,
+            "reward_overrides": {"fill_prob_loss_weight": 0.1},
+        })
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["plan"]["reward_overrides"] == {"fill_prob_loss_weight": 0.1}
+
+    def test_api_rejects_unknown_reward_key(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = self._config_with_reward(hp_ranges)
+        client = TestClient(app)
+
+        resp = client.post("/api/training-plans", json={
+            "name": "api-typo",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1"],
+            "hp_ranges": hp_ranges,
+            "reward_overrides": {"fillprob_loss_weight": 0.1},  # typo
+        })
+        assert resp.status_code == 422
+        assert "fillprob_loss_weight" in resp.json()["detail"]
+
+    def test_api_rejects_non_numeric_override_value(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = self._config_with_reward(hp_ranges)
+        client = TestClient(app)
+
+        resp = client.post("/api/training-plans", json={
+            "name": "api-str",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1"],
+            "hp_ranges": hp_ranges,
+            "reward_overrides": {"fill_prob_loss_weight": "huge"},
+        })
+        assert resp.status_code == 422
+
+    def test_api_rejects_non_dict_overrides(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = self._config_with_reward(hp_ranges)
+        client = TestClient(app)
+
+        resp = client.post("/api/training-plans", json={
+            "name": "api-list",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1"],
+            "hp_ranges": hp_ranges,
+            "reward_overrides": ["fill_prob_loss_weight", 0.1],
+        })
+        assert resp.status_code == 422
+
+    def test_api_empty_overrides_treated_as_none(self, tmp_path, hp_ranges):
+        reg = PlanRegistry(tmp_path / "plans")
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = self._config_with_reward(hp_ranges)
+        client = TestClient(app)
+
+        resp = client.post("/api/training-plans", json={
+            "name": "api-empty",
+            "population_size": 10,
+            "architectures": ["ppo_lstm_v1"],
+            "hp_ranges": hp_ranges,
+            "reward_overrides": {},
+        })
+        assert resp.status_code == 200
+        assert resp.json()["plan"]["reward_overrides"] is None
+
+
 # -- 9. Sobol seed point generator (Sprint 4, Session 02) ---------------------
 
 

@@ -1,6 +1,6 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { DecimalPipe, JsonPipe } from '@angular/common';
+import { DecimalPipe, JsonPipe, KeyValuePipe } from '@angular/common';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { ApiService } from '../services/api.service';
 import {
@@ -28,7 +28,7 @@ interface ArchInfo { name: string; description: string; }
 @Component({
   selector: 'app-training-plans',
   standalone: true,
-  imports: [FormsModule, DecimalPipe, JsonPipe, RouterLink, GeneEditor, EarlyPickValidator, CoveragePanel],
+  imports: [FormsModule, DecimalPipe, JsonPipe, KeyValuePipe, RouterLink, GeneEditor, EarlyPickValidator, CoveragePanel],
   templateUrl: './training-plans.html',
   styleUrl: './training-plans.scss',
 })
@@ -80,6 +80,9 @@ export class TrainingPlans implements OnInit {
   readonly editorAutoContinue = signal(false);
   readonly editorMaxMutationsPerChild = signal<number | null>(null);
   readonly editorBreedingPool = signal<'run_only' | 'include_garaged' | 'full_registry' | null>(null);
+  /** Raw JSON text in the reward-overrides textarea. Parsed on save. */
+  readonly editorRewardOverridesText = signal<string>('');
+  readonly editorRewardOverridesError = signal<string | null>(null);
   readonly editorBiasToggle = signal(false);
   readonly editorSaving = signal(false);
   readonly editorErrors = signal<ValidationIssue[]>([]);
@@ -189,6 +192,8 @@ export class TrainingPlans implements OnInit {
     this.editorAutoContinue.set(false);
     this.editorMaxMutationsPerChild.set(null);
     this.editorBreedingPool.set(null);
+    this.editorRewardOverridesText.set('');
+    this.editorRewardOverridesError.set(null);
     this.editorName.set('');
     this.editorErrors.set([]);
     this.editorTopError.set(null);
@@ -298,6 +303,41 @@ export class TrainingPlans implements OnInit {
     });
   }
 
+  // ── Reward-overrides parsing ────────────────────────────────────
+  /**
+   * Parse the textarea content into a `{key: number}` dict. Returns the
+   * parsed value, or `undefined` when empty. Sets an error signal and
+   * returns `null` on malformed input. Kept separate from savePlan so
+   * tests and the template can probe it independently.
+   */
+  parseRewardOverrides(): Record<string, number> | null | undefined {
+    this.editorRewardOverridesError.set(null);
+    const raw = this.editorRewardOverridesText().trim();
+    if (!raw) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err: any) {
+      this.editorRewardOverridesError.set(`Invalid JSON: ${err?.message ?? err}`);
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.editorRewardOverridesError.set('reward_overrides must be a JSON object');
+      return null;
+    }
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value !== 'number' || Number.isNaN(value)) {
+        this.editorRewardOverridesError.set(
+          `reward_overrides['${key}']: must be a number (got ${JSON.stringify(value)})`,
+        );
+        return null;
+      }
+      out[key] = value;
+    }
+    return Object.keys(out).length === 0 ? undefined : out;
+  }
+
   // ── Save ────────────────────────────────────────────────────────
   savePlan(): void {
     this.editorErrors.set([]);
@@ -308,6 +348,14 @@ export class TrainingPlans implements OnInit {
     }
     if (this.editorSelectedArchs().size === 0) {
       this.editorTopError.set('At least one architecture must be selected');
+      return;
+    }
+    const rewardOverrides = this.parseRewardOverrides();
+    if (rewardOverrides === null) {
+      // Parser already set the per-field error; surface as top-level too.
+      this.editorTopError.set(
+        this.editorRewardOverridesError() ?? 'reward_overrides is invalid',
+      );
       return;
     }
     const payload: TrainingPlanPayload = {
@@ -329,6 +377,7 @@ export class TrainingPlans implements OnInit {
       auto_continue: this.editorAutoContinue(),
       max_mutations_per_child: this.editorMaxMutationsPerChild(),
       breeding_pool: this.editorBreedingPool(),
+      reward_overrides: rewardOverrides ?? null,
     };
     this.editorSaving.set(true);
     this.api.createTrainingPlan(payload).subscribe({

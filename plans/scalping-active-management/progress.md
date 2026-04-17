@@ -4,6 +4,62 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Activation Part 1 — `reward_overrides` tooling (2026-04-17)
+
+**Landed.** Enabler for the activation playbook, not a new session.
+
+Before this: the only way to run the activation playbook's weight
+sweep (Steps A–D) was a bespoke driver script that passed
+`fill_prob_loss_weight` / `risk_loss_weight` as in-memory config
+mutations, bypassing the training-plan registry — no lifecycle
+tracking, no UI visibility, no persisted record of which weights
+each run used. Plans could override `starting_budget`, `hp_ranges`,
+`mutation_rate`, etc. but not reward-weight terms.
+
+Changes:
+
+- `TrainingPlan.reward_overrides: dict[str, float] | None`. Round-trips
+  through `to_dict` / `from_dict`; legacy JSON (no key) loads as
+  `None`.
+- `TrainingOrchestrator.__init__` merges `plan.reward_overrides` into
+  `config["reward"]` before env construction (mirrors the existing
+  `starting_budget` patch two lines up in
+  [training/run_training.py](../../training/run_training.py)).
+- `POST /training-plans` accepts `reward_overrides` with two validation
+  bars: every key must exist in the loaded `config.yaml:reward:*` (so
+  `fillprob_loss_weight` with a typo 422s instead of silently training
+  at 0.0), every value must be a real number.
+- Two reward keys added to `config.yaml:reward:*`
+  (`fill_prob_loss_weight: 0.0`, `risk_loss_weight: 0.0`) so the
+  validator can see them. No behaviour change — `agents.ppo_trainer`
+  already fell through to 0.0 via `.get(key, 0.0)`.
+- Angular editor gets a `reward_overrides (JSON)` textarea with
+  client-side JSON / number validation. Detail page renders
+  overrides as a `<dl>` when non-null.
+- `scripts/scalping_active_comparison.py`: one-run activation-playbook
+  dump (MACE, per-bucket, risk-Spearman ρ). Reuses
+  `registry.calibration.compute_mace` + `api.calibration._collect_scatter_pairs`;
+  new `spearman_rho` helper so we don't pull in numpy.
+
+Tests: +11 backend (`TestRewardOverrides` — round-trip, orchestrator
+patch, four API validation paths, empty-dict treated as None, legacy
+JSON load) + 13 comparison-script tests (Spearman edge cases, MACE
+calibration math). +7 frontend (parse helper + editor payload + detail
+render). Full `pytest tests/ -q` → **2101 passed, 7 skipped, 1
+xfailed**. Full `ng test` → **539 passed, 24 skipped**.
+
+Browser-verified end-to-end: create plan with
+`{"fill_prob_loss_weight": 0.25, "risk_loss_weight": 0.05}` via the
+editor, invalid JSON surfaces the client-side error, detail page
+renders the overrides. API round-trips confirmed three paths: valid,
+unknown-key 422, non-numeric 422.
+
+Next: Part 2 — create the activation playbook's plans via the
+training-plans API (one generation per session, `auto_continue: true`,
+per the operator's cadence preference), run and record outcomes.
+
+---
+
 ## Session 06 — Scoreboard MACE column (2026-04-17)
 
 **Landed.**

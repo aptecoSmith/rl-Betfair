@@ -69,6 +69,8 @@ export interface TrainingPlan {
   current_session?: number;
   max_mutations_per_child?: number | null;
   breeding_pool?: 'run_only' | 'include_garaged' | 'full_registry' | null;
+  /** Per-plan `config.yaml:reward:*` overrides. Null = use config defaults. */
+  reward_overrides?: Record<string, number> | null;
 }
 
 export interface ValidationIssue {
@@ -108,6 +110,8 @@ export interface TrainingPlanPayload {
   auto_continue?: boolean;
   max_mutations_per_child?: number | null;
   breeding_pool?: 'run_only' | 'include_garaged' | 'full_registry' | null;
+  /** Per-plan reward-weight overrides. Omitted/null/empty = no overrides. */
+  reward_overrides?: Record<string, number> | null;
 }
 
 export interface GeneCoverageEntry {

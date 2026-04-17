@@ -53,6 +53,12 @@ reward:
   #     proportional to ticks remaining when the second leg filled
   naked_penalty_weight: 0.0
   early_lock_bonus_weight: 0.0
+  # Scalping-active-management auxiliary-head loss weights (plumbing
+  # off by default — activation playbook bumps these per its Step E
+  # before Session 07 validation). Declared here so per-plan
+  # ``reward_overrides`` can be validated against the config.
+  fill_prob_loss_weight: 0.0
+  risk_loss_weight: 0.0
   coefficients:
     win_rate: 0.35
     sharpe: 0.3

@@ -152,6 +152,16 @@ class TrainingOrchestrator:
         if training_plan is not None and training_plan.starting_budget is not None:
             config.setdefault("training", {})["starting_budget"] = training_plan.starting_budget
 
+        # Per-plan reward_overrides: merge into config["reward"] so every
+        # env instance the orchestrator constructs picks them up. Unknown
+        # keys are rejected at create time (API layer) rather than silently
+        # swallowed here, so anything that reaches this point is safe to
+        # apply directly.
+        if training_plan is not None and training_plan.reward_overrides:
+            reward_cfg = config.setdefault("reward", {})
+            for key, value in training_plan.reward_overrides.items():
+                reward_cfg[key] = value
+
         # GPU auto-detection (config.training.device overrides auto-detect)
         config_device = config.get("training", {}).get("device")
         if device is not None:

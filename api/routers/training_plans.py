@@ -195,6 +195,35 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
     else:
         budget_val = None
 
+    # Validate reward_overrides if provided. Keys must exist in the loaded
+    # config's `reward` section so we fail fast on typos — silently
+    # accepting an unknown key would result in training running at
+    # defaults while the operator thinks the override was applied.
+    raw_overrides = payload.get("reward_overrides")
+    overrides_val: dict[str, float] | None
+    if raw_overrides is None or raw_overrides == {}:
+        overrides_val = None
+    else:
+        if not isinstance(raw_overrides, dict):
+            raise HTTPException(422, "reward_overrides must be an object")
+        config = getattr(request.app.state, "config", None) or {}
+        known_reward_keys = set((config.get("reward") or {}).keys())
+        overrides_val = {}
+        for key, value in raw_overrides.items():
+            if known_reward_keys and key not in known_reward_keys:
+                raise HTTPException(
+                    422,
+                    f"reward_overrides: unknown key '{key}' "
+                    f"(not present in config.reward)",
+                )
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise HTTPException(
+                    422,
+                    f"reward_overrides['{key}']: must be a number, got "
+                    f"{type(value).__name__}",
+                )
+            overrides_val[key] = float(value)
+
     try:
         plan = TrainingPlan.new(
             name=str(payload.get("name", "unnamed")),
@@ -229,6 +258,7 @@ def create_plan(payload: dict, request: Request) -> dict[str, Any]:
             adaptive_mutation=payload.get("adaptive_mutation"),
             adaptive_mutation_increment=payload.get("adaptive_mutation_increment"),
             adaptive_mutation_cap=payload.get("adaptive_mutation_cap"),
+            reward_overrides=overrides_val,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, f"Malformed plan payload: {exc}")
