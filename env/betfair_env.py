@@ -2072,7 +2072,7 @@ class BetfairEnv(gymnasium.Env):
             # instantly (``remaining_frac ≈ 1``) but earn £0 real money,
             # turning the bonus into free reward for busy-work. Observed
             # in activation-A-baseline's gen-0 population (2026-04-17) as
-            # "Arb completed: Back £X / Lay £X−1tick → locked £+0.00"
+            # "Arb completed: Back @ X / Lay @ X−1tick → locked £+0.00"
             # pages of log spam.
             total_ticks = max(len(race.ticks), 1)
             if self._early_lock_bonus_weight > 0.0:

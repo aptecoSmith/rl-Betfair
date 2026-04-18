@@ -1623,8 +1623,8 @@ class PPOTrainer:
                             "event": "arb_completed",
                             "phase": "training",
                             "detail": (
-                                f"Arb completed: Back £{ev['back_price']:.2f}"
-                                f" / Lay £{ev['lay_price']:.2f}"
+                                f"Arb completed: Back @ {ev['back_price']:.2f}"
+                                f" / Lay @ {ev['lay_price']:.2f}"
                                 f" on runner {ev['selection_id']}"
                                 f" → locked £{ev['locked_pnl']:+.2f}"
                             ),
@@ -1655,8 +1655,8 @@ class PPOTrainer:
                             "event": "pair_closed",
                             "phase": "training",
                             "detail": (
-                                f"Pair closed at loss: Back £{ev['back_price']:.2f}"
-                                f" / Lay £{ev['lay_price']:.2f}"
+                                f"Pair closed at loss: Back @ {ev['back_price']:.2f}"
+                                f" / Lay @ {ev['lay_price']:.2f}"
                                 f" on runner {ev['selection_id']}"
                                 f" → realised £{ev['realised_pnl']:+.2f}"
                             ),

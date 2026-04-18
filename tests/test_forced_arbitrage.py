@@ -563,7 +563,7 @@ class TestScalpingReward:
         1-tick pairs that fill instantly (``remaining_frac ≈ 1``) but
         round-trip for £0 after commission — observed in the
         activation-A-baseline gen-0 population as many
-        ``Arb completed: Back £X / Lay £X−1tick → locked £+0.00`` lines.
+        ``Arb completed: Back @ X / Lay @ X−1tick → locked £+0.00`` lines.
         """
         from env.bet_manager import Bet
 

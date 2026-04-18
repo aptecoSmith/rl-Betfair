@@ -4,6 +4,49 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 04 — UI display: drop £ from odds (2026-04-18)
+
+**Landed.** Presentation-only commit; no reward path, no schema,
+no behaviour change.
+
+- Swept `Back £` / `Lay £` / `@ £` across `frontend/src/`,
+  `agents/`, `env/`, `api/`. Confirmed the only code sites that
+  prefix a Betfair decimal price with `£` are the two activity-log
+  emitters in `agents/ppo_trainer.py` (`arb_completed` format
+  ~line 1626, `pair_closed` format ~line 1658). Replaced `£` with
+  `@` on both. Frontend, env, and api had no price-with-£ sites —
+  every frontend £ traced back to a stake / PnL / budget
+  (monetary), which keeps its £ per the §19 decision rule.
+- Comment in `env/betfair_env.py:2075` and docstring in
+  `tests/test_forced_arbitrage.py:566` that quoted the old
+  `Arb completed: Back £X / Lay £X−1tick → locked £+0.00` log
+  line updated to match the new format (`Back @ X / Lay @ X−1tick`).
+- No test assertions on the emitted detail string existed in
+  `tests/` or `frontend/src/**/*.spec.ts`, so no format-string
+  fixtures needed updating. Pre-existing `test_bet_manager.py` /
+  `test_forced_arbitrage.py` / `test_scalping_math.py` references
+  to "Back £20 @ 12.5" etc. stay — those are £20 *stakes* at
+  price 12.5, legitimate monetary £.
+- Browser-verify: injected three synthetic activity-log entries
+  into the Training Monitor via the live TrainingService signal;
+  confirmed the rendered strings read
+  "10:55:01 Arb completed: Back @ 8.20 / Lay @ 6.00 on runner
+  28642168 → locked £+4.03" with `@` on prices and `£` preserved
+  on locked P&L. Screenshot captured.
+- `pytest tests/ -q` → 2157 passed, 7 skipped, 133 deselected,
+  1 xfailed (same counts as Session 02 baseline).
+- `cd frontend && npx ng test --watch=false` → 556 passed, 24
+  skipped.
+
+The plan folder is now closed. If the operator launches the
+activation re-run after this session, the activity log lines
+will both report meaningful locked numbers (Session 02) AND
+read cleanly with `@` instead of `£` on the prices (this
+session). Both the reward signal and the operator's eyeball
+test now tell the truth.
+
+---
+
 ## Session 03 — CLAUDE.md + cross-plan notes (2026-04-18)
 
 **Landed.** Docs-only commit (no code, no tests touched).
