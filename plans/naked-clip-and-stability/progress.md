@@ -7,7 +7,7 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ## Session 04 — Smoke-test gate (UI tickbox + assertion harness)
 
-**Commit:** `<fill-on-commit>`
+**Commit:** `de55a9f`
 **Date:** 2026-04-18
 
 What landed — a pre-flight gate that catches the three pathologies
