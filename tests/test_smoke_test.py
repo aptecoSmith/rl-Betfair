@@ -353,21 +353,11 @@ class TestRunSmokeTestOrchestrator:
         train_kwargs: list[dict] = []
 
         class FakeTrainer:
-            def __init__(
-                self, *, policy, config, hyperparams, progress_queue,
-                model_id, architecture_name,
-            ):
-                init_kwargs.append({
-                    "policy": policy,
-                    "config": config,
-                    "hyperparams": hyperparams,
-                    "progress_queue": progress_queue,
-                    "model_id": model_id,
-                    "architecture_name": architecture_name,
-                })
-                self.policy = policy
-                self.model_id = model_id
-                self.architecture_name = architecture_name
+            def __init__(self, **kw):
+                init_kwargs.append(dict(kw))
+                self.policy = kw["policy"]
+                self.model_id = kw["model_id"]
+                self.architecture_name = kw["architecture_name"]
                 self.log_dir = log_training_dir
                 self.smoke_test_tag = False
 
@@ -442,3 +432,237 @@ class TestRunSmokeTestOrchestrator:
                 train_days=probe_days,
                 probe_architectures=("ppo_transformer_v1", "no_such_arch"),
             )
+
+    # ── Device + progress-queue observability ────────────────────────
+    #
+    # The user-visible symptom after the Session 05 launch was a warm
+    # CPU, idle GPU, and empty activity log. PPOTrainer defaulted to
+    # ``device="cpu"`` when run_smoke_test didn't forward a device, and
+    # the probe's trainer.train() call didn't emit the phase_start /
+    # phase_complete events the /training page's activity log reads.
+    # Both are fixed by threading device through from config /
+    # torch.cuda.is_available() and emitting explicit phase events
+    # around each probe agent + the aggregate pass/fail.
+
+    def _install_fake_trainer(
+        self, monkeypatch, tmp_path,
+    ) -> tuple[list[dict], list[dict]]:
+        """Install a FakeTrainer that records its constructor kwargs
+        and train() calls. Returns (init_kwargs_list, train_kwargs_list)
+        that tests can assert against."""
+        import json as _json
+        import agents.ppo_trainer as ppo_trainer_mod
+
+        log_training_dir = tmp_path / "training"
+        log_training_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_training_dir / "episodes.jsonl"
+
+        init_kwargs: list[dict] = []
+        train_kwargs: list[dict] = []
+
+        class FakeTrainer:
+            def __init__(self, **kw):
+                init_kwargs.append(dict(kw))
+                self.policy = kw["policy"]
+                self.model_id = kw["model_id"]
+                self.architecture_name = kw["architecture_name"]
+                self.log_dir = log_training_dir
+                self.smoke_test_tag = False
+
+            def train(self, *, days, n_epochs):
+                train_kwargs.append({
+                    "n_days": len(days), "n_epochs": n_epochs,
+                })
+                with open(log_path, "a") as f:
+                    for ep in range(1, PROBE_EPISODE_COUNT + 1):
+                        f.write(_json.dumps({
+                            "model_id": self.model_id,
+                            "episode": ep,
+                            "policy_loss": 1.0,
+                            "entropy": 50.0 - ep,
+                            "arbs_closed": 2 if ep == 1 else 0,
+                            "smoke_test": self.smoke_test_tag,
+                        }) + "\n")
+
+        monkeypatch.setattr(ppo_trainer_mod, "PPOTrainer", FakeTrainer)
+        return init_kwargs, train_kwargs
+
+    def test_run_smoke_test_forwards_cuda_device_when_available(
+        self, monkeypatch, scalping_config, probe_days, tmp_path,
+    ):
+        """With CUDA available and no ``config.training.device``
+        override, the probe must pass ``device="cuda"`` to
+        PPOTrainer. Regression for the Session 05 launch where the
+        probe ran on CPU beside an idle RTX 3090."""
+        import agents.smoke_test as st
+
+        init_kwargs, _ = self._install_fake_trainer(monkeypatch, tmp_path)
+
+        # Force the auto-detect branch to see a GPU.
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+        result = st.run_smoke_test(
+            config=scalping_config, train_days=probe_days,
+        )
+        assert result.passed is True
+        # Both probe agents received ``device="cuda"``.
+        assert [kw["device"] for kw in init_kwargs] == ["cuda", "cuda"]
+
+    def test_run_smoke_test_respects_explicit_cpu_config(
+        self, monkeypatch, scalping_config, probe_days, tmp_path,
+    ):
+        """``config.training.device="cpu"`` wins over auto-detect —
+        same precedence as run_training.py. Keeps the CPU-only
+        CI / developer path reproducible."""
+        import agents.smoke_test as st
+
+        init_kwargs, _ = self._install_fake_trainer(monkeypatch, tmp_path)
+
+        import torch
+        # CUDA visible but config forces CPU.
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        scalping_config["training"]["device"] = "cpu"
+
+        st.run_smoke_test(config=scalping_config, train_days=probe_days)
+        assert [kw["device"] for kw in init_kwargs] == ["cpu", "cpu"]
+
+    def test_run_smoke_test_falls_back_to_cpu_without_cuda(
+        self, monkeypatch, scalping_config, probe_days, tmp_path,
+    ):
+        """No CUDA, no config override → ``device="cpu"``. Covers
+        CI + any developer without a GPU."""
+        import agents.smoke_test as st
+
+        init_kwargs, _ = self._install_fake_trainer(monkeypatch, tmp_path)
+
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        st.run_smoke_test(config=scalping_config, train_days=probe_days)
+        assert [kw["device"] for kw in init_kwargs] == ["cpu", "cpu"]
+
+    def test_run_smoke_test_emits_phase_events_for_activity_log(
+        self, monkeypatch, scalping_config, probe_days, tmp_path,
+    ):
+        """The activity log on /training renders ``phase_start`` /
+        ``phase_complete`` events from the worker progress queue. The
+        probe must emit them or the operator sees charts updating with
+        no text log — confusing."""
+        import queue
+        import agents.smoke_test as st
+
+        self._install_fake_trainer(monkeypatch, tmp_path)
+        pq: queue.Queue = queue.Queue()
+
+        # Suppress CUDA auto-detect — the test doesn't care about
+        # device selection, it cares about events.
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        result = st.run_smoke_test(
+            config=scalping_config,
+            train_days=probe_days,
+            progress_queue=pq,
+        )
+        assert result.passed is True
+
+        events = []
+        while not pq.empty():
+            events.append(pq.get_nowait())
+
+        # One top-level phase_start + per-agent phase_start and
+        # phase_complete + one top-level phase_complete. Exact content
+        # matters for the UI so operators see meaningful text.
+        phases = [(e["event"], e["phase"]) for e in events]
+        assert ("phase_start", "smoke_test") in phases
+        assert ("phase_start", "smoke_test_agent") in phases
+        assert ("phase_complete", "smoke_test_agent") in phases
+        assert ("phase_complete", "smoke_test") in phases
+
+        top_complete = next(
+            e for e in events
+            if e["event"] == "phase_complete" and e["phase"] == "smoke_test"
+        )
+        assert "PASSED" in top_complete["detail"]
+
+    def test_run_smoke_test_emits_failing_assertions_in_final_detail(
+        self, monkeypatch, scalping_config, probe_days, tmp_path,
+    ):
+        """On fail, the final phase_complete detail names the failing
+        assertions so the activity log is self-explanatory."""
+        import json as _json
+        import queue
+        import agents.ppo_trainer as ppo_trainer_mod
+        import agents.smoke_test as st
+
+        log_dir = tmp_path / "training"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "episodes.jsonl"
+
+        class BlowUpTrainer:
+            """Writes rows that deliberately fail ep1_policy_loss."""
+            def __init__(self, **kw):
+                self.model_id = kw["model_id"]
+                self.log_dir = log_dir
+                self.smoke_test_tag = False
+
+            def train(self, *, days, n_epochs):
+                with open(log_path, "a") as f:
+                    for ep in range(1, PROBE_EPISODE_COUNT + 1):
+                        f.write(_json.dumps({
+                            "model_id": self.model_id,
+                            "episode": ep,
+                            # 1e17 > EP1_POLICY_LOSS_MAX → assertion 1 fails.
+                            "policy_loss": 1.0e17 if ep == 1 else 1.0,
+                            "entropy": 50.0 - ep,
+                            "arbs_closed": 2 if ep == 1 else 0,
+                        }) + "\n")
+
+        monkeypatch.setattr(ppo_trainer_mod, "PPOTrainer", BlowUpTrainer)
+
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        pq: queue.Queue = queue.Queue()
+        result = st.run_smoke_test(
+            config=scalping_config,
+            train_days=probe_days,
+            progress_queue=pq,
+        )
+        assert result.passed is False
+
+        events = []
+        while not pq.empty():
+            events.append(pq.get_nowait())
+
+        top_complete = next(
+            e for e in events
+            if e["event"] == "phase_complete" and e["phase"] == "smoke_test"
+        )
+        assert "FAILED" in top_complete["detail"]
+        assert "ep1_policy_loss" in top_complete["detail"]
+
+    def test_run_smoke_test_survives_full_progress_queue(
+        self, monkeypatch, scalping_config, probe_days, tmp_path,
+    ):
+        """A full progress_queue must NOT crash the probe. The gate
+        is the critical path; UI observability is best-effort."""
+        import agents.smoke_test as st
+
+        self._install_fake_trainer(monkeypatch, tmp_path)
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        class FullQueue:
+            def put_nowait(self, item):
+                raise Exception("queue full")  # generic — smoke_test
+                                               # must swallow any error
+
+        # No assertion beyond "doesn't raise" — that's the contract.
+        result = st.run_smoke_test(
+            config=scalping_config,
+            train_days=probe_days,
+            progress_queue=FullQueue(),
+        )
+        assert result.passed is True

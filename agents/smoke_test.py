@@ -288,9 +288,38 @@ def run_smoke_test(
     probe_days = list(train_days[:n_episodes])
 
     # Deferred imports — the API process avoids torch at module-load time.
+    import torch
+
     from agents.architecture_registry import REGISTRY, create_policy
     from agents.ppo_trainer import PPOTrainer
     from env.betfair_env import BetfairEnv
+
+    # Device selection mirrors ``training/run_training.py`` auto-detect
+    # so the probe exercises the same hardware as the full run. Without
+    # this, ``PPOTrainer`` defaults to ``"cpu"`` and the probe runs for
+    # 10+ minutes on CPU even when a CUDA GPU is available — and the
+    # UI operator sees an idle GPU wondering why training "isn't
+    # working". ``config.training.device`` overrides auto-detect,
+    # matching the full-run precedence.
+    config_device = config.get("training", {}).get("device")
+    if config_device is not None:
+        device = config_device
+    elif torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+
+    _emit_progress(
+        progress_queue,
+        {
+            "event": "phase_start",
+            "phase": "smoke_test",
+            "detail": (
+                f"Smoke test: {n_episodes}-episode probe on "
+                f"{len(probe_architectures)} architectures (device={device})"
+            ),
+        },
+    )
 
     probe_model_ids: list[str] = []
     probe_episode_rows: list[dict] = []
@@ -307,13 +336,25 @@ def run_smoke_test(
     action_dim = int(sample_env.action_space.shape[0])
     max_runners = sample_env.max_runners
 
-    for arch_name in probe_architectures:
+    for idx, arch_name in enumerate(probe_architectures, start=1):
         if arch_name not in REGISTRY:
             raise ValueError(
                 f"smoke-test probe architecture '{arch_name}' not in registry"
             )
         model_id = f"smoke-{arch_name}"
         probe_model_ids.append(model_id)
+
+        _emit_progress(
+            progress_queue,
+            {
+                "event": "phase_start",
+                "phase": "smoke_test_agent",
+                "detail": (
+                    f"Smoke test {idx}/{len(probe_architectures)}: "
+                    f"training {arch_name} on {n_episodes} episodes"
+                ),
+            },
+        )
 
         # Default hyperparameters only — the per-architecture LR
         # overrides (Session 02) fire automatically because PPOTrainer
@@ -331,6 +372,7 @@ def run_smoke_test(
             config=config,
             hyperparams={},
             progress_queue=progress_queue,
+            device=device,
             model_id=model_id,
             architecture_name=arch_name,
         )
@@ -342,12 +384,55 @@ def run_smoke_test(
         rows = _tail_probe_rows(trainer.log_dir / "episodes.jsonl", model_id)
         probe_episode_rows.extend(rows)
 
+        _emit_progress(
+            progress_queue,
+            {
+                "event": "phase_complete",
+                "phase": "smoke_test_agent",
+                "detail": (
+                    f"Smoke test {idx}/{len(probe_architectures)}: "
+                    f"{arch_name} finished ({len(rows)} episodes logged)"
+                ),
+            },
+        )
+
     result = evaluate_probe_episodes(probe_episode_rows)
+
+    outcome = "PASSED" if result.passed else "FAILED"
+    failed_names = [a.name for a in result.assertions if not a.passed]
+    detail = f"Smoke test {outcome}"
+    if failed_names:
+        detail += f" — failing assertions: {', '.join(failed_names)}"
+    _emit_progress(
+        progress_queue,
+        {
+            "event": "phase_complete",
+            "phase": "smoke_test",
+            "detail": detail,
+        },
+    )
+
     return SmokeResult(
         passed=result.passed,
         assertions=result.assertions,
         probe_model_ids=probe_model_ids,
     )
+
+
+def _emit_progress(progress_queue, event: dict) -> None:
+    """Best-effort publish of a progress event for the worker's
+    WebSocket broadcast. Never raises — the probe must not crash on a
+    full queue, a missing queue, or a monkeypatched stand-in that
+    lacks ``put_nowait``.
+    """
+    if progress_queue is None:
+        return
+    try:
+        progress_queue.put_nowait(event)
+    except Exception:
+        # Queue full or unsupported type — drop silently. The probe's
+        # correctness does not depend on the UI receiving the event.
+        pass
 
 
 def _tail_probe_rows(log_path, model_id: str) -> list[dict]:
