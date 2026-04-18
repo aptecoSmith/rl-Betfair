@@ -7,7 +7,7 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ## Session 01b — raw = race_pnl (loss-closed pairs correctly negative)
 
-**Commit:** `<hash>` (this session)
+**Commit:** `a4f689a`
 **Date:** 2026-04-18
 
 What landed:
