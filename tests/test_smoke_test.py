@@ -18,6 +18,10 @@ regression points at the right assertion.
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from agents.smoke_test import (
     ARBS_CLOSED_MIN,
     EP1_POLICY_LOSS_MAX,
@@ -266,3 +270,175 @@ class TestPurposeTableScenarios:
         # the conservative "any assertion fails → gate fails"
         # invariant in action.
         assert by_name["arbs_closed_any_agent"].passed
+
+
+# ── Orchestrator smoke (regression guard for signature drift) ────────
+#
+# ``evaluate_probe_episodes`` is the pure gate logic and has tight
+# coverage above. ``run_smoke_test`` is the glue that builds env +
+# policy + trainer; when it called ``BetfairEnv(config=..., days=...)``
+# (plural kwarg) and ``policy_cls(env=env)`` in the Session 04 landing,
+# neither the unit tests above nor the DTO-level integration in
+# ``test_api_training.py`` caught it — the bug only surfaced the first
+# time an operator clicked Launch after the Session 05 reset.
+#
+# This class exercises the whole ``run_smoke_test`` path end-to-end
+# with a fabricated ``PPOTrainer`` so the training loop itself stays
+# out of the hot path (seconds → milliseconds) but every real
+# construction call in the orchestrator — ``BetfairEnv(...)``,
+# ``create_policy(...)``, ``PPOTrainer(...)``, ``trainer.train(...)``
+# — fires with real arguments. A future kwarg drift on any of those
+# signatures fails the test before a launch.
+
+
+class TestRunSmokeTestOrchestrator:
+    """Full ``run_smoke_test`` path with a fake PPOTrainer.
+
+    The fake trainer records its constructor kwargs, appends two
+    fabricated clearly-passing episode rows to the shared
+    ``episodes.jsonl`` file on ``train()``, and otherwise mirrors the
+    real trainer's surface that ``run_smoke_test`` touches
+    (``log_dir``, ``smoke_test_tag``).
+    """
+
+    @pytest.fixture
+    def scalping_config(self, tmp_path) -> dict:
+        """Minimal scalping config pointing logs into ``tmp_path``."""
+        return {
+            "training": {
+                "max_runners": 14,
+                "starting_budget": 100.0,
+                "max_bets_per_race": 20,
+                "scalping_mode": True,
+            },
+            "actions": {"force_aggressive": True},
+            "reward": {
+                "early_pick_bonus_min": 1.2,
+                "early_pick_bonus_max": 1.5,
+                "early_pick_min_seconds": 300,
+                "efficiency_penalty": 0.01,
+            },
+            "paths": {"logs": str(tmp_path)},
+        }
+
+    @pytest.fixture
+    def probe_days(self):
+        """Three tiny synthetic days — real ``Day`` objects so the
+        env constructor can't be faked around."""
+        from tests.test_betfair_env import _make_day
+
+        day = _make_day(n_races=1, n_pre_ticks=3, n_inplay_ticks=1)
+        return [day, day, day]
+
+    def test_run_smoke_test_builds_real_env_and_policy(
+        self, monkeypatch, scalping_config, probe_days, tmp_path,
+    ):
+        """Regression for the Session 04→05 bug: ``run_smoke_test``
+        passed ``days=`` (plural) to ``BetfairEnv`` and ``env=`` to the
+        policy class. Either failure raises ``TypeError`` from real
+        constructors long before training starts — this test asserts
+        the construction path is wired to the real signatures by
+        letting both real constructors run."""
+        import agents.ppo_trainer as ppo_trainer_mod
+        from agents import smoke_test as st
+
+        # Fake trainer: records instantiation, fabricates episodes
+        # rows on train(), mirrors log_dir so _tail_probe_rows can
+        # read them back.
+        log_training_dir = tmp_path / "training"
+        log_training_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_training_dir / "episodes.jsonl"
+
+        init_kwargs: list[dict] = []
+        train_kwargs: list[dict] = []
+
+        class FakeTrainer:
+            def __init__(
+                self, *, policy, config, hyperparams, progress_queue,
+                model_id, architecture_name,
+            ):
+                init_kwargs.append({
+                    "policy": policy,
+                    "config": config,
+                    "hyperparams": hyperparams,
+                    "progress_queue": progress_queue,
+                    "model_id": model_id,
+                    "architecture_name": architecture_name,
+                })
+                self.policy = policy
+                self.model_id = model_id
+                self.architecture_name = architecture_name
+                self.log_dir = log_training_dir
+                self.smoke_test_tag = False
+
+            def train(self, *, days, n_epochs):
+                train_kwargs.append({"n_days": len(days), "n_epochs": n_epochs})
+                # Fabricate PROBE_EPISODE_COUNT clearly-passing rows
+                # for this model_id — enough to exercise
+                # _tail_probe_rows + evaluate_probe_episodes on real
+                # output rather than stubbed returns.
+                with open(log_path, "a") as f:
+                    for ep in range(1, PROBE_EPISODE_COUNT + 1):
+                        f.write(json.dumps({
+                            "model_id": self.model_id,
+                            "episode": ep,
+                            "policy_loss": 1.0,
+                            "entropy": 50.0 - ep,  # monotone decreasing
+                            "arbs_closed": 2 if ep == 1 else 0,
+                            "smoke_test": self.smoke_test_tag,
+                        }) + "\n")
+
+        monkeypatch.setattr(ppo_trainer_mod, "PPOTrainer", FakeTrainer)
+
+        result = st.run_smoke_test(
+            config=scalping_config,
+            train_days=probe_days,
+        )
+
+        # Both probe architectures were instantiated — real create_policy
+        # ran without TypeError; real BetfairEnv(day, config) ran without
+        # TypeError.
+        assert len(init_kwargs) == 2
+        assert {kw["architecture_name"] for kw in init_kwargs} == {
+            "ppo_transformer_v1", "ppo_lstm_v1",
+        }
+        # train() fired with the probe day list and n_epochs=1.
+        assert train_kwargs == [
+            {"n_days": PROBE_EPISODE_COUNT, "n_epochs": 1},
+            {"n_days": PROBE_EPISODE_COUNT, "n_epochs": 1},
+        ]
+        # Probe rows came back through _tail_probe_rows and were
+        # evaluated — not short-circuited to an empty fallback.
+        assert isinstance(result, SmokeResult)
+        assert result.passed is True
+        assert set(result.probe_model_ids) == {
+            "smoke-ppo_transformer_v1", "smoke-ppo_lstm_v1",
+        }
+
+    def test_run_smoke_test_short_day_list_rejected_before_construction(
+        self, scalping_config, probe_days,
+    ):
+        """Defensive — fewer days than PROBE_EPISODE_COUNT raises
+        ValueError before any env / policy / trainer construction."""
+        from agents import smoke_test as st
+
+        with pytest.raises(ValueError, match="at least"):
+            st.run_smoke_test(
+                config=scalping_config,
+                train_days=probe_days[:PROBE_EPISODE_COUNT - 1],
+            )
+
+    def test_run_smoke_test_unknown_architecture_rejected(
+        self, monkeypatch, scalping_config, probe_days,
+    ):
+        """Defensive — an architecture name not in REGISTRY raises
+        ValueError. Asserts the check fires after env construction (so
+        a bad architecture name doesn't mask a BetfairEnv TypeError)."""
+        from agents import smoke_test as st
+
+        with pytest.raises(ValueError, match="not in registry"):
+            st.run_smoke_test(
+                config=scalping_config,
+                train_days=probe_days,
+                probe_architectures=("ppo_transformer_v1", "no_such_arch"),
+            )

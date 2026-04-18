@@ -288,28 +288,44 @@ def run_smoke_test(
     probe_days = list(train_days[:n_episodes])
 
     # Deferred imports — the API process avoids torch at module-load time.
-    from agents.architecture_registry import REGISTRY
+    from agents.architecture_registry import REGISTRY, create_policy
     from agents.ppo_trainer import PPOTrainer
     from env.betfair_env import BetfairEnv
 
     probe_model_ids: list[str] = []
     probe_episode_rows: list[dict] = []
 
+    # One representative env is used only to read dimensions for
+    # policy construction; the actual training loop creates a fresh
+    # BetfairEnv per day inside ``PPOTrainer._rollout`` (see
+    # ``agents/ppo_trainer.py:769``). ``BetfairEnv`` takes a single
+    # positional ``day``, not a list — reusing the first probe day
+    # here is equivalent to how ``PopulationManager`` derives
+    # ``obs_dim`` / ``action_dim`` from env constants.
+    sample_env = BetfairEnv(probe_days[0], config)
+    obs_dim = int(sample_env.observation_space.shape[0])
+    action_dim = int(sample_env.action_space.shape[0])
+    max_runners = sample_env.max_runners
+
     for arch_name in probe_architectures:
-        policy_cls = REGISTRY.get(arch_name)
-        if policy_cls is None:
+        if arch_name not in REGISTRY:
             raise ValueError(
                 f"smoke-test probe architecture '{arch_name}' not in registry"
             )
         model_id = f"smoke-{arch_name}"
         probe_model_ids.append(model_id)
 
-        env = BetfairEnv(config=config, days=probe_days)
         # Default hyperparameters only — the per-architecture LR
         # overrides (Session 02) fire automatically because PPOTrainer
         # reads ``type(policy).default_learning_rate`` when
         # ``hyperparams.learning_rate`` is absent.
-        policy = policy_cls(env=env)
+        policy = create_policy(
+            name=arch_name,
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            max_runners=max_runners,
+            hyperparams={},
+        )
         trainer = PPOTrainer(
             policy=policy,
             config=config,
