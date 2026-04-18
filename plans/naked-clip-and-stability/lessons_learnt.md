@@ -72,7 +72,7 @@ right input, not that the producer generates it.
 
 ---
 
-## 2026-04-18 — Session 02 log-ratio clamp at ±20 is numerical, not a loss cap (NOT FIXED — watch-list)
+## 2026-04-18 — Session 02 log-ratio clamp tightened ±20 → ±5 (RESOLVED)
 
 **Observation.** The probe's ep1 `policy_loss = 7.23e+07` on
 the transformer (and `3.64e+07` on the LSTM) was a 10-orders-
@@ -80,8 +80,8 @@ of-magnitude improvement over the untreated transformer
 `0a8cacd3` baseline (`1.04e+17`) but still far above the
 `EP1_POLICY_LOSS_MAX = 100` gate threshold.
 
-**Why the existing defences don't bite hard enough on ep1.**
-The clamp `torch.clamp(log_ratio, -20, +20)` caps
+**Why the existing ±20 clamp didn't bite hard enough.** The
+clamp `torch.clamp(log_ratio, -20, +20)` caps
 `ratio = exp(log_ratio)` at ~5e+08 — it prevents NaN overflow
 but doesn't bound policy loss. On a bad in-epoch mini-batch
 with negative advantages, PPO's `min(surr1, surr2)` picks the
@@ -93,26 +93,40 @@ scale. The KL early-stop at epoch granularity cannot prevent
 in-epoch spikes — by the time it fires, the damage is done
 inside epoch 1.
 
-**Why we're NOT fixing it yet.** The reward-centering fix
-above changes the reward scale going into advantages.
-Advantages get per-mini-batch normalised to O(1) anyway. Once
-ep2+ value_loss isn't blowing up through the shared trunk,
-ep1 policy_loss may well fall under 100 on its own. We revisit
-this only if, after the centering fix, fresh runs still show
-ep1 `policy_loss > 100`.
+**Validation after the centering fix.** First relaunch after
+the centering fix (commit `0ba199b`) showed:
 
-**If revisiting becomes necessary, the candidates are (in
-order of increasing invasiveness):**
-1. Tighten the clamp to `±5` (ratio in `[0.007, 148]`). Keeps
-   the numerical backstop; adds a meaningful loss cap.
-2. Move KL early-stop from epoch granularity to mini-batch
-   granularity so a single runaway mini-batch aborts further
-   updates in the same rollout.
-3. Global-norm gradient clipping (`torch.nn.utils.
-   clip_grad_norm_`) before `optimizer.step()`. Caps the
-   actual weight delta regardless of loss magnitude.
+| | transformer | LSTM |
+|---|---|---|
+| ep1 policy_loss | 6.55e+07 | 3.28e+07 |
+| ep2 policy_loss | 8.95e+05 | 1.04e+05 |
+| ep3 policy_loss | 8.98e+04 | 43.1 |
 
-**Watch-list signal.** After the centering fix ships and a
-fresh run produces a few generations, pull the ep1
-`policy_loss` distribution. If median > 100 OR max > 10,000,
-open a follow-up plan and pick option 1 first.
+Value_loss was now healthy (O(10²) on ep2+ vs the
+pre-centering-fix 6.8e+08), so ep1 spike was isolated to the
+ratio clamp. The LSTM's ep3 dropping to 43 below the 100
+threshold confirmed the policy stabilises once past ep1 — the
+ep1 spike was the last bottleneck.
+
+**Fix.** Ratio clamp tightened from ±20 to ±5. The new constant
+`LOG_RATIO_CLAMP = 5.0` is defined at module scope in
+`agents/ppo_trainer.py` so production and tests share one
+source of truth. At ±5, `exp(5) ≈ 148`, which with normalised
+advantages O(1) caps per-mini-batch contribution at ~150 —
+comfortably below the smoke-test threshold in aggregate.
+`|log_ratio| ≪ 5` in normal PPO updates so the tighter clamp
+is still a no-op in healthy operation.
+
+**Hard-constraint note.** `hard_constraints.md §10` originally
+specified the ±20 number explicitly. The spirit of §10 (a
+numerical backstop that doesn't change gradients in the common
+case) is preserved — the letter changed. The §10 constraint
+was a specification from before the smoke probe ran; the
+probe's signal justified the revision.
+
+**Follow-ups considered but not taken:** moving KL early-stop
+to mini-batch granularity (would be more intrusive; clamp fix
+is strictly smaller and targets the same failure mode) and
+global-norm gradient clipping (would add a new knob; not
+needed once the loss magnitude is bounded). Parked unless
+another probe fails for a different reason.

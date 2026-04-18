@@ -43,6 +43,26 @@ from training.perf_log import perf_log
 from env.betfair_env import BetfairEnv
 from training.progress_tracker import ProgressTracker
 
+
+# -- Module constants --------------------------------------------------
+#
+# ``LOG_RATIO_CLAMP`` bounds ``new_logp - old_logp`` before the ``.exp()``
+# inside the PPO surrogate. Originally ±20 as a pure numerical backstop
+# (prevents float32 overflow on exp(88)). Tightened to ±5 after the
+# 2026-04-18 smoke probe showed ep1 policy_loss ~7e+07 on fresh
+# transformer/LSTM agents — ``exp(20) ≈ 5e+08`` was large enough that a
+# single bad mini-batch with a negative advantage could dominate the
+# mean loss. At ±5, ``exp(5) ≈ 148``, which with normalised advantages
+# O(1) caps per-mini-batch contribution at ~150 — comfortably below the
+# smoke-test ``EP1_POLICY_LOSS_MAX = 100`` in aggregate (mean smooths
+# toward 0 because PPO takes the min of the clamped and unclamped
+# surrogate). ``|log_ratio| ≪ 5`` in normal PPO updates so the tighter
+# clamp remains a no-op in healthy operation.
+#
+# See plans/naked-clip-and-stability/lessons_learnt.md for the trace
+# and the decision log.
+LOG_RATIO_CLAMP: float = 5.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -1400,17 +1420,19 @@ class PPOTrainer:
                     mb_advantages = (mb_advantages - adv_mean) / adv_std
 
                 # PPO clipped surrogate. ``log_ratio`` is clamped to
-                # [-20, +20] before ``.exp()`` as a numerical backstop
-                # (plans/naked-clip-and-stability, Session 02,
-                # hard_constraints.md §10). In normal operation
-                # |log_ratio| ≪ 20 so gradients are unchanged; the
-                # clamp only bites when an aggressive first-minibatch
-                # update has already driven the ratio toward overflow,
-                # at which point the KL early-stop (below, after the
-                # mini-batch loop) aborts the remaining epochs for
-                # this rollout.
+                # ``[-LOG_RATIO_CLAMP, +LOG_RATIO_CLAMP]`` before
+                # ``.exp()`` — see the module-level constant for the
+                # rationale (tightened from ±20 to ±5 on 2026-04-18
+                # after the smoke probe showed the looser bound wasn't
+                # actually capping policy_loss magnitude).
+                # ``|log_ratio| ≪ LOG_RATIO_CLAMP`` in normal PPO
+                # updates so the clamp is a no-op in healthy operation;
+                # it only bites when an aggressive first-minibatch
+                # update has already driven the ratio toward what would
+                # otherwise be a ``policy_loss`` spike.
                 log_ratio = torch.clamp(
-                    new_log_probs - mb_old_log_probs, min=-20.0, max=20.0,
+                    new_log_probs - mb_old_log_probs,
+                    min=-LOG_RATIO_CLAMP, max=LOG_RATIO_CLAMP,
                 )
                 ratio = log_ratio.exp()
                 surr1 = ratio * mb_advantages

@@ -5,10 +5,12 @@ plans/naked-clip-and-stability, Session 02 (2026-04-18).
 Layered defences against first-update policy explosion on fresh
 agents:
 
-1. ``log_ratio`` clamped to [-20, +20] before ``.exp()`` — numerical
-   backstop that prevents ``ratio`` from overflowing float32 when an
-   aggressive first-minibatch update drives ``new_logp - old_logp``
-   past ~88.
+1. ``log_ratio`` clamped to ``[-LOG_RATIO_CLAMP, +LOG_RATIO_CLAMP]``
+   (default ±5) before ``.exp()``. Originally ±20 as a pure numerical
+   backstop; tightened on 2026-04-18 after a smoke probe showed the
+   looser bound wasn't capping ``policy_loss`` magnitude. At ±5,
+   ``exp(5) ≈ 148``, so worst-case mini-batch loss contribution is
+   bounded at ~150 × |adv| with normalised advantages O(1).
 2. KL early-stop at PPO-epoch granularity — break out of the
    remaining epochs for the current rollout when approximate KL
    exceeds the configured threshold (default ``0.03`` per the
@@ -43,7 +45,7 @@ from torch.distributions import Normal
 
 from agents.architecture_registry import create_policy, REGISTRY
 from agents.policy_network import BasePolicy, PPOTransformerPolicy
-from agents.ppo_trainer import PPOTrainer, Rollout, Transition
+from agents.ppo_trainer import LOG_RATIO_CLAMP, PPOTrainer, Rollout, Transition
 from data.episode_builder import Day, PriceSize, Race, RunnerMeta, RunnerSnap, Tick
 from env.betfair_env import ACTIONS_PER_RUNNER
 
@@ -237,32 +239,63 @@ def _matched_rollout(trainer: PPOTrainer, day: Day) -> Rollout:
 
 
 class TestRatioClamp:
-    """``log_ratio = clamp(new_logp - old_logp, -20, +20)`` before
-    ``.exp()`` is the numerical backstop that prevents overflow when
-    an aggressive first-minibatch update pushes ``new_logp - old_logp``
-    past ~88 (``exp(88)`` overflows float32). The clamp is a no-op
-    in normal operation (|log_ratio| ≪ 20)."""
+    """``log_ratio = clamp(new_logp - old_logp, ±LOG_RATIO_CLAMP)``
+    before ``.exp()``. Tightened from ±20 to ±5 on 2026-04-18 — the
+    looser bound was a pure numerical backstop but didn't cap
+    ``policy_loss`` magnitude, leaving ep1 ``policy_loss`` at
+    ~7e+07 on fresh agents. At ±5, ``exp(5) ≈ 148`` so worst-case
+    contribution stays small. Still a no-op in normal operation
+    (``|log_ratio| ≪ 5``)."""
+
+    def test_clamp_value_is_five(self):
+        """Lock the chosen bound — this is the load-bearing constant.
+        If it drifts back toward 20 without a compensating change
+        elsewhere, the 2026-04-18 policy_loss spike re-emerges."""
+        assert LOG_RATIO_CLAMP == 5.0
 
     def test_clamp_prevents_overflow(self):
         """A pathological log-ratio of 50 (would overflow float32
         ``.exp()`` with ``exp(50) ≈ 5e21``) is clamped to exactly
-        ``20`` before the exponent, so ``ratio`` is finite and equal
-        to ``exp(20) ≈ 4.85e8``."""
+        ``LOG_RATIO_CLAMP`` (5) before the exponent, so ``ratio``
+        is finite and bounded at ``exp(5) ≈ 148.4``."""
         huge = torch.tensor([50.0, -50.0, 100.0, -100.0])
-        clamped = torch.clamp(huge, min=-20.0, max=20.0)
+        clamped = torch.clamp(
+            huge, min=-LOG_RATIO_CLAMP, max=LOG_RATIO_CLAMP,
+        )
         ratio = clamped.exp()
         assert torch.isfinite(ratio).all(), (
             f"ratio not finite after clamp: {ratio}"
         )
-        assert ratio[0].item() == pytest.approx(float(np.exp(20.0)), rel=1e-5)
-        assert ratio[1].item() == pytest.approx(float(np.exp(-20.0)), rel=1e-5)
+        assert ratio[0].item() == pytest.approx(
+            float(np.exp(LOG_RATIO_CLAMP)), rel=1e-5,
+        )
+        assert ratio[1].item() == pytest.approx(
+            float(np.exp(-LOG_RATIO_CLAMP)), rel=1e-5,
+        )
+
+    def test_clamp_caps_policy_loss_contribution(self):
+        """The reason we tightened to ±5: worst-case mini-batch loss
+        magnitude. With ``ratio = exp(LOG_RATIO_CLAMP) ≈ 148`` and a
+        negative advantage of −1 (post-normalisation scale), the
+        PPO ``-min(surr1, surr2)`` picks ``ratio * adv`` (more
+        negative) so the contribution to loss is ``148``. At the
+        old ±20, the same worst case was ``exp(20) ≈ 5e+08`` — the
+        gap Session 02 promised to close but left open."""
+        ratio = float(np.exp(LOG_RATIO_CLAMP))
+        worst_case_loss_contribution = ratio * 1.0  # |adv| ≈ 1
+        assert worst_case_loss_contribution < 200.0, (
+            "Clamp no longer caps per-mini-batch policy_loss "
+            "contribution under 200 — did LOG_RATIO_CLAMP loosen?"
+        )
 
     def test_clamp_is_noop_in_normal_range(self):
-        """|log_ratio| ≪ 20 in normal operation, so the clamp
+        """|log_ratio| ≪ 5 in normal operation, so the clamp
         preserves gradients. The arithmetic must be byte-identical
         to the un-clamped form for inputs in [-1, +1]."""
         tiny = torch.tensor([-0.5, -0.1, 0.0, 0.1, 0.5])
-        clamped = torch.clamp(tiny, min=-20.0, max=20.0)
+        clamped = torch.clamp(
+            tiny, min=-LOG_RATIO_CLAMP, max=LOG_RATIO_CLAMP,
+        )
         assert torch.allclose(clamped, tiny)
         assert torch.allclose(clamped.exp(), tiny.exp())
 
