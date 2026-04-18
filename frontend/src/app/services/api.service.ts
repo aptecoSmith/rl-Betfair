@@ -13,6 +13,7 @@ import {
   TrainingPlanPayload,
   CoverageResponse,
 } from '../models/training-plan.model';
+import { SmokeTestResult } from '../models/training.model';
 import {
   ExtractedDaysResponse,
   BackupDaysResponse,
@@ -177,9 +178,13 @@ export class ApiService {
     adaptive_mutation_increment?: number | null;
     adaptive_mutation_cap?: number | null;
     scalping_mode?: boolean | null;
+    /** Session 04 smoke-test gate — default true. Sends a 2-agent × 3-ep
+     *  probe through the worker before the full population launches. */
+    smoke_test_first?: boolean;
   }): Observable<{
     run_id: string; train_days: string[]; test_days: string[];
     n_generations: number; n_epochs: number;
+    smoke_test_result?: SmokeTestResult | null;
   }> {
     return this.http.post<any>(`${this.baseUrl}/training/start`, {
       plan_id: params.plan_id ?? null,
@@ -207,6 +212,7 @@ export class ApiService {
       adaptive_mutation_increment: params.adaptive_mutation_increment ?? null,
       adaptive_mutation_cap: params.adaptive_mutation_cap ?? null,
       scalping_mode: params.scalping_mode ?? null,
+      smoke_test_first: params.smoke_test_first ?? true,
     });
   }
 

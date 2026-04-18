@@ -65,6 +65,7 @@ def make_start_cmd(
     adaptive_mutation_increment: float | None = None,
     adaptive_mutation_cap: float | None = None,
     scalping_mode: bool | None = None,
+    smoke_test_first: bool = False,
 ) -> str:
     return json.dumps({
         "type": CMD_START,
@@ -94,6 +95,7 @@ def make_start_cmd(
         "adaptive_mutation_increment": adaptive_mutation_increment,
         "adaptive_mutation_cap": adaptive_mutation_cap,
         "scalping_mode": scalping_mode,
+        "smoke_test_first": bool(smoke_test_first),
     })
 
 
@@ -135,14 +137,22 @@ def make_started_msg(
     train_days: list[str],
     test_days: list[str],
     plan_id: str | None = None,
+    smoke_test_result: dict | None = None,
 ) -> str:
-    return json.dumps({
+    payload = {
         "type": EVT_STARTED,
         "run_id": run_id,
         "train_days": train_days,
         "test_days": test_days,
         "plan_id": plan_id,
-    })
+    }
+    if smoke_test_result is not None:
+        # Session 04 (naked-clip-and-stability). Surfaces the probe
+        # outcome alongside the launch ack so the synchronous HTTP
+        # reply can carry pass-case diagnostics. None when the probe
+        # was skipped (checkbox OFF or legacy client).
+        payload["smoke_test_result"] = smoke_test_result
+    return json.dumps(payload)
 
 
 def make_evaluate_cmd(
@@ -173,8 +183,15 @@ def make_evaluate_started_msg(
     })
 
 
-def make_error_msg(message: str) -> str:
-    return json.dumps({"type": EVT_ERROR, "message": message})
+def make_error_msg(message: str, smoke_test_result: dict | None = None) -> str:
+    payload: dict = {"type": EVT_ERROR, "message": message}
+    if smoke_test_result is not None:
+        # Session 04 (naked-clip-and-stability). A failing smoke-test
+        # probe is reported as an error so the launch's pending future
+        # resolves on the API side, but the structured probe outcome
+        # travels with it for the UI failure modal.
+        payload["smoke_test_result"] = smoke_test_result
+    return json.dumps(payload)
 
 
 def parse_message(raw: str) -> dict:

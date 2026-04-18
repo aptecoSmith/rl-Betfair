@@ -99,6 +99,17 @@ class MockApiService {
     return this.setAutoContinueResp$
       ?? of({ plan_id: planId, auto_continue: enabled, changed: true });
   }
+
+  // Session 04 (naked-clip-and-stability) — smoke-test gate.
+  startTrainingCalls: Array<Record<string, any>> = [];
+  startTrainingResp$:
+    | Observable<{ run_id: string; train_days: string[]; test_days: string[]; n_generations: number; n_epochs: number }>
+    | null = null;
+  startTraining(params: Record<string, any>) {
+    this.startTrainingCalls.push(params);
+    return this.startTrainingResp$
+      ?? of({ run_id: 'r1', train_days: [], test_days: [], n_generations: 1, n_epochs: 1 });
+  }
 }
 
 describe('TrainingPlans', () => {
@@ -111,7 +122,7 @@ describe('TrainingPlans', () => {
     TestBed.configureTestingModule({
       imports: [TrainingPlans],
       providers: [
-        provideRouter([]),
+        provideRouter([{ path: 'training', children: [] }]),
         provideHttpClient(),
         { provide: ApiService, useValue: mockApi },
       ],
@@ -146,7 +157,7 @@ describe('TrainingPlans', () => {
     TestBed.configureTestingModule({
       imports: [TrainingPlans],
       providers: [
-        provideRouter([]),
+        provideRouter([{ path: 'training', children: [] }]),
         provideHttpClient(),
         { provide: ApiService, useValue: mockApi },
       ],
@@ -303,7 +314,7 @@ describe('TrainingPlans', () => {
     TestBed.configureTestingModule({
       imports: [TrainingPlans],
       providers: [
-        provideRouter([]),
+        provideRouter([{ path: 'training', children: [] }]),
         provideHttpClient(),
         { provide: ApiService, useValue: mockApi },
       ],
@@ -475,7 +486,7 @@ describe('TrainingPlans', () => {
     TestBed.configureTestingModule({
       imports: [TrainingPlans],
       providers: [
-        provideRouter([]),
+        provideRouter([{ path: 'training', children: [] }]),
         provideHttpClient(),
         { provide: ApiService, useValue: mockApi },
       ],
@@ -507,6 +518,179 @@ describe('TrainingPlans', () => {
     expect(component.selectedPlan()?.auto_continue).toBe(true); // unchanged
   });
 
+  // ── Smoke-test gate (Session 04, naked-clip-and-stability) ──────
+  describe('Smoke-test gate', () => {
+    function setupDetail(overrides: Partial<TrainingPlanDetailResponse['plan']> = {}) {
+      mockApi = new MockApiService();
+      mockApi.detail$ = of({
+        plan: {
+          plan_id: 'smoke-plan',
+          name: 'Smoke test plan',
+          created_at: '2026-04-18',
+          population_size: 16,
+          architectures: ['ppo_lstm_v1'],
+          arch_mix: null,
+          hp_ranges: {},
+          arch_lr_ranges: null,
+          seed: 42,
+          min_arch_samples: 5,
+          notes: '',
+          outcomes: [],
+          n_generations: 3,
+          n_epochs: 1,
+          ...overrides,
+        },
+        validation: [],
+      });
+      TestBed.configureTestingModule({
+        imports: [TrainingPlans],
+        providers: [
+          provideRouter([{ path: 'training', children: [] }]),
+          provideHttpClient(),
+          { provide: ApiService, useValue: mockApi },
+        ],
+      });
+      fixture = TestBed.createComponent(TrainingPlans);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      component.openDetail('smoke-plan');
+      fixture.detectChanges();
+    }
+
+    it('checkbox defaults to checked (default ON per §15)', () => {
+      setupDetail();
+      const checkbox = fixture.nativeElement.querySelector(
+        '[data-testid="smoke-test-checkbox"]',
+      ) as HTMLInputElement | null;
+      expect(checkbox).toBeTruthy();
+      expect(checkbox!.checked).toBe(true);
+      expect(component.smokeTestFirst()).toBe(true);
+    });
+
+    it('includes smoke_test_first=true in the start payload when checked', () => {
+      setupDetail();
+      component.startPlan();
+      expect(mockApi.startTrainingCalls.length).toBe(1);
+      expect(mockApi.startTrainingCalls[0]['smoke_test_first']).toBe(true);
+    });
+
+    it('sends smoke_test_first=false when operator unchecks the box', () => {
+      setupDetail();
+      component.smokeTestFirst.set(false);
+      component.startPlan();
+      expect(mockApi.startTrainingCalls[0]['smoke_test_first']).toBe(false);
+    });
+
+    it('opens the failure modal when start returns a structured smoke failure', () => {
+      setupDetail();
+      const failure = {
+        passed: false,
+        assertions: [
+          {
+            name: 'ep1_policy_loss',
+            passed: false,
+            observed: 1.04e17,
+            threshold: 100.0,
+            detail: 'ep1 policy_loss: worst = 1.04e17 (agent 0a8cacd3), threshold < 100',
+          },
+          {
+            name: 'entropy_non_increasing',
+            passed: false,
+            observed: 40.0,
+            threshold: 0.0,
+            detail: 'ep3−ep1 entropy: worst Δ = +40.0',
+          },
+          {
+            name: 'arbs_closed_any_agent',
+            passed: true,
+            observed: 5.0,
+            threshold: 1.0,
+            detail: 'max arbs_closed across probe: 5',
+          },
+        ],
+        probe_model_ids: ['smoke-ppo_transformer_v1', 'smoke-ppo_lstm_v1'],
+      };
+      mockApi.startTrainingResp$ = throwError(() => ({
+        status: 409,
+        error: {
+          detail: {
+            message: 'Smoke test failed — full population not launched',
+            smoke_test_result: failure,
+          },
+        },
+      }));
+      component.startPlan();
+      fixture.detectChanges();
+
+      const modal = fixture.nativeElement.querySelector('[data-testid="smoke-failure-modal"]');
+      expect(modal).toBeTruthy();
+      expect(component.smokeFailure()?.passed).toBe(false);
+      // All three assertions render as rows in the modal table.
+      const rows = fixture.nativeElement.querySelectorAll(
+        '[data-testid="smoke-assertions"] tbody tr',
+      );
+      expect(rows.length).toBe(3);
+      // Headline carries the gate's explanation.
+      expect(modal.textContent).toContain('Smoke test failed');
+      expect(modal.textContent).toContain('ep1_policy_loss');
+      // Per-row PASS/FAIL decoration.
+      expect(modal.textContent).toContain('FAIL');
+      expect(modal.textContent).toContain('PASS');
+    });
+
+    it('plain-string 409 errors render the legacy banner, not the modal', () => {
+      setupDetail();
+      mockApi.startTrainingResp$ = throwError(() => ({
+        status: 409,
+        error: { detail: 'A training run is already in progress' },
+      }));
+      component.startPlan();
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="smoke-failure-modal"]'),
+      ).toBeFalsy();
+      expect(component.launchError()).toContain('already in progress');
+    });
+
+    it('"Re-run smoke test" re-submits with smokeTestFirst=true', () => {
+      setupDetail();
+      component.smokeFailure.set({
+        passed: false, assertions: [], probe_model_ids: [],
+      });
+      component.rerunSmokeTest();
+      const last = mockApi.startTrainingCalls.at(-1);
+      expect(last?.['smoke_test_first']).toBe(true);
+      // Modal dismissed so the operator sees the fresh launch.
+      expect(component.smokeFailure()).toBeNull();
+    });
+
+    it('"Launch anyway" needs a second click to confirm before firing', () => {
+      setupDetail();
+      component.smokeFailure.set({
+        passed: false, assertions: [], probe_model_ids: [],
+      });
+      // First click — confirmation state, no API call yet.
+      component.launchAnyway();
+      expect(mockApi.startTrainingCalls.length).toBe(0);
+      expect(component.confirmingLaunchAnyway()).toBe(true);
+      // Second click — fires with smoke_test_first=false.
+      component.launchAnyway();
+      expect(mockApi.startTrainingCalls.length).toBe(1);
+      expect(mockApi.startTrainingCalls[0]['smoke_test_first']).toBe(false);
+      expect(component.confirmingLaunchAnyway()).toBe(false);
+    });
+
+    it('Cancel dismisses the modal and leaves no in-flight launch', () => {
+      setupDetail();
+      component.smokeFailure.set({
+        passed: false, assertions: [], probe_model_ids: [],
+      });
+      component.dismissSmokeFailure();
+      expect(component.smokeFailure()).toBeNull();
+      expect(mockApi.startTrainingCalls.length).toBe(0);
+    });
+  });
+
   // ── Coverage panel renders in list mode when report is available ──
   it('coverage panel renders when report is loaded', () => {
     mockApi = new MockApiService();
@@ -526,7 +710,7 @@ describe('TrainingPlans', () => {
     TestBed.configureTestingModule({
       imports: [TrainingPlans],
       providers: [
-        provideRouter([]),
+        provideRouter([{ path: 'training', children: [] }]),
         provideHttpClient(),
         { provide: ApiService, useValue: mockApi },
       ],

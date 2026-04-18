@@ -563,10 +563,30 @@ async def start_training(request: Request, body: StartTrainingRequest):
         adaptive_mutation_increment=body.adaptive_mutation_increment,
         adaptive_mutation_cap=body.adaptive_mutation_cap,
         scalping_mode=body.scalping_mode,
+        smoke_test_first=body.smoke_test_first,
     )
-    resp = await _send_to_worker(request, cmd, timeout=30.0)
+    # The probe runs inside the worker as a pre-flight to the full run;
+    # the full population only starts if the probe passes. Give the
+    # worker up to the probe-budget + some slack before the API gives
+    # up on the synchronous acknowledgement.
+    start_timeout = 1800.0 if body.smoke_test_first else 30.0
+    resp = await _send_to_worker(request, cmd, timeout=start_timeout)
 
     if resp.get("type") == EVT_ERROR:
+        # The worker reports a failed smoke test as an EVT_ERROR with a
+        # structured ``smoke_test_result`` payload so the frontend can
+        # open its failure modal without guessing. Legacy errors
+        # (malformed config, worker busy) have no smoke_test_result and
+        # surface as a plain string detail.
+        smoke_result = resp.get("smoke_test_result")
+        if smoke_result is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": resp.get("message", "Smoke test failed"),
+                    "smoke_test_result": smoke_result,
+                },
+            )
         raise HTTPException(409, resp.get("message", "Worker rejected start request"))
 
     run_id = resp.get("run_id", "unknown")
@@ -577,6 +597,7 @@ async def start_training(request: Request, body: StartTrainingRequest):
         test_days=test_dates,
         n_generations=body.n_generations,
         n_epochs=body.n_epochs,
+        smoke_test_result=resp.get("smoke_test_result"),
     )
 
 

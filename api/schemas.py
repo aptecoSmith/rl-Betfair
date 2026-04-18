@@ -511,6 +511,44 @@ class StartTrainingRequest(BaseModel):
     # aggressive fill auto-generates a passive counter-order N ticks
     # away on the opposite side. None = use config default.
     scalping_mode: bool | None = None
+    # Smoke-test gate — Session 04 of naked-clip-and-stability. Default
+    # ON: a 2-agent × 3-episode probe runs before the full population
+    # to catch policy-loss / entropy / arbs-closed regressions before
+    # burning hours of compute. See agents/smoke_test.py and
+    # plans/naked-clip-and-stability/hard_constraints.md §15.
+    smoke_test_first: bool = True
+
+
+class SmokeAssertionPayload(BaseModel):
+    """One assertion row for the UI failure modal."""
+    name: str
+    passed: bool
+    observed: float
+    threshold: float
+    detail: str
+
+
+class SmokeTestResultPayload(BaseModel):
+    """Latest probe outcome — served by ``GET /training/smoke-test``.
+
+    ``None`` at the endpoint level (empty response) means no probe has
+    run since the worker started. ``passed=true`` means the full
+    population was subsequently launched; ``passed=false`` means the
+    launch was blocked and the UI should surface the failure modal.
+    """
+    passed: bool
+    assertions: list[SmokeAssertionPayload]
+    probe_model_ids: list[str]
+
+
+class StartTrainingResponseExtra(BaseModel):
+    """Fields added to ``StartTrainingResponse`` when the launch path
+    runs a smoke-test probe.
+
+    Kept as a separate model so legacy test fixtures that ignore the
+    field keep validating; the main response inherits it below.
+    """
+    smoke_test_result: SmokeTestResultPayload | None = None
 
 
 class ResumeTrainingRequest(BaseModel):
@@ -556,6 +594,13 @@ class StartTrainingResponse(BaseModel):
     test_days: list[str]
     n_generations: int
     n_epochs: int
+    # Session 04 (naked-clip-and-stability) — when the launch ran a
+    # smoke-test probe, the result is attached here. ``None`` when the
+    # operator ticked the checkbox OFF, or on legacy clients that
+    # pre-date the gate. When ``smoke_test_result.passed == false``,
+    # the full population was NOT launched; the frontend opens a
+    # failure modal with per-assertion detail.
+    smoke_test_result: SmokeTestResultPayload | None = None
 
 
 class StopTrainingResponse(BaseModel):

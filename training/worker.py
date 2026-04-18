@@ -367,6 +367,66 @@ class TrainingWorker:
         else:
             await ws.send(make_error_msg(f"Unknown command: {msg_type}"))
 
+    # ── Smoke-test gate (Session 04) ────────────────────────────────
+
+    async def _run_smoke_test(
+        self,
+        run_config: dict,
+        train_dates: list[str],
+        data_dir: str,
+    ) -> dict:
+        """Run the 2-agent × 3-episode probe and return its ``to_dict()``.
+
+        Delegates the actual training harness work to
+        :func:`agents.smoke_test.run_smoke_test`. Executes in a worker
+        thread so the asyncio loop stays responsive for status pings
+        while the probe runs (~10–20 minutes in production).
+
+        Overridable in tests: patch this coroutine on the worker
+        instance to return a fabricated ``SmokeResult.to_dict()``
+        payload and exercise the gate's pass/fail branches without
+        touching torch.
+        """
+        from data.episode_builder import load_days
+        from agents.smoke_test import PROBE_EPISODE_COUNT, run_smoke_test
+
+        if len(train_dates) < PROBE_EPISODE_COUNT:
+            # Defensive — the API layer also validates data availability
+            # but a raw worker caller (CLI smoke) skips the API checks.
+            raise ValueError(
+                f"Smoke test needs >= {PROBE_EPISODE_COUNT} train days, "
+                f"got {len(train_dates)}",
+            )
+
+        probe_dates = list(train_dates[:PROBE_EPISODE_COUNT])
+        console.print(
+            f"[cyan]Running smoke-test probe on {probe_dates} "
+            f"before committing to full population…[/cyan]"
+        )
+
+        def _probe() -> dict:
+            probe_days = load_days(
+                probe_dates, data_dir=data_dir,
+                progress_queue=self.progress_queue,
+            )
+            return run_smoke_test(
+                config=run_config,
+                train_days=probe_days,
+                progress_queue=self.progress_queue,
+            ).to_dict()
+
+        result = await asyncio.to_thread(_probe)
+        passed = result.get("passed", False)
+        colour = "green" if passed else "red"
+        console.print(
+            f"[{colour}]Smoke-test probe "
+            f"{'passed' if passed else 'FAILED'}[/{colour}]"
+        )
+        for a in result.get("assertions", []):
+            marker = "[green]✓[/green]" if a.get("passed") else "[red]✗[/red]"
+            console.print(f"  {marker} {a.get('detail', '')}")
+        return result
+
     # ── Training lifecycle ──────────────────────────────────────────
 
     async def _start_training(
@@ -483,8 +543,54 @@ class TrainingWorker:
             except thread_queue.Empty:
                 break
 
-        # Acknowledge — include plan_id so the frontend can cross-link
-        await self._broadcast(make_started_msg(run_id, train_dates, test_dates, plan_id=plan_id))
+        # Session 04 (plans/naked-clip-and-stability) — smoke-test gate.
+        # When the operator ticked "Smoke test first", run a 2-agent
+        # probe before touching the full population. On fail, do NOT
+        # spawn the training thread: return the structured assertion
+        # detail so the UI can show the failure modal.
+        smoke_result_payload: dict | None = None
+        if params.get("smoke_test_first"):
+            try:
+                smoke_result_payload = await self._run_smoke_test(
+                    run_config, train_dates, data_dir,
+                )
+            except Exception as exc:  # defensive — never swallow
+                logger.exception("Smoke-test probe crashed")
+                self.running = False
+                await ws.send(make_error_msg(
+                    f"Smoke-test probe crashed: {exc}",
+                ))
+                return
+            if not smoke_result_payload["passed"]:
+                # hard_constraints §15 — the full population does NOT
+                # launch. Clear running so a follow-up CMD_START is
+                # accepted, and carry the assertion detail in the
+                # structured error payload.
+                self.running = False
+                if training_plan is not None:
+                    try:
+                        self.plan_registry.set_status(
+                            training_plan.plan_id, "draft",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to reset plan status after smoke fail",
+                        )
+                await ws.send(make_error_msg(
+                    "Smoke test failed — full population not launched",
+                    smoke_test_result=smoke_result_payload,
+                ))
+                return
+
+        # Acknowledge — include plan_id so the frontend can cross-link.
+        # ``smoke_test_result`` is None when the operator left the
+        # checkbox unticked; on pass it carries every assertion row so
+        # the UI can display a confirmation badge.
+        await self._broadcast(make_started_msg(
+            run_id, train_dates, test_dates,
+            plan_id=plan_id,
+            smoke_test_result=smoke_result_payload,
+        ))
 
         console.print()
         console.rule(f"[bold green]Training Run {run_id[:8]}[/bold green]")

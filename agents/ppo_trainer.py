@@ -674,6 +674,15 @@ class PPOTrainer:
         self.log_dir = log_dir / "training"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Smoke-test probe tag (Session 04 of
+        # plans/naked-clip-and-stability). When True, every row
+        # written by ``_log_episode`` carries ``smoke_test: true`` so
+        # downstream tooling (learning-curves panel, the gate's
+        # assertion evaluator) can distinguish probe rows from real
+        # training rows in the shared episodes.jsonl stream.
+        # hard_constraints.md §16 makes this flag non-negotiable.
+        self.smoke_test_tag: bool = False
+
     # -- Public API -----------------------------------------------------------
 
     def train(
@@ -1716,6 +1725,12 @@ class PPOTrainer:
             "signal_bias": round(ep.signal_bias, 6),
             "timestamp": time.time(),
         }
+        # Smoke-test probe rows are tagged so the learning-curves panel
+        # can colour them distinctly and the gate's assertion evaluator
+        # can pick them out of the shared stream — see agents/smoke_test.py
+        # and plans/naked-clip-and-stability/hard_constraints.md §16.
+        if self.smoke_test_tag:
+            record["smoke_test"] = True
 
         log_file = self.log_dir / "episodes.jsonl"
         with open(log_file, "a", encoding="utf-8") as f:

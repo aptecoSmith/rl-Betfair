@@ -28,6 +28,26 @@ export interface ActivityLogEntry {
   text: string;
 }
 
+/** One assertion row from the Session 04 smoke-test gate. */
+export interface SmokeAssertion {
+  name: string;
+  passed: boolean;
+  observed: number;
+  threshold: number;
+  detail: string;
+}
+
+/** Full smoke-test probe outcome. Attached to the training-start
+ *  response when the operator ticked "Smoke test first", or to the
+ *  error payload when the probe failed and the full population was
+ *  blocked from launching.
+ *  See `agents/smoke_test.py` for the assertion semantics. */
+export interface SmokeTestResult {
+  passed: boolean;
+  assertions: SmokeAssertion[];
+  probe_model_ids: string[];
+}
+
 /** Top-model entry in the run_complete summary. */
 export interface RunSummaryTopModel {
   model_id: string;

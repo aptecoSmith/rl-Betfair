@@ -116,6 +116,25 @@
           </button>
         </div>
       </div>
+      <!-- Smoke-test gate (Session 04, naked-clip-and-stability).
+           Default ON per hard_constraints §15; runs a 2-agent × 3-ep
+           probe before committing to the full 16-agent GA launch. -->
+      <label class="smoke-test-toggle" data-testid="smoke-test-toggle">
+        <input
+          type="checkbox"
+          [checked]="smokeTestFirst()"
+          (change)="smokeTestFirst.set($any($event.target).checked)"
+          [disabled]="launching()"
+          data-testid="smoke-test-checkbox"
+        />
+        <span class="toggle-label">Smoke test first (recommended)</span>
+        <p class="mat-caption smoke-test-caption">
+          Runs a 2-agent × 3-episode probe before the full population
+          to catch training instability before burning hours of compute.
+          Assertions: ep1 policy_loss &lt; 100, entropy non-increasing
+          across ep 1→3, arbs_closed ≥ 1 on at least one agent.
+        </p>
+      </label>
       <div class="plan-id">plan_id: <code>{{ plan.plan_id }}</code></div>
 
       @if (plan.status === 'running') {
@@ -211,8 +230,83 @@
         </div>
       }
 
-      @if (launchError()) {
+      @if (launchError() && !smokeFailure()) {
         <div class="message error" data-testid="launch-error">{{ launchError() }}</div>
+      }
+
+      <!-- Smoke-test failure modal (Session 04, naked-clip-and-stability).
+           Rendered as an overlay so the operator can't miss it. Three
+           actions: re-run the probe, launch without the gate (with a
+           confirmation step), or dismiss and leave the plan in draft. -->
+      @if (smokeFailure(); as smoke) {
+        <div class="modal-backdrop" data-testid="smoke-failure-modal">
+          <div class="modal-card smoke-failure-card">
+            <h3>Smoke test failed — full population not launched.</h3>
+            <p class="smoke-failure-subhead">
+              The pre-flight probe ran two agents for three episodes
+              each. Review the assertion detail below before deciding
+              whether to re-run the probe or override the gate.
+            </p>
+            <table class="smoke-assertions" data-testid="smoke-assertions">
+              <thead>
+                <tr>
+                  <th>Assertion</th>
+                  <th>Observed</th>
+                  <th>Threshold</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (a of smoke.assertions; track a.name) {
+                  <tr [class.passed]="a.passed" [class.failed]="!a.passed">
+                    <td>
+                      <code>{{ a.name }}</code>
+                      <div class="smoke-assertion-detail">{{ a.detail }}</div>
+                    </td>
+                    <td>{{ a.observed | number:'1.0-4' }}</td>
+                    <td>{{ a.threshold | number:'1.0-4' }}</td>
+                    <td>{{ a.passed ? 'PASS' : 'FAIL' }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+
+            @if (confirmingLaunchAnyway()) {
+              <div class="message warning" data-testid="smoke-confirm-banner">
+                The gate flagged real instability. Launching will skip
+                the probe entirely — click <strong>Launch anyway</strong>
+                once more to confirm.
+              </div>
+            }
+
+            <div class="modal-actions">
+              <button
+                class="btn-secondary"
+                (click)="rerunSmokeTest()"
+                [disabled]="launching()"
+                data-testid="smoke-rerun"
+              >
+                Re-run smoke test
+              </button>
+              <button
+                class="btn-danger"
+                (click)="launchAnyway()"
+                [disabled]="launching()"
+                data-testid="smoke-launch-anyway"
+              >
+                {{ confirmingLaunchAnyway() ? 'Confirm launch anyway' : 'Launch anyway' }}
+              </button>
+              <button
+                class="btn-tertiary"
+                (click)="dismissSmokeFailure()"
+                [disabled]="launching()"
+                data-testid="smoke-dismiss"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       }
 
       @if (selectedValidation().length > 0) {

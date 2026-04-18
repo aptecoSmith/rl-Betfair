@@ -11,6 +11,7 @@ import {
   TrainingPlanPayload,
   ValidationIssue,
 } from '../models/training-plan.model';
+import { SmokeTestResult } from '../models/training.model';
 import { GeneEditor } from '../components/gene-editor/gene-editor';
 import { EarlyPickValidator } from '../components/early-pick-validator/early-pick-validator';
 import { CoveragePanel } from '../components/coverage-panel/coverage-panel';
@@ -426,11 +427,26 @@ export class TrainingPlans implements OnInit {
   readonly launching = signal(false);
   readonly launchError = signal<string | null>(null);
 
-  startPlan(): void {
+  // ── Smoke-test gate (Session 04, naked-clip-and-stability) ──────
+  /** Checkbox state. Default true — hard_constraints §15 calls for
+   *  the gate to default ON so new operators get the safety net
+   *  without having to know it exists. */
+  readonly smokeTestFirst = signal(true);
+  /** Populated when a launch attempt returns a failing probe result.
+   *  `null` = no failure to display (initial state, or last launch
+   *  succeeded / was unrelated to the probe). */
+  readonly smokeFailure = signal<SmokeTestResult | null>(null);
+  /** Second-step confirmation before "Launch anyway" actually fires. */
+  readonly confirmingLaunchAnyway = signal(false);
+
+  startPlan(overrideSmokeFirst?: boolean): void {
     const plan = this.selectedPlan();
     if (!plan) return;
+    const smokeFirst = overrideSmokeFirst ?? this.smokeTestFirst();
     this.launching.set(true);
     this.launchError.set(null);
+    this.smokeFailure.set(null);
+    this.confirmingLaunchAnyway.set(false);
     this.api.startTraining({
       plan_id: plan.plan_id,
       n_generations: plan.n_generations ?? 3,
@@ -441,6 +457,7 @@ export class TrainingPlans implements OnInit {
       starting_budget: plan.starting_budget ?? null,
       max_mutations_per_child: plan.max_mutations_per_child ?? null,
       breeding_pool: plan.breeding_pool ?? null,
+      smoke_test_first: smokeFirst,
     }).subscribe({
       next: () => {
         this.launching.set(false);
@@ -448,9 +465,54 @@ export class TrainingPlans implements OnInit {
       },
       error: (err) => {
         this.launching.set(false);
-        this.launchError.set(err?.error?.detail ?? err?.message ?? 'Failed to start training');
+        // The worker reports a failed probe as an HTTP 409 whose
+        // `detail` is an object carrying `smoke_test_result`. Other
+        // 409s (worker busy, malformed config) have a plain string
+        // `detail` and fall through to the generic error banner.
+        const detail = err?.error?.detail;
+        if (
+          detail
+          && typeof detail === 'object'
+          && detail.smoke_test_result
+        ) {
+          this.smokeFailure.set(detail.smoke_test_result as SmokeTestResult);
+          this.launchError.set(
+            detail.message ?? 'Smoke test failed — full population not launched',
+          );
+        } else {
+          this.launchError.set(
+            (typeof detail === 'string' ? detail : null)
+            ?? err?.message
+            ?? 'Failed to start training',
+          );
+        }
       },
     });
+  }
+
+  /** Re-run the smoke test with the same plan (checkbox stays on). */
+  rerunSmokeTest(): void {
+    this.smokeFailure.set(null);
+    this.startPlan(true);
+  }
+
+  /** First click: flip into confirming state. Second click: actually
+   *  fire the launch with `smoke_test_first=false`. The intermediate
+   *  confirmation step is load-bearing — the operator is explicitly
+   *  overriding a safety gate that flagged real instability. */
+  launchAnyway(): void {
+    if (!this.confirmingLaunchAnyway()) {
+      this.confirmingLaunchAnyway.set(true);
+      return;
+    }
+    this.smokeFailure.set(null);
+    this.confirmingLaunchAnyway.set(false);
+    this.startPlan(false);
+  }
+
+  dismissSmokeFailure(): void {
+    this.smokeFailure.set(null);
+    this.confirmingLaunchAnyway.set(false);
   }
 
   // ── Toggle auto-continue ────────────────────────────────────────

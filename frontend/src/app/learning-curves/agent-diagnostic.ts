@@ -28,7 +28,16 @@ export interface EpisodeRecord {
   entropy: number | null;
   arbs_completed?: number;
   arbs_naked?: number;
+  arbs_closed?: number;
+  locked_pnl?: number;
+  naked_pnl?: number;
   timestamp: string;
+  /** Smoke-test probe tag (Session 04, naked-clip-and-stability).
+   *  Absent on real training rows; `true` on the 2-agent × 3-episode
+   *  probe that runs when the operator ticks "Smoke test first".
+   *  Learning-curves colours these rows distinctly so operators can
+   *  tell probe activity from real training at a glance. */
+  smoke_test?: boolean;
 }
 
 export type AgentVerdict =

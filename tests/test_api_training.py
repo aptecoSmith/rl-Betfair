@@ -667,6 +667,149 @@ class TestStartWithOverrides:
             assert resp.status_code == 400
 
 
+# ── Smoke-test gate (Session 04, naked-clip-and-stability) ─────────
+
+
+class TestSmokeTestGateDTO:
+    """The HTTP-layer plumbing for the smoke-test gate.
+
+    hard_constraints §15 says default ON. These tests verify:
+
+    - ``smoke_test_first`` defaults to True on the request DTO.
+    - The flag flows through to the worker start command.
+    - A worker EVT_ERROR carrying ``smoke_test_result`` surfaces as a
+      409 whose ``detail`` is a structured dict the frontend can
+      render into the failure modal without inspecting strings.
+    """
+
+    def _make_app_with_fake_worker(self, reply: dict):
+        """_make_app plus a fake worker_ws that resolves the pending
+        response future with ``reply``. ``reply`` is dispatched in the
+        background so the HTTP call can await it synchronously."""
+        from pathlib import Path
+        import pandas as pd
+
+        client, app = _make_app()
+        tmp = tempfile.mkdtemp()
+        data_dir = Path(tmp)
+        for d in ("2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"):
+            pd.DataFrame({"x": [1]}).to_parquet(data_dir / f"{d}.parquet")
+        app.state.config = {
+            "paths": {"processed_data": str(data_dir)},
+            "population": {"size": 2},
+            "training": {},
+            "hyperparameters": {
+                "search_ranges": {
+                    "architecture_name": {"choices": ["ppo_lstm_v1"]},
+                },
+            },
+        }
+
+        sent_messages: list[dict] = []
+
+        class _FakeWorkerWS:
+            async def send(self, raw: str):
+                sent_messages.append(json.loads(raw))
+                # Resolve the pending future on the next loop tick.
+                loop = asyncio.get_event_loop()
+                def _resolve():
+                    pending = app.state.worker_pending_response
+                    if pending and not pending.done():
+                        pending.set_result(reply)
+                loop.call_soon(_resolve)
+
+        app.state.worker_ws = _FakeWorkerWS()
+        app.state.worker_pending_response = None
+        return client, app, sent_messages
+
+    def test_smoke_test_first_defaults_true_on_dto(self):
+        """Pydantic default is True — clients that don't send the field
+        still trigger the gate (hard_constraints §15)."""
+        from api.schemas import StartTrainingRequest
+        req = StartTrainingRequest()
+        assert req.smoke_test_first is True
+
+    def test_flag_forwarded_to_worker(self):
+        reply = {
+            "type": "started",
+            "run_id": "r1",
+            "train_days": [],
+            "test_days": [],
+            "plan_id": None,
+            "smoke_test_result": {
+                "passed": True,
+                "assertions": [],
+                "probe_model_ids": ["smoke-transformer", "smoke-lstm"],
+            },
+        }
+        client, app, sent = self._make_app_with_fake_worker(reply)
+        resp = client.post("/training/start", json={
+            "n_generations": 1,
+            "n_epochs": 1,
+            "architectures": ["ppo_lstm_v1"],
+            "smoke_test_first": True,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["smoke_test_result"]["passed"] is True
+        assert sent and sent[0]["smoke_test_first"] is True
+
+    def test_smoke_fail_surfaces_as_structured_409(self):
+        """Worker EVT_ERROR with smoke_test_result → 409 + detail dict.
+
+        The frontend relies on the ``detail.smoke_test_result`` shape
+        — regression-proofing that contract so future refactors can't
+        silently drop it."""
+        failure_payload = {
+            "passed": False,
+            "assertions": [
+                {
+                    "name": "ep1_policy_loss",
+                    "passed": False,
+                    "observed": 1.0e17,
+                    "threshold": 100.0,
+                    "detail": "ep1 policy_loss blew up on the transformer",
+                },
+            ],
+            "probe_model_ids": ["smoke-ppo_transformer_v1"],
+        }
+        reply = {
+            "type": "error",
+            "message": "Smoke test failed — full population not launched",
+            "smoke_test_result": failure_payload,
+        }
+        client, _app, _sent = self._make_app_with_fake_worker(reply)
+        resp = client.post("/training/start", json={
+            "n_generations": 1,
+            "n_epochs": 1,
+            "architectures": ["ppo_lstm_v1"],
+            "smoke_test_first": True,
+        })
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert isinstance(detail, dict)
+        assert detail["smoke_test_result"]["passed"] is False
+        assert detail["smoke_test_result"]["assertions"][0]["name"] == "ep1_policy_loss"
+
+    def test_ipc_make_start_cmd_carries_flag(self):
+        from training.ipc import make_start_cmd
+        raw = make_start_cmd(smoke_test_first=True)
+        payload = json.loads(raw)
+        assert payload["smoke_test_first"] is True
+        # Default is False — an absent flag (legacy call) stays disabled.
+        default = json.loads(make_start_cmd())
+        assert default["smoke_test_first"] is False
+
+    def test_make_error_msg_passes_smoke_result_through(self):
+        from training.ipc import make_error_msg
+        payload = {"passed": False, "assertions": [], "probe_model_ids": []}
+        raw = make_error_msg("fail", smoke_test_result=payload)
+        parsed = json.loads(raw)
+        assert parsed["smoke_test_result"] == payload
+        # Legacy one-arg form stays identical to pre-change output.
+        legacy = json.loads(make_error_msg("fail"))
+        assert "smoke_test_result" not in legacy
+
+
 # ── Episodes Endpoint Tests ──────────────────────────────────────────
 
 

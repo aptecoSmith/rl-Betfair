@@ -34,6 +34,12 @@ interface AgentPanel {
   architecture: string;
   episodes: EpisodeRecord[];
   diagnostic: AgentDiagnostic;
+  /** Session 04 (naked-clip-and-stability): true when every row on
+   *  this panel carries `smoke_test: true`. The panel is then faded
+   *  and tagged with a "SMOKE TEST" chip so operators can tell probe
+   *  agents apart from real population agents at a glance
+   *  (hard_constraints §16). */
+  isSmokeTest: boolean;
 }
 
 /** Per-agent learning-curves panel with headline verdict + captions.
@@ -77,12 +83,18 @@ export class LearningCurves implements OnInit, OnDestroy {
     const panels: AgentPanel[] = [];
     for (const [modelId, eps] of byAgent) {
       const diagnostic = diagnoseAgent(eps);
+      // Smoke-test panels flag if every row carries the probe tag.
+      // A mixed panel (probe rows + real rows for the same model_id)
+      // shouldn't happen in practice — the probe uses ephemeral
+      // `smoke-<arch>` ids — but `every` is the safe default.
+      const isSmokeTest = eps.length > 0 && eps.every(e => e.smoke_test === true);
       panels.push({
         modelId,
         shortId: modelId.slice(0, 8),
         architecture: eps[0]?.architecture_name ?? '—',
         episodes: eps,
         diagnostic,
+        isSmokeTest,
       });
     }
     // Order: alerts first (collapsed, unstable), then learning, then rest,

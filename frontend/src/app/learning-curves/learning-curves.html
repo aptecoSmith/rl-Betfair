@@ -70,6 +70,7 @@
         <article
           class="agent-panel"
           [class]="verdictClass(panel.diagnostic.verdict)"
+          [class.smoke-test-panel]="panel.isSmokeTest"
           [attr.data-testid]="'lc-panel-' + panel.shortId"
         >
           <header class="panel-header">
@@ -77,6 +78,13 @@
               <code class="agent-id">{{ panel.shortId }}</code>
               <span class="arch">{{ panel.architecture }}</span>
               <span class="episode-count">{{ panel.diagnostic.nEpisodes }} ep</span>
+              @if (panel.isSmokeTest) {
+                <span
+                  class="smoke-test-chip"
+                  data-testid="lc-smoke-chip"
+                  title="Smoke-test probe row — not part of the full population run."
+                >SMOKE TEST</span>
+              }
             </div>
             <span
               class="verdict-chip"

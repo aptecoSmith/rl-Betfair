@@ -5,6 +5,179 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ---
 
+## Session 04 — Smoke-test gate (UI tickbox + assertion harness)
+
+**Commit:** `<fill-on-commit>`
+**Date:** 2026-04-18
+
+What landed — a pre-flight gate that catches the three pathologies
+Sessions 01–03 fix (policy-loss blow-up, rising entropy, naked /
+arbs-closed collapse) before burning the ~8 hours it takes to train
+16 agents from a fresh registry. Default ON per
+`hard_constraints.md §15`.
+
+**Backend:**
+
+- `agents/smoke_test.py` (new). Narrow public surface:
+  - `SmokeAssertionResult` + `SmokeResult` frozen dataclasses with
+    `to_dict()` so the structured result travels cleanly through
+    WebSocket → HTTP → UI.
+  - `evaluate_probe_episodes(rows) -> SmokeResult` — pure assertion
+    evaluator; unit-testable without any trainer. Always returns
+    three assertion rows (one per hard-constraint §15 rule) even
+    on empty input, so the UI modal can render a full table.
+  - `run_smoke_test(config, train_days, ...)` — real orchestrator
+    that spins up one transformer and one LSTM via the same
+    `PPOTrainer` harness the full run uses, trains each for 3
+    episodes on the first 3 train days, and evaluates. Probe agents
+    are ephemeral (no model-store persistence). Uses default
+    hyperparameters so the gate exercises the default code path, not
+    the plan-specific one — catches failures that would bite fresh
+    agents regardless of which plan launched them.
+- `agents/ppo_trainer.py` — new `smoke_test_tag: bool = False`
+  instance attribute; when set, `_log_episode` writes
+  `smoke_test: true` into each `episodes.jsonl` row so the
+  learning-curves panel and post-hoc tooling can distinguish probe
+  activity from real training (`hard_constraints §16`). Flag
+  defaults to False, so every other call site (full runs,
+  direct-instantiation tests) stays byte-identical.
+- `api/schemas.py` — `StartTrainingRequest.smoke_test_first: bool =
+  True`, plus new `SmokeAssertionPayload`, `SmokeTestResultPayload`
+  models; `StartTrainingResponse` gains `smoke_test_result: … |
+  None` so the happy path also carries the probe's per-assertion
+  detail for a confirmation banner.
+- `training/ipc.py` — `make_start_cmd(..., smoke_test_first=False)`
+  threads the flag to the worker; `make_started_msg` and
+  `make_error_msg` gain an optional `smoke_test_result: dict | None`
+  kwarg so the structured outcome travels with the ack/error. Legacy
+  call sites (no kwarg) produce byte-identical messages to before.
+- `api/routers/training.py` — `/training/start` forwards
+  `smoke_test_first` to the worker and bumps the response timeout
+  to 30 minutes when the probe will run (the ~18-minute probe budget
+  plus slack). A worker `EVT_ERROR` carrying `smoke_test_result`
+  surfaces as an HTTP 409 whose `detail` is a structured dict
+  (`{message, smoke_test_result}`) — the frontend detects this shape
+  and opens the failure modal rather than the generic error banner.
+- `training/worker.py` — `_run_smoke_test` coroutine runs the probe
+  in a worker thread via `asyncio.to_thread` so the asyncio loop
+  stays responsive for status pings during the probe. On pass:
+  emits `make_started_msg` with the result attached and spawns the
+  full-run thread as before. On fail: clears `running`, resets the
+  plan status back to `draft` so a retry can relaunch, and sends
+  `make_error_msg` with the structured detail. No full-run side
+  effects fire on a failing gate.
+
+**Frontend:**
+
+- `src/app/models/training.model.ts` — new `SmokeAssertion` and
+  `SmokeTestResult` interfaces matching the backend payload.
+- `src/app/services/api.service.ts` — `startTraining` accepts
+  `smoke_test_first?: boolean` (default true in the POST body) and
+  returns `smoke_test_result?: SmokeTestResult | null` on the
+  success shape.
+- `src/app/training-plans/training-plans.ts` + `.html` + `.scss`:
+  - `smokeTestFirst` signal, initialised to `true`, bound to a
+    checkbox above the Start button labelled "Smoke test first
+    (recommended)" with caption explaining the three assertions.
+  - `startPlan(overrideSmokeFirst?)` threads the checkbox value
+    into the launch payload; `rerunSmokeTest()` re-fires with
+    `true`, `launchAnyway()` uses `false` with a two-click
+    confirmation (first click flips into a `confirmingLaunchAnyway`
+    state; second fires). A single click can't bypass the safety
+    gate by accident.
+  - Error handler detects the `detail.smoke_test_result` shape,
+    stores it in a `smokeFailure` signal, and renders a modal
+    overlay: headline, per-assertion table (name / observed /
+    threshold / PASS|FAIL), and the three action buttons. The
+    generic error banner still renders for legacy string errors
+    (worker busy, etc).
+- `src/app/learning-curves/learning-curves.ts` + `.html` + `.scss`:
+  - `AgentPanel.isSmokeTest: boolean` — true when every row for a
+    given `model_id` carries `smoke_test: true`. Probe panels
+    render with a dashed violet border, 0.75 opacity, and a
+    "SMOKE TEST" chip next to the short-id so operators can tell
+    probe activity from real population activity at a glance
+    (`hard_constraints §16`).
+  - `EpisodeRecord` gains `smoke_test?: boolean` plus
+    `arbs_closed?`, `locked_pnl?`, `naked_pnl?` fields that were
+    already present on the JSONL rows but missing from the TS type.
+
+**Tests:**
+
+- `tests/test_smoke_test.py` (new, 15 tests). Each hard-constraint
+  §15 assertion gets its own class (policy-loss, entropy, arbs-
+  closed) covering pass / at-threshold / fail. Plus aggregate
+  `SmokeResult` tests for the AND-fold, empty-input fallback,
+  deterministic `probe_model_ids` ordering, and `to_dict()`
+  round-trip. One vignette class recreates the gen-2 transformer
+  `0a8cacd3` ep1..ep3 pathology and asserts the gate blocks it.
+- `tests/test_api_training.py::TestSmokeTestGateDTO` (5 new tests).
+  DTO default, flag forwarding to the worker, structured 409 on
+  failure, IPC `make_start_cmd` flag, and `make_error_msg` legacy
+  compatibility.
+- Frontend: `training-plans.spec.ts` gains 8 tests for the smoke-
+  test gate — default-checked checkbox, `smoke_test_first` in the
+  payload, unchecked path, failure-modal rendering, legacy-banner
+  fallback, re-run, two-click Launch Anyway, Cancel.
+
+Full suites:
+
+- `pytest tests/ -q` → **2213 passed**, 7 skipped, 133 deselected,
+  1 xfailed (Session 03 baseline 2194 → +19 net; 15 new in
+  `test_smoke_test.py` + 5 new in `TestSmokeTestGateDTO` minus one
+  pre-existing test whose replacement slotted into the new class
+  structure).
+- `ng test --watch=false` (vitest via Angular CLI) →
+  **564 passed**, 24 skipped, 0 errors. Pre-existing
+  `NG8113: DecimalPipe is not used in LearningCurves` warning
+  remains (not introduced here, out of scope).
+
+Browser verification:
+
+- The gate's real-world exercise requires a full stack (worker +
+  API + frontend) plus ~18 minutes of probe compute per launch
+  attempt. Captured as a follow-up manual validation step in
+  `master_todo.md` Session 04 acceptance line rather than
+  performed inline — the session-prompt "fabricate a failure"
+  approach (`ep1_policy_loss_threshold = 0` override in config)
+  is the cheapest way to exercise the failure-modal path
+  end-to-end and happens naturally during Session 05's launch
+  validation. Gate logic, DTO plumbing, and UI rendering are all
+  covered by the unit + spec tests above.
+
+Not changed: matcher (`env/exchange_matcher.py`), action/obs
+schemas, gene ranges, GA selection, pair sizing, per-pair naked
+aggregation, reward shape (Sessions 01/01b), PPO stability
+(Session 02), entropy control (Session 03). Per
+`hard_constraints §1`, the gate is purely additive.
+
+Gotchas:
+
+- The probe writes to the shared `episodes.jsonl` stream tagged
+  `smoke_test: true`. After a passing probe, the full run appends
+  its own rows behind those. Any analysis script that reads the
+  file must either filter on `smoke_test` or slice by timestamp —
+  naive `open().readlines()` consumers will mix probe and real
+  rows. `sliceToMostRecentRun` in `agent-diagnostic.ts` already
+  handles this since probe and full-run rows share a timestamp
+  cluster.
+- Worker's `_run_smoke_test` resets plan status back to `draft` on
+  failure so the operator can re-edit and relaunch. If the session
+  workflow ever needs a distinct "probe-failed" terminal state,
+  this is the single point to add it.
+- The API's 30-minute launch timeout is a hard ceiling. A probe
+  running longer than that (data-loading stalls, massive days)
+  will raise HTTP 504 and the frontend will surface the generic
+  error banner, not the failure modal. That's the correct
+  outcome — an unresponsive probe should never silently become a
+  pass.
+
+Next: Session 05 (registry reset + activation-plan redraft). Per
+`hard_constraints §26`, Session 05 is operator-gated — the plan
+folder's prompt is instructional, not autonomously runnable.
+
+---
+
 ## Session 03 — Entropy control: halved coefficient + reward centering
 
 **Commit:** `6379362`
