@@ -600,6 +600,23 @@ class PPOTrainer:
 
         self.optimiser = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
 
+        # First-5-update linear LR warmup
+        # (plans/policy-startup-stability, Session 01, 2026-04-18).
+        # Defence-in-depth on top of per-mini-batch advantage
+        # normalisation. The smoke test at the end of Session 01
+        # showed a residual 1.48e+12 episode-1 policy_loss spike with
+        # normalisation alone — the rollout's policy/value variance
+        # on a fresh LSTM still produces a first-update gradient
+        # large enough to shift the action heads. Scaling LR linearly
+        # over the first 5 PPO updates lets the optimiser "ease in"
+        # without adding a new tunable surface (the ramp is fixed,
+        # not a gene). ``self._update_count`` counts how many
+        # ``_ppo_update`` calls have started; warmup_factor reaches
+        # 1.0 on the 5th update and stays there forever after.
+        self._base_learning_rate: float = float(self.lr)
+        self._update_count: int = 0
+        self._lr_warmup_updates: int = 5
+
         # Logging setup
         log_dir = Path(config.get("paths", {}).get("logs", "logs"))
         self.log_dir = log_dir / "training"
@@ -1094,6 +1111,23 @@ class PPOTrainer:
         transitions = rollout.transitions
         n = len(transitions)
 
+        # Linear LR warmup over the first ``_lr_warmup_updates`` PPO
+        # updates (plans/policy-startup-stability, Session 01,
+        # 2026-04-18). On update 0 the optimiser sees lr * 1/5; by
+        # update 4 it sees lr * 5/5 = lr; from update 5 onward the
+        # factor stays at 1.0. Pairs with the per-mini-batch
+        # advantage normalisation in the surrogate-loss branch below;
+        # the smoke test showed normalisation alone left a residual
+        # ≫100 spike on update 0, and the warmup is the defence-in-
+        # depth that brings it down to the bounded regime.
+        warmup_factor = min(
+            1.0,
+            (self._update_count + 1) / float(self._lr_warmup_updates),
+        )
+        for param_group in self.optimiser.param_groups:
+            param_group["lr"] = self._base_learning_rate * warmup_factor
+        self._update_count += 1
+
         # Prepare tensors — build numpy arrays first, then transfer to GPU.
         # Use pinned memory when CUDA is available for faster async transfer.
         obs_np = np.array([t.obs for t in transitions], dtype=np.float32)
@@ -1159,11 +1193,10 @@ class PPOTrainer:
         advantages = advantages.to(self.device)
         returns = returns.to(self.device)
 
-        # Normalise advantages
-        if n > 1:
-            adv_std = advantages.std()
-            if adv_std > 1e-8:
-                advantages = (advantages - advantages.mean()) / adv_std
+        # Per-mini-batch advantage normalisation lives inside the loop
+        # below (plans/policy-startup-stability, Session 01, 2026-04-18).
+        # The prior per-rollout normalisation was dropped in favour of
+        # the literature-standard per-batch recipe — see hard_constraints.md §5.
 
         policy_losses = []
         value_losses = []
@@ -1220,6 +1253,24 @@ class PPOTrainer:
                     )
                 per_head_count += 1
                 values = out.value.squeeze(-1)
+
+                # Per-mini-batch advantage normalisation
+                # (plans/policy-startup-stability, Session 01, 2026-04-18).
+                # Stabilises the PPO update against large-magnitude
+                # rewards that would otherwise produce a first-rollout
+                # policy_loss spike and saturate action heads (most
+                # notably close_signal — see purpose.md, agent
+                # 3e37822e-c9fa). Literature standard: Engstrom et al.
+                # 2020, "Implementation Matters in Deep Policy Gradients".
+                # Ships in stable-baselines3, CleanRL, RLlib. Applied to
+                # the policy-loss branch only; the value loss still uses
+                # the un-normalised returns (hard_constraints.md §6).
+                # ``eps = 1e-8`` guards the degenerate case where every
+                # advantage in the batch is identical (std = 0).
+                if mb_advantages.numel() > 1:
+                    adv_mean = mb_advantages.mean()
+                    adv_std = mb_advantages.std() + 1e-8
+                    mb_advantages = (mb_advantages - adv_mean) / adv_std
 
                 # PPO clipped surrogate
                 ratio = (new_log_probs - mb_old_log_probs).exp()
