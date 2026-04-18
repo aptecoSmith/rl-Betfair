@@ -7,7 +7,7 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ## Session 02 — PPO stability: KL early-stop + ratio clamp + per-arch LR
 
-**Commit:** `<pending>`
+**Commit:** `cc64fbd`
 **Date:** 2026-04-18
 
 What landed — three layered defences against first-update policy
