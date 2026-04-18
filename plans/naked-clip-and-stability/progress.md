@@ -7,7 +7,7 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ## Session 05 — Registry reset + activation-plan redraft
 
-**Commit:** _(fills in post-commit)_
+**Commit:** `853a60c`
 **Date:** 2026-04-18
 
 Archive + reset ahead of the naked-clip-and-stability relaunch.
