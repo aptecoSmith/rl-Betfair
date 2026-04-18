@@ -221,6 +221,36 @@ are UNCHANGED by normalisation — the fix is purely on the
 gradient pathway. Scoreboard rows from before the fix are
 directly comparable to scoreboard rows after.
 
+### Reward centering: units contract (per-step, NOT episode-sum)
+
+`PPOTrainer._update_reward_baseline(x)` expects `x` in
+**per-step reward units** — i.e. the caller must pass
+`sum(training_reward) / n_steps`, not the raw episode sum.
+The EMA stored in `self._reward_ema` is subtracted per-step
+inside `_compute_advantages`:
+
+    centered_reward = tr.training_reward - self._reward_ema
+
+If the caller passes the episode sum, every step's reward gets
+shifted by the whole-episode total, GAE accumulates into
+returns ~`shifted_reward / (1 − γλ)` — orders of magnitude
+larger than anything the value head has been trained on —
+and `value_loss` explodes to O(1e8+) on the very next rollout.
+
+This happened in the 2026-04-18 smoke probe. See
+`plans/naked-clip-and-stability/lessons_learnt.md` "Session 03
+reward centering: units mismatch bug" for the trace
+(predicted value_loss 6.8e+08 vs observed 6.76e+08, within 0.6 %).
+
+The `test_real_ppo_update_feeds_per_step_mean_to_baseline`
+integration test in `tests/test_ppo_trainer.py` spies on
+`_update_reward_baseline` during a real `_ppo_update` call and
+asserts the passed value equals `sum / n_steps`. Do NOT refactor
+it into an isolated helper-driven unit test — unit tests in
+this file mirror the aggregation in a spec helper, so a
+caller-only drift silently passes them. The integration test
+is the load-bearing regression guard.
+
 ---
 
 ## `info["realised_pnl"]` is last-race-only

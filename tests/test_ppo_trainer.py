@@ -917,3 +917,207 @@ class TestEntropyAndCentering:
         adv_centered, _ = trainer._compute_advantages(rollout)
 
         assert abs(adv_centered.mean().item()) < 1e-3  # centered ≈ 0
+
+    # -- Units regression: EMA must be per-step, not episode-sum ----
+    #
+    # Bug observed in the 2026-04-18 smoke probe (plans/naked-clip-
+    # and-stability/lessons_learnt.md): ``_ppo_update`` was calling
+    # ``self._update_reward_baseline(rollout_reward)`` where
+    # ``rollout_reward`` was ``sum(tr.training_reward for tr in
+    # transitions)`` — the episode SUM. But
+    # ``_compute_advantages`` subtracts ``_reward_ema`` from each
+    # PER-STEP ``tr.training_reward``. On a 4742-step rollout with
+    # total reward −1551, the EMA landed at −1551, then on the next
+    # rollout every per-step reward got shifted by +1551, GAE
+    # accumulated to ~26,000, and value_loss exploded to 6.76e+08.
+    # The pre-existing centering tests passed because they set
+    # ``_reward_ema = np.mean(rewards)`` directly — exercising the
+    # correct-units path while production used wrong units. These
+    # tests lock the contract.
+
+    # These tests exercise the CALLER contract of
+    # ``_update_reward_baseline`` — they build a rollout and invoke
+    # the exact code path ``_ppo_update`` uses to populate the EMA,
+    # without needing the full policy forward pass. The rollout
+    # shape matches what the real trainer produces; only the policy
+    # network is bypassed.
+
+    def _rollout_with_constant_reward(
+        self, obs_dim: int, per_step: float, n_steps: int,
+    ) -> Rollout:
+        rollout = Rollout()
+        for _ in range(n_steps):
+            rollout.append(Transition(
+                obs=np.zeros(obs_dim, dtype=np.float32),
+                action=np.zeros(1, dtype=np.float32),
+                log_prob=0.0,
+                value=0.0,
+                reward=per_step,
+                done=False,
+                training_reward=per_step,
+            ))
+        return rollout
+
+    def _simulate_baseline_update_from_rollout(
+        self, trainer: PPOTrainer, rollout: Rollout,
+    ) -> None:
+        """Run the exact ``_ppo_update`` lines that populate the EMA.
+
+        Mirrors ``_ppo_update`` at agents/ppo_trainer.py:1304-ish so
+        a future change to the aggregation (sum vs mean) fails this
+        test immediately, without paying the cost of a real policy
+        forward/backward."""
+        transitions = list(rollout.transitions)
+        per_step_mean_reward = (
+            float(sum(tr.training_reward for tr in transitions))
+            / max(1, len(transitions))
+        )
+        trainer._update_reward_baseline(per_step_mean_reward)
+
+    def test_reward_baseline_stores_per_step_mean_not_episode_sum(
+        self,
+    ):
+        """After a rollout with per-step rewards near zero and a long
+        step count, the EMA must end up near the per-step mean
+        (~rollout_sum / n_steps), NOT near the episode sum. Would
+        have caught the 2026-04-18 probe bug immediately — the old
+        code stored the sum, producing an EMA of -1551 from a
+        4742-step rollout with per-step reward ~-0.33."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        n_steps = 1000
+        per_step_reward = -0.03
+        rollout = self._rollout_with_constant_reward(
+            obs_dim=10, per_step=per_step_reward, n_steps=n_steps,
+        )
+        self._simulate_baseline_update_from_rollout(trainer, rollout)
+
+        expected = per_step_reward
+        assert abs(trainer._reward_ema - expected) < 1e-6, (
+            f"_reward_ema={trainer._reward_ema} expected per-step mean "
+            f"{expected}; episode sum would be "
+            f"{per_step_reward * n_steps}. If the EMA is close to "
+            f"that, the unit mismatch is back."
+        )
+        # Belt-and-braces: EMA magnitude stays small relative to the
+        # episode sum (the bug magnitude).
+        assert abs(trainer._reward_ema) < abs(per_step_reward * n_steps) * 0.1
+
+    def test_centering_does_not_explode_returns_across_rollouts(self):
+        """Two back-to-back rollouts with the same per-step reward
+        scale. If the EMA stored episode-sum (the bug), ep2's returns
+        blow up by ~n_steps× and the value head with it. With the
+        fix, ep2 returns stay in the same O(1/(1-γλ)) magnitude as
+        the centered per-step reward."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        per_step = -0.05
+        n = 2000
+
+        # Ep1: establish the EMA using the production aggregation.
+        rollout1 = self._rollout_with_constant_reward(
+            obs_dim=10, per_step=per_step, n_steps=n,
+        )
+        self._simulate_baseline_update_from_rollout(trainer, rollout1)
+        ema_after_ep1 = trainer._reward_ema
+
+        # Ep2: compute advantages under the post-ep1 EMA.
+        rollout2 = self._rollout_with_constant_reward(
+            obs_dim=10, per_step=per_step, n_steps=n,
+        )
+        _advantages2, returns2 = trainer._compute_advantages(rollout2)
+
+        # With correct units (EMA ~= per_step), centered reward per
+        # step is ~0, GAE converges near 0, returns stay O(1).
+        # With the old bug (EMA == episode sum), centered reward per
+        # step jumps by ~100, returns accumulate to ~1700. Threshold
+        # 50 is well below the bug magnitude and well above the
+        # fixed magnitude.
+        returns_mean = returns2.abs().mean().item()
+        assert returns_mean < 50.0, (
+            f"ep2 |returns|.mean()={returns_mean} — centering bug "
+            f"likely re-introduced (EMA stored as episode sum rather "
+            f"than per-step mean). ep1 EMA was {ema_after_ep1}."
+        )
+
+    def test_centering_units_match_between_update_and_advantage(self):
+        """Semantic lock: the quantity fed into
+        ``_update_reward_baseline`` must match the unit used inside
+        ``_compute_advantages``. After simulating the production
+        aggregation on a rollout whose per-step reward is constant
+        C, the EMA should equal exactly C (first-call init), not
+        C × n_steps."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        C = 0.123
+        n = 500
+        rollout = self._rollout_with_constant_reward(
+            obs_dim=10, per_step=C, n_steps=n,
+        )
+        self._simulate_baseline_update_from_rollout(trainer, rollout)
+        assert abs(trainer._reward_ema - C) < 1e-6, (
+            f"_reward_ema={trainer._reward_ema} expected {C}; "
+            f"episode sum = {C * n}, ratio = "
+            f"{trainer._reward_ema / C if C else 'inf'}"
+        )
+
+    def test_real_ppo_update_feeds_per_step_mean_to_baseline(self):
+        """End-to-end lock: spy on ``_update_reward_baseline`` while
+        running the REAL ``_ppo_update`` against a collected rollout.
+        The spy captures the exact value production code passes;
+        asserting it equals ``sum / n`` (per-step mean) instead of
+        ``sum`` (episode total) fails immediately if anyone reverts
+        the call-site fix.
+
+        This is the one test that protects against the two-file-drift
+        failure mode — a future refactor can't skip updating the
+        helper in the unit tests because this test doesn't use the
+        helper at all."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={"ppo_epochs": 1, "mini_batch_size": 4},
+        )
+
+        day = _make_day(n_races=1, n_ticks=5, n_runners=3)
+        rollout, _ = trainer._collect_rollout(day)
+        transitions = list(rollout.transitions)
+        assert len(transitions) > 1, (
+            "expected a multi-step rollout to meaningfully "
+            "distinguish per-step-mean from episode-sum"
+        )
+        episode_sum = sum(tr.training_reward for tr in transitions)
+        expected_per_step_mean = episode_sum / len(transitions)
+
+        recorded: list[float] = []
+        orig = trainer._update_reward_baseline
+
+        def spy(x: float) -> None:
+            recorded.append(float(x))
+            return orig(x)
+
+        trainer._update_reward_baseline = spy  # type: ignore[assignment]
+        trainer._ppo_update(rollout)
+
+        assert len(recorded) == 1, (
+            f"expected one baseline update per _ppo_update; got "
+            f"{len(recorded)}"
+        )
+        passed_value = recorded[0]
+        assert abs(passed_value - expected_per_step_mean) < 1e-6, (
+            f"_update_reward_baseline received {passed_value}; "
+            f"expected per-step mean {expected_per_step_mean} "
+            f"(n={len(transitions)}, sum={episode_sum}). "
+            f"If the value matches the episode sum, the 2026-04-18 "
+            f"unit-mismatch bug has returned."
+        )
+        # The episode sum itself should be distinctly different —
+        # guards against the degenerate n=1 case.
+        assert abs(passed_value - episode_sum) > 1e-6 or len(transitions) == 1

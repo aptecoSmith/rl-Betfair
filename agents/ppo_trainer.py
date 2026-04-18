@@ -1170,8 +1170,8 @@ class PPOTrainer:
 
     # -- Reward-centering baseline --------------------------------------------
 
-    def _update_reward_baseline(self, episode_reward: float) -> None:
-        """EMA-updated reward baseline.
+    def _update_reward_baseline(self, per_step_mean_reward: float) -> None:
+        """EMA-updated reward baseline, in PER-STEP reward units.
 
         Subtracted from per-step training rewards inside
         ``_compute_advantages`` to prevent the policy from flattening
@@ -1182,14 +1182,22 @@ class PPOTrainer:
         translation. First call initialises on the observed reward
         rather than blending from zero (a zero-initialised EMA
         produces biased advantages for the first rollout).
+
+        UNITS CONTRACT: callers MUST pass a per-step mean, not an
+        episode sum. The subtraction inside ``_compute_advantages`` is
+        per-step; feeding an episode sum shifts each step's reward by
+        the whole-episode total, exploding returns through the GAE
+        accumulator. See
+        ``test_reward_baseline_stores_per_step_mean_not_episode_sum``
+        and plans/naked-clip-and-stability/lessons_learnt.md.
         """
         if not self._reward_ema_initialised:
-            self._reward_ema = float(episode_reward)
+            self._reward_ema = float(per_step_mean_reward)
             self._reward_ema_initialised = True
             return
         self._reward_ema = (
             (1.0 - self._reward_ema_alpha) * self._reward_ema
-            + self._reward_ema_alpha * float(episode_reward)
+            + self._reward_ema_alpha * float(per_step_mean_reward)
         )
 
     # -- PPO update -----------------------------------------------------------
@@ -1286,12 +1294,26 @@ class PPOTrainer:
         returns = returns.to(self.device)
 
         # Reward centering (plans/naked-clip-and-stability §14): update
-        # the EMA baseline with THIS rollout's total training reward
-        # AFTER advantages have been computed, so the current rollout's
-        # advantages use the pre-update EMA (no self-referential
-        # leakage). Once-per-rollout cadence matches the §14 spec.
-        rollout_reward = float(sum(tr.training_reward for tr in transitions))
-        self._update_reward_baseline(rollout_reward)
+        # the EMA baseline with THIS rollout's per-step mean training
+        # reward AFTER advantages have been computed, so the current
+        # rollout's advantages use the pre-update EMA (no
+        # self-referential leakage).
+        #
+        # UNITS: the EMA is in PER-STEP reward units because
+        # ``_compute_advantages`` subtracts ``_reward_ema`` from each
+        # ``tr.training_reward`` (per-step). Feeding the episode SUM
+        # here would create a units mismatch: a long rollout with a
+        # total reward of −1551 would poison ep2+ by shifting every
+        # per-step reward by +1551, which GAE then accumulates into
+        # returns O(tens of thousands), blowing up the value head
+        # (observed 2026-04-18 smoke probe, value_loss 6.8e+08 on
+        # ep2 of a fresh transformer). See
+        # plans/naked-clip-and-stability/lessons_learnt.md.
+        per_step_mean_reward = (
+            float(sum(tr.training_reward for tr in transitions))
+            / max(1, len(transitions))
+        )
+        self._update_reward_baseline(per_step_mean_reward)
 
         # Per-mini-batch advantage normalisation lives inside the loop
         # below (plans/policy-startup-stability, Session 01, 2026-04-18).
