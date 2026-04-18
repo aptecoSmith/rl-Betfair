@@ -2243,8 +2243,20 @@ class BetfairEnv(gymnasium.Env):
             # "shaping only, capped at -weight" regime was the bug we set
             # out to fix). Tune up toward 1.0 once the agent has a reliable
             # arb policy.
-            naked_loss_only = min(0.0, naked_pnl)
-            race_reward_pnl = scalping_locked_pnl + 0.5 * naked_loss_only
+            #
+            # Per-pair aggregation (scalping-naked-asymmetry, 2026-04-18):
+            # prior formula used ``min(0, naked_pnl)`` on the race-wide
+            # aggregate, so a lucky winning naked could cancel an unrelated
+            # losing naked in the same race. Now each naked aggressive leg
+            # contributes its own ``min(0, pnl)``, so individual losses are
+            # never masked by unrelated luck. Aggregate ``naked_pnl`` is
+            # kept for RaceRecord logging below; only the reward branch
+            # switches to per-pair.
+            naked_per_pair = bm.get_naked_per_pair_pnls(
+                market_id=race.market_id,
+            )
+            naked_loss_term = sum(min(0.0, p) for p in naked_per_pair)
+            race_reward_pnl = scalping_locked_pnl + 0.5 * naked_loss_term
         else:
             race_reward_pnl = race_pnl
         self._day_reward_pnl += race_reward_pnl

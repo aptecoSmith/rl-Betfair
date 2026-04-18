@@ -92,7 +92,17 @@ into two buckets and accumulates each separately for diagnostics:
   losses, with naked windfalls still excluded. The asymmetry preserves
   "no reward for directional luck" while making naked losses cost real
   reward (instead of just a budget-normalised shaping cap that the agent
-  can outrun by sizing pairs aggressively).
+  can outrun by sizing pairs aggressively). **Scalping mode
+  (2026-04-18 — `scalping-naked-asymmetry`):** the naked term is now
+  computed per-pair:
+  `scalping_locked_pnl + sum(min(0, per_pair_naked_pnl))`. The
+  2026-04-15 aggregate let lucky winning nakeds cancel unrelated
+  losing nakeds within a race (`min(0, +£100 − £80) = £0`); the
+  per-pair aggregation makes every individual naked loss cost reward
+  (`min(0, +£100) + min(0, −£80) = −£80`) and forces the agent to
+  actually substitute `close_signal` for nakeds rather than rolling
+  the dice on aggregates. The 0.5× softening factor from 2026-04-15
+  is preserved on the new per-pair sum.
 - **Shaped** = `early_pick_bonus + (precision − 0.5) × precision_bonus
   − bet_count × efficiency_penalty`. These are training-signal
   contributions that shouldn't (in expectation) add or remove money.

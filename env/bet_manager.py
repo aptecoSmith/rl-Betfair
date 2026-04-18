@@ -1296,6 +1296,40 @@ class BetManager:
             })
         return results
 
+    def get_naked_per_pair_pnls(self, market_id: str = "") -> list[float]:
+        """Per-pair realised P&L of every naked aggressive leg.
+
+        A "naked" pair is one whose aggressive leg matched but whose
+        paired passive never filled before race-off (unfilled passives
+        are cancelled at race-off so they never appear as settled
+        bets). The returned list contains one entry per such
+        aggressive leg, in ``self.bets`` insertion order, holding that
+        leg's settled ``pnl``.
+
+        Read-only and deterministic. Used by
+        ``env.betfair_env._settle_current_race`` to compute the
+        asymmetric per-pair naked penalty introduced by the
+        ``scalping-naked-asymmetry`` plan (2026-04-18): replacing the
+        aggregate ``min(0, sum(naked_pnls))`` with
+        ``sum(min(0, per_pair_pnl))`` so individual naked losses can
+        no longer be cancelled by lucky unrelated naked wins in the
+        same race.
+
+        A leg whose ``pnl`` is None (not yet settled) is skipped — the
+        caller invokes this AFTER per-bet settlement has populated
+        ``Bet.pnl`` for every matched bet.
+        """
+        pairs = self.get_paired_positions(market_id=market_id)
+        out: list[float] = []
+        for p in pairs:
+            if p["complete"]:
+                continue
+            agg = p["aggressive"]
+            if agg is None or agg.pnl is None:
+                continue
+            out.append(float(agg.pnl))
+        return out
+
     def get_naked_exposure(self, market_id: str = "") -> float:
         """Sum of worst-case loss on unpaired matched bets.
 

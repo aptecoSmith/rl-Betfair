@@ -780,6 +780,152 @@ class TestScalpingReward:
         assert info["locked_pnl"] == 0.0
 
 
+# ── Per-pair naked P&L asymmetry (scalping-naked-asymmetry, 2026-04-18) ─────
+
+
+class TestPerPairNakedAsymmetry:
+    """Covers the 2026-04-18 switch from race-aggregate to per-pair
+    naked-loss accounting in the scalping raw reward.
+
+    Pre-fix:  raw += 0.5 × min(0, sum(naked_pnls))          (aggregate)
+    Post-fix: raw += 0.5 × sum(min(0, per_pair_naked_pnl))  (per-pair)
+
+    The per-pair form stops lucky winning nakeds from masking unrelated
+    losing nakeds in the same race. All five cases from
+    ``plans/scalping-naked-asymmetry/hard_constraints.md §12``.
+    """
+
+    def _place_naked_back(
+        self,
+        bm: BetManager,
+        selection_id: int,
+        pair_id: str,
+        *,
+        price: float = 4.0,
+        stake: float = 10.0,
+        market_id: str = "m1",
+    ) -> None:
+        """Place an aggressive back with ``pair_id`` and no paired lay.
+
+        That alone satisfies ``get_paired_positions`` → incomplete pair
+        (``complete=False``, aggressive=the back leg) which is exactly
+        the "naked" condition the accessor looks for.
+        """
+        bm.place_back(
+            _make_runner_snap(
+                selection_id, ltp=price, back_price=price,
+                lay_price=price + 0.1, size=1000.0,
+            ),
+            stake=stake, market_id=market_id, pair_id=pair_id,
+        )
+
+    def test_two_naked_pairs_one_win_one_loss_no_cancellation(self):
+        """Win+loss pair set: naked term = sum(min(0, …)) = −loss,
+        NOT min(0, win+loss) = 0. This is the whole point of the
+        plan."""
+        bm = BetManager(starting_budget=1000.0)
+        # Pair A: naked back on sid=101 @ 4.0, £10 stake → wins +£30
+        # if 101 wins.
+        self._place_naked_back(bm, 101, "pp_win", price=4.0, stake=10.0)
+        # Pair B: naked back on sid=202 @ 4.0, £10 stake → loses
+        # −£10 if 202 loses.
+        self._place_naked_back(bm, 202, "pp_lose", price=4.0, stake=10.0)
+
+        bm.settle_race({101}, market_id="m1", commission=0.0)
+
+        pnls = bm.get_naked_per_pair_pnls(market_id="m1")
+        assert len(pnls) == 2
+        # Two distinct per-pair P&Ls: one win (+30), one loss (−10).
+        assert sorted(pnls) == [pytest.approx(-10.0), pytest.approx(30.0)]
+
+        # Pre-fix aggregate: min(0, 30 − 10) = 0 — no penalty.
+        aggregate_term = min(0.0, sum(pnls))
+        assert aggregate_term == pytest.approx(0.0)
+        # Post-fix per-pair: min(0, 30) + min(0, −10) = −10 — the
+        # loss is not masked.
+        per_pair_term = sum(min(0.0, p) for p in pnls)
+        assert per_pair_term == pytest.approx(-10.0)
+
+    def test_single_losing_naked_unchanged(self):
+        """Single losing naked: pre and post fix give the same −loss."""
+        bm = BetManager(starting_budget=1000.0)
+        self._place_naked_back(bm, 202, "pp_lose", price=4.0, stake=10.0)
+
+        bm.settle_race({101}, market_id="m1", commission=0.0)
+
+        pnls = bm.get_naked_per_pair_pnls(market_id="m1")
+        assert pnls == [pytest.approx(-10.0)]
+        assert min(0.0, sum(pnls)) == pytest.approx(-10.0)
+        assert sum(min(0.0, p) for p in pnls) == pytest.approx(-10.0)
+
+    def test_single_winning_naked_unchanged(self):
+        """Single winning naked: pre and post fix give the same zero."""
+        bm = BetManager(starting_budget=1000.0)
+        self._place_naked_back(bm, 101, "pp_win", price=4.0, stake=10.0)
+
+        bm.settle_race({101}, market_id="m1", commission=0.0)
+
+        pnls = bm.get_naked_per_pair_pnls(market_id="m1")
+        assert pnls == [pytest.approx(30.0)]
+        assert min(0.0, sum(pnls)) == pytest.approx(0.0)
+        assert sum(min(0.0, p) for p in pnls) == pytest.approx(0.0)
+
+    def test_all_completed_no_naked_contribution(self):
+        """A race whose every pair completed contributes zero."""
+        bm = BetManager(starting_budget=1000.0)
+        # Complete pair: back £10 @ 5.0, lay £10 @ 4.6 on sid=101.
+        bm.place_back(
+            _make_runner_snap(
+                101, ltp=5.0, back_price=5.0, lay_price=5.2, size=200.0,
+            ),
+            stake=10.0, market_id="m1", pair_id="pp_done",
+        )
+        bm.place_lay(
+            _make_runner_snap(
+                101, ltp=4.5, back_price=4.5, lay_price=4.6, size=200.0,
+            ),
+            stake=10.0, market_id="m1", pair_id="pp_done",
+        )
+        bm.settle_race({101}, market_id="m1", commission=0.05)
+
+        pnls = bm.get_naked_per_pair_pnls(market_id="m1")
+        assert pnls == []
+        assert sum(min(0.0, p) for p in pnls) == 0.0
+
+    def test_random_zero_ev_nakeds_term_is_non_positive(self):
+        """Sample naked P&Ls from a zero-EV symmetric distribution.
+
+        The per-pair penalty is ≤ 0 by construction (each individual
+        loss contributes a negative amount; wins contribute 0). Sanity
+        check that the aggregation preserves the asymmetric design
+        intent from ``scalping-asymmetric-hedging``'s purpose.md —
+        the accessor consumes realised P&Ls; the plan's ≤0 guarantee
+        is what this assertion verifies.
+
+        Also asserts the weaker statistical property: the mean of the
+        term over many independent samples is strictly negative (the
+        punishment lands on losers), confirming that the per-pair
+        form is BY DESIGN more punitive than the pre-fix aggregate on
+        heterogeneous naked books.
+        """
+        rng = np.random.default_rng(seed=20260418)
+        per_pair_terms = []
+        for _ in range(200):
+            samples = rng.normal(0.0, 10.0, size=5).tolist()
+            term = sum(min(0.0, p) for p in samples)
+            per_pair_terms.append(term)
+            assert term <= 0.0, f"per-pair term must be ≤ 0, got {term}"
+
+        # Strictly negative in expectation (average-of-loss-only on a
+        # zero-mean draw is ≤ 0 with equality iff all samples ≥ 0 —
+        # vanishingly unlikely over 200 × 5 draws).
+        mean_term = sum(per_pair_terms) / len(per_pair_terms)
+        assert mean_term < -1.0, (
+            f"expected strictly negative mean naked term under "
+            f"zero-EV sampling, got {mean_term:.3f}"
+        )
+
+
 # ── Session 3: gene / hyperparameter integration ───────────────────────────
 
 

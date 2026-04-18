@@ -345,14 +345,17 @@ class TestExplicitPriceJunkFilterRelaxed:
 
 
 class TestAsymmetricNakedLossReward:
-    """The raw reward in scalping mode is now
-    ``locked_pnl + 0.5 * min(0, naked_pnl)``. Losses count (at 0.5×);
-    windfalls remain excluded."""
+    """The raw reward in scalping mode is
+    ``locked_pnl + 0.5 * sum(min(0, per_pair_naked_pnl))``
+    (per-pair aggregation, 2026-04-18 ``scalping-naked-asymmetry``).
+    Individual naked losses count (at 0.5×); windfalls remain
+    excluded; wins no longer cancel unrelated losses."""
 
     def test_naked_loss_subtracted_from_raw_at_half_factor(self,
                                                             scalping_config):
         """Drive a single naked-back episode where the runner LOSES so
-        naked_pnl < 0, and verify raw_pnl_reward == 0.5 * naked_pnl."""
+        the incomplete pair's aggressive leg settles negative, and
+        verify ``raw_pnl_reward == 0.5 * per_pair_naked_loss``."""
         cfg = dict(scalping_config)
         cfg["reward"] = dict(cfg["reward"])
         # Strip shaping so raw_pnl_reward is the only thing we measure.
@@ -362,7 +365,8 @@ class TestAsymmetricNakedLossReward:
         cfg["reward"]["efficiency_penalty"] = 0.0
 
         # Force the synthetic race winner to be a runner OTHER than 101
-        # so the agent's back on 101 loses → naked_pnl < 0.
+        # so the agent's back on 101 loses → the incomplete pair's
+        # aggressive leg settles at a loss.
         day = _make_day(n_races=1, n_pre_ticks=3)
         for race in day.races:
             race.winner_selection_id = 102
@@ -377,11 +381,15 @@ class TestAsymmetricNakedLossReward:
         env.reset()
         env.step(a)
 
-        # Strip pair_ids from matched bets so the lay leg, if any, is
-        # treated as naked too — we want a clean naked-loss episode.
+        # Keep pair_ids intact — scalping-mode bets are always paired,
+        # and the per-pair accessor needs the aggressive leg's pair_id
+        # to classify it as a naked pair. Clear the passive_book so the
+        # resting lay can't match on subsequent ticks (would turn the
+        # pair complete and change the arithmetic). Previous iteration
+        # of this test stripped pair_ids to force the old
+        # ``race_pnl - locked - closed`` aggregate path; that path is
+        # now gone (2026-04-18 ``scalping-naked-asymmetry``).
         bm = env.bet_manager
-        for b in bm.bets:
-            b.pair_id = None
         bm.passive_book._orders.clear()
         bm.passive_book._orders_by_sid.clear()
 
@@ -395,8 +403,8 @@ class TestAsymmetricNakedLossReward:
         assert info["naked_pnl"] < 0.0
         assert info["arbs_completed"] == 0
         assert info["locked_pnl"] == pytest.approx(0.0)
-        # raw must be 0.5 * naked_pnl + terminal bonus (which we zeroed),
-        # so just 0.5 * naked_pnl.
+        # With exactly one naked pair, sum(min(0, per_pair)) ==
+        # per_pair_loss == aggregate naked_pnl, so raw = 0.5 × naked_pnl.
         expected_raw = 0.5 * info["naked_pnl"]
         assert info["raw_pnl_reward"] == pytest.approx(expected_raw, abs=1e-6)
 
