@@ -93,5 +93,23 @@ high-variance heads) or a short value-function bootstrap before the
 policy update fires. Out of scope for this plan per
 `hard_constraints.md` §-out-of-scope list.
 
-**Commit:** (to be filled in on commit).
+**Commit:** `8b8ca67`.
 
+---
+
+## Session 02 — CLAUDE.md + activation reset (2026-04-18)
+
+**Landed.** Docs + JSON edits only — no code, no tests.
+
+- CLAUDE.md gains a new "PPO update stability — advantage
+  normalisation" sub-section under "Reward function: raw vs
+  shaped". Cross-links to Session 01's commit (`8b8ca67`).
+- All four activation plans
+  (`activation-A-baseline`, `activation-B-001/010/100`) reset
+  to draft state via direct JSON edit. Verified each has
+  `status=draft`, `outcomes=0`. `activation-A-baseline` was
+  `status=running` from the aborted 2026-04-18 morning launch;
+  the other three were already `draft`.
+- The plan folder is now closed. Next operator action: launch
+  activation-A-baseline and watch the learning-curves panel
+  for the success criteria documented in `purpose.md`.

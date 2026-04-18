@@ -177,6 +177,30 @@ random betting, which taught the agent to bet more without caring
 whether its bets were profitable. That's the opposite of what you
 want.
 
+## PPO update stability — advantage normalisation
+
+The PPO update normalises the per-mini-batch advantage tensor
+to mean=0, std=1 before the surrogate-loss calculation:
+
+    adv_mean = advantages.mean()
+    adv_std  = advantages.std() + 1e-8
+    advantages = (advantages - adv_mean) / adv_std
+
+This is load-bearing for any training run with large-magnitude
+rewards (every scalping run — typical episode rewards land in
+the ±£500 range, which without normalisation produces
+gradients large enough to saturate action-head outputs on the
+first PPO update). Without it, fresh-init agents reliably
+exploded with `policy_loss` in the 10⁴–10¹⁴ range on episode 1
+and lost the ability to ever fire `close_signal` /
+`requote_signal` again — see
+`plans/policy-startup-stability/` (commit `8b8ca67`).
+
+Reward magnitudes in `episodes.jsonl` and `info["raw_pnl_reward"]`
+are UNCHANGED by normalisation — the fix is purely on the
+gradient pathway. Scoreboard rows from before the fix are
+directly comparable to scoreboard rows after.
+
 ---
 
 ## `info["realised_pnl"]` is last-race-only
