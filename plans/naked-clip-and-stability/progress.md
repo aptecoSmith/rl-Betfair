@@ -5,6 +5,155 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ---
 
+## Session 03 — Entropy control: halved coefficient + reward centering
+
+**Commit:** `6379362`
+**Date:** 2026-04-18
+
+What landed — two coordinated changes in `agents/ppo_trainer.py`
+targeting the monotone-rising entropy (139 → 189) observed across
+transformer `0a8cacd3` ep 1–7:
+
+1. **`entropy_coefficient` default halved.** `hp.get(…, 0.01)` →
+   `hp.get(…, 0.005)` at line ~482. With the per-mini-batch advantage
+   normalisation from commit `8b8ca67` making the surrogate-loss term
+   O(1), a 0.01 entropy bonus was dominating the gradient and
+   flattening the policy under uniformly-negative rewards. Fresh-init
+   default only — GA gene range for `entropy_coefficient` is
+   unchanged per `hard_constraints.md §13`. Inherited agents that
+   already have a gene-expressed value carry that value through; the
+   change only bites fresh-init agents (every agent after the
+   Session 05 registry reset).
+2. **Reward centering.** New EMA baseline state on `PPOTrainer`:
+
+   ```python
+   self._reward_ema: float = 0.0
+   self._reward_ema_alpha: float = 0.01
+   self._reward_ema_initialised: bool = False
+   ```
+
+   New helper `_update_reward_baseline(episode_reward)`:
+   first-observed-reward init, then EMA blend with α=0.01. The
+   zero-init path is explicitly avoided — biased-zero EMA produces
+   biased advantages for the first rollout.
+
+   Subtraction point is inside `_compute_advantages`: the GAE delta
+   becomes `delta = (tr.training_reward - self._reward_ema) +
+   gamma * next_value - tr.value`. EMA update cadence is once per
+   call to `_ppo_update`, AFTER advantages are computed, so the
+   current rollout uses the pre-update EMA (no self-referential
+   leakage). The running sum passed to the baseline is
+   `sum(tr.training_reward for tr in transitions)` — the rollout-
+   level training reward.
+
+   Per `hard_constraints.md §14`, centering MUST NOT change
+   advantage ordering within a rollout. The constant subtraction is
+   a pure translation of returns that the per-mini-batch advantage
+   normalisation downstream erases in expectation — verified by a
+   pytest.
+
+Tests — new class `TestEntropyAndCentering` in
+`tests/test_ppo_trainer.py` (6 tests):
+
+- `test_entropy_default_is_halved` — fresh PPOTrainer with no hp
+  gives `entropy_coeff == 0.005`.
+- `test_entropy_explicit_hp_overrides_default` — `hp={
+  "entropy_coefficient": 0.02}` still wins (GA path intact).
+- `test_reward_baseline_initialises_on_first_episode` — first call
+  sets EMA to the observed value exactly; second call applies the
+  `0.99 × old + 0.01 × new` blend.
+- `test_reward_baseline_ema_update_is_monotonic` — monotone reward
+  sequence → monotone EMA.
+- `test_centering_preserves_advantage_ordering` — load-bearing
+  principled check per `hard_constraints §14`. Synthetic
+  terminal-at-every-step rollout with `value=0`: advantage_t equals
+  `r_t - ema` (delta collapses to `r_t - ema` at every done
+  boundary, `last_gae` resets). Per-mini-batch normalisation
+  subtracts the mean; the constant `ema` cancels; centered and
+  uncentered normalised advantages agree to `1e-5` tolerance.
+- `test_centering_fixes_uniformly_negative_rewards` — synthetic
+  rollout with rewards in [-900, -200] (transformer `0a8cacd3`
+  scale). Un-centered pre-normalisation advantages have mean
+  ≪ -300; centered advantages (with EMA set to the reward mean)
+  have mean ≈ 0. Sanity-check that centering does what we think
+  it does before normalisation gets to it.
+
+Existing `TestPPOTrainerInit.test_default_hyperparams` updated to
+assert `entropy_coeff == 0.005` (the sole existing test that
+pinned the old default).
+
+Regression guards (all still green):
+
+- `tests/test_ppo_advantage_normalisation.py` — 8 tests PASS. The
+  per-mini-batch normalisation from `policy-startup-stability`
+  still fires; centering slots in FRONT of it, doesn't replace it.
+- `tests/test_ppo_stability.py` — 16 tests PASS (Session 02 KL
+  early-stop + ratio clamp + per-arch LR + warmup coverage).
+- `tests/test_ppo_trainer.py` — 42 tests PASS (36 pre-existing +
+  6 new).
+
+Full suite: `pytest tests/ -q` → **2194 passed**, 7 skipped, 133
+deselected, 1 xfailed (Session 02 baseline 2188 → +6 for the new
+`TestEntropyAndCentering` class).
+
+Qualitative probe (documented here per session prompt §4; not a
+pytest). Transformer policy (seed 0), 15 synthetic episodes per
+rollout, rewards drawn from U[-900, +300] (transformer `0a8cacd3`
+ep 1–3 magnitude), matched log-prob pattern so `ratio=1` on the
+first minibatch:
+
+| ep | policy_loss | entropy | approx_kl | epochs | reward_ema |
+|---|---|---|---|---|---|
+| 1 | −0.0016 | 79.4597 | 0.0012 | 4 | −3724.660 |
+| 2 | −0.0002 | 79.4575 | −0.0003 | 4 | −3727.556 |
+| 3 | +0.0000 | 79.4563 | 0.0001 | 4 | −3734.690 |
+
+Both session-prompt assertions pass:
+
+- **Ep 1 `|policy_loss|` = 0.0016 ≪ 100** (compare to `1.04e17` in
+  the untreated transformer `0a8cacd3` run — the combined Session
+  02 defences + this session's centering squash the first-update
+  explosion at this reward scale).
+- **Ep 3 entropy (79.4563) ≤ Ep 1 entropy (79.4597)** —
+  monotonically non-increasing across the probe, flipping the
+  rising-entropy pathology.
+
+This is the "Session 02 + Session 03 combined" acceptance check
+from `master_todo.md` (qualitative, not gate-blocking). The
+smoke-test gate (Session 04) will apply the same assertions in
+production.
+
+Not changed: matcher, reward shape (Sessions 01/01b), action/obs
+schemas, gene ranges, GA selection, pair sizing, per-pair naked
+aggregation, KL early-stop/ratio-clamp/per-arch-LR (Session 02),
+entropy-floor controller (`_entropy_coeff_base` and friends). Per
+`hard_constraints §1`, §13.
+
+Gotchas:
+
+- The entropy-floor controller (from arb-improvements Session 2)
+  uses `self._entropy_coeff_base = float(self.entropy_coeff)` to
+  snapshot the baseline at init. The halved default flows through
+  here naturally — the controller's scaling ratio is unchanged,
+  only the base it scales from halves. No additional plumbing
+  needed.
+- Reward centering subtracts per-step, not per-episode. For
+  rollouts where reward is concentrated at terminal steps (typical
+  scalping), only the terminal-step delta meaningfully shifts
+  (non-terminal rewards are 0 and the baseline is small relative
+  to the terminal magnitude). The mathematical "pure translation"
+  property is only exact when `done=True` at every step OR when
+  `gamma*lambda=0`; the pytest constructs the former. In general
+  use, the approximation is close enough that per-mini-batch
+  normalisation still erases the bulk of the shift in expectation
+  — which is the regime centering targets.
+
+Next: Session 04 (smoke-test gate — UI tickbox + 2-agent × 3-ep
+probe + assertion harness). Blocked on operator review of this
+commit.
+
+---
+
 ## Session 02 — PPO stability: KL early-stop + ratio clamp + per-arch LR
 
 **Commit:** `cc64fbd`
