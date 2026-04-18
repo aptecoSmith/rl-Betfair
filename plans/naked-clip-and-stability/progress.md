@@ -5,6 +5,99 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ---
 
+## Session 05 — Registry reset + activation-plan redraft
+
+**Commit:** _(fills in post-commit)_
+**Date:** 2026-04-18
+
+Archive + reset ahead of the naked-clip-and-stability relaunch.
+Operator-gated per `hard_constraints §26` — this session ends at
+the commit; the launch itself is the operator's action (click
+Launch on `activation-A-baseline` with "Smoke test first" ticked).
+
+**Archived** (in `registry/archive_20260418T193948Z/`):
+
+- `registry/models.db` — the pre-reset gen-2 state containing the
+  transformer `0a8cacd3` collapse history, naked-asymmetry rows,
+  and the GA seed population.
+- `registry/weights/` — 51 `.pt` files (including one `.backup-*`
+  weight from the 2026-04-17 asymmetry reset).
+- `registry/training_plans/` — copy of the plan JSONs at the
+  moment of archive (status snapshot preserved for post-mortem).
+- `logs/training/episodes.jsonl` →
+  `logs/training/episodes.pre-naked-clip-stability-20260418T193948Z.jsonl`
+  (~979 KB of episode rows from the aborted gen-2 run).
+
+Per `hard_constraints §19`, nothing is deleted — the archive is a
+frozen reference for post-mortem comparisons against the fresh
+run.
+
+**Fresh registry:**
+
+- New `registry/models.db` initialised via `ModelStore()` — the
+  application's own init path (schema = `_SCHEMA_SQL` in
+  `registry/model_store.py`, source of truth per §17). Verified
+  `select count(*) from models` → **0**; five core tables
+  present (`models`, `evaluation_runs`, `evaluation_days`,
+  `genetic_events`, `exploration_runs`).
+- `registry/weights/` recreated empty.
+- `logs/training/episodes.jsonl` truncated to 0 bytes.
+
+**Activation plans redrafted** — all four (`activation-A-baseline`,
+`activation-B-001`, `activation-B-010`, `activation-B-100`) now
+carry `status='draft'`, `started_at=None`, `completed_at=None`,
+`current_generation=None`, `current_session=0`, `outcomes=[]` per
+`hard_constraints §18`. The `activation-A-baseline` plan was
+`running` with `current_generation=2, current_session=2,
+outcomes=[2]` before this session — operator had stopped the run
+per `purpose.md`, this reset clears the runtime state while
+preserving the plan's `hp_ranges`, `reward_overrides`, and other
+configuration. The `training_plans/` folder is gitignored, so the
+JSON edits don't appear in the commit diff (same pattern as
+`f0fc171`).
+
+Not changed: the plan's configuration knobs (`population_size`,
+`n_generations`, `arch_mix`, `hp_ranges`, `reward_overrides`,
+`seed`, `name`, `notes`, `plan_id`) — only the runtime/status
+fields were reset.
+
+**Pre-reset state** (for audit trail):
+
+| Plan | Status | Generation | Session | Outcomes |
+|---|---|---|---|---|
+| activation-A-baseline | running | 2 | 2 | 2 |
+| activation-B-001 | draft | — | 0 | 0 |
+| activation-B-010 | draft | — | 0 | 0 |
+| activation-B-100 | draft | — | 0 | 0 |
+
+**Plan closure:**
+
+Sessions 01 through 04 have all landed (commits `e0799a4`,
+`a4f689a`, `cc64fbd`, `6379362`, `de55a9f`). Session 05 is the
+final deliverable before operator launch. `plans/INDEX.md` row 16
+already carries the plan summary; no new index entry needed.
+
+Hand-off to operator (from the session prompt):
+
+1. Start the admin UI + API.
+2. Open the training-launch page for `activation-A-baseline`.
+3. Confirm "Smoke test first" is checked (default per Session 04).
+4. Click Launch.
+5. Watch the probe run in the learning-curves panel (badged
+   smoke-test rows).
+6. On probe pass: full population launches. Watch for the
+   validation criteria in `master_todo.md` "After Session 05":
+   no ep-1 `policy_loss > 100`, entropy trending downward,
+   `arbs_closed > 0` and `arbs_closed / arbs_naked > 0.3` on at
+   least one agent.
+7. Capture findings in this `progress.md` under a "Validation"
+   entry — commit hash, outcome, next step.
+
+Per `hard_constraints §28`, the launch itself is NOT bundled into
+this commit.
+
+---
+
 ## Session 04 — Smoke-test gate (UI tickbox + assertion harness)
 
 **Commit:** `de55a9f`
