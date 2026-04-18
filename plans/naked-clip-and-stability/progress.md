@@ -7,7 +7,7 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ## Session 01 — reward shape (naked winner clip + close bonus + full loss in raw)
 
-**Commit:** _TBD — see git log_
+**Commit:** `e0799a4`
 **Date:** 2026-04-18
 
 What landed:
