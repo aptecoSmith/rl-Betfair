@@ -298,7 +298,7 @@ class TestPPOTrainerInit:
         assert trainer.gamma == 0.99
         assert trainer.gae_lambda == 0.95
         assert trainer.clip_epsilon == 0.2
-        assert trainer.entropy_coeff == 0.01
+        assert trainer.entropy_coeff == 0.005
         assert trainer.max_grad_norm == 0.5
         assert trainer.ppo_epochs == 4
 
@@ -786,3 +786,134 @@ class TestGradientClipping:
         for p in policy.parameters():
             if p.grad is not None:
                 assert torch.isfinite(p.grad).all()
+
+
+class TestEntropyAndCentering:
+    """Session 03 — entropy coefficient default halved + reward centering.
+
+    plans/naked-clip-and-stability/session_prompts/03_entropy_and_centering.md
+    """
+
+    def test_entropy_default_is_halved(self):
+        """Fresh PPOTrainer with no explicit ``entropy_coefficient`` hp
+        picks up the halved default (0.005 per §13)."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+        assert trainer.entropy_coeff == 0.005
+
+    def test_entropy_explicit_hp_overrides_default(self):
+        """Explicit ``entropy_coefficient`` hp still wins (GA path)."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config, hyperparams={"entropy_coefficient": 0.02},
+        )
+        assert trainer.entropy_coeff == 0.02
+
+    def test_reward_baseline_initialises_on_first_episode(self):
+        """First call sets EMA to the observed value exactly; second
+        call applies the EMA blend (α=0.01)."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        assert trainer._reward_ema == 0.0
+        assert trainer._reward_ema_initialised is False
+
+        trainer._update_reward_baseline(42.0)
+        assert trainer._reward_ema == 42.0
+        assert trainer._reward_ema_initialised is True
+
+        trainer._update_reward_baseline(-58.0)
+        expected = 0.99 * 42.0 + 0.01 * (-58.0)
+        assert abs(trainer._reward_ema - expected) < 1e-9
+
+    def test_reward_baseline_ema_update_is_monotonic(self):
+        """A monotonically-increasing reward sequence yields a
+        monotonically-increasing EMA."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        rewards = [0.0, 10.0, 20.0, 50.0, 100.0, 200.0]
+        ema_trace: list[float] = []
+        for r in rewards:
+            trainer._update_reward_baseline(r)
+            ema_trace.append(trainer._reward_ema)
+
+        for i in range(1, len(ema_trace)):
+            assert ema_trace[i] >= ema_trace[i - 1]
+
+    def test_centering_preserves_advantage_ordering(self):
+        """Synthetic rollout where every transition is terminal
+        (done=True, value=0). Delta_t = r_t - ema, last_gae resets at
+        each done → advantage_t = r_t - ema. Per-mini-batch
+        normalisation subtracts the mean and divides by std; the
+        constant ``ema`` cancels, so centered and uncentered
+        normalised advantages agree to floating-point tolerance."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        rewards = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        rollout = Rollout()
+        for r in rewards:
+            rollout.append(Transition(
+                obs=np.zeros(10, dtype=np.float32),
+                action=np.zeros(1, dtype=np.float32),
+                log_prob=0.0,
+                value=0.0,
+                reward=r,
+                done=True,
+                training_reward=r,
+            ))
+
+        # Uncentered pass: EMA = 0 (not initialised), so no subtraction.
+        adv_uncentered, _ = trainer._compute_advantages(rollout)
+
+        # Centered pass: force a non-zero EMA.
+        trainer._reward_ema = 4.5
+        trainer._reward_ema_initialised = True
+        adv_centered, _ = trainer._compute_advantages(rollout)
+
+        def normalise(t: torch.Tensor) -> torch.Tensor:
+            return (t - t.mean()) / (t.std() + 1e-8)
+
+        norm_unc = normalise(adv_uncentered)
+        norm_cen = normalise(adv_centered)
+        assert torch.allclose(norm_unc, norm_cen, atol=1e-5)
+
+    def test_centering_fixes_uniformly_negative_rewards(self):
+        """Rollout with all rewards in [-900, -200] (transformer
+        0a8cacd3 scale). After centering + per-mini-batch
+        normalisation, advantages have mean ≈ 0 (normalisation does
+        that regardless); without centering the UN-NORMALISED
+        advantage tensor is strongly negative-biased. This is the
+        sanity-check that centering shifts the pre-normalisation
+        signal the way we expect."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        rewards = [-900.0, -750.0, -600.0, -400.0, -350.0, -250.0, -220.0, -210.0]
+        rollout = Rollout()
+        for r in rewards:
+            rollout.append(Transition(
+                obs=np.zeros(10, dtype=np.float32),
+                action=np.zeros(1, dtype=np.float32),
+                log_prob=0.0,
+                value=0.0,
+                reward=r,
+                done=True,
+                training_reward=r,
+            ))
+
+        adv_uncentered, _ = trainer._compute_advantages(rollout)
+        assert adv_uncentered.mean().item() < -300.0  # strongly negative
+
+        trainer._reward_ema = float(np.mean(rewards))
+        trainer._reward_ema_initialised = True
+        adv_centered, _ = trainer._compute_advantages(rollout)
+
+        assert abs(adv_centered.mean().item()) < 1e-3  # centered ≈ 0

@@ -479,7 +479,15 @@ class PPOTrainer:
         self.gamma = hp.get("gamma", 0.99)
         self.gae_lambda = hp.get("gae_lambda", 0.95)
         self.clip_epsilon = hp.get("ppo_clip_epsilon", 0.2)
-        self.entropy_coeff = hp.get("entropy_coefficient", 0.01)
+        # Default halved 2026-04-18 per
+        # plans/naked-clip-and-stability/purpose.md §3 — with
+        # per-mini-batch advantage normalisation in place, 0.01
+        # dominates the surrogate term and flattens the policy
+        # under negative-reward pressure (observed rising entropy
+        # 139→189 across transformer 0a8cacd3 ep 1–7). Gene range
+        # is unchanged; only the fresh-init default halves
+        # (hard_constraints.md §13).
+        self.entropy_coeff = hp.get("entropy_coefficient", 0.005)
         # -- Session 2 (arb-improvements) entropy-floor controller --------
         # Baseline coefficient captured before any adaptive scaling. When
         # ``entropy_floor`` is 0 (default) the controller is a no-op and
@@ -541,6 +549,19 @@ class PPOTrainer:
         # only (surfaces in the returned loss_info dict).
         self._last_kl_early_stop_epoch: int | None = None
         self._last_approx_kl: float = 0.0
+
+        # -- Reward centering (plans/naked-clip-and-stability §14) --------
+        # Running-mean reward baseline, subtracted from per-step
+        # training rewards before advantage computation. Lazy-init on
+        # the first observed episode reward so the first rollout does
+        # not train against a biased zero baseline. A constant
+        # translation of returns cancels under the per-mini-batch
+        # advantage normalisation that already lives in ``_ppo_update``
+        # — centering fixes the "everything negative → explore wider"
+        # pressure without changing advantage ordering in expectation.
+        self._reward_ema: float = 0.0
+        self._reward_ema_alpha: float = 0.01
+        self._reward_ema_initialised: bool = False
 
         # -- Session 1 (arb-improvements) clipping knobs ---------------------
         # Three independent safety nets that default to 0.0 = off. When
@@ -1124,12 +1145,43 @@ class PPOTrainer:
 
             # Session 1: advantage/return computation uses the clipped
             # training signal (equals tr.reward when reward_clip is off).
-            delta = tr.training_reward + self.gamma * next_value - tr.value
+            # Reward centering (plans/naked-clip-and-stability §14):
+            # subtract the EMA baseline so advantages are not biased by
+            # the running reward level. The subtraction is a pure
+            # translation of returns that the per-mini-batch advantage
+            # normalisation downstream erases in expectation — see
+            # ``test_centering_preserves_advantage_ordering``.
+            centered_reward = tr.training_reward - self._reward_ema
+            delta = centered_reward + self.gamma * next_value - tr.value
             last_gae = delta + self.gamma * self.gae_lambda * last_gae
             advantages[t] = last_gae
             returns[t] = last_gae + tr.value
 
         return advantages, returns
+
+    # -- Reward-centering baseline --------------------------------------------
+
+    def _update_reward_baseline(self, episode_reward: float) -> None:
+        """EMA-updated reward baseline.
+
+        Subtracted from per-step training rewards inside
+        ``_compute_advantages`` to prevent the policy from flattening
+        under uniformly-negative rewards (see
+        plans/naked-clip-and-stability/purpose.md §3). The constant
+        subtraction does not change advantage ordering in expectation —
+        per-mini-batch normalisation in ``_ppo_update`` erases any
+        translation. First call initialises on the observed reward
+        rather than blending from zero (a zero-initialised EMA
+        produces biased advantages for the first rollout).
+        """
+        if not self._reward_ema_initialised:
+            self._reward_ema = float(episode_reward)
+            self._reward_ema_initialised = True
+            return
+        self._reward_ema = (
+            (1.0 - self._reward_ema_alpha) * self._reward_ema
+            + self._reward_ema_alpha * float(episode_reward)
+        )
 
     # -- PPO update -----------------------------------------------------------
 
@@ -1223,6 +1275,14 @@ class PPOTrainer:
         advantages, returns = self._compute_advantages(rollout)
         advantages = advantages.to(self.device)
         returns = returns.to(self.device)
+
+        # Reward centering (plans/naked-clip-and-stability §14): update
+        # the EMA baseline with THIS rollout's total training reward
+        # AFTER advantages have been computed, so the current rollout's
+        # advantages use the pre-update EMA (no self-referential
+        # leakage). Once-per-rollout cadence matches the §14 spec.
+        rollout_reward = float(sum(tr.training_reward for tr in transitions))
+        self._update_reward_baseline(rollout_reward)
 
         # Per-mini-batch advantage normalisation lives inside the loop
         # below (plans/policy-startup-stability, Session 01, 2026-04-18).
