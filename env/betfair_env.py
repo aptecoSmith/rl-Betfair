@@ -48,7 +48,12 @@ from env.features import (
     compute_obi,
     compute_traded_delta,
 )
-from env.scalping_math import locked_pnl_per_unit_stake, min_arb_ticks_for_profit
+from env.scalping_math import (
+    equal_profit_back_stake,
+    equal_profit_lay_stake,
+    locked_pnl_per_unit_stake,
+    min_arb_ticks_for_profit,
+)
 from env.tick_ladder import tick_offset, ticks_between
 from training.perf_log import perf_log
 
@@ -1563,22 +1568,36 @@ class BetfairEnv(gymnasium.Env):
         # equal stakes a completed "scalp" nets £0 on the losing branch
         # and a big directional payout on the winning branch: the pair
         # is lucky, not locked. Proper formula (derived from demanding
-        # equal P&L in win and lose outcomes):
+        # equal P&L in win and lose outcomes after commission, see
+        # plans/scalping-equal-profit-sizing/purpose.md):
         #
-        #     S_passive = S_aggressive × P_aggressive / P_passive
+        #     S_lay  = S_back × [P_back × (1 − c) + c] / (P_lay − c)
+        #     S_back = S_lay  × (P_lay − c) / [P_back × (1 − c) + c]
         #
-        # Works symmetrically for BACK→LAY (passive_price < agg_price,
-        # so S_passive > S_aggressive) and LAY→BACK (passive_price >
-        # agg_price, so S_passive < S_aggressive). Guard against a
-        # zero/negative passive_price even though tick_offset should
-        # never produce one.
+        # The earlier `S_back × P_back / P_lay` form (used here until
+        # the equal-profit-sizing plan landed) only equalises *exposure*
+        # when commission is non-zero — it under-locks every scalp by a
+        # factor that grows with commission. Works symmetrically for
+        # BACK→LAY (passive_price < agg_price, so S_passive > S_agg)
+        # and LAY→BACK (passive_price > agg_price, so S_passive < S_agg).
+        # Guard against a zero/negative passive_price even though
+        # tick_offset should never produce one.
         if passive_price is None or passive_price <= 0.0:
             return False
-        passive_stake = (
-            aggressive_bet.matched_stake
-            * aggressive_bet.average_price
-            / passive_price
-        )
+        if aggressive_bet.side is BetSide.BACK:
+            passive_stake = equal_profit_lay_stake(
+                back_stake=aggressive_bet.matched_stake,
+                back_price=aggressive_bet.average_price,
+                lay_price=passive_price,
+                commission=self._commission,
+            )
+        else:
+            passive_stake = equal_profit_back_stake(
+                lay_stake=aggressive_bet.matched_stake,
+                lay_price=aggressive_bet.average_price,
+                back_price=passive_price,
+                commission=self._commission,
+            )
 
         order = bm.passive_book.place(
             runner,
@@ -1723,7 +1742,24 @@ class BetfairEnv(gymnasium.Env):
                   cancelled=True)
             return
 
-        stake_to_replace = target.requested_stake
+        # Re-size at the new passive price using the equal-profit helper.
+        # The original passive's stake was sized for its OLD price; carrying
+        # it forward to the new price re-introduces the same asymmetric-
+        # payoff bug the equal-profit fix addresses.
+        if agg_bet.side is BetSide.BACK:
+            stake_to_replace = equal_profit_lay_stake(
+                back_stake=agg_bet.matched_stake,
+                back_price=agg_bet.average_price,
+                lay_price=new_price,
+                commission=self._commission,
+            )
+        else:
+            stake_to_replace = equal_profit_back_stake(
+                lay_stake=agg_bet.matched_stake,
+                lay_price=agg_bet.average_price,
+                back_price=new_price,
+                commission=self._commission,
+            )
 
         # Cancel first so budget reservation is released before the new
         # reservation is made (hard_constraints §6).
@@ -1773,8 +1809,9 @@ class BetfairEnv(gymnasium.Env):
         best. The pair's both legs become matched and it settles as a
         closed pair (``arbs_closed``), not a naked leg.
 
-        Sizing follows the same equal-P&L rule as ``_maybe_place_paired``:
-        ``S_close = S_aggressive × P_aggressive / P_close`` (hard_constraints §3).
+        Sizing follows the same equal-P&L rule as ``_maybe_place_paired``
+        — the commission-aware equal-profit helper from
+        ``env/scalping_math.py`` (hard_constraints §3).
 
         Commission-feasibility is **not** checked (hard_constraints §4):
         closing at a loss is a deliberate loss-cap and the
@@ -1861,10 +1898,22 @@ class BetfairEnv(gymnasium.Env):
                   close_reason="no_close_price")
             return
 
-        # Equal-P&L sizing: S_close × P_close = S_agg × P_agg.
-        close_stake = (
-            agg_bet.matched_stake * agg_bet.average_price / close_price
-        )
+        # Equal-P&L sizing via the equal-profit helper (matches the
+        # placement path; see _maybe_place_paired for the formula).
+        if agg_bet.side is BetSide.BACK:
+            close_stake = equal_profit_lay_stake(
+                back_stake=agg_bet.matched_stake,
+                back_price=agg_bet.average_price,
+                lay_price=close_price,
+                commission=self._commission,
+            )
+        else:
+            close_stake = equal_profit_back_stake(
+                lay_stake=agg_bet.matched_stake,
+                lay_price=agg_bet.average_price,
+                back_price=close_price,
+                commission=self._commission,
+            )
 
         # Cancel the outstanding passive FIRST so its budget reservation
         # is released before the close bet reserves new capital. Matches

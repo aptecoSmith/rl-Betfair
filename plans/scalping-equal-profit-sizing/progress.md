@@ -4,6 +4,84 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 02 — Wire helper into all three placement paths (2026-04-18)
+
+**Status:** complete. **Reward-scale change has landed.** The env's
+scalping placement code now sizes passive / close / requote legs
+with the commission-aware equal-profit helper. Scoreboard rows
+from before this commit are not directly comparable to post-fix;
+new training is the comparison surface.
+
+**Call sites switched to the helper** (`env/betfair_env.py`):
+
+- `_maybe_place_paired` — auto-paired passive after aggressive
+  fill. Picks `equal_profit_lay_stake` (aggressive BACK) or
+  `equal_profit_back_stake` (aggressive LAY). Old comment block
+  that described the formula ("derived from demanding equal P&L
+  in win and lose outcomes") is now CORRECT in its description
+  of behaviour; preserved with a sentence noting the fix landed
+  in this plan.
+- `_attempt_close` — close-at-loss from `scalping-close-signal`.
+  Same helper selection (close leg is opposite side of agg).
+  Docstring updated: no longer advertises the buggy
+  `S_close = S_agg × P_agg / P_close` formula.
+- `_attempt_requote` — previously carried `target.requested_stake`
+  forward. That stake was sized for the OLD passive price; at a
+  new lay price it re-introduced the same asymmetric-payoff bug.
+  Now RE-SIZES via the helper at the new price (hard_constraints §8).
+
+Import block at the top of `betfair_env.py` expanded to pull
+`equal_profit_back_stake`, `equal_profit_lay_stake` alongside
+the existing `locked_pnl_per_unit_stake` / `min_arb_ticks_for_profit`.
+
+**Worked example confirmation** (test
+`test_canonical_worked_example_locks_4_03`): Back £16 @ 8.20 /
+Lay @ 6.00 / c=5% locks £4.03 (old sizing reported £0.08 on the
+same trade). Invariant `|win_pnl − lose_pnl| < 0.01` holds on
+the synthesised pair.
+
+**Tests:**
+
+- Updated `test_paired_passive_stake_sized_asymmetrically` to
+  assert the new helper's output (old formula expectation was
+  wrong post-fix). Docstring rewritten to cite the correct
+  commission-aware formula; still asserts the passive-lay stake
+  is strictly larger than the aggressive-back stake for BACK→LAY.
+- New `TestEqualProfitSizingEndToEnd` class: 4 tests (delta: +4,
+  full suite now 2157 passed from 2153).
+  1. `test_paired_passive_stake_uses_equal_profit_formula` —
+     `_maybe_place_paired` output matches the helper.
+  2. `test_close_leg_stake_uses_equal_profit_formula` —
+     `_attempt_close` output matches the helper.
+  3. `test_requote_resizes_at_new_lay_price` — requote's new
+     stake differs from the old AND matches the helper at the
+     new price.
+  4. `test_canonical_worked_example_locks_4_03` — end-to-end
+     settlement-style check via `get_paired_positions`.
+- Pre-existing `test_invariant_raw_plus_shaped_equals_total_reward`
+  stays green (sizing change touches stakes, not the raw+shaped
+  accumulator).
+- No pre-existing specific `locked_pnl` assertions needed
+  updating — `test_completed_arb_locks_real_pnl_via_race_pnl`
+  uses `> 0.0`, and the `test_early_lock_bonus_*` harness tests
+  synthesise their own stakes manually.
+
+**Test results:**
+- `pytest tests/test_forced_arbitrage.py::TestEqualProfitSizingEndToEnd -q` → 4 passed.
+- `pytest tests/ -q` → 2157 passed, 7 skipped, 133 deselected,
+  1 xfailed.
+
+**Activation plans reset to draft:** `activation-A-baseline`
+was `running` from the frozen-fitness 2026-04-18 launch. Reset
+via the same JSON-edit pattern used 2026-04-17: `status=draft`,
+`started_at=None`, `completed_at=None`, `current_generation=None`,
+`current_session=0`, `outcomes=[]`. The other three B plans
+(`activation-B-100`, `-010`, `-001`) were already draft/outcomes=[]
+and were left as-is. All four plans now show `status=draft,
+outcomes=[]` — the env is ready for post-fix re-launch.
+
+---
+
 ## Session 01 — Equal-profit sizing helper + tests (2026-04-18)
 
 **Status:** complete. No env wiring yet — the helper is pure math,

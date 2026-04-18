@@ -287,14 +287,19 @@ class TestScalpingPairedPlacement:
         assert resting[0].side is BetSide.LAY
 
     def test_paired_passive_stake_sized_asymmetrically(self, scalping_config):
-        """Passive leg stake = agg_stake × agg_price / passive_price.
+        """Passive lay stake = S_back × [P_back × (1 − c) + c] / (P_lay − c).
 
-        This is the only stake ratio that locks profit across both race
-        outcomes. Any other ratio leaves the pair directional. A BACK→LAY
-        pair always places MORE lay stake than the aggressive back stake
-        (because passive_price < agg_price) — the magnitude of the
-        difference encodes the price movement.
+        This commission-aware closed-form is the only stake ratio that
+        equalises P&L across both race outcomes (see
+        ``plans/scalping-equal-profit-sizing/purpose.md``). The earlier
+        ``S_back × P_back / P_lay`` form only equalises *exposure* when
+        commission is non-zero. A BACK→LAY pair still places MORE lay
+        stake than the aggressive back stake (because passive_price <
+        agg_price) — the magnitude is just slightly smaller than the
+        commission-free formula yielded.
         """
+        from env.scalping_math import equal_profit_lay_stake
+
         env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
         env.reset()
         a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
@@ -313,9 +318,12 @@ class TestScalpingPairedPlacement:
         assert agg.side is BetSide.BACK
         assert resting.side is BetSide.LAY
         assert resting.price < agg.average_price
-        # Correct asymmetric stake.
-        expected = (
-            agg.matched_stake * agg.average_price / resting.price
+        # Correct equal-profit asymmetric stake.
+        expected = equal_profit_lay_stake(
+            back_stake=agg.matched_stake,
+            back_price=agg.average_price,
+            lay_price=resting.price,
+            commission=scalping_config["reward"].get("commission", 0.05),
         )
         assert resting.requested_stake == pytest.approx(expected, rel=1e-6)
         # And the passive stake must be STRICTLY larger than the agg
@@ -2507,3 +2515,202 @@ class TestRiskHead:
         lv = out.predicted_locked_log_var_per_runner
         assert torch.all(lv >= RISK_LOG_VAR_MIN)
         assert torch.all(lv <= RISK_LOG_VAR_MAX)
+
+
+# ── Equal-profit sizing end-to-end (plans/scalping-equal-profit-sizing) ─────
+
+
+class TestEqualProfitSizingEndToEnd:
+    """Sizing helper is correctly wired into the three placement paths
+    (``_maybe_place_paired``, ``_attempt_close``, ``_attempt_requote``).
+
+    Hard_constraints §16 items 6–8 + the canonical worked example from
+    ``purpose.md`` (Back £16 @ 8.20 / Lay @ 6.00 / c=5% → locked ≈ £4.03).
+    """
+
+    def _make_env(self, scalping_config, **kwargs) -> BetfairEnv:
+        return BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=5, n_inplay_ticks=2),
+            scalping_config,
+            **kwargs,
+        )
+
+    def _place_initial_pair(self, env: BetfairEnv) -> tuple:
+        """Drive env through one tick producing an aggressive back + paired lay."""
+        a = _scalping_action(
+            signal=1.0, stake=-0.8, aggression=1.0, arb_spread=-1.0,
+        )
+        env.step(a)
+        bm = env.bet_manager
+        paired_bets = [b for b in bm.bets if b.pair_id is not None]
+        assert paired_bets, "expected an aggressive fill with a pair_id"
+        agg = paired_bets[0]
+        pairing = [
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        ]
+        assert pairing, "expected a paired passive to rest after the fill"
+        # Fence against on_tick auto-fill so subsequent steps don't drain
+        # the resting passive before close/requote tests exercise it.
+        for o in bm.passive_book.orders:
+            if o.pair_id is not None:
+                o.queue_ahead_at_placement = 1e12
+        return agg, pairing[0]
+
+    def test_paired_passive_stake_uses_equal_profit_formula(
+        self, scalping_config,
+    ):
+        """Placement of the auto-paired passive uses ``equal_profit_lay_stake``
+        (aggressive BACK) for back-first scalps. Formula:
+
+            S_lay = S_back × [P_back × (1 − c) + c] / (P_lay − c)
+        """
+        from env.scalping_math import equal_profit_lay_stake
+
+        env = self._make_env(scalping_config)
+        env.reset()
+        agg, passive = self._place_initial_pair(env)
+        assert agg.side is BetSide.BACK
+        assert passive.side is BetSide.LAY
+
+        c = scalping_config["reward"].get("commission", 0.05)
+        expected = equal_profit_lay_stake(
+            back_stake=agg.matched_stake,
+            back_price=agg.average_price,
+            lay_price=passive.price,
+            commission=c,
+        )
+        assert passive.requested_stake == pytest.approx(expected, rel=1e-6)
+
+    def test_close_leg_stake_uses_equal_profit_formula(
+        self, scalping_config,
+    ):
+        """The close mechanic sizes its closing leg via the same helper.
+
+        ``_attempt_close`` calls ``bm.place_back`` / ``bm.place_lay`` with
+        the helper's output. The returned ``close_bet.requested_stake``
+        must equal the helper's value for the aggressive leg's price / the
+        close-side best price.
+        """
+        from env.scalping_math import equal_profit_lay_stake
+
+        env = self._make_env(scalping_config)
+        env.reset()
+        agg, _ = self._place_initial_pair(env)
+        bm = env.bet_manager
+
+        # Fire the close signal on slot 0 (close index = 6 per scalping v4).
+        a = _scalping_action(signal=0.0, stake=-1.0)
+        a[6 * 14 + 0] = 1.0
+        env.step(a)
+
+        pair_bets = [b for b in bm.bets if b.pair_id == agg.pair_id]
+        close_bet = next(b for b in pair_bets if getattr(b, "close_leg", False))
+        # Close is LAY for an aggressive BACK; equal_profit_lay_stake is
+        # the right helper.
+        c = scalping_config["reward"].get("commission", 0.05)
+        expected = equal_profit_lay_stake(
+            back_stake=agg.matched_stake,
+            back_price=agg.average_price,
+            lay_price=close_bet.average_price,
+            commission=c,
+        )
+        assert close_bet.requested_stake == pytest.approx(expected, rel=1e-6)
+
+    def test_requote_resizes_at_new_lay_price(self, scalping_config):
+        """Re-quote re-sizes the passive at the new lay price — it does
+        NOT carry the old stake forward (hard_constraints §8 third bullet).
+        """
+        from env.scalping_math import equal_profit_lay_stake
+
+        env = self._make_env(scalping_config)
+        env.reset()
+        agg, old_passive = self._place_initial_pair(env)
+        bm = env.bet_manager
+        old_price = old_passive.price
+        old_stake = old_passive.requested_stake
+
+        # Re-quote at MAX arb offset so the new price differs meaningfully.
+        a = _scalping_action(requote=1.0, arb_spread=1.0)
+        env.step(a)
+
+        new_passive = next(
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        )
+        assert new_passive.price != old_price, (
+            "test setup failed: re-quote must move price to exercise re-sizing"
+        )
+        # Old behaviour would have kept the stake identical across prices.
+        assert new_passive.requested_stake != pytest.approx(old_stake, rel=1e-9)
+        # New stake must match the helper's output at the NEW price.
+        c = scalping_config["reward"].get("commission", 0.05)
+        expected = equal_profit_lay_stake(
+            back_stake=agg.matched_stake,
+            back_price=agg.average_price,
+            lay_price=new_passive.price,
+            commission=c,
+        )
+        assert new_passive.requested_stake == pytest.approx(expected, rel=1e-6)
+
+    def test_canonical_worked_example_locks_4_03(self, scalping_config):
+        """Worked example from ``purpose.md``: Back £16 @ 8.20, Lay @ 6.00,
+        c=5% locks ≈ £4.03 (not the £0.08 the old sizing produced).
+
+        Synthesises a completed pair by overriding the aggressive leg's
+        stake/price and appending a matching passive Bet at the canonical
+        lay price with the helper-sized stake. ``get_paired_positions``
+        then computes the real ``locked_pnl`` via the existing
+        ``min(win, lose)`` formula on the matched legs — we assert the
+        result matches the purpose.md number.
+        """
+        from env.bet_manager import Bet
+        from env.scalping_math import equal_profit_lay_stake
+
+        env = self._make_env(scalping_config)
+        env.reset()
+        agg, resting = self._place_initial_pair(env)
+        bm = env.bet_manager
+
+        # Override aggressive leg to the canonical BACK £16 @ 8.20.
+        agg.matched_stake = 16.0
+        agg.average_price = 8.20
+
+        # Size the passive lay via the helper at the canonical 6.00 / 5%.
+        c = 0.05
+        lay_stake = equal_profit_lay_stake(
+            back_stake=16.0, back_price=8.20, lay_price=6.00, commission=c,
+        )
+        assert lay_stake == pytest.approx(21.0823529, rel=1e-6)
+
+        # Synthesise the passive fill at 6.00 and flush the originally-
+        # rested order so settlement doesn't double-count.
+        bm.bets.append(Bet(
+            selection_id=resting.selection_id,
+            side=resting.side,
+            requested_stake=lay_stake,
+            matched_stake=lay_stake,
+            average_price=6.00,
+            market_id=resting.market_id,
+            ltp_at_placement=resting.ltp_at_placement,
+            pair_id=resting.pair_id,
+            tick_index=env._tick_idx,
+        ))
+        bm.passive_book._orders = [
+            o for o in bm.passive_book._orders if id(o) != id(resting)
+        ]
+        for sid_orders in bm.passive_book._orders_by_sid.values():
+            sid_orders[:] = [o for o in sid_orders if id(o) != id(resting)]
+
+        pairs = bm.get_paired_positions(
+            market_id=agg.market_id, commission=c,
+        )
+        assert pairs and pairs[0]["complete"]
+        # purpose.md: £4.03 (old sizing gave £0.08).
+        assert pairs[0]["locked_pnl"] == pytest.approx(4.03, abs=0.01)
+
+        # Cross-check by computing min(win, lose) directly from the
+        # matched stakes / prices.
+        S_b, P_b, S_l, P_l = 16.0, 8.20, lay_stake, 6.00
+        win_pnl = S_b * (P_b - 1.0) * (1.0 - c) - S_l * (P_l - 1.0)
+        lose_pnl = -S_b + S_l * (1.0 - c)
+        assert abs(win_pnl - lose_pnl) < 0.01  # equal-profit invariant
+        assert min(win_pnl, lose_pnl) == pytest.approx(4.03, abs=0.01)
