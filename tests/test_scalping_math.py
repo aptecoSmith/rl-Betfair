@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from env.scalping_math import locked_pnl_per_unit_stake, min_arb_ticks_for_profit
+from env.scalping_math import (
+    equal_profit_back_stake,
+    equal_profit_lay_stake,
+    locked_pnl_per_unit_stake,
+    min_arb_ticks_for_profit,
+)
 
 
 # -- locked_pnl_per_unit_stake --------------------------------------------
@@ -149,3 +154,99 @@ class TestMinArbTicksForProfit:
             min_arb_ticks_for_profit(4.00, "back", 0.05) for _ in range(10)
         }
         assert len(results) == 1
+
+
+# -- equal_profit_lay_stake / equal_profit_back_stake ---------------------
+
+
+class TestEqualProfitSizing:
+    """Equal-profit lay/back sizing for scalp pairs."""
+
+    def test_zero_commission_collapses_to_old_formula(self):
+        """With c=0, equal_profit_lay_stake reduces to the original
+        (commission-free) S_b × P_b / P_l form."""
+        s = equal_profit_lay_stake(
+            back_stake=10.0, back_price=4.0, lay_price=3.0,
+            commission=0.0,
+        )
+        assert s == pytest.approx(10.0 * 4.0 / 3.0, abs=1e-9)
+
+    def test_canonical_worked_example_at_5pct(self):
+        """The example from purpose.md: Back £16 @ 8.20 / Lay @ 6.00 /
+        c=5% should size the lay at ≈ £21.083."""
+        s = equal_profit_lay_stake(
+            back_stake=16.0, back_price=8.20, lay_price=6.00,
+            commission=0.05,
+        )
+        assert s == pytest.approx(21.0823529, rel=1e-6)
+
+    def test_canonical_example_at_10pct(self):
+        """Same trade at c=10% — formula gives a different, documented
+        stake. Recompute by hand:
+            num = 8.20 × 0.90 + 0.10 = 7.48
+            den = 6.00 − 0.10 = 5.90
+            S = 16 × 7.48 / 5.90 ≈ £20.285
+        """
+        s = equal_profit_lay_stake(
+            back_stake=16.0, back_price=8.20, lay_price=6.00,
+            commission=0.10,
+        )
+        assert s == pytest.approx(16.0 * 7.48 / 5.90, rel=1e-6)
+
+    def test_equal_profit_invariant_holds_across_grid(self):
+        """For a grid of (P_back, P_lay, c) triples, the helper-sized
+        pair must produce |win_pnl − lose_pnl| < 0.01."""
+        c = 0.05
+        S_b = 10.0
+        for P_b in (2.5, 4.0, 6.0, 9.0):
+            for P_l in (2.0, 3.0, 4.5, 6.0):
+                if P_l >= P_b:  # back-first scalp requires P_b > P_l
+                    continue
+                S_l = equal_profit_lay_stake(S_b, P_b, P_l, c)
+                win_pnl = S_b * (P_b - 1) * (1 - c) - S_l * (P_l - 1)
+                lose_pnl = -S_b + S_l * (1 - c)
+                assert abs(win_pnl - lose_pnl) < 0.01, (
+                    f"P_b={P_b}, P_l={P_l}: win={win_pnl}, lose={lose_pnl}"
+                )
+
+    def test_symmetric_helper_for_lay_first(self):
+        """equal_profit_back_stake produces the analogous balanced size
+        for an aggressive-lay scalp. The back/lay legs are not
+        algebraically symmetric, so the formula is the genuine inverse
+        (not a label-swap of the forward formula)."""
+        # Lay £10 @ 3.00, passive back at 4.00, c=5%.
+        s = equal_profit_back_stake(
+            lay_stake=10.0, lay_price=3.00, back_price=4.00,
+            commission=0.05,
+        )
+        # By formula: num = 3.00 − 0.05 = 2.95; den = 4.00 × 0.95 + 0.05 = 3.85
+        # S_back = 10 × 2.95 / 3.85 ≈ 7.662
+        assert s == pytest.approx(10.0 * 2.95 / 3.85, rel=1e-6)
+        # And the resulting pair locks equal profit:
+        S_b, P_b, S_l, P_l, c = s, 4.00, 10.0, 3.00, 0.05
+        win_pnl = S_b * (P_b - 1) * (1 - c) - S_l * (P_l - 1)
+        lose_pnl = -S_b + S_l * (1 - c)
+        assert abs(win_pnl - lose_pnl) < 0.01
+
+    def test_tiny_back_stake_no_division_instability(self):
+        """A £0.01 back stake must produce a finite, positive lay stake
+        with the same balance property."""
+        s = equal_profit_lay_stake(0.01, 4.00, 3.00, 0.05)
+        assert s > 0
+        assert s < 1.0  # sanity: tiny stake → tiny lay
+
+    def test_back_price_at_or_below_one_raises(self):
+        with pytest.raises(ValueError):
+            equal_profit_lay_stake(10.0, 1.0, 0.95, 0.05)
+        with pytest.raises(ValueError):
+            equal_profit_lay_stake(10.0, 0.50, 0.40, 0.05)
+
+    def test_lay_price_at_or_below_commission_raises(self):
+        """lay_price <= commission means denominator <= 0; the helper
+        refuses rather than silently producing a negative or huge
+        stake. Caller should have refused the trade upstream via
+        min_arb_ticks_for_profit."""
+        with pytest.raises(ValueError):
+            equal_profit_lay_stake(10.0, 4.0, 0.05, 0.05)
+        with pytest.raises(ValueError):
+            equal_profit_lay_stake(10.0, 4.0, 0.04, 0.05)

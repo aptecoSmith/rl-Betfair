@@ -36,13 +36,20 @@ S_lay = S_back × [P_back × (1 − c) + c] / (P_lay − c)
 derived from setting `total_win == total_lose` after commission.
 No "approximation", no "near-equal" simplification. Closed-form,
 exactly equal P&L either way (modulo float rounding). The
-symmetric helper for lay-first scalps:
+symmetric helper for lay-first scalps is the **algebraic inverse**
+of the same balance equation (NOT a label-swap — back and lay
+legs are not symmetric in P&L shape):
 
 ```
-S_back = S_lay × [P_lay × (1 − c) + c] / (P_back − c)
+S_back = S_lay × (P_lay − c) / [P_back × (1 − c) + c]
 ```
 
-(swap the labels; same derivation).
+Derivation: the balance equation is
+`S_b × [P_b(1 − c) + c] = S_l × (P_l − c)`; solve for `S_b`
+instead of `S_l`. An earlier draft of this constraint had the
+label-swapped form, which satisfies neither the win-side nor
+lose-side equality; the formula above is the only one that
+holds.
 
 **§5** The formula MUST collapse to `S_lay = S_back × P_back / P_lay`
 exactly when `c = 0`. A unit test asserts this — guards against

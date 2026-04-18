@@ -101,6 +101,107 @@ def locked_pnl_per_unit_stake(
     return min(win, lose)
 
 
+def equal_profit_lay_stake(
+    back_stake: float,
+    back_price: float,
+    lay_price: float,
+    commission: float,
+) -> float:
+    """Lay stake that nets exactly equal profit on both race outcomes
+    after commission, given a back leg of ``back_stake`` matched at
+    ``back_price`` and a passive lay at ``lay_price``.
+
+    Closed-form derivation in
+    ``plans/scalping-equal-profit-sizing/purpose.md``. The formula:
+
+        S_lay = S_back × [P_back × (1 − c) + c] / (P_lay − c)
+
+    collapses to the older ``S_back × P_back / P_lay`` form when
+    ``c == 0``. With non-zero commission it produces a smaller lay
+    stake, balancing the win-side and lose-side P&L exactly (modulo
+    float rounding).
+
+    Used by ``env.betfair_env._maybe_place_paired``,
+    ``_attempt_close``, and ``_attempt_requote`` (Session 02 of this
+    plan wires them in). Pure function; no I/O; safe for unit tests.
+
+    Parameters
+    ----------
+    back_stake:
+        Stake on the back leg, GBP. Must be > 0.
+    back_price:
+        Decimal Betfair odds the back leg matched at. Must be > 1.0.
+    lay_price:
+        Decimal Betfair odds the passive lay rests at. Must be >
+        commission (otherwise the denominator collapses).
+    commission:
+        Fractional commission on net winnings (Betfair: 0.05 for 5%).
+        Same value used everywhere else in the env.
+
+    Returns
+    -------
+    float
+        The lay stake (GBP) that equalises win-pnl and lose-pnl for
+        this pair.
+
+    Raises
+    ------
+    ValueError
+        If ``back_price <= 1.0`` or ``lay_price <= commission``
+        (degenerate / unscalpable cases — caller should refuse the
+        trade upstream rather than relying on the helper to clip).
+    """
+    if back_price <= 1.0:
+        raise ValueError(
+            f"back_price must exceed 1.0, got {back_price}"
+        )
+    if lay_price <= commission:
+        raise ValueError(
+            f"lay_price ({lay_price}) must exceed commission "
+            f"({commission}); the trade is unscalpable"
+        )
+    numerator = back_price * (1.0 - commission) + commission
+    return back_stake * numerator / (lay_price - commission)
+
+
+def equal_profit_back_stake(
+    lay_stake: float,
+    lay_price: float,
+    back_price: float,
+    commission: float,
+) -> float:
+    """Symmetric helper for lay-first scalps: given an aggressive lay
+    leg, returns the passive-back stake that equalises both outcomes.
+
+    Derived by algebraically inverting the same balance equation that
+    produced ``equal_profit_lay_stake``:
+
+        S_b × [P_b × (1 − c) + c] = S_l × (P_l − c)
+
+    Solving for ``S_b`` instead of ``S_l``:
+
+        S_back = S_lay × (P_lay − c) / [P_back × (1 − c) + c]
+
+    The back/lay legs are *not* algebraically symmetric — a back and a
+    lay have different win-side vs lose-side P&L shapes — so the labels
+    cannot be naively swapped. This is the only inversion that actually
+    nets equal P&L on both outcomes.
+    """
+    if back_price <= 1.0:
+        raise ValueError(
+            f"back_price must exceed 1.0, got {back_price}"
+        )
+    denom = back_price * (1.0 - commission) + commission
+    if denom <= 0.0:
+        raise ValueError(
+            f"back_price ({back_price}) / commission ({commission}) "
+            f"combination yields a non-positive denominator; "
+            f"the trade is unscalpable"
+        )
+    numerator = lay_price - commission
+    return lay_stake * numerator / denom
+
+
 def min_arb_ticks_for_profit(
     aggressive_price: float,
     aggressive_side: AggressiveSide,

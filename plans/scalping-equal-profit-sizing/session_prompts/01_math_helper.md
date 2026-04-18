@@ -123,22 +123,25 @@ def equal_profit_back_stake(
     lay leg, returns the passive-back stake that equalises both
     outcomes.
 
-    Same closed-form derivation as ``equal_profit_lay_stake``,
-    with the back/lay labels swapped:
+    Derived by algebraically inverting the same balance equation
+    used for ``equal_profit_lay_stake`` — NOT a label-swap, since
+    back and lay legs have different P&L shapes:
 
-        S_back = S_lay × [P_lay × (1 − c) + c] / (P_back − c)
+        S_back = S_lay × (P_lay − c) / [P_back × (1 − c) + c]
     """
-    if lay_price <= 1.0:
+    if back_price <= 1.0:
         raise ValueError(
-            f"lay_price must exceed 1.0, got {lay_price}"
+            f"back_price must exceed 1.0, got {back_price}"
         )
-    if back_price <= commission:
+    denom = back_price * (1.0 - commission) + commission
+    if denom <= 0.0:
         raise ValueError(
-            f"back_price ({back_price}) must exceed commission "
-            f"({commission}); the trade is unscalpable"
+            f"back_price ({back_price}) / commission ({commission}) "
+            f"combination yields a non-positive denominator; "
+            f"the trade is unscalpable"
         )
-    numerator = lay_price * (1.0 - commission) + commission
-    return lay_stake * numerator / (back_price - commission)
+    numerator = lay_price - commission
+    return lay_stake * numerator / denom
 ```
 
 Style notes:
@@ -211,9 +214,9 @@ class TestEqualProfitSizing:
             lay_stake=10.0, lay_price=3.00, back_price=4.00,
             commission=0.05,
         )
-        # By formula: num = 3.00 × 0.95 + 0.05 = 2.90; den = 4.00 − 0.05 = 3.95
-        # S_back = 10 × 2.90 / 3.95 ≈ 7.342
-        assert s == pytest.approx(10.0 * 2.90 / 3.95, rel=1e-6)
+        # By formula: num = 3.00 − 0.05 = 2.95; den = 4.00 × 0.95 + 0.05 = 3.85
+        # S_back = 10 × 2.95 / 3.85 ≈ 7.662
+        assert s == pytest.approx(10.0 * 2.95 / 3.85, rel=1e-6)
         # And the resulting pair locks equal profit:
         S_b, P_b, S_l, P_l, c = s, 4.00, 10.0, 3.00, 0.05
         win_pnl = S_b * (P_b - 1) * (1 - c) - S_l * (P_l - 1)

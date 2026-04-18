@@ -113,7 +113,13 @@ A new pure function in `env/scalping_math.py`:
 A second helper for the symmetric case (lay-first scalp where the
 "passive" is a back leg):
 `equal_profit_back_stake(lay_stake, lay_price, back_price, commission)
--> float`.
+-> float`. Derived by algebraically inverting the same balance
+equation (back and lay legs have different P&L shapes, so the
+formula is **not** a label-swap):
+
+```
+S_back = S_lay × (P_lay − c) / [P_back × (1 − c) + c]
+```
 
 Both are unit-tested with the worked example above + edge cases
 (c=0 collapses to old formula; high odds; ladder boundaries; very
