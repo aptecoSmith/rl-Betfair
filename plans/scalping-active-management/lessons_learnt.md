@@ -5,6 +5,21 @@ Most recent at the top.
 
 ---
 
+## Post-hoc correction — equal-profit sizing (2026-04-18)
+
+- 2026-04-18: the Session-01 sizing comment ("derived from
+  demanding equal P&L in win and lose outcomes") was true in
+  intent but wrong in math — the derivation only holds at
+  c=0. Fixed by `plans/scalping-equal-profit-sizing/`
+  Session 02 (commit `f7a09fc`). Until that fix landed, the
+  re-quote / paired-passive code was over-laying every back-
+  first scalp by `[1 − (1 − c)]/(1 − c) ≈ 5 %` of the back stake,
+  producing a near-zero win-side payoff and a much bigger
+  lose-side payoff. Locked_pnl values from runs before the fix
+  systematically understated equal-profit-equivalent locks.
+
+---
+
 ## Session 04 findings (2026-04-16)
 
 - **Untrained aux heads need explicit UI gating, not just a

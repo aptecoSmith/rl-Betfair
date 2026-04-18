@@ -4,6 +4,56 @@ One entry per completed session. Most recent at the top.
 
 ---
 
+## Session 03 — CLAUDE.md + cross-plan notes (2026-04-18)
+
+**Landed.** Docs-only commit (no code, no tests touched).
+
+- `CLAUDE.md` gains a new "Equal-profit pair sizing (scalping)"
+  section after "Order matching: single-price, no walking".
+  Includes the commission-aware formula, the canonical worked
+  example (Back £16 @ 8.20 / Lay @ 6.00 / c=5% → locked £4.03),
+  and a historical audit-trail note pointing at Session 02's
+  commit (`f7a09fc`) where the env switched off the old
+  zero-commission-only formula.
+- `plans/scalping-active-management/lessons_learnt.md` appended
+  with a one-paragraph entry recording that the original
+  Session-01 sizing comment ("derived from demanding equal P&L
+  in win and lose outcomes") was correct in intent but wrong in
+  math — the derivation only holds at c=0. Cross-link to
+  `plans/scalping-equal-profit-sizing/` Session 02 (commit
+  `f7a09fc`).
+- `progress.md` (this file) gets an operator-facing "Reading the
+  new locked numbers" paragraph immediately below this entry,
+  explaining the pre-vs-post-fix scoreboard comparability cliff.
+
+No code changes this session. Test suite untouched.
+
+### Reading the new locked numbers (operator note)
+
+After Session 02 (commit `f7a09fc`), `scalping_locked_pnl` values
+from new training runs are NOT directly comparable to scoreboard
+rows from runs before that commit. The new values reflect
+equal-profit-balanced pair P&L; the old values reflected the
+worst-case floor of over-laid pairs.
+
+Rule of thumb:
+
+- Old `locked_pnl` ≈ new `locked_pnl` × `(1 − c)` for tight
+  spreads. Roughly: take the new number and multiply by 0.95 to
+  approximate the comparable old-formula floor, OR take an old
+  number and divide by 0.95 (then add roughly the win-side cliff)
+  to estimate the equal-profit-equivalent.
+- For wide spreads (well into the profitable zone) the two
+  formulas converge; the difference is largest right at the
+  commission edge, where the old over-lay was collapsing the
+  win-side payoff toward zero.
+
+When in doubt: the post-fix number is the one a real-world
+scalping calculator (greenupgreen, Bet Angel, etc.) would
+produce.
+
+---
+
 ## Session 02 — Wire helper into all three placement paths (2026-04-18)
 
 **Status:** complete. **Reward-scale change has landed.** The env's

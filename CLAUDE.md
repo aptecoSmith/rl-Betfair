@@ -80,6 +80,47 @@ rejected — each of those independently caused the phantom-profit bug.
 
 ---
 
+## Equal-profit pair sizing (scalping)
+
+The auto-paired passive (and the closing leg from
+`scalping-close-signal`) is sized to **equalise net profit on
+both race outcomes after commission**, not to equalise exposure.
+
+The formula:
+
+    S_lay = S_back × [P_back × (1 − c) + c] / (P_lay − c)
+
+(or symmetrically for lay-first scalps, derived as the algebraic
+inverse of the same balance equation — not a label-swap:
+`S_back = S_lay × (P_lay − c) / [P_back × (1 − c) + c]`).
+
+Worked example — Back £16 @ 8.20, passive lay at 6.00, c=0.05:
+
+    S_lay = 16 × [8.20×0.95 + 0.05] / (6.00 − 0.05)
+          = 16 × 7.84 / 5.95
+          = £21.08
+
+Settles to:
+
+    win  = 16 × 7.20 × 0.95 − 21.08 × 5.00 = +£4.04
+    lose = −16 + 21.08 × 0.95              = +£4.03
+
+Both outcomes net the same ≈ £4.03. `locked_pnl = min(win, lose)`
+therefore reports the actual lock, not the near-zero floor of an
+over-laid trade.
+
+**Historical note (audit trail).** Before commit `f7a09fc`
+(2026-04-18, `plans/scalping-equal-profit-sizing`) the sizing was
+`S_lay = S_back × P_back / P_lay` — a formula derived under the
+assumption of zero commission. With Betfair's 5 % commission this
+form equalises *exposure* (`stake × (price − 1)`) rather than P&L,
+producing pairs whose win-side payoff was tiny and lose-side payoff
+was much larger. Pre-fix scoreboard rows reflect that behaviour and
+are valid pre-fix references; post-fix scoreboard rows are the new
+comparison surface.
+
+---
+
 ## Reward function: raw vs shaped
 
 `env/betfair_env.py::_settle_current_race` splits the per-race reward
