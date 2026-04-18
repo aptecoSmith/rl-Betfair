@@ -13,6 +13,12 @@
       "runtimeArgs": ["start"],
       "cwd": "frontend",
       "port": 4202
+    },
+    {
+      "name": "worker",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "training.worker"],
+      "port": 8002
     }
   ]
 }

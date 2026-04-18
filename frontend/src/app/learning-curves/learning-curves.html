@@ -36,6 +36,20 @@
 
     <div class="lc-filters" data-testid="lc-filters">
       <label>
+        Run
+        <select
+          [ngModel]="runFilter()"
+          (ngModelChange)="runFilter.set($event)"
+          data-testid="lc-run-filter"
+          title="Runs are separated by gaps > 30 min between episodes. Defaults to the latest run."
+        >
+          <option value="latest">Latest run</option>
+          @for (r of runs(); track r.id) {
+            <option [value]="r.id">{{ runLabel(r) }}</option>
+          }
+        </select>
+      </label>
+      <label>
         Agent
         <select
           [ngModel]="agentFilter()"
@@ -65,8 +79,33 @@
       </label>
     </div>
 
+    @if (filteredPanels().length > 0) {
+      <nav class="lc-pagination" data-testid="lc-pagination-top">
+        <button
+          class="btn-page"
+          (click)="prevPage()"
+          [disabled]="currentPage() === 0"
+          data-testid="lc-page-prev"
+        >‹ Prev</button>
+        <span class="page-indicator" data-testid="lc-page-indicator">
+          Page {{ currentPage() + 1 }} of {{ totalPages() }}
+          <span class="page-range">
+            ({{ currentPage() * 10 + 1 }}–{{
+              currentPage() * 10 + pagedPanels().length
+            }} of {{ filteredPanels().length }})
+          </span>
+        </span>
+        <button
+          class="btn-page"
+          (click)="nextPage()"
+          [disabled]="currentPage() >= totalPages() - 1"
+          data-testid="lc-page-next"
+        >Next ›</button>
+      </nav>
+    }
+
     <div class="lc-panels" data-testid="lc-panels">
-      @for (panel of filteredPanels(); track panel.modelId) {
+      @for (panel of pagedPanels(); track panel.modelId) {
         <article
           class="agent-panel"
           [class]="verdictClass(panel.diagnostic.verdict)"
@@ -78,6 +117,13 @@
               <code class="agent-id">{{ panel.shortId }}</code>
               <span class="arch">{{ panel.architecture }}</span>
               <span class="episode-count">{{ panel.diagnostic.nEpisodes }} ep</span>
+              @if (panel.lastTsLabel; as ts) {
+                <span
+                  class="run-timestamp"
+                  data-testid="lc-run-ts"
+                  title="Most-recent episode logged for this agent"
+                >{{ ts }}</span>
+              }
               @if (panel.isSmokeTest) {
                 <span
                   class="smoke-test-chip"
@@ -168,5 +214,23 @@
         </div>
       }
     </div>
+
+    @if (filteredPanels().length > 10) {
+      <nav class="lc-pagination lc-pagination-bottom" data-testid="lc-pagination-bottom">
+        <button
+          class="btn-page"
+          (click)="prevPage()"
+          [disabled]="currentPage() === 0"
+        >‹ Prev</button>
+        <span class="page-indicator">
+          Page {{ currentPage() + 1 }} of {{ totalPages() }}
+        </span>
+        <button
+          class="btn-page"
+          (click)="nextPage()"
+          [disabled]="currentPage() >= totalPages() - 1"
+        >Next ›</button>
+      </nav>
+    }
   }
 </section>

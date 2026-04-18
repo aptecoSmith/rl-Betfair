@@ -756,10 +756,23 @@
   }
 
   <!-- ── Charts ───────────────────────────────────────────── -->
+  <!--
+    These two top-level charts are a sliding feed of "whatever agent
+    last reported", not a per-agent line. Each point is the reward /
+    policy-loss scalar parsed out of the most recent progress event's
+    detail string (any agent, current run only — the buffer resets on
+    a new run via clearHistory()). For per-agent charts use the
+    Learning diagnostics panel below.
+  -->
   <div class="charts">
     <div class="chart-card">
       <div class="chart-header">
-        <h3 class="chart-title">Reward</h3>
+        <h3 class="chart-title">
+          Reward
+          <span class="chart-scope" title="Each point is the most-recent agent's episode reward. Not a per-agent line — open Learning diagnostics below for per-agent charts.">
+            latest episode · any agent · this run
+          </span>
+        </h3>
         <span class="verdict-badge" [class]="rewardVerdict().cls">{{ rewardVerdict().label }}</span>
       </div>
       @if (rewardHistory().length >= 2) {
@@ -778,7 +791,12 @@
     </div>
     <div class="chart-card">
       <div class="chart-header">
-        <h3 class="chart-title">Loss</h3>
+        <h3 class="chart-title">
+          Loss
+          <span class="chart-scope" title="Each point is the most-recent agent's PPO policy loss. Not a per-agent line — open Learning diagnostics below for per-agent charts.">
+            latest episode · any agent · this run
+          </span>
+        </h3>
         <span class="verdict-badge" [class]="lossVerdict().cls">{{ lossVerdict().label }}</span>
       </div>
       @if (lossHistory().length >= 2) {

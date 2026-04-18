@@ -319,6 +319,17 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin: 0;
+
+  .chart-scope {
+    margin-left: 0.6rem;
+    font-size: 0.65rem;
+    font-weight: 500;
+    color: #606080;
+    letter-spacing: 0.03em;
+    text-transform: none;
+    cursor: help;
+    border-bottom: 1px dotted #505070;
+  }
 }
 
 .verdict-badge {

@@ -1340,3 +1340,186 @@ class TestSetAutoContinue:
         assert resp.status_code == 200
         assert resp.json() == {"plan_id": plan.plan_id, "auto_continue": False, "changed": True}
         assert reg.load(plan.plan_id).auto_continue is False
+
+
+# -- 11. Stale-running sweep on list ---------------------------------------
+#
+# Operator complaint: "Many times I restart the stack, killing the training
+# worker. Then I go to a training plan and it says it is still training —
+# from the last run." The API's list endpoint now auto-resets any
+# ``status='running'`` plan that the worker isn't actually running. Fires
+# only when the worker is connected (disconnected = unknown ground truth).
+
+
+class TestListPlansStaleRunningSweep:
+    """GET /training-plans auto-resets plans stuck in ``running`` state."""
+
+    def _app_with_running_plan(
+        self, tmp_path, hp_ranges,
+        *, worker_connected: bool, worker_running: bool,
+        worker_plan_id: str | None = None,
+    ) -> tuple[TestClient, PlanRegistry, TrainingPlan]:
+        reg = PlanRegistry(tmp_path / "training_plans")
+        plan = TrainingPlan.new(
+            name="sweep-test", population_size=14,
+            architectures=["ppo_lstm_v1", "ppo_time_lstm_v1"],
+            hp_ranges=hp_ranges, min_arch_samples=5,
+        )
+        reg.save(plan)
+        # Leave the plan visibly stuck in running state — mirrors
+        # what a crashed worker leaves behind.
+        reg.set_status(plan.plan_id, "running",
+                       started_at="2026-04-18T10:00:00+00:00")
+
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = {"hyperparameters": {"search_ranges": hp_ranges}}
+        app.state.coverage_history = []
+        app.state.worker_connected = worker_connected
+        app.state.training_state = {
+            "running": worker_running,
+            "plan_id": worker_plan_id,
+        }
+        return TestClient(app), reg, plan
+
+    def test_worker_disconnected_leaves_plan_alone(self, tmp_path, hp_ranges):
+        """Disconnected worker might be reconnecting — don't assume the
+        running state is stale just because we can't see the worker
+        right now."""
+        client, reg, plan = self._app_with_running_plan(
+            tmp_path, hp_ranges,
+            worker_connected=False, worker_running=False,
+        )
+        resp = client.get("/api/training-plans")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["stale_reset"] == []
+        assert reg.load(plan.plan_id).status == "running"
+
+    def test_worker_idle_resets_stale_running(self, tmp_path, hp_ranges):
+        """The common operator case — stack restarted, worker came up
+        fresh with nothing running, but the plan JSON still says
+        running. List should reset it to paused."""
+        client, reg, plan = self._app_with_running_plan(
+            tmp_path, hp_ranges,
+            worker_connected=True, worker_running=False,
+        )
+        resp = client.get("/api/training-plans")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["stale_reset"] == [plan.plan_id]
+        assert reg.load(plan.plan_id).status == "paused"
+        # The listed plan reflects the post-sweep state so the UI
+        # immediately sees "paused" without needing another round-trip.
+        listed = next(
+            p for p in body["plans"] if p["plan_id"] == plan.plan_id
+        )
+        assert listed["status"] == "paused"
+
+    def test_worker_running_this_plan_leaves_it_alone(self, tmp_path, hp_ranges):
+        """Don't reset the plan that's genuinely in progress. That
+        would immediately flip the UI Launch button on mid-run — the
+        operator would retry and collide with the active worker."""
+        client, reg, plan = self._app_with_running_plan(
+            tmp_path, hp_ranges,
+            worker_connected=True, worker_running=True,
+            worker_plan_id=None,  # set after fixture
+        )
+        # Patch the active plan_id to match this plan.
+        # (Fixture couldn't pass plan.plan_id into itself.)
+        client.app.state.training_state["plan_id"] = plan.plan_id
+        resp = client.get("/api/training-plans")
+        assert resp.status_code == 200
+        assert resp.json()["stale_reset"] == []
+        assert reg.load(plan.plan_id).status == "running"
+
+    def test_worker_running_other_plan_resets_this_one(
+        self, tmp_path, hp_ranges,
+    ):
+        """Worker is busy with a DIFFERENT plan — any other running
+        plan is stale (the registry can only have one active run)."""
+        client, reg, plan = self._app_with_running_plan(
+            tmp_path, hp_ranges,
+            worker_connected=True, worker_running=True,
+            worker_plan_id="some-other-plan-id",
+        )
+        resp = client.get("/api/training-plans")
+        assert resp.status_code == 200
+        assert resp.json()["stale_reset"] == [plan.plan_id]
+        assert reg.load(plan.plan_id).status == "paused"
+
+    def test_non_running_plans_untouched(self, tmp_path, hp_ranges):
+        """A ``draft`` / ``completed`` / ``paused`` plan is never the
+        target of the sweep even when the worker is idle."""
+        reg = PlanRegistry(tmp_path / "training_plans")
+        draft = TrainingPlan.new(
+            name="draft-plan", population_size=14,
+            architectures=["ppo_lstm_v1", "ppo_time_lstm_v1"],
+            hp_ranges=hp_ranges, min_arch_samples=5,
+        )
+        reg.save(draft)
+        completed = TrainingPlan.new(
+            name="done-plan", population_size=14,
+            architectures=["ppo_lstm_v1", "ppo_time_lstm_v1"],
+            hp_ranges=hp_ranges, min_arch_samples=5,
+        )
+        reg.save(completed)
+        reg.set_status(
+            completed.plan_id, "completed",
+            started_at="2026-04-18T08:00:00+00:00",
+            completed_at="2026-04-18T09:30:00+00:00",
+        )
+
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = {"hyperparameters": {"search_ranges": hp_ranges}}
+        app.state.coverage_history = []
+        app.state.worker_connected = True
+        app.state.training_state = {"running": False, "plan_id": None}
+
+        client = TestClient(app)
+        resp = client.get("/api/training-plans")
+        assert resp.json()["stale_reset"] == []
+        assert reg.load(draft.plan_id).status == "draft"
+        assert reg.load(completed.plan_id).status == "completed"
+
+    def test_sweep_is_idempotent(self, tmp_path, hp_ranges):
+        """Second list after a successful reset is a no-op."""
+        client, reg, plan = self._app_with_running_plan(
+            tmp_path, hp_ranges,
+            worker_connected=True, worker_running=False,
+        )
+        first = client.get("/api/training-plans").json()
+        assert first["stale_reset"] == [plan.plan_id]
+        second = client.get("/api/training-plans").json()
+        assert second["stale_reset"] == []
+        assert reg.load(plan.plan_id).status == "paused"
+
+    def test_missing_training_state_is_tolerated(self, tmp_path, hp_ranges):
+        """If ``app.state.training_state`` hasn't been wired (e.g.
+        test mount skipped the lifespan), treat worker as not running
+        and still sweep when connected."""
+        reg = PlanRegistry(tmp_path / "training_plans")
+        plan = TrainingPlan.new(
+            name="noconfig", population_size=14,
+            architectures=["ppo_lstm_v1", "ppo_time_lstm_v1"],
+            hp_ranges=hp_ranges, min_arch_samples=5,
+        )
+        reg.save(plan)
+        reg.set_status(plan.plan_id, "running",
+                       started_at="2026-04-18T10:00:00+00:00")
+
+        app = FastAPI()
+        app.include_router(training_plans_router.router, prefix="/api")
+        app.state.plan_registry = reg
+        app.state.config = {"hyperparameters": {"search_ranges": hp_ranges}}
+        app.state.coverage_history = []
+        app.state.worker_connected = True
+        # No training_state attr at all.
+
+        client = TestClient(app)
+        resp = client.get("/api/training-plans")
+        assert resp.json()["stale_reset"] == [plan.plan_id]
+        assert reg.load(plan.plan_id).status == "paused"

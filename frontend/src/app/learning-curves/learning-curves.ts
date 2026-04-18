@@ -13,8 +13,9 @@ import { ApiService } from '../services/api.service';
 import {
   AgentDiagnostic,
   EpisodeRecord,
+  RunBucket,
+  bucketIntoRuns,
   diagnoseAgent,
-  sliceToMostRecentRun,
   summarisePopulation,
 } from './agent-diagnostic';
 
@@ -27,6 +28,10 @@ const CHART_HEIGHT = 120;
 /** How far back to look on initial load. Scopes the panel to "the
  *  current run" rather than the entire historical episodes.jsonl. */
 const INITIAL_LOOKBACK_HOURS = 24;
+/** Panels per page. Large populations (16 agents × multiple
+ *  generations) otherwise swamp the page with 100+ SVGs and stall
+ *  paint. */
+export const PANELS_PER_PAGE = 10;
 
 interface AgentPanel {
   modelId: string;
@@ -34,6 +39,13 @@ interface AgentPanel {
   architecture: string;
   episodes: EpisodeRecord[];
   diagnostic: AgentDiagnostic;
+  /** Epoch seconds of this agent's most-recent episode row. Drives
+   *  the newest-first panel order and the per-panel run timestamp. */
+  lastTs: number;
+  /** Human-readable form of ``lastTs`` for the panel header. Null
+   *  when no row carried a parseable timestamp (older rows / test
+   *  fixtures). */
+  lastTsLabel: string | null;
   /** Session 04 (naked-clip-and-stability): true when every row on
    *  this panel carries `smoke_test: true`. The panel is then faded
    *  and tagged with a "SMOKE TEST" chip so operators can tell probe
@@ -67,11 +79,43 @@ export class LearningCurves implements OnInit, OnDestroy {
   /** 'all' or a specific model_id. */
   readonly agentFilter = signal<string>('all');
   readonly verdictFilter = signal<VerdictFilter>('all');
+  /** 0-indexed current page. Reset to 0 by an ``effect`` whenever a
+   *  filter changes or the panel set shrinks past the current page. */
+  readonly currentPage = signal<number>(0);
+  /** Sentinel used by ``runFilter`` for "show the latest run"; the
+   *  string default survives serialisation to query params if the
+   *  route ever grows one. Otherwise the value is a run's ``id``
+   *  (the run's start-ts in epoch seconds, as a string). */
+  readonly runFilter = signal<string>('latest');
 
-  /** Scoped to the most-recent training run (past the last >30 min gap). */
-  readonly currentRunEpisodes = computed(() => sliceToMostRecentRun(this.episodes()));
+  /** Contiguous runs detected by ``bucketIntoRuns`` — newest first.
+   *  Drives the run-filter dropdown. */
+  readonly runs = computed<RunBucket[]>(() => bucketIntoRuns(this.episodes()));
 
-  /** All agents (model_ids) seen in the current run. */
+  /** The run currently being displayed. ``'latest'`` picks
+   *  ``runs()[0]``; any other value picks the matching run by id.
+   *  Null when ``episodes()`` is empty. */
+  readonly selectedRun = computed<RunBucket | null>(() => {
+    const all = this.runs();
+    if (all.length === 0) return null;
+    const pick = this.runFilter();
+    if (pick === 'latest') return all[0];
+    const match = all.find(r => String(r.id) === pick);
+    return match ?? all[0];
+  });
+
+  /** Episodes scoped to the selected run. Replaces the old
+   *  ``sliceToMostRecentRun`` behaviour — default is still the most
+   *  recent run, but the operator can pick any historical run. */
+  readonly currentRunEpisodes = computed<EpisodeRecord[]>(() => {
+    const run = this.selectedRun();
+    return run ? run.episodes : [];
+  });
+
+  /** All agents (model_ids) seen in the current run. Sorted newest-
+   *  first by each agent's most-recent episode timestamp so a fresh
+   *  generation lands at the top — operators want to see the
+   *  agents that just trained, not the first alphabetical one. */
   readonly allPanels = computed<AgentPanel[]>(() => {
     const byAgent = new Map<string, EpisodeRecord[]>();
     for (const ep of this.currentRunEpisodes()) {
@@ -83,28 +127,23 @@ export class LearningCurves implements OnInit, OnDestroy {
     const panels: AgentPanel[] = [];
     for (const [modelId, eps] of byAgent) {
       const diagnostic = diagnoseAgent(eps);
-      // Smoke-test panels flag if every row carries the probe tag.
-      // A mixed panel (probe rows + real rows for the same model_id)
-      // shouldn't happen in practice — the probe uses ephemeral
-      // `smoke-<arch>` ids — but `every` is the safe default.
       const isSmokeTest = eps.length > 0 && eps.every(e => e.smoke_test === true);
+      const lastTs = maxEpochSeconds(eps);
       panels.push({
         modelId,
         shortId: modelId.slice(0, 8),
         architecture: eps[0]?.architecture_name ?? '—',
         episodes: eps,
         diagnostic,
+        lastTs,
+        lastTsLabel: lastTs > 0 ? formatTs(lastTs) : null,
         isSmokeTest,
       });
     }
-    // Order: alerts first (collapsed, unstable), then learning, then rest,
-    // then warming_up at the bottom so the operator sees problems first.
-    const verdictRank: Record<string, number> = {
-      collapsed: 0, unstable: 1, learning: 2, stagnant: 3, warming_up: 4,
-    };
+    // Newest-first. Tie-break by shortId so panel order is stable
+    // between polls when two agents share a timestamp.
     panels.sort((a, b) => {
-      const d = (verdictRank[a.diagnostic.verdict] ?? 99) - (verdictRank[b.diagnostic.verdict] ?? 99);
-      if (d !== 0) return d;
+      if (b.lastTs !== a.lastTs) return b.lastTs - a.lastTs;
       return a.shortId.localeCompare(b.shortId);
     });
     return panels;
@@ -120,6 +159,19 @@ export class LearningCurves implements OnInit, OnDestroy {
     });
   });
 
+  readonly totalPages = computed<number>(() => {
+    const n = this.filteredPanels().length;
+    return Math.max(1, Math.ceil(n / PANELS_PER_PAGE));
+  });
+
+  /** Panels for the current page, newest-first. */
+  readonly pagedPanels = computed<AgentPanel[]>(() => {
+    const all = this.filteredPanels();
+    const page = this.currentPage();
+    const start = page * PANELS_PER_PAGE;
+    return all.slice(start, start + PANELS_PER_PAGE);
+  });
+
   readonly populationSummary = computed(() =>
     summarisePopulation(this.allPanels().map(p => p.diagnostic)),
   );
@@ -127,6 +179,41 @@ export class LearningCurves implements OnInit, OnDestroy {
   readonly availableAgents = computed(() =>
     this.allPanels().map(p => ({ id: p.modelId, short: p.shortId, verdict: p.diagnostic.verdict })),
   );
+
+  constructor() {
+    // Clamp currentPage whenever the filtered panel count changes —
+    // e.g. switching a verdict filter with fewer matches shouldn't
+    // leave the user staring at an empty page 7.
+    effect(() => {
+      const total = this.totalPages();
+      if (this.currentPage() >= total) {
+        this.currentPage.set(Math.max(0, total - 1));
+      }
+    });
+  }
+
+  goToPage(page: number): void {
+    const max = this.totalPages() - 1;
+    this.currentPage.set(Math.max(0, Math.min(page, max)));
+  }
+
+  prevPage(): void { this.goToPage(this.currentPage() - 1); }
+  nextPage(): void { this.goToPage(this.currentPage() + 1); }
+
+  /** Label for a run-filter dropdown option. Shows start time +
+   *  duration + agent count so the operator can tell runs apart when
+   *  two happened close together. */
+  runLabel(run: RunBucket): string {
+    const start = formatTs(run.startTs);
+    const durationSec = Math.max(0, run.endTs - run.startTs);
+    const durationStr = durationSec < 60
+      ? `${Math.round(durationSec)}s`
+      : durationSec < 3600
+        ? `${Math.round(durationSec / 60)}m`
+        : `${(durationSec / 3600).toFixed(1)}h`;
+    const agents = new Set(run.episodes.map(e => e.model_id ?? 'unknown')).size;
+    return `${start} · ${durationStr} · ${agents} agent${agents === 1 ? '' : 's'}`;
+  }
 
   ngOnInit(): void {
     this.fetch();
@@ -261,4 +348,40 @@ export class LearningCurves implements OnInit, OnDestroy {
   // Template accessor — keeps Math out of template.
   readonly chartWidth = CHART_WIDTH;
   readonly chartHeight = CHART_HEIGHT;
+}
+
+// -- Timestamp helpers (exported for spec tests) ----------------------
+
+/** Parse a single episode row's timestamp into epoch seconds, matching
+ *  the tolerant parsing in ``sliceToMostRecentRun``. Returns 0 when
+ *  the row has no parseable timestamp. */
+export function epochSecondsOf(ep: EpisodeRecord): number {
+  const ts = ep.timestamp as unknown;
+  if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+  const n = Number(ts);
+  if (Number.isFinite(n)) return n;
+  const d = Date.parse(String(ts));
+  return Number.isFinite(d) ? d / 1000 : 0;
+}
+
+/** Max epoch-seconds across a set of episodes. Returns 0 when every
+ *  row has a missing / unparseable timestamp (older test fixtures). */
+export function maxEpochSeconds(eps: EpisodeRecord[]): number {
+  let max = 0;
+  for (const ep of eps) {
+    const t = epochSecondsOf(ep);
+    if (t > max) max = t;
+  }
+  return max;
+}
+
+/** Local-time ``YYYY-MM-DD HH:MM:SS``. Readable without dropping into
+ *  a timezone string that differs by locale. */
+export function formatTs(epochSec: number): string {
+  const d = new Date(epochSec * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  );
 }

@@ -332,6 +332,65 @@ export function diagnoseAgent(eps: EpisodeRecord[]): AgentDiagnostic {
  *  abandoned) and a fresh one later started. */
 export const RUN_BOUNDARY_GAP_SECONDS = 30 * 60;
 
+/** A bucket of contiguous episodes — i.e. rows whose timestamps are
+ *  within ``RUN_BOUNDARY_GAP_SECONDS`` of each other. Identified so
+ *  the UI can offer a per-run filter instead of dumping every
+ *  historical agent into one panel. */
+export interface RunBucket {
+  /** Stable identifier — epoch seconds of the first row in the run. */
+  id: number;
+  /** First-row epoch seconds. */
+  startTs: number;
+  /** Last-row epoch seconds. */
+  endTs: number;
+  /** The rows in this run, sorted ascending by timestamp. */
+  episodes: EpisodeRecord[];
+}
+
+/** Bucket every episode into contiguous runs. Returns them
+ *  newest-first so UI dropdowns render the most-recent run at the
+ *  top. A lone episode produces a one-row run.
+ *
+ *  Rows with unparseable timestamps land at epoch 0; they form a
+ *  synthetic "unknown" run at the tail unless they are the only
+ *  rows, in which case callers get one bucket with ``startTs === 0``. */
+export function bucketIntoRuns(episodes: EpisodeRecord[]): RunBucket[] {
+  if (episodes.length === 0) return [];
+  const toEpoch = (e: EpisodeRecord): number => {
+    const ts = e.timestamp as unknown;
+    if (typeof ts === 'number') return ts;
+    const n = Number(ts);
+    if (Number.isFinite(n)) return n;
+    const d = Date.parse(String(ts));
+    return Number.isFinite(d) ? d / 1000 : 0;
+  };
+  const sorted = [...episodes].sort((a, b) => toEpoch(a) - toEpoch(b));
+
+  const runs: RunBucket[] = [];
+  let current: EpisodeRecord[] = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = toEpoch(sorted[i]) - toEpoch(sorted[i - 1]);
+    if (gap > RUN_BOUNDARY_GAP_SECONDS) {
+      runs.push(makeRun(current, toEpoch));
+      current = [sorted[i]];
+    } else {
+      current.push(sorted[i]);
+    }
+  }
+  runs.push(makeRun(current, toEpoch));
+  // Newest run first.
+  return runs.sort((a, b) => b.startTs - a.startTs);
+}
+
+function makeRun(
+  episodes: EpisodeRecord[],
+  toEpoch: (e: EpisodeRecord) => number,
+): RunBucket {
+  const startTs = toEpoch(episodes[0]);
+  const endTs = toEpoch(episodes[episodes.length - 1]);
+  return { id: startTs, startTs, endTs, episodes };
+}
+
 /** Slice `episodes` to the rows belonging to the most recent training
  *  run only. Scans backwards through the timestamp-sorted list and
  *  cuts at the first gap > RUN_BOUNDARY_GAP_SECONDS.

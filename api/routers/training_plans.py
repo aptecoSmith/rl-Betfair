@@ -85,13 +85,70 @@ def _issues_to_dicts(issues: list[ValidationIssue]) -> list[dict]:
 
 @router.get("")
 def list_plans(request: Request) -> dict[str, Any]:
-    """Return all known plans (full payload, sorted by created_at desc)."""
+    """Return all known plans (full payload, sorted by created_at desc).
+
+    Before returning, sweeps any ``status='running'`` plan that the
+    worker isn't actually running — e.g. the operator killed the stack
+    mid-run and the plan's JSON still says ``running``. Such plans are
+    reset to ``status='paused'`` so the UI Launch button becomes
+    enabled again instead of showing a permanently-running false state.
+    """
     reg = _registry(request)
+    reset = _sweep_stale_running(request, reg)
     plans = sorted(reg.list(), key=lambda p: p.created_at, reverse=True)
     return {
         "plans": [p.to_dict() for p in plans],
         "count": len(plans),
+        # Surface the cleanup so the UI (or an operator tailing the
+        # API log) can tell when a stale-running reset fired.
+        "stale_reset": reset,
     }
+
+
+def _sweep_stale_running(request: Request, reg: PlanRegistry) -> list[str]:
+    """Reset plans with ``status='running'`` that the worker isn't
+    actually running. Returns the list of reset plan_ids.
+
+    Only fires when the worker is connected — a disconnected worker
+    could be temporary (reconnecting), and we should not overwrite the
+    plan's running state on a transient blip. Once connected, the
+    worker's EVT_STATUS sync tells us authoritatively what's running:
+
+      - ``running=False`` → every ``status='running'`` plan is stale.
+      - ``running=True`` with ``plan_id=P`` → any OTHER running plan
+        is stale (plan P is the genuinely active one).
+
+    Idempotent: a second call after the first is a no-op.
+    """
+    state = getattr(request.app.state, "training_state", None) or {}
+    worker_connected = getattr(request.app.state, "worker_connected", False)
+    if not worker_connected:
+        # Worker is offline; we don't know ground truth. Leave the
+        # registry alone until it reconnects.
+        return []
+
+    worker_running = bool(state.get("running"))
+    active_plan_id = state.get("plan_id") if worker_running else None
+
+    reset: list[str] = []
+    for plan in reg.list():
+        if plan.status != "running":
+            continue
+        if plan.plan_id == active_plan_id:
+            continue  # genuinely in progress on the worker
+        try:
+            reg.set_status(plan.plan_id, "paused")
+            reset.append(plan.plan_id)
+            logger.info(
+                "Reset stale running plan %s to paused "
+                "(worker_running=%s, active=%s)",
+                plan.plan_id, worker_running, active_plan_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to reset stale running plan %s", plan.plan_id,
+            )
+    return reset
 
 
 @router.get("/coverage")

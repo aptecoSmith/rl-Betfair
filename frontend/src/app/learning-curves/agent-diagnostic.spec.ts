@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+  bucketIntoRuns,
   diagnoseAgent,
   EpisodeRecord,
+  RUN_BOUNDARY_GAP_SECONDS,
   sliceToMostRecentRun,
   summarisePopulation,
 } from './agent-diagnostic';
@@ -260,5 +262,101 @@ describe('summarisePopulation', () => {
     expect(summarisePopulation([])).toEqual({
       total: 0, learning: 0, collapsed: 0, unstable: 0, stagnant: 0, warmingUp: 0,
     });
+  });
+});
+
+// ── bucketIntoRuns — per-run filter source of truth -------------------
+//
+// A "run" is a contiguous cluster of episodes whose timestamps are
+// within RUN_BOUNDARY_GAP_SECONDS (30 min) of each other. The UI's
+// run-filter dropdown lets the operator pick a specific run instead
+// of always seeing the latest — fixtures here pin the boundary
+// behaviour so a future change to RUN_BOUNDARY_GAP_SECONDS surfaces
+// explicitly rather than quietly shifting which rows bucket together.
+
+function rowAt(modelId: string, epoch: number): EpisodeRecord {
+  return ep(1, '2026-04-18', { model_id: modelId, timestamp: epoch as unknown as string });
+}
+
+describe('bucketIntoRuns', () => {
+  it('returns empty for no episodes', () => {
+    expect(bucketIntoRuns([])).toEqual([]);
+  });
+
+  it('puts adjacent rows in one run', () => {
+    const rows = [
+      rowAt('a', 1000),
+      rowAt('a', 1100),
+      rowAt('a', 1200),
+    ];
+    const runs = bucketIntoRuns(rows);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].startTs).toBe(1000);
+    expect(runs[0].endTs).toBe(1200);
+    expect(runs[0].episodes).toHaveLength(3);
+  });
+
+  it('splits at the > RUN_BOUNDARY_GAP_SECONDS boundary', () => {
+    const rows = [
+      rowAt('a', 1000),
+      rowAt('a', 2000),
+      rowAt('b', 2000 + RUN_BOUNDARY_GAP_SECONDS + 1),  // new run
+      rowAt('b', 3500 + RUN_BOUNDARY_GAP_SECONDS),
+    ];
+    const runs = bucketIntoRuns(rows);
+    expect(runs).toHaveLength(2);
+    // Newest first — the second run starts later.
+    expect(runs[0].startTs).toBe(2000 + RUN_BOUNDARY_GAP_SECONDS + 1);
+    expect(runs[1].startTs).toBe(1000);
+  });
+
+  it('keeps rows together at exactly RUN_BOUNDARY_GAP_SECONDS (inclusive)', () => {
+    const rows = [
+      rowAt('a', 0),
+      rowAt('a', RUN_BOUNDARY_GAP_SECONDS),  // exactly on boundary — NOT a split
+      rowAt('a', RUN_BOUNDARY_GAP_SECONDS + 1), // 1 s beyond also keeps
+      rowAt('a', 2 * RUN_BOUNDARY_GAP_SECONDS + 2),  // gap > 30 min → split
+    ];
+    const runs = bucketIntoRuns(rows);
+    expect(runs).toHaveLength(2);
+    expect(runs[1].episodes).toHaveLength(3);
+    expect(runs[0].episodes).toHaveLength(1);
+  });
+
+  it('returns runs sorted newest-first', () => {
+    const rows = [
+      rowAt('a', 10000),
+      rowAt('b', 1000),
+      rowAt('c', 50000),
+    ];
+    const runs = bucketIntoRuns(rows);
+    expect(runs.map(r => r.startTs)).toEqual([50000, 10000, 1000]);
+  });
+
+  it('id equals startTs — stable across polls', () => {
+    const rows = [rowAt('a', 1234), rowAt('a', 1235)];
+    const [run] = bucketIntoRuns(rows);
+    expect(run.id).toBe(1234);
+  });
+
+  it('handles unparseable timestamps without throwing', () => {
+    const rows = [
+      { ...rowAt('a', 1000), timestamp: '' },
+      { ...rowAt('b', 2000), timestamp: 'not-a-date' },
+      rowAt('c', 3000),
+    ];
+    const runs = bucketIntoRuns(rows);
+    // At minimum: no crash, and the valid row appears somewhere.
+    const allEpisodes = runs.flatMap(r => r.episodes);
+    expect(allEpisodes).toHaveLength(3);
+    expect(allEpisodes.some(e => e.model_id === 'c')).toBe(true);
+  });
+
+  it('a lone episode produces a one-row run', () => {
+    const runs = bucketIntoRuns([rowAt('a', 500)]);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].startTs).toBe(500);
+    expect(runs[0].endTs).toBe(500);
+    expect(runs[0].episodes).toHaveLength(1);
   });
 });
