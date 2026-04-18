@@ -5,6 +5,104 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ---
 
+## Session 01b — raw = race_pnl (loss-closed pairs correctly negative)
+
+**Commit:** `<hash>` (this session)
+**Date:** 2026-04-18
+
+What landed:
+
+- `env/betfair_env.py::_compute_scalping_reward_terms` helper
+  signature changed: first argument renamed from
+  `scalping_locked_pnl` to `race_pnl`, and the helper now returns
+  `race_reward_pnl = race_pnl` directly. This is the whole-race
+  cashflow — `scalping_locked_pnl + scalping_closed_pnl +
+  sum(per_pair_naked_pnl)` — so close-leg losses on pairs closed
+  via `close_signal` at a loss now land in raw at full cash value.
+- Session 01's draft used
+  `race_reward_pnl = scalping_locked_pnl + sum(naked_per_pair)`,
+  which silently excluded `scalping_closed_pnl`. A pair closed at
+  a −£5 loss registered `raw=0` (locked floor) + `+£1` (shaped
+  close bonus) = `net +£1` — rewarding the agent for a losing
+  trade. Session 01b corrects this: the same −£5 close now
+  registers `raw=−5, shaped=+1, net=−4`. The close bonus still
+  keeps closing strictly better than letting a naked roll to a
+  larger worst-case loss (naked −£80 → net −£80 vs closing at
+  −£4), so the learning signal favours closing without making
+  close an unconditional reward.
+- Call site at `_settle_current_race` updated to pass
+  `race_pnl=race_pnl` (the local already computed before the
+  reward-assembly block).
+- Shaped terms (`−0.95 × sum(max(0, per_pair_naked_pnl))`,
+  `+£1 × n_close_signal_successes`) unchanged.
+
+Tests:
+
+- `TestNakedWinnerClipAndCloseBonus` — six existing tests
+  rewritten to pass `race_pnl=<sum>` in place of
+  `scalping_locked_pnl=<sum>` (same scalar values, new keyword);
+  one new test
+  `test_loss_closed_scalp_reports_full_loss_in_raw` covers the
+  loss-closed row of the `purpose.md` outcome table
+  (`race_pnl=−5, naked=[], n_close=1` → `raw=−5, shaped=+1,
+  net=−4`).
+- `TestCloseAtLossRawRewardInvariant` in `tests/test_close_signal.py`
+  reframed: the class's invariant was "close-at-loss contributes 0
+  to raw_pnl_reward" — under Session 01b this no longer holds.
+  Renamed test to
+  `test_close_at_loss_flows_cash_loss_into_raw_reward` and
+  asserts `raw_pnl_reward == day_pnl` (cash loss flows through
+  raw at full value). `terminal_bonus_weight` overridden to 0 in
+  the env fixture so the raw accumulator equals the race-level
+  contribution exactly.
+- `test_naked_windfall_excluded_from_raw_reward` in
+  `tests/test_forced_arbitrage.py` reframed:
+  renamed to `test_naked_windfall_in_raw_with_shaped_winner_clip`.
+  Old test stripped `pair_id` to hide the naked from the helper;
+  the new test keeps `pair_id` intact so the naked pair appears
+  in `get_naked_per_pair_pnls`, and asserts `raw ==
+  day_pnl` (full cash) plus `shaped == −0.95 × naked_pnl`
+  (winner clip fires). Same directional-luck-neutralisation
+  behaviour, exercised through the real code path.
+
+Invariant test:
+`pytest tests/test_forced_arbitrage.py::TestScalpingReward::test_invariant_raw_plus_shaped_equals_total_reward -v`
+→ PASS.
+
+Full suite: `pytest tests/ -q` → **2172 passed**, 7 skipped, 1
+xfailed, 133 deselected (Session 01 baseline 2171 → +1 for the
+new loss-closed test).
+
+Docs:
+
+- `CLAUDE.md` "Reward function: raw vs shaped" 2026-04-18
+  naked-clip paragraph updated: formula changed from
+  `scalping_locked_pnl + sum(per_pair_naked_pnl)` to `race_pnl`;
+  outcome-table line gains the loss-closed row (`net −£4`); a
+  closing sentence notes the Session 01 → 01b refinement lineage.
+  Historical 2026-04-15 and naked-asymmetry paragraphs
+  preserved.
+
+Outcome table with the loss-closed row now covered by tests:
+
+| Per-pair outcome | Raw | Shaped | Net |
+|---|---|---|---|
+| Scalp locks +£2 (passive filled naturally) | +2 | 0 | **+2** |
+| Scalp locks +£2 via `close_signal` | +2 | +1 | **+3** |
+| Loss-closed scalp (close at −£5, locked=0) | −5 | +1 | **−4** |
+| Naked winner +£100 (held to settle) | +100 | −95 | **+5** |
+| Naked loser −£80 (held to settle) | −80 | 0 | **−80** |
+| Naked winner +£10 (held to settle) | +10 | −9.50 | **+0.50** |
+
+Not changed: matcher, action/obs schemas, gene ranges, GA
+selection, pair sizing, per-pair aggregation, shaped-term
+formulas. Per `hard_constraints §1–§2`.
+
+Next: Session 02 (PPO stability) remains gated on the operator
+reviewing Session 01 + 01b.
+
+---
+
 ## Session 01 — reward shape (naked winner clip + close bonus + full loss in raw)
 
 **Commit:** `e0799a4`

@@ -974,7 +974,7 @@ class TestNakedWinnerClipAndCloseBonus:
     def test_single_naked_winner_raw_full_shaped_clipped(self):
         """Naked winner +£100 → raw=+100, shaped=−95, net=+5."""
         raw, shaped = _compute_scalping_reward_terms(
-            scalping_locked_pnl=0.0,
+            race_pnl=100.0,
             naked_per_pair=[100.0],
             n_close_signal_successes=0,
         )
@@ -985,7 +985,7 @@ class TestNakedWinnerClipAndCloseBonus:
     def test_single_naked_loser_raw_full_shaped_zero(self):
         """Naked loser −£80 → raw=−80, shaped=0, net=−80."""
         raw, shaped = _compute_scalping_reward_terms(
-            scalping_locked_pnl=0.0,
+            race_pnl=-80.0,
             naked_per_pair=[-80.0],
             n_close_signal_successes=0,
         )
@@ -996,14 +996,14 @@ class TestNakedWinnerClipAndCloseBonus:
     def test_mixed_win_and_loss_per_pair_aggregation(self):
         """Winner +£100 and loser −£80 in the same race.
 
-        Raw sums both (+£20). Shaped clips only the winner (−£95);
-        loser contributes 0 to the clip because ``max(0, −80) = 0``.
-        Net = −£75 — the aggregate ‘lucky wins cancel losses’
-        masking that per-pair aggregation was introduced to kill
-        still cannot rescue this race.
+        Raw is the whole-race cashflow (+£20). Shaped clips only the
+        winner (−£95); loser contributes 0 to the clip because
+        ``max(0, −80) = 0``. Net = −£75 — the aggregate ‘lucky wins
+        cancel losses’ masking that per-pair aggregation was
+        introduced to kill still cannot rescue this race.
         """
         raw, shaped = _compute_scalping_reward_terms(
-            scalping_locked_pnl=0.0,
+            race_pnl=20.0,
             naked_per_pair=[100.0, -80.0],
             n_close_signal_successes=0,
         )
@@ -1012,15 +1012,14 @@ class TestNakedWinnerClipAndCloseBonus:
         assert raw + shaped == pytest.approx(-75.0)
 
     def test_scalp_using_close_signal_earns_bonus(self):
-        """Closed pair with locked_pnl=+£2 → raw=+2, shaped=+1, net=+3.
+        """Closed pair at +£2 cash → raw=+2, shaped=+1, net=+3.
 
-        A close_signal success contributes the pair's realised floor
-        via ``scalping_locked_pnl`` (which is the helper's first
-        argument — the test passes £2 directly to model that) plus
-        the shaped +£1 per-close bonus.
+        A profitable ``close_signal`` success contributes the pair's
+        cash via ``race_pnl`` (the helper's raw channel) plus the
+        shaped +£1 per-close bonus.
         """
         raw, shaped = _compute_scalping_reward_terms(
-            scalping_locked_pnl=2.0,
+            race_pnl=2.0,
             naked_per_pair=[],
             n_close_signal_successes=1,
         )
@@ -1028,11 +1027,34 @@ class TestNakedWinnerClipAndCloseBonus:
         assert shaped == pytest.approx(1.0)
         assert raw + shaped == pytest.approx(3.0)
 
+    def test_loss_closed_scalp_reports_full_loss_in_raw(self):
+        """Close_signal closes a pair at −£5 cash → raw=−5, shaped=+1, net=−4.
+
+        Under Session 01's draft (raw = ``scalping_locked_pnl +
+        sum(naked_per_pair)``) the pair's locked floor was 0, no naked
+        contribution, so raw=0 and net=+£1 from the close bonus —
+        rewarding a trade that actually lost real cash. Under Session
+        01b (raw = ``race_pnl``) the close-leg loss flows through
+        ``scalping_closed_pnl`` into ``race_pnl`` and net is correctly
+        negative. The close bonus still gives closing a positive
+        gradient over holding-to-settle (a naked −£80 would net −£80
+        vs this close's −£4), so the learning signal favours closing
+        without letting close be an unconditional reward.
+        """
+        raw, shaped = _compute_scalping_reward_terms(
+            race_pnl=-5.0,
+            naked_per_pair=[],
+            n_close_signal_successes=1,
+        )
+        assert raw == pytest.approx(-5.0)
+        assert shaped == pytest.approx(1.0)
+        assert raw + shaped == pytest.approx(-4.0)
+
     def test_multiple_close_signal_successes_accumulate(self):
         """N closes in one race → shaped += N × £1."""
         for n in (2, 3, 5):
             raw, shaped = _compute_scalping_reward_terms(
-                scalping_locked_pnl=0.0,
+                race_pnl=0.0,
                 naked_per_pair=[],
                 n_close_signal_successes=n,
             )
@@ -1042,15 +1064,16 @@ class TestNakedWinnerClipAndCloseBonus:
     def test_raw_plus_shaped_invariant_with_new_terms(self):
         """Mixed race exercises every new term simultaneously:
         locked scalp +£5, naked winner +£50, naked loser −£30, and
-        two ``close_signal`` successes. Confirms raw and shaped
+        two ``close_signal`` successes. ``race_pnl`` is the sum of
+        all cash contributions (+£25). Confirms raw and shaped
         add up to the full contribution (no leakage).
         """
         raw, shaped = _compute_scalping_reward_terms(
-            scalping_locked_pnl=5.0,
+            race_pnl=25.0,
             naked_per_pair=[50.0, -30.0],
             n_close_signal_successes=2,
         )
-        # Raw: 5 + 50 + (−30) = +£25.
+        # Raw: race_pnl = 5 + 50 + (−30) = +£25.
         assert raw == pytest.approx(25.0)
         # Shaped: −0.95 × 50 + 2 × 1.0 = −47.5 + 2.0 = −£45.5.
         assert shaped == pytest.approx(-45.5)
@@ -1134,18 +1157,26 @@ class TestScalpingGenes:
         assert env._naked_penalty_weight == pytest.approx(3.5)
         assert env._early_lock_bonus_weight == pytest.approx(0.7)
 
-    def test_naked_windfall_excluded_from_raw_reward(self, scalping_config):
-        """Naked bet P&L must not count toward the reward in scalping mode.
+    def test_naked_windfall_in_raw_with_shaped_winner_clip(self, scalping_config):
+        """Naked windfall lands in raw at full cash; shaped clips
+        winners by 95 % to neutralise the training incentive for
+        directional luck.
 
-        A naked back that wins is directional luck, not scalping skill —
-        folding it into the reward would teach the agent to deliberately
-        leave unpaired bets and hope for a price run. The naked penalty
-        covers the exposure, and that's the only signal naked bets get.
+        Pre-``naked-clip-and-stability`` (2026-04-18) raw masked naked
+        winners entirely via ``min(0, ...)`` so the agent saw zero
+        reward for a naked win regardless of outcome. The refactor
+        moves the asymmetry out of raw — raw now reports actual
+        cashflow (``race_pnl``) so winners land at full cash — and
+        into shaped, which subtracts 0.95 × per-pair-naked-winner.
+        Net training signal on a winning naked is +0.05 × win — small
+        enough to avoid teaching "leave bets naked and hope", while
+        raw reports honest day P&L. See
+        ``plans/naked-clip-and-stability/`` and CLAUDE.md.
         """
         cfg = dict(scalping_config)
         cfg["reward"] = dict(cfg["reward"])
-        # Turn shaping way down so the raw reward is effectively the only
-        # thing driving the reward stream.
+        # Turn non-clip shaping way down so the raw reward + shaped
+        # winner-clip are the only signals in the reward stream.
         cfg["reward"]["naked_penalty_weight"] = 0.0
         cfg["reward"]["early_lock_bonus_weight"] = 0.0
         cfg["reward"]["terminal_bonus_weight"] = 0.0
@@ -1162,25 +1193,33 @@ class TestScalpingGenes:
         # Subsequent steps: hold (no new bets) so we can isolate the
         # behaviour of the first naked leg without more pairs stacking.
         hold = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
-        # Force the one outstanding pair to stay unfilled: clear the
-        # passive_book and strip pair_id off the matched aggressive so
-        # `get_paired_positions` can't find a pair group.
+        # Keep pair_ids intact — scalping-mode bets are always paired,
+        # and the per-pair naked accessor needs the aggressive leg's
+        # pair_id to classify it. Clear the passive_book so the
+        # resting lay never matches on subsequent ticks (would turn
+        # the pair complete and change the arithmetic).
         bm = env.bet_manager
         bm.passive_book._orders = []
         bm.passive_book._orders_by_sid.clear()
-        for b in bm.bets:
-            b.pair_id = None
         terminated = False
         info = {}
         while not terminated:
             _, _, terminated, _, info = env.step(hold)
-        # No pair was completed, so the raw reward excludes the naked
-        # bet's P&L entirely — even if day_pnl is non-zero because the
-        # runner did win / lose directionally.
+        # No pair was completed, locked is zero, and day P&L equals
+        # the naked aggregate — the naked aggressive leg is the only
+        # thing that settled.
         assert info["arbs_completed"] == 0
         assert info["locked_pnl"] == 0.0
         assert info["naked_pnl"] == pytest.approx(info["day_pnl"], abs=1e-6)
-        assert info["raw_pnl_reward"] == pytest.approx(0.0, abs=1e-6)
+        # Raw now reports full race cashflow (including naked P&L).
+        assert info["raw_pnl_reward"] == pytest.approx(info["day_pnl"], abs=1e-6)
+        # Shaped applies the 95 % winner clip if the naked won, and
+        # is zero if it lost. The synthetic fixture produces a
+        # winning back here (naked_pnl > 0).
+        assert info["naked_pnl"] > 0.0
+        assert info["shaped_bonus"] == pytest.approx(
+            -0.95 * info["naked_pnl"], abs=1e-6,
+        )
 
     def test_evaluator_collects_scalping_metrics(self, scalping_config):
         """EvaluationDayRecord carries arbs_completed / arbs_naked /

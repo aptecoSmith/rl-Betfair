@@ -143,7 +143,7 @@ CLOSE_SIGNAL_BONUS: float = 1.0
 
 
 def _compute_scalping_reward_terms(
-    scalping_locked_pnl: float,
+    race_pnl: float,
     naked_per_pair: list[float],
     n_close_signal_successes: int,
 ) -> tuple[float, float]:
@@ -151,10 +151,19 @@ def _compute_scalping_reward_terms(
 
     Parameters
     ----------
-    scalping_locked_pnl:
-        Locked-PnL floor summed across completed pairs (both natural
-        completions and agent-closed pairs). Already floored at ≥ 0 by
-        :meth:`BetManager.get_paired_positions`.
+    race_pnl:
+        The whole-race cashflow — ``scalping_locked_pnl +
+        scalping_closed_pnl + sum(per_pair_naked_pnl)`` by
+        construction. Becomes the raw reward directly: every £ that
+        moved in or out of the wallet lands in raw, including close-leg
+        losses. Session 01's initial draft used ``scalping_locked_pnl +
+        sum(naked_per_pair)`` which silently excluded
+        ``scalping_closed_pnl``, so a pair closed at a loss via
+        ``close_signal`` contributed ``raw=0`` (locked floor) and
+        ``+£1`` via the close bonus — rewarding the agent for a trade
+        that actually lost real cash. Session 01b substituted
+        ``race_pnl`` to correct this; see
+        ``plans/naked-clip-and-stability/hard_constraints.md §4–§4a``.
     naked_per_pair:
         One entry per naked aggressive leg — the leg's settled ``pnl``.
         Positive for a winning naked, negative for a losing naked.
@@ -182,7 +191,7 @@ def _compute_scalping_reward_terms(
     (outcome table) — the tests in ``TestNakedWinnerClipAndCloseBonus``
     assert every row.
     """
-    race_reward_pnl = scalping_locked_pnl + sum(naked_per_pair)
+    race_reward_pnl = race_pnl
     naked_winner_clip = -NAKED_WINNER_CLIP_FRACTION * sum(
         max(0.0, p) for p in naked_per_pair
     )
@@ -2325,21 +2334,27 @@ class BetfairEnv(gymnasium.Env):
         naked_pnl = race_pnl - scalping_locked_pnl - scalping_closed_pnl
 
         # Scalping reward split across raw and shaped channels
-        # (naked-clip-and-stability, 2026-04-18). Raw reports actual
-        # race cashflow — per-pair naked P&L flows in at 100 %, winners
-        # AND losers. Shaped carries the training-signal adjustments:
-        # a −95 % clip on naked winners neutralises the incentive for
-        # directional luck, and a +£1 per close_signal success gives a
-        # positive gradient for substituting closes for naked rolls.
-        # See ``plans/naked-clip-and-stability/purpose.md`` and
-        # hard_constraints §4–§7. Aggregate ``naked_pnl`` below is
-        # kept for RaceRecord logging, not reward.
+        # (naked-clip-and-stability, 2026-04-18). Raw is the whole-race
+        # cashflow (``race_pnl`` = scalping_locked_pnl +
+        # scalping_closed_pnl + sum(per_pair_naked_pnl)) — every £ that
+        # moved through the wallet, including close-leg losses on pairs
+        # closed via ``close_signal`` at a loss. Shaped carries the
+        # training-signal adjustments: a −95 % clip on naked winners
+        # neutralises the incentive for directional luck, and a +£1
+        # per close_signal success gives a positive gradient for
+        # substituting closes for naked rolls. See
+        # ``plans/naked-clip-and-stability/purpose.md`` and
+        # hard_constraints §4–§7 (Session 01b refined raw from the
+        # Session 01 draft ``locked + sum(naked)`` to ``race_pnl`` so
+        # loss-closed pairs report their actual loss in raw — §4a).
+        # Aggregate ``naked_pnl`` below is kept for RaceRecord logging,
+        # not reward.
         if self.scalping_mode:
             naked_per_pair = bm.get_naked_per_pair_pnls(
                 market_id=race.market_id,
             )
             race_reward_pnl, race_shaping = _compute_scalping_reward_terms(
-                scalping_locked_pnl=scalping_locked_pnl,
+                race_pnl=race_pnl,
                 naked_per_pair=naked_per_pair,
                 n_close_signal_successes=scalping_arbs_closed,
             )

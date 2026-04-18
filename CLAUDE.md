@@ -145,18 +145,25 @@ into two buckets and accumulates each separately for diagnostics:
   the dice on aggregates. The 0.5× softening factor from 2026-04-15
   is preserved on the new per-pair sum. **Scalping mode (2026-04-18 —
   `naked-clip-and-stability`):** the reward shape now splits naked
-  handling across the two channels. Raw becomes
-  `scalping_locked_pnl + sum(per_pair_naked_pnl)` — actual race
-  cashflow, winners AND losers. Shaped absorbs the training-signal
-  adjustments: `shaped += −0.95 × sum(max(0, per_pair_naked_pnl))`
-  neuters 95 % of any naked windfall, and `shaped += +£1 per
-  close_signal success` gives a positive gradient for substituting
-  closes for naked rolls. The 0.5× softener from 2026-04-15 is
-  removed — naked losses now land at full cash value in raw. Net
-  effect per per-pair outcome: scalp locks +£2 (used `close_signal`)
-  → net +£3 reward; naked winner +£100 → net +£5 reward; naked loser
-  −£80 → net −£80 reward. Reward-scale change; scoreboard rows from
-  before this fix are not directly comparable.
+  handling across the two channels. Raw becomes `race_pnl` — the
+  whole-race cashflow (`scalping_locked_pnl + scalping_closed_pnl +
+  sum(per_pair_naked_pnl)`), truthful about every £ that moved
+  including close-leg losses on pairs closed at a loss via
+  `close_signal`. Shaped absorbs the training-signal adjustments:
+  `shaped += −0.95 × sum(max(0, per_pair_naked_pnl))` neuters 95 % of
+  any naked windfall, and `shaped += +£1 per close_signal success`
+  gives a positive gradient for substituting closes for naked rolls.
+  The 0.5× softener from 2026-04-15 is removed — naked losses now
+  land at full cash value in raw. Net effect per per-pair outcome:
+  scalp locks +£2 (used `close_signal`) → net +£3 reward; loss-closed
+  scalp (close at −£5) → net −£4 reward; naked winner +£100 → net +£5
+  reward; naked loser −£80 → net −£80 reward. Reward-scale change;
+  scoreboard rows from before this fix are not directly comparable.
+  (Initial Session 01 draft set raw to `scalping_locked_pnl +
+  sum(per_pair_naked_pnl)`, silently excluding `scalping_closed_pnl`;
+  Session 01b corrected this to `race_pnl` so loss-closed pairs report
+  their actual loss in raw rather than netting +£1 via the close
+  bonus — see `plans/naked-clip-and-stability/`.)
 - **Shaped** = `early_pick_bonus + (precision − 0.5) × precision_bonus
   − bet_count × efficiency_penalty`. These are training-signal
   contributions that shouldn't (in expectation) add or remove money.

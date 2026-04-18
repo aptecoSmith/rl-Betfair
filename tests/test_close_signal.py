@@ -254,15 +254,29 @@ class TestClosePairAlreadyComplete:
 
 
 class TestCloseAtLossRawRewardInvariant:
-    def test_close_at_loss_contributes_zero_to_raw_reward(
+    def test_close_at_loss_flows_cash_loss_into_raw_reward(
         self, scalping_config,
     ):
-        """Core reward-invariant (hard_constraints §5): close-at-loss
-        pair registers with locked_pnl=0 (floored), contributes 0 to
-        naked_pnl (both legs matched), so raw_pnl_reward stays 0 — but
-        the realised cash loss flows through info['day_pnl']."""
+        """Raw-reward invariant (hard_constraints §4, Session 01b):
+        close-at-loss pair registers with locked_pnl=0 (floored) but
+        its cash loss flows through ``scalping_closed_pnl`` into
+        ``race_pnl`` — and ``raw_pnl_reward`` IS ``race_pnl`` post
+        Session 01b. So the loss is honestly reported in raw.
+
+        Previously (Session 01 draft) raw was ``scalping_locked_pnl +
+        sum(per_pair_naked_pnl)`` which excluded ``scalping_closed_pnl``
+        — a close-at-loss pair contributed raw=0 and +£1 via the shaped
+        close bonus, netting +£1 reward for a trade that actually lost
+        real cash. Session 01b refined raw to ``race_pnl`` so the
+        close-leg's cash loss lands in raw at full value (see
+        plans/naked-clip-and-stability/)."""
+        # Strip the terminal day-P&L bonus so the raw accumulator is
+        # exactly the race-level race_pnl contribution — makes the
+        # raw == day_pnl invariant bind cleanly without arithmetic
+        # offset from the terminal bonus.
         env = BetfairEnv(
             _make_day(n_races=1, n_pre_ticks=5), scalping_config,
+            reward_overrides={"terminal_bonus_weight": 0.0},
         )
         env.reset()
         agg, _ = _place_initial_pair(env)
@@ -288,14 +302,16 @@ class TestCloseAtLossRawRewardInvariant:
         # The closed pair should show up in arbs_closed — NOT arbs_naked
         # and NOT arbs_completed (close_leg tagging routes it separately).
         assert info["arbs_closed"] >= 1
-        # Raw reward invariant (hard_constraints §5 + session 01 exit
-        # criteria): a close-at-loss contributes 0 to raw_pnl_reward.
-        # The pair's locked_pnl floors at 0 and its cash P&L is carved
-        # out of naked_pnl (scalping_closed_pnl), so neither the locked
-        # term nor the asymmetric naked-loss term claim it. The cash
-        # loss remains visible on info["day_pnl"].
+        # Raw-reward invariant (hard_constraints §4, Session 01b): raw
+        # equals race_pnl, so a close-at-loss's cash hit flows through
+        # raw at full value. The shaped close bonus (+£1) still keeps
+        # closing strictly more attractive than letting a naked roll
+        # to its worst case, but the raw signal is no longer +£1 for a
+        # losing trade.
         assert info["day_pnl"] < 0.0
-        assert info["raw_pnl_reward"] == pytest.approx(0.0, abs=1e-6)
+        assert info["raw_pnl_reward"] == pytest.approx(
+            info["day_pnl"], abs=1e-6,
+        )
         # Close events surface on info for the trainer.
         events = info.get("close_events", [])
         assert len(events) >= 1
