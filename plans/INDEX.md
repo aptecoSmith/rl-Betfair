@@ -23,7 +23,8 @@ Don't renumber on top — numbers are append-only history.
 | 11 | [scalping-active-management](scalping-active-management/) | 2026-04-16 | Re-quote + fill-prob + risk aux heads + UI surfaces |
 | 12 | [scalping-close-signal](scalping-close-signal/) | 2026-04-17 | "Take the red" close-at-loss action (Session 01 landed) |
 | 13 | [scalping-naked-asymmetry](scalping-naked-asymmetry/) | 2026-04-18 | Per-pair naked P&L penalty — fix luck-cancellation in raw reward |
-| 14 | [scalping-equal-profit-sizing](scalping-equal-profit-sizing/) | 2026-04-18 | **(latest)** Correct passive-leg sizing — equalises P&L (not exposure) after commission |
+| 14 | [scalping-equal-profit-sizing](scalping-equal-profit-sizing/) | 2026-04-18 | Correct passive-leg sizing — equalises P&L (not exposure) after commission |
+| 15 | [policy-startup-stability](policy-startup-stability/) | 2026-04-18 | **(latest)** PPO advantage normalisation — prevents first-update spike that saturates `close_signal` head |
 
 ## Conventions
 
