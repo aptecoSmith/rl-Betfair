@@ -5,6 +5,114 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ---
 
+## Session 02 — PPO stability: KL early-stop + ratio clamp + per-arch LR
+
+**Commit:** `<pending>`
+**Date:** 2026-04-18
+
+What landed — three layered defences against first-update policy
+explosion on fresh agents (`agents/ppo_trainer.py`), plus a
+per-architecture default LR pathway (`agents/policy_network.py`):
+
+1. **Ratio clamp.** In `_ppo_update`'s mini-batch loop,
+   `ratio = (new_log_probs - mb_old_log_probs).exp()` becomes
+   `log_ratio = torch.clamp(new_logp - old_logp, -20, +20);
+   ratio = log_ratio.exp()`. Numerical backstop for when
+   KL early-stop hasn't yet caught a runaway ratio within the
+   first epoch. No-op in normal operation (|log_ratio| ≪ 20);
+   only bites when an aggressive first-minibatch update has
+   already driven log-ratio toward overflow. Per
+   `hard_constraints.md §10`.
+2. **KL early-stop.** After each full epoch sweep of mini-batches,
+   a no-grad forward pass over the whole rollout computes
+   `approx_kl = (old_logp - new_logp_full).mean()`. If it exceeds
+   `self.kl_early_stop_threshold` (default `0.03`, literature
+   standard — Andrychowicz et al. 2021, Engstrom et al. 2020),
+   break out of the remaining epochs for this rollout. Applied at
+   epoch granularity, not mini-batch, per `hard_constraints.md §9`
+   — mid-epoch breaks leave mini-batches unevenly weighted.
+   Exposed to the GA via the `kl_early_stop_threshold`
+   hyperparameter so it can be mutated later if useful.
+3. **Per-architecture default LR.** New
+   `BasePolicy.default_learning_rate = 3e-4` class attribute,
+   overridden to `1.5e-4` on `PPOTransformerPolicy`.
+   `PPOTrainer.__init__` now reads
+   `type(policy).default_learning_rate` as the fallback when the
+   hp dict omits `learning_rate`. The GA still mutates LR around
+   the sampled gene value when `learning_rate` is present —
+   fresh-init transformer agents get the halved default.
+4. **Warmup coverage audit.** All three architectures
+   (transformer, LSTM, time-LSTM) construct their optimiser
+   through `PPOTrainer.__init__`, so the existing 5-update
+   linear LR warmup (`agents/ppo_trainer.py:1114`) fires
+   uniformly. No bypass to fix. Hard-constraint §12 satisfied.
+   Warmup length stays at 5 updates (§12: only extend if the
+   Session 04 smoke test fails).
+
+Return-dict additions on `_ppo_update`:
+
+```python
+"approx_kl": float,         # last-epoch approximate KL
+"epochs_completed": int,    # how many epochs actually ran
+"kl_early_stop_epoch": int, # -1 if didn't fire, else the epoch index
+```
+
+These feed the learning-curves panel and the Session 04 smoke-test
+assertions.
+
+Tests — new file `tests/test_ppo_stability.py`, 16 tests total:
+
+- `TestRatioClamp` (3) — clamp prevents overflow on |log_ratio|=50;
+  clamp is a no-op for |log_ratio| ≤ 0.5; real `_ppo_update`
+  surrogate loss stays finite on a deliberately-poisoned rollout
+  with `old_logp = -100` (would overflow `.exp()` without the
+  clamp).
+- `TestKLEarlyStop` (5) — threshold is configurable; default is
+  `0.03`; does NOT fire on a normal rollout (all 3 epochs run);
+  FIRES on a synthetic high-KL rollout (poisoned `old_logp + 2.0`,
+  <5 epochs run, `approx_kl > 0.03`); break is at epoch
+  granularity (`epochs_completed` is an integer). The high-KL
+  test is the hard-constraint §22 synthetic rollout required by
+  the session spec.
+- `TestTransformerDefaultLR` (4) —
+  `PPOTransformerPolicy.default_learning_rate == 1.5e-4` (exactly
+  half of `BasePolicy`'s `3e-4`); LSTM variants keep the base
+  default; `PPOTrainer` picks up the transformer default when hp
+  omits `learning_rate`; explicit `hp["learning_rate"]` wins over
+  the arch default (GA path).
+- `TestWarmupCoverageAllArchs` (3) — parameterised over
+  [`ppo_lstm_v1`, `ppo_time_lstm_v1`, `ppo_transformer_v1`]. After
+  the first `_ppo_update`, each architecture's optimiser lr
+  equals `base_learning_rate / 5`. Direct enforcement of the §12
+  audit conclusion.
+- `TestLargeRewardSmoke` (1) — synthetic rollout with ±£500
+  advantages (scalping magnitude) produces
+  `|policy_loss| < 100` through the real `_ppo_update`. Cheapest
+  possible end-to-end regression net for the transformer
+  `0a8cacd3` failure mode.
+
+Regression guards (pre-existing, unchanged):
+
+- `tests/test_ppo_advantage_normalisation.py` — all 8 tests PASS
+  (normalisation + warmup from `plans/policy-startup-stability/`
+  still bounded under the new clamp + early-stop defences).
+- `tests/test_ppo_trainer.py` — all 36 tests PASS.
+
+Full suite: `pytest tests/ -q` → **2188 passed**, 7 skipped, 1
+xfailed, 133 deselected (Session 01b baseline 2172 → +16 for the
+new stability tests).
+
+Not changed: matcher, reward shape (Session 01/01b), action/obs
+schemas, gene ranges, GA selection, pair sizing, entropy
+coefficient (that's Session 03), warmup length, gradient clipping.
+Per `hard_constraints §1`.
+
+Next: Session 03 (entropy control — halve `entropy_coefficient`
+default + reward centering). Blocked on operator review of this
+commit.
+
+---
+
 ## Session 01b — raw = race_pnl (loss-closed pairs correctly negative)
 
 **Commit:** `a4f689a`

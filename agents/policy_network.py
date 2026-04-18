@@ -305,6 +305,14 @@ class BasePolicy(nn.Module, abc.ABC):
 
     architecture_name: str = ""
     description: str = ""
+    # Per-architecture default learning rate
+    # (plans/naked-clip-and-stability, Session 02, 2026-04-18).
+    # Consulted by ``PPOTrainer.__init__`` when the hp dict omits
+    # ``learning_rate``. Subclasses override to tune fresh-init LR to
+    # their saturation profile (see ``PPOTransformerPolicy`` which
+    # halves this to 1.5e-4). The GA still mutates LR around the
+    # sampled gene value when ``learning_rate`` is present in hp.
+    default_learning_rate: float = 3e-4
 
     @abc.abstractmethod
     def forward(
@@ -1247,6 +1255,18 @@ class PPOTransformerPolicy(BasePolicy):
         "heads with the LSTM variants; replaces the LSTM with a causal "
         "transformer and a learned positional embedding."
     )
+
+    # Transformer action heads saturate on the first PPO update at the
+    # shared 3e-4 default LR — transformer ``0a8cacd3`` ep-1
+    # ``policy_loss = 1.04e17`` regression confirmed the shared LR is
+    # too hot for this arch. Halving here gives the warmup +
+    # KL-early-stop + ratio-clamp defences headroom to catch any
+    # residual instability. Consumed by
+    # ``agents/ppo_trainer.py::PPOTrainer.__init__`` when the hp dict
+    # omits ``learning_rate``; the GA still mutates LR around the
+    # sampled gene value when it's present.
+    # See plans/naked-clip-and-stability/purpose.md §2.
+    default_learning_rate: float = 1.5e-4
 
     def __init__(
         self,

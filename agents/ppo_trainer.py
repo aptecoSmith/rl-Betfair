@@ -461,7 +461,21 @@ class PPOTrainer:
 
         hp = hyperparams or {}
         self.hyperparams = hp
-        self.lr = hp.get("learning_rate", 3e-4)
+        # Per-architecture default learning rate
+        # (plans/naked-clip-and-stability, Session 02, 2026-04-18).
+        # The transformer architecture saturates its action heads on
+        # the first PPO update at the shared 3e-4 default — transformer
+        # ``0a8cacd3`` ep-1 logged ``policy_loss = 1.04e17`` despite the
+        # advantage-normalisation fix (plans/policy-startup-stability).
+        # Each architecture class may override ``default_learning_rate``
+        # (see agents/policy_network.py::PPOTransformerPolicy at 1.5e-4)
+        # so the fresh-init default is appropriate for its saturation
+        # profile; the GA still mutates LR around the sampled gene
+        # value when ``learning_rate`` is present in ``hp``.
+        policy_default_lr = float(
+            getattr(type(policy), "default_learning_rate", 3e-4)
+        )
+        self.lr = hp.get("learning_rate", policy_default_lr)
         self.gamma = hp.get("gamma", 0.99)
         self.gae_lambda = hp.get("gae_lambda", 0.95)
         self.clip_epsilon = hp.get("ppo_clip_epsilon", 0.2)
@@ -510,6 +524,23 @@ class PPOTrainer:
         self.max_grad_norm = hp.get("max_grad_norm", 0.5)
         self.ppo_epochs = hp.get("ppo_epochs", 4)
         self.mini_batch_size = hp.get("mini_batch_size", 64)
+
+        # KL early-stop threshold
+        # (plans/naked-clip-and-stability, Session 02, 2026-04-18).
+        # After each full epoch sweep of mini-batches in ``_ppo_update``,
+        # approximate KL across the rollout is compared against this
+        # threshold; if exceeded, the remaining epochs for the current
+        # rollout are skipped. Default ``0.03`` is the literature
+        # standard (Andrychowicz et al. 2021, Engstrom et al. 2020) and
+        # ships in stable-baselines3 / CleanRL. Exposed here so the GA
+        # gene system can mutate it later if useful.
+        self.kl_early_stop_threshold = float(
+            hp.get("kl_early_stop_threshold", 0.03)
+        )
+        # Set by ``_ppo_update`` when the threshold fires; diagnostic
+        # only (surfaces in the returned loss_info dict).
+        self._last_kl_early_stop_epoch: int | None = None
+        self._last_approx_kl: float = 0.0
 
         # -- Session 1 (arb-improvements) clipping knobs ---------------------
         # Three independent safety nets that default to 0.0 = off. When
@@ -1212,7 +1243,12 @@ class PPOTrainer:
         per_head_sums: dict[str, float] = {}
         per_head_count: int = 0
 
-        for _ in range(self.ppo_epochs):
+        # Reset KL early-stop diagnostics for this rollout.
+        self._last_kl_early_stop_epoch = None
+        self._last_approx_kl = 0.0
+        epochs_completed = 0
+
+        for epoch_idx in range(self.ppo_epochs):
             # Generate random mini-batch indices
             indices = torch.randperm(n, device=self.device)
             for start in range(0, n, self.mini_batch_size):
@@ -1272,8 +1308,20 @@ class PPOTrainer:
                     adv_std = mb_advantages.std() + 1e-8
                     mb_advantages = (mb_advantages - adv_mean) / adv_std
 
-                # PPO clipped surrogate
-                ratio = (new_log_probs - mb_old_log_probs).exp()
+                # PPO clipped surrogate. ``log_ratio`` is clamped to
+                # [-20, +20] before ``.exp()`` as a numerical backstop
+                # (plans/naked-clip-and-stability, Session 02,
+                # hard_constraints.md §10). In normal operation
+                # |log_ratio| ≪ 20 so gradients are unchanged; the
+                # clamp only bites when an aggressive first-minibatch
+                # update has already driven the ratio toward overflow,
+                # at which point the KL early-stop (below, after the
+                # mini-batch loop) aborts the remaining epochs for
+                # this rollout.
+                log_ratio = torch.clamp(
+                    new_log_probs - mb_old_log_probs, min=-20.0, max=20.0,
+                )
+                ratio = log_ratio.exp()
                 surr1 = ratio * mb_advantages
                 surr2 = (
                     torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon)
@@ -1364,6 +1412,41 @@ class PPOTrainer:
                 fill_prob_losses.append(float(fill_prob_loss.item()))
                 risk_losses.append(float(risk_loss.item()))
 
+            # KL early-stop at PPO-epoch granularity
+            # (plans/naked-clip-and-stability, Session 02, 2026-04-18,
+            # hard_constraints.md §9). After each full epoch sweep of
+            # mini-batches, compute approximate KL across the whole
+            # rollout as evaluated by the current (post-this-epoch)
+            # policy: ``mean(old_logp - new_logp)``. If the threshold
+            # is exceeded, break out of the remaining epochs for this
+            # rollout — prevents runaway updates from continuing to
+            # push the policy further after a large KL swing.
+            # Literature standard (Andrychowicz et al. 2021, Engstrom
+            # et al. 2020); ships in stable-baselines3. Kept at epoch
+            # granularity rather than mini-batch (hard_constraints §9)
+            # because mid-epoch breaks leave mini-batches unevenly
+            # weighted.
+            epochs_completed += 1
+            with torch.no_grad():
+                full_out = self.policy(obs_batch)
+                full_std = full_out.action_log_std.exp()
+                full_dist = Normal(full_out.action_mean, full_std)
+                new_logp_full = full_dist.log_prob(action_batch).sum(dim=-1)
+                approx_kl = float(
+                    (old_log_probs - new_logp_full).mean().item()
+                )
+            self._last_approx_kl = approx_kl
+            if approx_kl > self.kl_early_stop_threshold:
+                self._last_kl_early_stop_epoch = epoch_idx
+                logger.info(
+                    "PPO KL early-stop after epoch %d: approx_kl=%.4f"
+                    " > threshold=%.4f (skipping %d remaining epochs)",
+                    epoch_idx, approx_kl,
+                    self.kl_early_stop_threshold,
+                    self.ppo_epochs - (epoch_idx + 1),
+                )
+                break
+
         ppo_elapsed = time.perf_counter() - ppo_start
         n_updates = len(policy_losses)
         logger.info(
@@ -1398,6 +1481,18 @@ class PPOTrainer:
             "risk_loss": (
                 float(np.mean(risk_losses))
                 if risk_losses else 0.0
+            ),
+            # Session 02 KL early-stop diagnostics. ``approx_kl``
+            # always reports the last-epoch KL so the smoke test and
+            # learning-curves panel can see it. ``epochs_completed``
+            # is how many PPO epochs actually ran — < ppo_epochs only
+            # when the threshold fired.
+            "approx_kl": float(self._last_approx_kl),
+            "epochs_completed": int(epochs_completed),
+            "kl_early_stop_epoch": (
+                int(self._last_kl_early_stop_epoch)
+                if self._last_kl_early_stop_epoch is not None
+                else -1
             ),
             "action_stats": action_stats,
         }
