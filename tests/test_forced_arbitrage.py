@@ -15,6 +15,7 @@ from env.betfair_env import (
     SCALPING_ACTIONS_PER_RUNNER,
     SCALPING_POSITION_DIM,
     BetfairEnv,
+    _compute_scalping_reward_terms,
 )
 from env.exchange_matcher import ExchangeMatcher
 from env.tick_ladder import snap_to_tick, tick_offset, ticks_between
@@ -433,22 +434,41 @@ class TestScalpingReward:
     def test_precision_and_early_pick_zeroed_in_scalping_mode(
         self, scalping_config,
     ):
-        """Directional shaping is switched off when scalping_mode is on."""
-        cfg = dict(scalping_config)
-        cfg["reward"] = dict(cfg["reward"])
-        cfg["reward"]["precision_bonus"] = 10.0
-        cfg["reward"]["early_pick_bonus_min"] = 5.0
-        cfg["reward"]["early_pick_bonus_max"] = 5.0
-        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg)
+        """Directional shaping is switched off when scalping_mode is on.
+
+        Post-2026-04-18 (``naked-clip-and-stability``) shaped also
+        carries the naked-winner clip and close-bonus, so an absolute
+        threshold on ``shaped_bonus`` no longer isolates the
+        precision/early_pick leak. Differential form: two runs with
+        identical bets but radically different precision/early_pick
+        weights must produce identical shaped_bonus — the clip and
+        bonus depend only on naked outcomes, not these gates.
+        """
+        cfg_hi = dict(scalping_config)
+        cfg_hi["reward"] = dict(cfg_hi["reward"])
+        cfg_hi["reward"]["precision_bonus"] = 10.0
+        cfg_hi["reward"]["early_pick_bonus_min"] = 5.0
+        cfg_hi["reward"]["early_pick_bonus_max"] = 5.0
+
+        cfg_lo = dict(scalping_config)
+        cfg_lo["reward"] = dict(cfg_lo["reward"])
+        cfg_lo["reward"]["precision_bonus"] = 0.0
+        cfg_lo["reward"]["early_pick_bonus_min"] = 1.0
+        cfg_lo["reward"]["early_pick_bonus_max"] = 1.0
+
         a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
         a[0] = 1.0
         a[14] = -0.8
         a[28] = 1.0
-        info = self._run_episode(env, a)
-        # Those two shaping terms are the only ones we loaded with large
-        # non-zero weights. If either leaked into shaping, the cumulative
-        # shaped reward would be bounded away from zero by a large margin.
-        assert abs(info["shaped_bonus"]) < 1.0, info["shaped_bonus"]
+
+        env_hi = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg_hi)
+        info_hi = self._run_episode(env_hi, a)
+        env_lo = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg_lo)
+        info_lo = self._run_episode(env_lo, a)
+
+        assert info_hi["shaped_bonus"] == pytest.approx(
+            info_lo["shaped_bonus"], abs=1e-6,
+        )
 
     def test_naked_penalty_scales_with_exposure_weight(self, scalping_config):
         """Doubling the penalty weight roughly doubles the shaped penalty."""
@@ -932,6 +952,110 @@ class TestPerPairNakedAsymmetry:
             f"expected strictly negative mean naked term under "
             f"zero-EV sampling, got {mean_term:.3f}"
         )
+
+
+# ── Naked-winner clip + close bonus (naked-clip-and-stability, 2026-04-18) ──
+
+
+class TestNakedWinnerClipAndCloseBonus:
+    """Reward-shape worked examples from the
+    ``plans/naked-clip-and-stability/purpose.md`` outcome table.
+
+    Raw channel reports actual race cashflow: locked-pair floor plus
+    full per-pair naked P&L (winners AND losers). Shaped channel
+    carries the training-signal adjustments: a 95 % clip on naked
+    winners that neutralises directional luck, plus a +£1 bonus per
+    ``close_signal`` success that gives the close mechanic a positive
+    gradient beyond its realised locked P&L.
+
+    See ``plans/naked-clip-and-stability/hard_constraints.md`` §4–§6.
+    """
+
+    def test_single_naked_winner_raw_full_shaped_clipped(self):
+        """Naked winner +£100 → raw=+100, shaped=−95, net=+5."""
+        raw, shaped = _compute_scalping_reward_terms(
+            scalping_locked_pnl=0.0,
+            naked_per_pair=[100.0],
+            n_close_signal_successes=0,
+        )
+        assert raw == pytest.approx(100.0)
+        assert shaped == pytest.approx(-95.0)
+        assert raw + shaped == pytest.approx(5.0)
+
+    def test_single_naked_loser_raw_full_shaped_zero(self):
+        """Naked loser −£80 → raw=−80, shaped=0, net=−80."""
+        raw, shaped = _compute_scalping_reward_terms(
+            scalping_locked_pnl=0.0,
+            naked_per_pair=[-80.0],
+            n_close_signal_successes=0,
+        )
+        assert raw == pytest.approx(-80.0)
+        assert shaped == pytest.approx(0.0)
+        assert raw + shaped == pytest.approx(-80.0)
+
+    def test_mixed_win_and_loss_per_pair_aggregation(self):
+        """Winner +£100 and loser −£80 in the same race.
+
+        Raw sums both (+£20). Shaped clips only the winner (−£95);
+        loser contributes 0 to the clip because ``max(0, −80) = 0``.
+        Net = −£75 — the aggregate ‘lucky wins cancel losses’
+        masking that per-pair aggregation was introduced to kill
+        still cannot rescue this race.
+        """
+        raw, shaped = _compute_scalping_reward_terms(
+            scalping_locked_pnl=0.0,
+            naked_per_pair=[100.0, -80.0],
+            n_close_signal_successes=0,
+        )
+        assert raw == pytest.approx(20.0)
+        assert shaped == pytest.approx(-95.0)
+        assert raw + shaped == pytest.approx(-75.0)
+
+    def test_scalp_using_close_signal_earns_bonus(self):
+        """Closed pair with locked_pnl=+£2 → raw=+2, shaped=+1, net=+3.
+
+        A close_signal success contributes the pair's realised floor
+        via ``scalping_locked_pnl`` (which is the helper's first
+        argument — the test passes £2 directly to model that) plus
+        the shaped +£1 per-close bonus.
+        """
+        raw, shaped = _compute_scalping_reward_terms(
+            scalping_locked_pnl=2.0,
+            naked_per_pair=[],
+            n_close_signal_successes=1,
+        )
+        assert raw == pytest.approx(2.0)
+        assert shaped == pytest.approx(1.0)
+        assert raw + shaped == pytest.approx(3.0)
+
+    def test_multiple_close_signal_successes_accumulate(self):
+        """N closes in one race → shaped += N × £1."""
+        for n in (2, 3, 5):
+            raw, shaped = _compute_scalping_reward_terms(
+                scalping_locked_pnl=0.0,
+                naked_per_pair=[],
+                n_close_signal_successes=n,
+            )
+            assert raw == pytest.approx(0.0)
+            assert shaped == pytest.approx(float(n))
+
+    def test_raw_plus_shaped_invariant_with_new_terms(self):
+        """Mixed race exercises every new term simultaneously:
+        locked scalp +£5, naked winner +£50, naked loser −£30, and
+        two ``close_signal`` successes. Confirms raw and shaped
+        add up to the full contribution (no leakage).
+        """
+        raw, shaped = _compute_scalping_reward_terms(
+            scalping_locked_pnl=5.0,
+            naked_per_pair=[50.0, -30.0],
+            n_close_signal_successes=2,
+        )
+        # Raw: 5 + 50 + (−30) = +£25.
+        assert raw == pytest.approx(25.0)
+        # Shaped: −0.95 × 50 + 2 × 1.0 = −47.5 + 2.0 = −£45.5.
+        assert shaped == pytest.approx(-45.5)
+        # Net: +25 + (−45.5) = −£20.5.
+        assert raw + shaped == pytest.approx(-20.5)
 
 
 # ── Session 3: gene / hyperparameter integration ───────────────────────────

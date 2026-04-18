@@ -143,7 +143,20 @@ into two buckets and accumulates each separately for diagnostics:
   (`min(0, +£100) + min(0, −£80) = −£80`) and forces the agent to
   actually substitute `close_signal` for nakeds rather than rolling
   the dice on aggregates. The 0.5× softening factor from 2026-04-15
-  is preserved on the new per-pair sum.
+  is preserved on the new per-pair sum. **Scalping mode (2026-04-18 —
+  `naked-clip-and-stability`):** the reward shape now splits naked
+  handling across the two channels. Raw becomes
+  `scalping_locked_pnl + sum(per_pair_naked_pnl)` — actual race
+  cashflow, winners AND losers. Shaped absorbs the training-signal
+  adjustments: `shaped += −0.95 × sum(max(0, per_pair_naked_pnl))`
+  neuters 95 % of any naked windfall, and `shaped += +£1 per
+  close_signal success` gives a positive gradient for substituting
+  closes for naked rolls. The 0.5× softener from 2026-04-15 is
+  removed — naked losses now land at full cash value in raw. Net
+  effect per per-pair outcome: scalp locks +£2 (used `close_signal`)
+  → net +£3 reward; naked winner +£100 → net +£5 reward; naked loser
+  −£80 → net −£80 reward. Reward-scale change; scoreboard rows from
+  before this fix are not directly comparable.
 - **Shaped** = `early_pick_bonus + (precision − 0.5) × precision_bonus
   − bet_count × efficiency_penalty`. These are training-signal
   contributions that shouldn't (in expectation) add or remove money.

@@ -134,6 +134,63 @@ MIN_ARB_TICKS: int = 1
 # the agent exploring useful spreads instead of fantasy zone.
 MAX_ARB_TICKS: int = 25
 
+# ── Scalping reward shape (naked-clip-and-stability, 2026-04-18) ────────────
+# Magnitudes of the two shaped training-signal adjustments applied on top
+# of the raw per-race cash P&L. See hard_constraints §5 and §6 and
+# ``plans/naked-clip-and-stability/purpose.md`` for the motivation.
+NAKED_WINNER_CLIP_FRACTION: float = 0.95
+CLOSE_SIGNAL_BONUS: float = 1.0
+
+
+def _compute_scalping_reward_terms(
+    scalping_locked_pnl: float,
+    naked_per_pair: list[float],
+    n_close_signal_successes: int,
+) -> tuple[float, float]:
+    """Split a scalping race's settlement into raw and shaped terms.
+
+    Parameters
+    ----------
+    scalping_locked_pnl:
+        Locked-PnL floor summed across completed pairs (both natural
+        completions and agent-closed pairs). Already floored at ≥ 0 by
+        :meth:`BetManager.get_paired_positions`.
+    naked_per_pair:
+        One entry per naked aggressive leg — the leg's settled ``pnl``.
+        Positive for a winning naked, negative for a losing naked.
+    n_close_signal_successes:
+        Count of pairs that completed via a ``close_signal`` action
+        this race (pairs whose second leg carries ``close_leg=True``).
+
+    Returns
+    -------
+    ``(race_reward_pnl, race_shaping)``
+        ``race_reward_pnl`` feeds the raw accumulator and reports
+        actual race cashflow; ``race_shaping`` feeds the shaped
+        accumulator and carries the training-signal adjustments.
+
+    The two training-signal terms are:
+
+    * ``−0.95 × sum(max(0, p) for p in naked_per_pair)`` — clips
+      naked *winners* by 95 %, neutralising the reward for directional
+      luck while leaving naked *losers* in raw at full cash value.
+    * ``+1.0 × n_close_signal_successes`` — per-close bonus that gives
+      ``close_signal`` a positive gradient beyond its realised
+      locked P&L contribution.
+
+    See worked examples in ``plans/naked-clip-and-stability/purpose.md``
+    (outcome table) — the tests in ``TestNakedWinnerClipAndCloseBonus``
+    assert every row.
+    """
+    race_reward_pnl = scalping_locked_pnl + sum(naked_per_pair)
+    naked_winner_clip = -NAKED_WINNER_CLIP_FRACTION * sum(
+        max(0.0, p) for p in naked_per_pair
+    )
+    close_bonus = CLOSE_SIGNAL_BONUS * float(n_close_signal_successes)
+    race_shaping = naked_winner_clip + close_bonus
+    return race_reward_pnl, race_shaping
+
+
 # ── Feature key constants (deterministic ordering) ──────────────────────────
 # These MUST match the keys produced by data/feature_engineer.py exactly.
 
@@ -2267,45 +2324,26 @@ class BetfairEnv(gymnasium.Env):
         # asymmetric loss term below can use it.
         naked_pnl = race_pnl - scalping_locked_pnl - scalping_closed_pnl
 
-        # Scalping reward-eligible P&L: locked spread profit + naked
-        # LOSSES (asymmetric — naked windfalls remain excluded).
-        #
-        # Rationale: a naked back that happens to win is directional luck
-        # and rewarding it would teach the agent to leave unpaired bets on
-        # purpose. But IGNORING naked LOSSES is just as bad — the agent
-        # never sees the cash cost of leaving exposure unhedged, only a
-        # shaping proxy capped at ~-weight per race regardless of how big
-        # the actual loss was. The 2026-04-15 diagnostic on the top model
-        # showed +£3,555 locked / −£3,356 naked / +£200 net across 4 days:
-        # naked variance dwarfed the locked signal because the agent had
-        # no incentive to size pairs to control it.
-        #
-        # The asymmetric form keeps the "no luck reward" guarantee while
-        # giving real cash teeth to naked exposure: locked profit → +,
-        # naked loss → − (full cash hit), naked windfall → 0.
+        # Scalping reward split across raw and shaped channels
+        # (naked-clip-and-stability, 2026-04-18). Raw reports actual
+        # race cashflow — per-pair naked P&L flows in at 100 %, winners
+        # AND losers. Shaped carries the training-signal adjustments:
+        # a −95 % clip on naked winners neutralises the incentive for
+        # directional luck, and a +£1 per close_signal success gives a
+        # positive gradient for substituting closes for naked rolls.
+        # See ``plans/naked-clip-and-stability/purpose.md`` and
+        # hard_constraints §4–§7. Aggregate ``naked_pnl`` below is
+        # kept for RaceRecord logging, not reward.
         if self.scalping_mode:
-            # Asymmetric naked-loss factor (2026-04-15 follow-up): full 1.0×
-            # weighting collapsed an under-trained policy to "no bets" — the
-            # raw cash hit on every bad rollout was harsher than 12 episodes
-            # of training could overcome. 0.5× softens early-training pain
-            # while still giving naked losses real reward teeth (the prior
-            # "shaping only, capped at -weight" regime was the bug we set
-            # out to fix). Tune up toward 1.0 once the agent has a reliable
-            # arb policy.
-            #
-            # Per-pair aggregation (scalping-naked-asymmetry, 2026-04-18):
-            # prior formula used ``min(0, naked_pnl)`` on the race-wide
-            # aggregate, so a lucky winning naked could cancel an unrelated
-            # losing naked in the same race. Now each naked aggressive leg
-            # contributes its own ``min(0, pnl)``, so individual losses are
-            # never masked by unrelated luck. Aggregate ``naked_pnl`` is
-            # kept for RaceRecord logging below; only the reward branch
-            # switches to per-pair.
             naked_per_pair = bm.get_naked_per_pair_pnls(
                 market_id=race.market_id,
             )
-            naked_loss_term = sum(min(0.0, p) for p in naked_per_pair)
-            race_reward_pnl = scalping_locked_pnl + 0.5 * naked_loss_term
+            race_reward_pnl, race_shaping = _compute_scalping_reward_terms(
+                scalping_locked_pnl=scalping_locked_pnl,
+                naked_per_pair=naked_per_pair,
+                n_close_signal_successes=scalping_arbs_closed,
+            )
+            shaped += race_shaping
         else:
             race_reward_pnl = race_pnl
         self._day_reward_pnl += race_reward_pnl
