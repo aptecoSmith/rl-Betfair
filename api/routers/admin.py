@@ -467,6 +467,20 @@ async def reset_system(body: ResetRequest, request: Request):
                 shutil.rmtree(d)
                 bet_dirs_deleted += 1
 
+    # Truncate the per-episode training log that feeds the Training
+    # Monitor's Learning-diagnostics cards. Chronological log shared
+    # across all agents — can't partially preserve by model_id, so
+    # always clears regardless of ``clear_garage``. Manually archived
+    # siblings (e.g. ``episodes.pre-*.jsonl``) are untouched. Matches
+    # the truncate-in-place pattern in ``scripts/prune_non_garaged.py``.
+    episodes_truncated = 0
+    logs_root = request.app.state.config.get("paths", {}).get("logs")
+    if logs_root:
+        episodes_path = Path(logs_root) / "training" / "episodes.jsonl"
+        if episodes_path.exists():
+            episodes_path.write_text("", encoding="utf-8")
+            episodes_truncated = 1
+
     # Clear DB tables (order matters for foreign keys; skip garaged rows)
     conn = store._get_conn()
     try:
@@ -501,9 +515,11 @@ async def reset_system(body: ResetRequest, request: Request):
         conn.close()
 
     garage_note = f" (preserved {len(garaged_ids)} garaged model(s))" if garaged_ids and skip_garaged else ""
+    episodes_note = ", truncated episodes.jsonl" if episodes_truncated else ""
     detail = (
         f"Reset complete: deleted {weights_deleted} weight file(s), "
-        f"{bet_dirs_deleted} bet log dir(s), cleared DB tables{garage_note}"
+        f"{bet_dirs_deleted} bet log dir(s), cleared DB tables"
+        f"{episodes_note}{garage_note}"
     )
     logger.info(detail)
     return ResetResponse(reset=True, detail=detail)

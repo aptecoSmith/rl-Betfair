@@ -595,6 +595,17 @@ class TestReset:
             # Create extracted data (should be preserved)
             _create_parquet(processed / "2026-03-26.parquet")
 
+            # Seed the per-episode training log that feeds the
+            # Training Monitor's Learning-diagnostics cards. Reset
+            # should truncate this so the charts start clean.
+            training_log_dir = Path(config["paths"]["logs"]) / "training"
+            training_log_dir.mkdir(parents=True, exist_ok=True)
+            episodes_path = training_log_dir / "episodes.jsonl"
+            episodes_path.write_text('{"episode": 1}\n{"episode": 2}\n', encoding="utf-8")
+            # Operator-archived sibling that must NOT be touched.
+            archived_path = training_log_dir / "episodes.pre-naked-asymmetry-20260418.jsonl"
+            archived_path.write_text('{"archived": true}\n', encoding="utf-8")
+
             client = _make_app(store, config)
             resp = client.post("/admin/reset", json={"confirm": "DELETE_EVERYTHING"})
             assert resp.status_code == 200
@@ -615,6 +626,12 @@ class TestReset:
 
             # Verify extracted Parquet PRESERVED
             assert (processed / "2026-03-26.parquet").exists()
+
+            # Verify episodes.jsonl truncated (file still exists, empty)
+            assert episodes_path.exists()
+            assert episodes_path.read_text(encoding="utf-8") == ""
+            # Archived sibling untouched
+            assert archived_path.read_text(encoding="utf-8") == '{"archived": true}\n'
 
     def test_reset_empty_registry(self):
         """Reset on an already-empty registry should succeed."""
