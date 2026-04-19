@@ -1261,10 +1261,15 @@ class TestTargetEntropyController:
         )
 
     def test_controller_optimizer_separate_from_policy(self):
-        """The alpha optimiser holds its own state — running
-        ``_update_entropy_coefficient`` does NOT mutate the policy
-        optimiser's state_dict. The alpha optimiser's state DOES
-        change."""
+        """The alpha controller is orthogonal to the policy optimiser
+        — running ``_update_entropy_coefficient`` must NOT mutate the
+        policy optimiser's state_dict. The alpha controller DOES
+        move ``log_alpha``.
+
+        Post Session 05 the alpha optimiser is SGD(momentum=0) so
+        its state_dict is effectively empty — the essential
+        assertion is therefore that ``log_alpha.item()`` changed,
+        not that the optimiser's internal state did."""
         import copy
         config = _make_config()
         policy = _make_policy(config)
@@ -1276,14 +1281,12 @@ class TestTargetEntropyController:
         policy_state_before = copy.deepcopy(
             trainer.optimiser.state_dict()
         )
-        alpha_state_before = copy.deepcopy(
-            trainer._alpha_optimizer.state_dict()
-        )
+        log_alpha_before = float(trainer._log_alpha.item())
 
         trainer._update_entropy_coefficient(current_entropy=200.0)
 
         policy_state_after = trainer.optimiser.state_dict()
-        alpha_state_after = trainer._alpha_optimizer.state_dict()
+        log_alpha_after = float(trainer._log_alpha.item())
 
         # Policy optimiser state is unchanged — the alpha update does
         # not touch the policy's autograd graph.
@@ -1291,12 +1294,10 @@ class TestTargetEntropyController:
             policy_state_before["state"] == policy_state_after["state"]
         ), "policy optimiser state was mutated by the alpha update"
 
-        # Alpha optimiser state HAS changed (Adam now has step=1, momentum).
-        assert (
-            alpha_state_before["state"] != alpha_state_after["state"]
-        ), (
-            "alpha optimiser state was not mutated — did the controller "
-            "actually take a step?"
+        # log_alpha DID move — the controller actually took a step.
+        assert log_alpha_before != log_alpha_after, (
+            "log_alpha did not change — did the controller actually "
+            "take a step?"
         )
 
     def test_effective_entropy_coeff_matches_log_alpha_exp(self):
@@ -1366,22 +1367,76 @@ class TestTargetEntropyController:
         trainer = PPOTrainer(policy, config)
         assert trainer._target_entropy == pytest.approx(112.0)
 
-    def test_alpha_lr_default_matches_session_04(self):
-        """Default ``alpha_lr`` is 3e-2 (entropy-control-v2 Session 04).
-        The original 1e-4 default was too timid to move alpha
-        meaningfully within a 3-episode smoke probe — the
-        2026-04-19 post-Session-03 probe logged log_alpha moving
-        ~2e-4 across 2 updates, well below any useful range. The
-        adaptive Adam normalisation makes per-update step size ~lr
-        regardless of gradient magnitude, so the fix is on the LR
-        side, not the loss formula."""
+    def test_alpha_lr_default_matches_session_05(self):
+        """Default ``alpha_lr`` is 1e-2 (entropy-control-v2 Session 05).
+        The default moved 1e-4 → 3e-2 (Session 04) when the Adam
+        version proved too timid, and 3e-2 → 1e-2 (Session 05) when
+        the controller was reformulated as proportional SGD — SGD
+        multiplies lr by the raw entropy error (O(20-50)), so
+        lr=1e-2 gives per-episode log_alpha steps of O(0.2-0.5),
+        enough to tighten alpha across several episodes without
+        saturating in a single update."""
         config = _make_config()
         policy = _make_policy(config)
         trainer = PPOTrainer(policy, config)
-        # Read lr off the first param group of the alpha optimiser —
-        # Adam stores it there.
         assert trainer._alpha_optimizer.param_groups[0]["lr"] == (
-            pytest.approx(3e-2, rel=1e-9)
+            pytest.approx(1e-2, rel=1e-9)
+        )
+
+    def test_alpha_optimizer_is_sgd_proportional_controller(self):
+        """The alpha controller is plain SGD (momentum=0), not Adam.
+        Proportional control needs the step size to scale with the
+        entropy error; Adam's adaptive normalisation destroys that
+        property. Pin the optimiser class so a future refactor
+        can't silently revert to Adam."""
+        import torch
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+        assert isinstance(trainer._alpha_optimizer, torch.optim.SGD), (
+            f"alpha optimiser is "
+            f"{type(trainer._alpha_optimizer).__name__}; expected SGD"
+        )
+        assert trainer._alpha_optimizer.param_groups[0]["momentum"] == 0.0
+
+    def test_controller_step_is_proportional_to_error(self):
+        """SGD → step size scales linearly with the entropy error.
+        Two controller invocations with errors differing by 10x
+        should produce log_alpha deltas differing by 10x, in the
+        same direction."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer_small = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "entropy_coefficient": 0.02,
+                "target_entropy": 100.0,
+                "alpha_lr": 1e-3,
+            },
+        )
+        before_small = float(trainer_small._log_alpha.item())
+        trainer_small._update_entropy_coefficient(current_entropy=110.0)
+        delta_small = float(trainer_small._log_alpha.item()) - before_small
+
+        policy2 = _make_policy(config)
+        trainer_big = PPOTrainer(
+            policy2, config,
+            hyperparams={
+                "entropy_coefficient": 0.02,
+                "target_entropy": 100.0,
+                "alpha_lr": 1e-3,
+            },
+        )
+        before_big = float(trainer_big._log_alpha.item())
+        trainer_big._update_entropy_coefficient(current_entropy=200.0)
+        delta_big = float(trainer_big._log_alpha.item()) - before_big
+
+        # Same direction (both down — entropy above target).
+        assert delta_small < 0 and delta_big < 0
+        # delta_big / delta_small ≈ error_big / error_small = 100/10 = 10.
+        ratio = delta_big / delta_small
+        assert 9.5 < ratio < 10.5, (
+            f"expected ~10x ratio (proportional control); got {ratio}"
         )
 
     def test_alpha_lr_explicit_hp_overrides_default(self):

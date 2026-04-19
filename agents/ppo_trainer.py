@@ -545,22 +545,26 @@ class PPOTrainer:
             device=self.device,
             requires_grad=True,
         )
-        # ``alpha_lr`` default raised 1e-4 -> 3e-2 on 2026-04-19 after
-        # the first post-Session-03 probe FAILED the slope assertion
-        # (transformer slope +1.94, LSTM +3.71 over eps 1..3). Adam's
-        # adaptive normalisation makes per-update log_alpha movement
-        # roughly ``lr``-sized regardless of raw gradient magnitude;
-        # the SAC literature default (1e-4) is timed against training
-        # loops with 10^5-10^6 updates, whereas our ``_ppo_update``
-        # runs once per episode (dozens per run). At lr=3e-2 the
-        # controller can travel ~0.45 in log_alpha across 15 episodes
-        # -- enough to materially shift alpha when it needs to. The
-        # per-step ``log_alpha_min`` / ``log_alpha_max`` clamp remains
-        # the ultimate safety net against overshoot. See
+        # Optimiser: plain SGD (momentum=0), NOT Adam. Rationale
+        # (entropy-control-v2 Session 05, 2026-04-19): Adam
+        # normalises the gradient magnitude away, producing ~``lr``-
+        # sized steps regardless of how far entropy is from target.
+        # On our one-call-per-episode cadence that made the
+        # controller too timid to track even a moderate drift
+        # (Session-04 post-launch observed entropy 139->192 across
+        # 15 eps with Adam lr=3e-2). SGD gives proportional control:
+        # ``log_alpha -= lr * grad`` where
+        # ``grad = current_entropy - target_entropy`` (see the sign
+        # derivation in _update_entropy_coefficient's docstring), so
+        # a large error produces a large correction and the
+        # controller self-adapts as it approaches target. The
+        # ``log_alpha_min`` / ``log_alpha_max`` clamp is still the
+        # ultimate safety net against runaway. See
         # plans/entropy-control-v2/lessons_learnt.md 2026-04-19.
-        self._alpha_optimizer = torch.optim.Adam(
+        self._alpha_optimizer = torch.optim.SGD(
             [self._log_alpha],
-            lr=float(hp.get("alpha_lr", 3e-2)),
+            lr=float(hp.get("alpha_lr", 1e-2)),
+            momentum=0.0,
         )
         # Effective coefficient consumed by the surrogate-loss formula.
         # Kept in sync with ``log_alpha`` after every controller step.
@@ -1682,25 +1686,51 @@ class PPOTrainer:
     # -- Target-entropy controller (entropy-control-v2) ---------------------
 
     def _update_entropy_coefficient(self, current_entropy: float) -> None:
-        """SAC-style target-entropy controller step.
+        """Proportional target-entropy controller step.
 
         Drives the entropy coefficient to hold ``current_entropy`` at
-        ``self._target_entropy``. Uses a separate Adam optimiser over
-        ``_log_alpha``; does NOT backprop through the policy.
+        ``self._target_entropy``. Uses a separate SGD optimiser
+        (momentum=0) over ``_log_alpha``; does NOT backprop through
+        the policy.
 
         Call ONCE per ``_ppo_update``, after the entropy value is
         computed on the current rollout. The argument must be a
-        detached Python float — no tensor leakage into the controller's
-        autograd graph.
+        detached Python float — no tensor leakage into the
+        controller's autograd graph.
 
-        Sign: ``alpha_loss = -log_alpha * (target - current)``.
-        - If ``current > target``: ``(target - current) < 0`` →
-          ``alpha_loss = log_alpha * (positive)`` → gradient descent
-          drives ``log_alpha`` DOWN (coefficient shrinks → less entropy
-          bonus → entropy falls toward target).
-        - If ``current < target``: symmetric in the other direction.
+        Mechanism. The loss ``-log_alpha * (target - current)`` has
+        gradient ``d/d(log_alpha) = -(target - current) = (current -
+        target)`` w.r.t. ``log_alpha``. Under SGD with learning rate
+        ``lr`` the update is:
 
-        See plans/entropy-control-v2/hard_constraints.md §4–§8.
+            log_alpha <- log_alpha - lr * (current - target)
+
+        That is literal proportional control with gain ``lr`` — when
+        ``current > target`` the coefficient shrinks by an amount
+        scaling with the overshoot; when ``current < target`` it
+        grows symmetrically. A large error produces a large
+        correction; as entropy approaches target the error shrinks
+        and the step shrinks too. No Adam adaptive normalisation,
+        no momentum — the controller has no internal state beyond
+        ``log_alpha`` itself.
+
+        Sign check:
+        - ``current > target`` → grad = positive → log_alpha shrinks
+          → alpha shrinks → less entropy bonus → entropy falls
+          toward target. ✓
+        - ``current < target`` → grad = negative → log_alpha grows
+          → alpha grows → more entropy bonus → entropy rises toward
+          target. ✓
+
+        Reason this replaces the Adam-based Session-01 formulation.
+        Adam's adaptive normalisation makes per-update log_alpha
+        movement ~``lr``-sized regardless of gradient magnitude. At
+        the one-call-per-episode cadence our training loop runs,
+        the controller couldn't track even a moderate drift
+        (Session-04 post-launch observed entropy 139→192 across 15
+        eps while alpha barely moved). SGD's proportional behaviour
+        fixes that at the formulation level, not via lr tuning. See
+        plans/entropy-control-v2/lessons_learnt.md 2026-04-19.
         """
         alpha_loss = -self._log_alpha * (
             self._target_entropy - float(current_entropy)

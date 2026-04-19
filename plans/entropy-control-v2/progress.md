@@ -8,6 +8,87 @@ Format per session follows `naked-clip-and-stability/
 progress.md` — "What landed", "Not changed", "Gotchas",
 "Next".
 
+## Session 05 — Swap Adam for SGD (proportional controller) (2026-04-19)
+
+**Commit:** _(to be filled in at commit time)_
+
+### What landed
+
+- `agents/ppo_trainer.py`:
+  - `_alpha_optimizer` changed from `torch.optim.Adam` to
+    `torch.optim.SGD(momentum=0.0)`.
+  - `alpha_lr` default 3e-2 → 1e-2.
+  - `_update_entropy_coefficient` docstring rewritten with
+    the proportional-control derivation; loss formula and
+    sign are unchanged.
+- `tests/test_ppo_trainer.py::TestTargetEntropyController`:
+  - `test_controller_optimizer_separate_from_policy` updated
+    to assert `log_alpha` movement rather than optimiser-state
+    change (SGD momentum=0 has an effectively-empty state).
+  - `test_alpha_lr_default_matches_session_04` renamed to
+    `_session_05` with the new default value 1e-2.
+  - New `test_alpha_optimizer_is_sgd_proportional_controller`
+    pins the optimiser class.
+  - New `test_controller_step_is_proportional_to_error`
+    verifies the core proportional invariant (10× error →
+    10× log_alpha delta).
+- `CLAUDE.md` — "Entropy control" paragraph updated:
+  - Adam → SGD (momentum=0).
+  - `alpha_lr` default 3e-2 → 1e-2.
+  - Rationale paragraph added explaining Adam's adaptive
+    normalisation destroys proportional control and the
+    Session-04 data that proved it.
+- `plans/entropy-control-v2/lessons_learnt.md` — new entry
+  "Adam is the wrong optimiser for this controller" with
+  diagnosis, fix, and toy-dynamics simulation prediction.
+
+### Trigger
+
+Post-Session-04 full-population launch reached ep15. Results:
+
+| | ep1 | ep5 | ep10 | ep15 |
+|---|---|---|---|---|
+| entropy (avg) | 139.6 | 155.7 | 178.9 | 192.6 |
+| alpha (avg) | 0.0289 | 0.0232 | 0.0199 | 0.0169 |
+| policy_loss | 50 | 11 | 0.2 | 0.2 |
+
+Controller direction correct (alpha going down), magnitude
+insufficient (alpha only halved across 14 episodes while
+entropy drifted +53 units). Slope +3.8/ep, barely below the
+pre-controller +4.4/ep baseline.
+
+### Not changed
+
+- Reward shape.
+- Matcher.
+- Target-entropy controller sign, clamp bounds, call site
+  (once per `_ppo_update`).
+- Smoke-gate slope threshold (`ENTROPY_SLOPE_MAX = 1.0`).
+- PPO stability defences.
+- Checkpoint schema (SGD's state_dict round-trips the same
+  way Adam's did, just with a smaller payload).
+
+### Test suite
+
+`pytest tests/ -q`: **2256 passed, 7 skipped, 133 deselected,
+1 xfailed** (0:04:53). +2 net tests from Session 04's 2254.
+
+### Next (operator action)
+
+1. Truncate `logs/training/episodes.jsonl` (the 47 rows from
+   the post-Session-04 run).
+2. Re-launch `activation-A-baseline` (currently in `paused`
+   status from the completed post-Session-04 training run —
+   hit Launch / Resume).
+3. Watch for: alpha decreasing rapidly toward the lower clamp
+   (1e-5). If alpha saturates at the clamp AND entropy keeps
+   rising past ~180, the conclusion is "entropy bonus isn't
+   the dominant force" and the queued `reward-densification`
+   plan opens. If entropy stabilises, C1-C5 can be evaluated
+   against the remainder of the 15-episode run.
+
+---
+
 ## Session 04 — `alpha_lr` default 1e-4 → 3e-2 (2026-04-19)
 
 **Commit:** _(to be filled in at commit time)_

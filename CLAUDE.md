@@ -254,10 +254,8 @@ is the load-bearing regression guard.
 ## Entropy control — target-entropy controller (2026-04-19)
 
 Entropy coefficient is a *learned variable*, not a fixed
-hyperparameter. A small separate Adam optimiser (`alpha_lr`
-default `3e-2` — raised 1e-4 → 3e-2 on 2026-04-19 after the
-first post-Session-03 probe failed the slope check; see
-`plans/entropy-control-v2/lessons_learnt.md`) optimises
+hyperparameter. A small separate **SGD (momentum=0)**
+optimiser (`alpha_lr` default `1e-2`) optimises
 `log_alpha = log(entropy_coefficient)`
 to hold the policy's current entropy at `target_entropy=112`
 (≈ 80 % of the observed ep-1 pop-avg entropy on a fresh-init
@@ -273,9 +271,19 @@ panel rather than silently letting the coefficient drift out of
 the useful range.
 
 The controller's optimiser is SEPARATE from the policy
-optimiser — `self._alpha_optimizer` is a second
-`torch.optim.Adam` instance over `[self._log_alpha]` only,
-with its own momentum state and LR. The effective
+optimiser — `self._alpha_optimizer` is a separate
+`torch.optim.SGD(momentum=0)` instance over
+`[self._log_alpha]` only. **SGD (not Adam) is deliberate:**
+SGD's update is `log_alpha -= lr * grad` where
+`grad = current_entropy - target_entropy`, i.e. literal
+proportional control — step size scales linearly with the
+entropy error. Adam's adaptive per-parameter normalisation
+destroys that property and the original Session-01 Adam
+formulation couldn't track a moderate drift at our
+one-call-per-episode cadence (Session-04 post-launch:
+entropy 139 → 192 across 15 eps while alpha barely
+moved; see `plans/entropy-control-v2/lessons_learnt.md`
+2026-04-19). The effective
 `entropy_coefficient` the surrogate loss reads
 (`self.entropy_coeff`) is `log_alpha.exp().item()`, refreshed
 after each controller step. `log_alpha` uses float64 so the

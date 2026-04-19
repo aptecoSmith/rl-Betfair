@@ -94,10 +94,82 @@ the move. Plausibly a new Session 04 of this plan:
   loss formula's Adam interaction" (possibly switch to
   SGD with explicit momentum for predictability).
 
-**Status.** Resolved in Session 04 (commit to follow). The
-`alpha_lr` default is now `3e-2` in
-`PPOTrainer.__init__` with two new tests pinning both the
-default and the explicit-hp override path. No further registry
-reset needed — the fresh registry from Session 03 had only the
-failed smoke probe's rows on it; those rows were truncated at
-the re-reset bundled with the Session 04 commit.
+**Status.** Partially resolved in Session 04 (`alpha_lr` 1e-4
+→ 3e-2). Fully resolved in Session 05 — see next entry.
+
+---
+
+## 2026-04-19 — Adam is the wrong optimiser for this controller (Session 05)
+
+**Observation.** Operator re-launched after Session 04. Smoke
+test passed; full population reached ep15. Entropy trajectory
+139.6 → 192.6 (slope +3.8/ep) — barely better than the
+pre-controller Baseline-A drift of 139.6 → 201.3 (+4.4/ep).
+Alpha did move in the correct direction (0.0289 → 0.0169 on
+the population average across the 14 updates) but too slowly
+to arrest the drift.
+
+**Diagnosis.** Adam's adaptive per-parameter normalisation
+destroys proportional control. Adam produces
+~``lr``-sized steps regardless of gradient magnitude — so when
+entropy is 30 above target AND when it's 5 above target, the
+controller applies the same correction. Raising `alpha_lr`
+makes every step bigger (including the tiny ones, so the
+controller oscillates around target once it gets close).
+Lowering it makes every step smaller (including the big ones,
+so tracking is slow). There is no Adam lr that gives good
+behaviour for BOTH regimes.
+
+**The right primitive is plain SGD.** With SGD momentum=0 the
+update is:
+
+    log_alpha <- log_alpha - lr * (current_entropy - target_entropy)
+
+That IS a proportional controller with gain `lr`. Large error
+→ large correction, small error → small correction,
+self-adapting. The log_alpha clamp remains the ultimate
+safety net against a pathological spike pushing alpha to ±∞
+in one step.
+
+This was hiding in plain sight — the SAC paper's Adam-based
+Lagrangian-multiplier formulation is theoretically
+motivated by the continuous-time differential equation
+describing the constrained-optimisation dual, not by any
+claim that Adam specifically works well for this loop.
+Adam being "the default" for neural-network optimisation led
+us to use it without questioning the fit. Any
+discrete-time-update control problem at our cadence should
+prefer the simplest optimiser that gives the dynamics you
+want.
+
+**Session 05 landed.**
+
+- `torch.optim.Adam` → `torch.optim.SGD(momentum=0)` in
+  `PPOTrainer.__init__` for `_alpha_optimizer`.
+- `alpha_lr` default 3e-2 → 1e-2. Rationale: with SGD the
+  step is `lr × error`, and observed errors are O(20-50) so
+  lr=1e-2 gives per-update log_alpha steps of O(0.2-0.5) —
+  fast enough to tighten alpha meaningfully each episode
+  without single-step saturation.
+- `_update_entropy_coefficient` docstring rewritten with
+  the derivation above. Sign-check unchanged.
+- `test_controller_optimizer_separate_from_policy` updated to
+  assert `log_alpha` movement rather than optimiser-state
+  change (SGD momentum=0 has an effectively-empty state dict).
+- New `test_alpha_optimizer_is_sgd_proportional_controller`
+  pins the optimiser class so a future refactor can't
+  silently revert to Adam.
+- New `test_controller_step_is_proportional_to_error`: two
+  invocations with 10× different errors produce 10× different
+  log_alpha deltas — the core proportional-control invariant.
+- `test_alpha_lr_default_matches_session_04` renamed to
+  `_session_05` with the new value (1e-2).
+
+**Toy-dynamics simulation** against the observed drift predicts
+the new controller drives alpha from ep-1 0.029 to below
+0.005 (pre-controller default) by ep6, below 1e-3 by ep8, and
+bottoming at the lower clamp (1e-5) around ep13-14. If
+entropy continues to drift AFTER alpha hits the lower clamp,
+we'll have a clean signal that entropy control isn't the
+bottleneck and the queued `reward-densification` plan is the
+next move (purpose.md "Failure modes" case 3).
