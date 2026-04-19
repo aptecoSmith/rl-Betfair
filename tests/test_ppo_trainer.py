@@ -1358,14 +1358,20 @@ class TestTargetEntropyController:
             float(trainer._log_alpha.exp().item()), rel=1e-9,
         )
 
-    def test_target_entropy_default_matches_purpose_md(self):
-        """Default ``target_entropy`` is 112.0 — 80% of the A-baseline
-        ep-1 pop-avg entropy (139.6). Any change to the default needs
-        to co-land with a plan update."""
+    def test_target_entropy_default_matches_session_06(self):
+        """Default ``target_entropy`` is 150.0 (Session 06, 2026-04-19).
+        The original 112.0 target (80% of fresh-init ep-1 entropy 139.6)
+        sat below the action space's natural entropy floor — no alpha
+        value could coax entropy below the floor, so the controller
+        drove alpha all the way to the lower clamp without ever
+        stabilising entropy. Target 150 sits ~+8% above fresh-init
+        139, giving the controller real authority from ep1 onward.
+        Any change to this default needs to co-land with a plan
+        update."""
         config = _make_config()
         policy = _make_policy(config)
         trainer = PPOTrainer(policy, config)
-        assert trainer._target_entropy == pytest.approx(112.0)
+        assert trainer._target_entropy == pytest.approx(150.0)
 
     def test_alpha_lr_default_matches_session_05(self):
         """Default ``alpha_lr`` is 1e-2 (entropy-control-v2 Session 05).

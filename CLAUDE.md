@@ -257,9 +257,14 @@ Entropy coefficient is a *learned variable*, not a fixed
 hyperparameter. A small separate **SGD (momentum=0)**
 optimiser (`alpha_lr` default `1e-2`) optimises
 `log_alpha = log(entropy_coefficient)`
-to hold the policy's current entropy at `target_entropy=112`
-(≈ 80 % of the observed ep-1 pop-avg entropy on a fresh-init
-population in the 2026-04-19 activation-A-baseline run).
+to hold the policy's current entropy at `target_entropy=150`
+(Session 06, 2026-04-19 — raised from the original 112, which
+sat below the 70-dim action space's natural entropy floor and
+gave the controller no reachable setpoint; see
+`plans/entropy-control-v2/lessons_learnt.md`). Target 150 is
+~+8 % above the observed fresh-init ep-1 entropy (139.6), so
+the controller has real authority from ep1: when entropy
+drifts above 150 alpha shrinks, when below it grows.
 
 When the forward-pass entropy exceeds the target, gradient
 descent on `log_alpha` drives it DOWN (less entropy bonus →

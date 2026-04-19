@@ -173,3 +173,88 @@ entropy continues to drift AFTER alpha hits the lower clamp,
 we'll have a clean signal that entropy control isn't the
 bottleneck and the queued `reward-densification` plan is the
 next move (purpose.md "Failure modes" case 3).
+
+---
+
+## 2026-04-19 — target_entropy=112 sits below the action space's natural floor (Session 06)
+
+**Observation.** Post-Session-05 smoke probe FAILED on
+`entropy_slope` (threshold 1.0):
+
+| agent | ep1 α | ep2 α | ep3 α | slope |
+|---|---|---|---|---|
+| transformer | 0.00380 | 0.00285 | 0.00210 | **+1.47** |
+| LSTM       | 0.00379 | 0.00279 | 0.00200 | **+2.90** |
+
+**The controller now works correctly** — alpha shrinks 1.3–1.4×
+per episode, exactly what SGD lr=1e-2 × error=~27 should
+produce. Log_alpha moves −0.29 per step, consistent with the
+proportional-control formula.
+
+**But entropy still rises despite alpha at 0.002** — 2.5×
+LOWER than the pre-controller Session-03 default (0.005).
+If the entropy-bonus term were the primary driver, drift
+should have flattened long before alpha crossed below
+0.005. It didn't.
+
+**Diagnosis: target is below the natural entropy floor.**
+Fresh-init action distributions on our 70-dim Gaussian action
+space (14 runners × 5 dims) have differential entropy ~139.
+Reaching entropy 112 would require log_std below ≈ −0.4 on
+ALL 70 dims simultaneously — a very committed policy. The
+policy doesn't WANT to be that committed early in training
+(the reward gradient on quiet steps is ≈ 0; there's nothing
+for it to commit TO). So 112 sits below the policy's natural
+equilibrium. The controller keeps shrinking alpha hoping
+entropy will fall toward 112, but there's no alpha value that
+achieves it — the equilibrium is elsewhere.
+
+This is distinct from the "alpha has no authority" failure
+mode (purpose.md "Failure modes" case 3 — reward-densification
+territory). The mechanism IS connected to entropy in the
+expected direction; the target was just set on the wrong side
+of the floor.
+
+**Session 06 landed.** `target_entropy` default 112.0 → 150.0.
+Rationale:
+
+- 150 is ~+8 % above observed fresh-init 139.6 — *above* the
+  natural floor.
+- In the post-Session-04 full-run, entropy stabilised
+  transiently around 165–180 across eps 6–10 before drifting
+  higher. 150 sits below that stable band, so the controller
+  has two-sided authority: drift up → alpha shrinks → drift
+  slows; drift down → alpha grows → bonus lifts entropy
+  back.
+- Smoke probe regime: current entropy 139 is BELOW 150, so
+  the controller *grows* alpha (positive step on log_alpha).
+  More entropy bonus helps hold entropy up, but since the
+  policy's natural early-training drift is also upward, the
+  controller doesn't have to fight it hard. Expected slope
+  ≈ 0 after a couple of episodes.
+
+Landed as a one-line default change plus the
+`test_target_entropy_default_matches_session_06` test rename.
+Explicit hp overrides (`target_entropy=112.0` in
+`test_real_ppo_update_updates_log_alpha` and
+`test_log_episode_includes_alpha_and_log_alpha`) still work —
+those tests pass an explicit value that doesn't depend on the
+default.
+
+**What we learn if Session 06 still fails.** If the next
+smoke probe also fails `entropy_slope` with target=150:
+
+- The failure mode is genuine reward-signal starvation, not
+  target mis-specification. That's purpose.md case 3 — open
+  `reward-densification` next. The proportional-control
+  machinery stays as-is; the entropy-bonus lever just isn't
+  strong enough on its own to stabilise a scalping policy
+  with sparse terminal rewards.
+
+If Session 06 passes smoke but the full run drifts to very
+high entropy (say >200 by ep15):
+
+- The floor is above 150 too; raise target further (180? 200?).
+  Or accept that the controller defends the upper bound only
+  (let entropy settle at its natural equilibrium and focus on
+  reward-densification).

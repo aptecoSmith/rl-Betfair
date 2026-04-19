@@ -8,6 +8,93 @@ Format per session follows `naked-clip-and-stability/
 progress.md` — "What landed", "Not changed", "Gotchas",
 "Next".
 
+## Session 06 — `target_entropy` default 112.0 → 150.0 (2026-04-19)
+
+**Commit:** _(to be filled in at commit time)_
+
+### What landed
+
+- `agents/ppo_trainer.py`: `target_entropy` default raised
+  from 112.0 to 150.0. Rationale comment in `__init__`
+  documents the fresh-init entropy-floor reasoning and
+  cross-references `lessons_learnt.md`.
+- `tests/test_ppo_trainer.py`:
+  `test_target_entropy_default_matches_purpose_md` renamed to
+  `test_target_entropy_default_matches_session_06` with the
+  new default value. Explicit hp overrides
+  (`target_entropy=112.0` in
+  `test_real_ppo_update_updates_log_alpha` and
+  `test_log_episode_includes_alpha_and_log_alpha`) are
+  unchanged — they pin their own values.
+- `CLAUDE.md`: "Entropy control" paragraph updated with the
+  new default (150) and the rationale.
+- `plans/entropy-control-v2/lessons_learnt.md`: new entry
+  diagnosing the natural-entropy-floor issue and proposing
+  the fix; also documents what a Session 06 pass / fail
+  implies for the queued `reward-densification` plan.
+
+### Trigger
+
+Post-Session-05 smoke probe FAILED `entropy_slope`:
+
+| agent | ep1 α | ep2 α | ep3 α | slope |
+|---|---|---|---|---|
+| transformer | 0.00380 | 0.00285 | 0.00210 | **+1.47** |
+| LSTM | 0.00379 | 0.00279 | 0.00200 | **+2.90** |
+
+The proportional controller (Session 05) IS working — alpha
+drops 1.3–1.4× per episode as predicted — but entropy still
+rises while alpha is already 2.5× below the pre-controller
+default. No alpha value can drive entropy below 112 on a
+70-dim Gaussian action space whose fresh-init differential
+entropy is 139. Target was set below the floor.
+
+### Not changed
+
+- Controller mechanism (SGD, proportional).
+- `alpha_lr` default (1e-2).
+- Clamp bounds (`[log(1e-5), log(0.1)]`).
+- Call site (once per `_ppo_update`).
+- Smoke-gate slope threshold (1.0/ep).
+- Reward shape, matcher, PPO stability defences,
+  checkpoint schema.
+
+### Gotchas
+
+- Two existing controller tests explicitly pass
+  `target_entropy=112.0` (the integration
+  `_ppo_update` test and the `_log_episode` fields test).
+  Those are unaffected by the default change — they
+  exercise their own explicit-hp paths. No update needed.
+- Session 06 changes ONE hard-constraint §9 value (was
+  "112.0", now "150.0"). Hard_constraints are append-only
+  per convention; the change is recorded in
+  `lessons_learnt.md` rather than edited in §9 in place.
+
+### Test suite
+
+`pytest tests/ -q`: **2256 passed, 7 skipped, 133 deselected,
+1 xfailed** (0:05:13). Net delta from Session 05: 0 tests
+(one rename, no adds).
+
+### Next (operator action)
+
+1. Truncate `logs/training/episodes.jsonl` (the 6 failed
+   smoke-probe rows from the Session-05 launch).
+2. Reset `models.db` / `weights/` (were populated by the
+   full-run from the Session-04 launch).
+3. Reset `activation-A-baseline` plan to `draft`.
+4. Re-launch with "Smoke test first" ticked.
+
+If smoke passes + full-run stabilises: green light for
+`activation-B-*` sweep. If smoke passes but full-run drifts
+above 200: raise target further or accept the controller as
+a defend-upper-bound mechanism and open reward-densification.
+If smoke still fails: the entropy-bonus lever genuinely
+isn't strong enough; reward-densification is the next plan.
+
+---
+
 ## Session 05 — Swap Adam for SGD (proportional controller) (2026-04-19)
 
 **Commit:** _(to be filled in at commit time)_

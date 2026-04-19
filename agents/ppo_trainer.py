@@ -528,8 +528,31 @@ class PPOTrainer:
         initial_entropy_coeff = float(
             hp.get("entropy_coefficient", 0.005)
         )
+        # ``target_entropy`` default raised 112.0 -> 150.0 on 2026-04-19
+        # (Session 06). The original 112.0 target (80% of fresh-init
+        # ep-1 entropy 139.6) turned out to sit BELOW the action
+        # space's natural entropy floor: even with the Session-05
+        # proportional controller aggressively driving alpha down to
+        # ~0.002 (2.5x below the old fixed default), the smoke probe
+        # still logged entropy slopes +1.47 / +2.90 over eps 1-3,
+        # because no alpha value can coax entropy below the floor.
+        # Action space is 14 runners x 5 dims = 70 Gaussian action
+        # dims; fresh-init differential entropy ~139 corresponds
+        # roughly to ``sigma ~= 1.8`` across all dims, and target
+        # 112 would require ``sigma ~= 1.2`` on ALL 70 dims
+        # simultaneously -- below what the policy naturally holds
+        # early in training.
+        #
+        # Target 150 (~ +8% above fresh-init 139) sits ABOVE the
+        # natural floor, so the controller has real authority: when
+        # entropy drifts above 150, alpha shrinks; if entropy ever
+        # dips below 150, alpha grows. The Session-05 diagnostic --
+        # rapid alpha decay despite continuing entropy rise -- is
+        # the evidence that the target, not the controller
+        # mechanism, was mis-specified. See
+        # plans/entropy-control-v2/lessons_learnt.md 2026-04-19.
         self._target_entropy: float = float(
-            hp.get("target_entropy", 112.0)
+            hp.get("target_entropy", 150.0)
         )
         self._log_alpha_min: float = math.log(1e-5)
         self._log_alpha_max: float = math.log(0.1)
