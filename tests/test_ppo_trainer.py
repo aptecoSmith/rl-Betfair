@@ -298,7 +298,10 @@ class TestPPOTrainerInit:
         assert trainer.gamma == 0.99
         assert trainer.gae_lambda == 0.95
         assert trainer.clip_epsilon == 0.2
-        assert trainer.entropy_coeff == 0.005
+        # entropy-control-v2: entropy_coeff is now log_alpha.exp() —
+        # bit-exact equality to the literal doesn't survive the
+        # log/exp round trip, so compare to machine-epsilon tolerance.
+        assert trainer.entropy_coeff == pytest.approx(0.005, rel=1e-12)
         assert trainer.max_grad_norm == 0.5
         assert trainer.ppo_epochs == 4
 
@@ -796,11 +799,16 @@ class TestEntropyAndCentering:
 
     def test_entropy_default_is_halved(self):
         """Fresh PPOTrainer with no explicit ``entropy_coefficient`` hp
-        picks up the halved default (0.005 per §13)."""
+        picks up the halved default (0.005 per §13). Post
+        entropy-control-v2 the value is ``log_alpha.exp()`` and we
+        tolerate a machine-epsilon drift from the literal."""
         config = _make_config()
         policy = _make_policy(config)
         trainer = PPOTrainer(policy, config)
-        assert trainer.entropy_coeff == 0.005
+        assert trainer._log_alpha.exp().item() == pytest.approx(
+            0.005, rel=1e-12,
+        )
+        assert trainer.entropy_coeff == pytest.approx(0.005, rel=1e-12)
 
     def test_entropy_explicit_hp_overrides_default(self):
         """Explicit ``entropy_coefficient`` hp still wins (GA path)."""
@@ -809,7 +817,7 @@ class TestEntropyAndCentering:
         trainer = PPOTrainer(
             policy, config, hyperparams={"entropy_coefficient": 0.02},
         )
-        assert trainer.entropy_coeff == 0.02
+        assert trainer.entropy_coeff == pytest.approx(0.02, rel=1e-12)
 
     def test_reward_baseline_initialises_on_first_episode(self):
         """First call sets EMA to the observed value exactly; second
@@ -1121,3 +1129,289 @@ class TestEntropyAndCentering:
         # The episode sum itself should be distinctly different —
         # guards against the degenerate n=1 case.
         assert abs(passed_value - episode_sum) > 1e-6 or len(transitions) == 1
+
+
+# ── Target-entropy controller (entropy-control-v2 Session 01) ──────────────
+
+
+class TestTargetEntropyController:
+    """SAC-style target-entropy controller (``_update_entropy_coefficient``).
+
+    Replaces the fixed ``entropy_coefficient`` with a learned
+    ``log_alpha`` variable that a small separate Adam optimiser drives
+    to hold the policy's forward-pass entropy at
+    ``self._target_entropy``. See
+    ``plans/entropy-control-v2/session_prompts/01_target_entropy_controller.md``.
+    """
+
+    def test_log_alpha_initialises_from_entropy_coefficient(self):
+        """hp={'entropy_coefficient': 0.01} → log_alpha.exp() ≈ 0.01.
+        Default (no hp) → 0.005."""
+        import math
+        config = _make_config()
+        policy = _make_policy(config)
+
+        trainer = PPOTrainer(
+            policy, config, hyperparams={"entropy_coefficient": 0.01},
+        )
+        assert trainer._log_alpha.exp().item() == pytest.approx(
+            0.01, rel=1e-6,
+        )
+        assert trainer._log_alpha.item() == pytest.approx(
+            math.log(0.01), abs=1e-6,
+        )
+        assert trainer.entropy_coeff == pytest.approx(0.01, rel=1e-6)
+
+        # Default path — no explicit entropy_coefficient hp.
+        policy2 = _make_policy(config)
+        trainer2 = PPOTrainer(policy2, config)
+        assert trainer2._log_alpha.exp().item() == pytest.approx(
+            0.005, rel=1e-6,
+        )
+        assert trainer2.entropy_coeff == pytest.approx(0.005, rel=1e-6)
+
+    def test_controller_shrinks_alpha_when_entropy_above_target(self):
+        """target=100, feed current_entropy=200 → log_alpha strictly
+        smaller than before. Sign: target-current = -100, alpha_loss =
+        -log_alpha × (-100) = 100 × log_alpha; gradient descent on a
+        function whose derivative wrt log_alpha is +100 pushes log_alpha
+        DOWN."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "entropy_coefficient": 0.01,
+                "target_entropy": 100.0,
+                "alpha_lr": 1e-2,  # raise LR so one step moves meaningfully
+            },
+        )
+        before = float(trainer._log_alpha.item())
+
+        trainer._update_entropy_coefficient(current_entropy=200.0)
+
+        after = float(trainer._log_alpha.item())
+        assert after < before, (
+            f"log_alpha should shrink when entropy > target; "
+            f"before={before} after={after}"
+        )
+        assert trainer.entropy_coeff < 0.01
+
+    def test_controller_grows_alpha_when_entropy_below_target(self):
+        """target=100, feed current_entropy=50 → log_alpha strictly
+        larger than before. Symmetric to the shrink case."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "entropy_coefficient": 0.01,
+                "target_entropy": 100.0,
+                "alpha_lr": 1e-2,
+            },
+        )
+        before = float(trainer._log_alpha.item())
+
+        trainer._update_entropy_coefficient(current_entropy=50.0)
+
+        after = float(trainer._log_alpha.item())
+        assert after > before, (
+            f"log_alpha should grow when entropy < target; "
+            f"before={before} after={after}"
+        )
+        assert trainer.entropy_coeff > 0.01
+
+    def test_log_alpha_clamped_within_bounds(self):
+        """Stress with a pathological entropy mismatch to pull
+        log_alpha hard toward each bound. After one step log_alpha
+        sits at the clamp bound exactly, not outside it. Symmetric
+        across upper and lower bounds."""
+        import math
+        # Lower clamp: pathological entropy >>> target with a huge LR
+        # drives log_alpha to log(1e-5).
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "entropy_coefficient": 0.01,
+                "target_entropy": 100.0,
+                "alpha_lr": 1e6,  # enormous so one step saturates
+            },
+        )
+        trainer._update_entropy_coefficient(current_entropy=1e6)
+        assert trainer._log_alpha.item() == pytest.approx(
+            math.log(1e-5), abs=1e-6,
+        )
+
+        # Upper clamp: pathological entropy <<< target with a huge LR
+        # drives log_alpha to log(0.1).
+        policy2 = _make_policy(config)
+        trainer2 = PPOTrainer(
+            policy2, config,
+            hyperparams={
+                "entropy_coefficient": 0.01,
+                "target_entropy": 100.0,
+                "alpha_lr": 1e6,
+            },
+        )
+        trainer2._update_entropy_coefficient(current_entropy=-1e6)
+        assert trainer2._log_alpha.item() == pytest.approx(
+            math.log(0.1), abs=1e-6,
+        )
+
+    def test_controller_optimizer_separate_from_policy(self):
+        """The alpha optimiser holds its own state — running
+        ``_update_entropy_coefficient`` does NOT mutate the policy
+        optimiser's state_dict. The alpha optimiser's state DOES
+        change."""
+        import copy
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={"alpha_lr": 1e-3, "target_entropy": 100.0},
+        )
+
+        policy_state_before = copy.deepcopy(
+            trainer.optimiser.state_dict()
+        )
+        alpha_state_before = copy.deepcopy(
+            trainer._alpha_optimizer.state_dict()
+        )
+
+        trainer._update_entropy_coefficient(current_entropy=200.0)
+
+        policy_state_after = trainer.optimiser.state_dict()
+        alpha_state_after = trainer._alpha_optimizer.state_dict()
+
+        # Policy optimiser state is unchanged — the alpha update does
+        # not touch the policy's autograd graph.
+        assert (
+            policy_state_before["state"] == policy_state_after["state"]
+        ), "policy optimiser state was mutated by the alpha update"
+
+        # Alpha optimiser state HAS changed (Adam now has step=1, momentum).
+        assert (
+            alpha_state_before["state"] != alpha_state_after["state"]
+        ), (
+            "alpha optimiser state was not mutated — did the controller "
+            "actually take a step?"
+        )
+
+    def test_effective_entropy_coeff_matches_log_alpha_exp(self):
+        """After ``_update_entropy_coefficient`` returns,
+        ``self.entropy_coeff == self._log_alpha.exp().item()`` within
+        floating-point epsilon."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "entropy_coefficient": 0.01,
+                "target_entropy": 100.0,
+                "alpha_lr": 1e-3,
+            },
+        )
+
+        # Drive the controller through a handful of steps at different
+        # entropies so the coefficient meaningfully moves.
+        for ent in (150.0, 80.0, 120.0, 95.0):
+            trainer._update_entropy_coefficient(current_entropy=ent)
+            assert trainer.entropy_coeff == pytest.approx(
+                float(trainer._log_alpha.exp().item()), rel=1e-9,
+            )
+
+    def test_real_ppo_update_updates_log_alpha(self):
+        """End-to-end: a real ``_ppo_update`` call must move
+        ``log_alpha`` from its init value. Exercises the wired-in code
+        path — unit tests on the controller method alone are
+        insufficient per the 2026-04-18 units-mismatch lesson
+        (plans/naked-clip-and-stability/lessons_learnt.md)."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "entropy_coefficient": 0.005,
+                "target_entropy": 112.0,
+                "alpha_lr": 1e-4,
+                "ppo_epochs": 1,
+                "mini_batch_size": 4,
+            },
+        )
+        before = float(trainer._log_alpha.item())
+
+        day = _make_day(n_races=1, n_ticks=5, n_runners=3)
+        rollout, _ = trainer._collect_rollout(day)
+        trainer._ppo_update(rollout)
+
+        after = float(trainer._log_alpha.item())
+        assert after != before, (
+            "log_alpha did not move during a real _ppo_update — the "
+            "controller is not wired into the update path."
+        )
+        # Sanity: the new entropy_coeff matches log_alpha.exp() after
+        # the update.
+        assert trainer.entropy_coeff == pytest.approx(
+            float(trainer._log_alpha.exp().item()), rel=1e-9,
+        )
+
+    def test_target_entropy_default_matches_purpose_md(self):
+        """Default ``target_entropy`` is 112.0 — 80% of the A-baseline
+        ep-1 pop-avg entropy (139.6). Any change to the default needs
+        to co-land with a plan update."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+        assert trainer._target_entropy == pytest.approx(112.0)
+
+    def test_log_episode_includes_alpha_and_log_alpha(self, tmp_path):
+        """Per-episode JSONL row carries ``alpha``, ``log_alpha``, and
+        ``target_entropy`` fields so the learning-curves panel can
+        plot the controller trajectory alongside entropy."""
+        import math
+        config = _make_config()
+        config["paths"]["logs"] = str(tmp_path / "logs")
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "entropy_coefficient": 0.01,
+                "target_entropy": 112.0,
+            },
+        )
+
+        ep = EpisodeStats(
+            day_date="2026-04-19",
+            total_reward=0.0,
+            total_pnl=0.0,
+            bet_count=0,
+            winning_bets=0,
+            races_completed=0,
+            final_budget=100.0,
+            n_steps=0,
+        )
+        loss_info = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy": 0.0,
+        }
+
+        class _Tracker:
+            completed = 1
+            total = 1
+
+            def to_dict(self):
+                return {"completed": 1, "total": 1}
+
+        trainer._log_episode(ep, loss_info, _Tracker())
+
+        log_file = trainer.log_dir / "episodes.jsonl"
+        row = json.loads(log_file.read_text().strip().splitlines()[-1])
+        assert "alpha" in row
+        assert "log_alpha" in row
+        assert "target_entropy" in row
+        assert row["alpha"] == pytest.approx(0.01, rel=1e-6)
+        assert row["log_alpha"] == pytest.approx(math.log(0.01), abs=1e-4)
+        assert row["target_entropy"] == pytest.approx(112.0)

@@ -251,6 +251,68 @@ this file mirror the aggregation in a spec helper, so a
 caller-only drift silently passes them. The integration test
 is the load-bearing regression guard.
 
+## Entropy control — target-entropy controller (2026-04-19)
+
+Entropy coefficient is a *learned variable*, not a fixed
+hyperparameter. A small separate Adam optimiser (`alpha_lr`
+default `1e-4`) optimises `log_alpha = log(entropy_coefficient)`
+to hold the policy's current entropy at `target_entropy=112`
+(≈ 80 % of the observed ep-1 pop-avg entropy on a fresh-init
+population in the 2026-04-19 activation-A-baseline run).
+
+When the forward-pass entropy exceeds the target, gradient
+descent on `log_alpha` drives it DOWN (less entropy bonus →
+entropy falls toward target); when below, the coefficient
+grows. `log_alpha` is clamped to `[log(1e-5), log(0.1)]` to
+prevent runaway during calibration. Saturation at either clamp
+is a valid failure signal — surface it in the learning-curves
+panel rather than silently letting the coefficient drift out of
+the useful range.
+
+The controller's optimiser is SEPARATE from the policy
+optimiser — `self._alpha_optimizer` is a second
+`torch.optim.Adam` instance over `[self._log_alpha]` only,
+with its own momentum state and LR. The effective
+`entropy_coefficient` the surrogate loss reads
+(`self.entropy_coeff`) is `log_alpha.exp().item()`, refreshed
+after each controller step. `log_alpha` uses float64 so the
+`log → exp` round trip preserves the literal
+`entropy_coefficient` gene value to machine epsilon on fresh
+init.
+
+The controller is called once per `_ppo_update`, after the
+mini-batch loop, using the mean forward-pass entropy across
+the update as `current_entropy`. It updates the coefficient
+for the NEXT `_ppo_update`; a one-update lag is defensible
+(it was in the original SAC recipe too) and keeps the
+implementation composable with the existing Session-2
+per-head entropy-floor controller (when `entropy_floor > 0`,
+the floor layer scales the SAC output by
+`min(entropy_boost_max, floor / rolling_mean)`).
+
+`test_real_ppo_update_updates_log_alpha` in
+`tests/test_ppo_trainer.py::TestTargetEntropyController` is
+the load-bearing regression guard per the 2026-04-18
+units-mismatch lesson — it exercises the wired-in code path
+end-to-end, not the controller method in isolation.
+
+Load-bearing for any training run on the current scalping
+reward shape. Without the controller, entropy drifts monotone
+139 → 200+ across a 15-episode run (observed on 64 agents
+during `activation-A-baseline` 2026-04-19), the policy
+diffuses toward the uniform distribution, and
+`close_signal` / `requote_signal` actions lose their
+probability mass. See `plans/entropy-control-v2/purpose.md`
+for the drift evidence and controller design.
+
+Reward magnitudes in `episodes.jsonl` are UNCHANGED by the
+controller — the fix is purely on the gradient pathway.
+Scoreboard rows pre-controller are directly comparable to
+post-controller rows. Per-episode JSONL rows gain `alpha`,
+`log_alpha`, and `target_entropy` optional fields for the
+learning-curves panel; downstream readers must tolerate
+their absence on pre-controller rows.
+
 ---
 
 ## `info["realised_pnl"]` is last-race-only

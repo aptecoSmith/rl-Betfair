@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from collections import Counter, deque
@@ -507,21 +508,61 @@ class PPOTrainer:
         # 139→189 across transformer 0a8cacd3 ep 1–7). Gene range
         # is unchanged; only the fresh-init default halves
         # (hard_constraints.md §13).
-        self.entropy_coeff = hp.get("entropy_coefficient", 0.005)
-        # -- Session 2 (arb-improvements) entropy-floor controller --------
-        # Baseline coefficient captured before any adaptive scaling. When
-        # ``entropy_floor`` is 0 (default) the controller is a no-op and
-        # ``self.entropy_coeff`` stays at the baseline for every update —
-        # byte-identical to pre-session behaviour.
+        # -- Target-entropy controller (plans/entropy-control-v2) ---------
+        # Entropy coefficient is a *learned variable* driven by a small
+        # separate Adam optimiser over ``log_alpha = log(entropy_coeff)``.
+        # When the policy's forward-pass entropy exceeds ``target_entropy``,
+        # gradient descent on ``log_alpha`` drives it DOWN (less entropy
+        # bonus → entropy falls toward target); when below, the reverse.
+        # Clamped to ``[log(1e-5), log(0.1)]`` to prevent runaway during
+        # calibration. See purpose.md for the Baseline-A 2026-04-19
+        # entropy drift (139.6 → 201.3 across 64 agents × 15 episodes)
+        # that this replaces the fixed-coefficient approach for.
         #
-        # The controller keeps a rolling window of per-head entropies.
-        # Before each PPO update's entropy-bonus term, if the rolling
-        # mean entropy (averaged across heads and the window) is below
-        # the floor, ``self.entropy_coeff`` is scaled up to
-        # ``min(entropy_boost_max, floor / rolling_mean) * base``. When
-        # the rolling mean recovers above the floor, it snaps back to
-        # baseline. The floor scales the *coefficient*, never the action
-        # distribution directly (hard_constraints.md §Stabilisation).
+        # The alpha-optimiser is SEPARATE from the policy optimiser —
+        # it holds its own momentum state and does NOT share anything
+        # with ``self.optimiser``. ``self.entropy_coeff`` (the Python
+        # float the surrogate loss reads) is refreshed from
+        # ``log_alpha.exp().item()`` after every controller step; the
+        # policy's autograd graph stays clean of the controller.
+        initial_entropy_coeff = float(
+            hp.get("entropy_coefficient", 0.005)
+        )
+        self._target_entropy: float = float(
+            hp.get("target_entropy", 112.0)
+        )
+        self._log_alpha_min: float = math.log(1e-5)
+        self._log_alpha_max: float = math.log(0.1)
+        # float64 on log_alpha preserves ``log(x).exp() == x`` to
+        # machine epsilon on the default hp values (0.005 / 0.01 /
+        # 0.02); float32 round-trip visibly drifts at the 7th decimal
+        # and breaks pre-existing ``entropy_coeff == <literal>`` tests.
+        # The alpha optimiser works on a single scalar — dtype cost is
+        # negligible.
+        self._log_alpha = torch.tensor(
+            math.log(max(initial_entropy_coeff, 1e-12)),
+            dtype=torch.float64,
+            device=self.device,
+            requires_grad=True,
+        )
+        self._alpha_optimizer = torch.optim.Adam(
+            [self._log_alpha],
+            lr=float(hp.get("alpha_lr", 1e-4)),
+        )
+        # Effective coefficient consumed by the surrogate-loss formula.
+        # Kept in sync with ``log_alpha`` after every controller step.
+        self.entropy_coeff = float(self._log_alpha.exp().item())
+
+        # -- Session 2 (arb-improvements) per-head entropy diagnostics ----
+        # The per-head rolling window + progress-event plumbing from the
+        # arb-improvements entropy-floor controller is retained for
+        # operator visibility. When ``entropy_floor > 0`` the floor
+        # controller layers a multiplicative scale-up on top of the
+        # SAC-style base (``_entropy_coeff_base``), which now tracks
+        # ``log_alpha.exp()`` rather than a fixed constant. With
+        # ``entropy_floor == 0`` (default) the floor scaling is a no-op
+        # and ``self.entropy_coeff`` equals the controller output
+        # directly. See plans/entropy-control-v2/hard_constraints.md §10.
         self._entropy_coeff_base = float(self.entropy_coeff)
         self.entropy_floor = float(hp.get("entropy_floor", 0.0) or 0.0)
         self.entropy_floor_window = int(hp.get("entropy_floor_window", 10) or 10)
@@ -1568,6 +1609,21 @@ class PPOTrainer:
             n, n_updates, ppo_elapsed, self.device,
         )
 
+        # Target-entropy controller step (entropy-control-v2 §5–§8).
+        # Runs once per ``_ppo_update`` with the mean forward-pass
+        # entropy across the update. ``entropies`` was appended per
+        # mini-batch above; its mean is the best detached estimate of
+        # the current policy's entropy on this rollout. Drives
+        # ``self.entropy_coeff`` via ``log_alpha.exp()`` and writes
+        # back into ``_entropy_coeff_base`` so the Session-2 floor
+        # controller (when armed) scales on top of the fresh base.
+        # The ``entropies`` list holds Python floats (already
+        # detached) — no autograd leakage into the controller.
+        if entropies:
+            self._update_entropy_coefficient(
+                float(np.mean(entropies)),
+            )
+
         # Session 2: flush this update's per-head entropies into the
         # rolling controller. ``per_head_sums`` only contains heads the
         # policy actually produced during the mini-batch loop.
@@ -1609,6 +1665,103 @@ class PPOTrainer:
             ),
             "action_stats": action_stats,
         }
+
+    # -- Target-entropy controller (entropy-control-v2) ---------------------
+
+    def _update_entropy_coefficient(self, current_entropy: float) -> None:
+        """SAC-style target-entropy controller step.
+
+        Drives the entropy coefficient to hold ``current_entropy`` at
+        ``self._target_entropy``. Uses a separate Adam optimiser over
+        ``_log_alpha``; does NOT backprop through the policy.
+
+        Call ONCE per ``_ppo_update``, after the entropy value is
+        computed on the current rollout. The argument must be a
+        detached Python float — no tensor leakage into the controller's
+        autograd graph.
+
+        Sign: ``alpha_loss = -log_alpha * (target - current)``.
+        - If ``current > target``: ``(target - current) < 0`` →
+          ``alpha_loss = log_alpha * (positive)`` → gradient descent
+          drives ``log_alpha`` DOWN (coefficient shrinks → less entropy
+          bonus → entropy falls toward target).
+        - If ``current < target``: symmetric in the other direction.
+
+        See plans/entropy-control-v2/hard_constraints.md §4–§8.
+        """
+        alpha_loss = -self._log_alpha * (
+            self._target_entropy - float(current_entropy)
+        )
+        self._alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self._alpha_optimizer.step()
+        # Clamp to prevent runaway during calibration. Saturation at
+        # either bound is a valid failure signal — surface in the
+        # learning-curves panel rather than silently letting log_alpha
+        # drift out of the useful range.
+        self._log_alpha.data.clamp_(
+            self._log_alpha_min, self._log_alpha_max,
+        )
+        # Refresh the effective coefficient the loss formula reads.
+        # Also refresh the base the Session-2 floor controller scales
+        # on top of; when ``entropy_floor == 0`` the floor controller
+        # is a no-op and these two agree after the controller runs.
+        self.entropy_coeff = float(self._log_alpha.exp().item())
+        self._entropy_coeff_base = self.entropy_coeff
+
+    # -- Checkpointing the controller state ---------------------------------
+
+    def save_checkpoint(self) -> dict:
+        """Return a serialisable dict carrying trainer-level state that
+        must survive across process boundaries.
+
+        Schema (entropy-control-v2 §11):
+        - ``log_alpha``: float — current value of ``_log_alpha``.
+        - ``alpha_optim_state``: dict — Adam momentum state for the
+          alpha optimiser.
+
+        Consumers that want the policy weights save those separately
+        via ``policy.state_dict()``; this method is scoped to trainer
+        controller state only.
+        """
+        return {
+            "log_alpha": float(self._log_alpha.item()),
+            "alpha_optim_state": self._alpha_optimizer.state_dict(),
+        }
+
+    def load_checkpoint(self, checkpoint: dict) -> None:
+        """Restore controller state from a dict produced by
+        :meth:`save_checkpoint`.
+
+        Backward-compat: when either key is missing we fresh-init
+        from the default (log_alpha from the current value; optimiser
+        momentum reset to zero) and log a warning. This matches the
+        registry-reset playbook's fallback for pre-controller
+        checkpoints.
+        """
+        if "log_alpha" in checkpoint:
+            self._log_alpha.data = torch.tensor(
+                float(checkpoint["log_alpha"]),
+                dtype=torch.float64,
+                device=self.device,
+            )
+        else:
+            logger.warning(
+                "Checkpoint missing log_alpha; fresh-initing from "
+                "default. Expected for checkpoints saved before "
+                "entropy-control-v2."
+            )
+        if "alpha_optim_state" in checkpoint:
+            self._alpha_optimizer.load_state_dict(
+                checkpoint["alpha_optim_state"]
+            )
+        # else: optimiser stays at its fresh-init state (Adam momentum
+        # starts at 0 — same fallback behaviour as the log_alpha branch
+        # above, no extra warning needed).
+
+        # Refresh the effective coefficient after load.
+        self.entropy_coeff = float(self._log_alpha.exp().item())
+        self._entropy_coeff_base = self.entropy_coeff
 
     # -- Entropy-floor controller (Session 2) --------------------------------
 
@@ -1757,6 +1910,14 @@ class PPOTrainer:
             "policy_loss": round(loss_info["policy_loss"], 6),
             "value_loss": round(loss_info["value_loss"], 6),
             "entropy": round(loss_info["entropy"], 6),
+            # Target-entropy controller trajectory (entropy-control-v2).
+            # Lets the learning-curves panel plot controller alpha
+            # alongside entropy. Optional keys — pre-controller rows
+            # do not have them; downstream readers must tolerate
+            # absence.
+            "alpha": round(float(self._log_alpha.exp().item()), 8),
+            "log_alpha": round(float(self._log_alpha.item()), 6),
+            "target_entropy": round(float(self._target_entropy), 4),
             # Forced-arbitrage (scalping) rollups — zero for directional.
             "arbs_completed": ep.arbs_completed,
             "arbs_naked": ep.arbs_naked,
