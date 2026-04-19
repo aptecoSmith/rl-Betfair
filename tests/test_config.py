@@ -68,6 +68,17 @@ def test_reward_coefficients_sum_to_one(config):
     )
 
 
+def test_mark_to_market_weight_default_matches_session_02(config):
+    """Default ``reward.mark_to_market_weight`` is 0.05
+    (plans/reward-densification, Session 02, 2026-04-19).
+
+    The original 0.0 default from Session 01 was a no-op migration;
+    0.05 engages the mechanism for any run that doesn't override via
+    hp. Any change to this default needs to co-land with a plan
+    update — pin it so a future refactor can't silently revert."""
+    assert config["reward"]["mark_to_market_weight"] == 0.05
+
+
 def test_path_keys(config):
     paths = config["paths"]
     for key in REQUIRED_PATH_KEYS:

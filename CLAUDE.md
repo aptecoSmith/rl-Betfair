@@ -229,6 +229,21 @@ raw P&L accumulator. See `plans/reward-densification/purpose.md`.
 `tests/test_mark_to_market.py` is the load-bearing regression guard
 per the 2026-04-18 units-mismatch lesson.
 
+**Default weight 0.05 (2026-04-19, Session 02).** MTM deltas are
+O(pennies-to-pounds) per tick on typical stakes; 0.05 × cumulative
+`|MTM delta|` across a race scales the shaped contribution to
+order-of-magnitude-comparable with per-race raw P&L (typical −£5 to
++£30 range per race) without dominating it. Too small and the signal
+is lost in advantage-normalisation noise; too large and the policy
+optimises per-tick flicker at the expense of settle P&L. The knob is
+a plan-level default only — not a GA gene in this plan (follow-on
+plan `reward-densification-gene` handles that if validation shows
+the mechanism works but the magnitude is wrong). Runs started after
+this commit are NOT byte-identical to pre-change runs: per-episode
+reward magnitudes differ (raw P&L preserved; `shaped_bonus` now
+includes MTM shaping). Scoreboard rows from pre-change runs remain
+comparable on `raw_pnl_reward` but not on `total_reward`.
+
 ### Symmetry around random betting
 
 Both shaping terms are **zero-mean for random policies**:

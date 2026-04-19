@@ -101,3 +101,50 @@ existing invariant guard = net +12 assertions, 11 net new tests).
 **Next.** Session 02 — flip the config.yaml default from 0.0 to
 0.05 so the next training run engages the mechanism without
 per-plan overrides.
+
+---
+
+## Session 02 — Plan-level default weight (0.05)
+
+**Date:** 2026-04-19.
+**Commit:** _pending_.
+
+**What landed.**
+
+- `config.yaml` — added `reward.mark_to_market_weight: 0.05`
+  under the reward block (preserves existing ordering). This
+  is the project-wide default; agents that don't override via
+  hp pick it up.
+- `tests/test_config.py::test_mark_to_market_weight_default_matches_session_02`
+  pins the value so a future refactor can't silently revert.
+- `CLAUDE.md` — dated "Default weight 0.05 (2026-04-19,
+  Session 02)" paragraph appended under the Session-01
+  "Per-step mark-to-market shaping" subsection. Notes the
+  reward-scale change: runs after this commit are NOT
+  byte-identical to pre-change; scoreboard rows compare on
+  `raw_pnl_reward` but not on `total_reward`.
+
+**Not changed.** The mechanism itself (Session 01), formulas,
+telescope property, invariant tests, target-entropy controller,
+PPO stability defences, action/obs schemas, gene ranges, smoke-
+gate assertion, raw P&L accounting.
+
+**Gotchas.**
+
+- This IS a reward-scale change per hard_constraints §19 —
+  documented in the CLAUDE.md paragraph. Pre-change scoreboard
+  rows are NOT directly comparable on `total_reward`. The MTM
+  shaping lives entirely in `shaped_bonus`; `raw_pnl_reward`
+  (race-settled cashflow only) remains comparable.
+- The default propagates via `config["reward"]["mark_to_market_weight"]`
+  → `BetfairEnv._mark_to_market_weight`; per-plan overrides via
+  `reward_overrides.mark_to_market_weight` still work and take
+  precedence over the default (same gene passthrough as the
+  other reward knobs).
+
+**Test suite.** 2276 passed, 7 skipped, 1 xfailed (+1 new pin
+test in test_config.py).
+
+**Next.** Session 03 — archive the existing registry and
+redraft the probe training plan. Session 03 is
+operator-gated per hard_constraints §21.

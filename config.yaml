@@ -53,6 +53,16 @@ reward:
   #     proportional to ticks remaining when the second leg filled
   naked_penalty_weight: 0.0
   early_lock_bonus_weight: 0.0
+  # Per-step mark-to-market shaping weight
+  # (plans/reward-densification, Session 02, 2026-04-19).
+  # 0.0 = no-op (rollouts byte-identical to pre-Session-01 code);
+  # 0.05 is the first-cut default calibrated so the cumulative
+  # shaped MTM across a race is order-of-magnitude-comparable with
+  # the race's raw P&L without dominating it. See purpose.md
+  # "Picking the default weight" for the calibration argument and
+  # hard_constraints.md §11 for why this is NOT a GA gene in this
+  # plan.
+  mark_to_market_weight: 0.05
   # Scalping-active-management auxiliary-head loss weights (plumbing
   # off by default — activation playbook bumps these per its Step E
   # before Session 07 validation). Declared here so per-plan
