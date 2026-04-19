@@ -8,6 +8,116 @@ Format per session follows `naked-clip-and-stability/
 progress.md` — "What landed", "Not changed", "Gotchas",
 "Next".
 
+## Session 03 — Registry reset + activation-plan redraft (2026-04-19)
+
+**Commit:** _(to be filled in at commit time)_
+
+### What landed
+
+Archive path: `registry/archive_20260419T102446Z/`.
+
+- `registry/models.db` → `registry/archive_20260419T102446Z/models.db`
+  (64 agents from the 2026-04-19 activation-A-baseline run —
+  transformer × 13, LSTM × 26, Time-LSTM × 25 per the gen-3
+  population split).
+- `registry/weights/` → `registry/archive_20260419T102446Z/weights/`
+  (64 `.pt` files).
+- `registry/training_plans/` copied (not moved) to
+  `registry/archive_20260419T102446Z/training_plans/` —
+  captures the plan states pre-reset for audit trail.
+- `logs/training/episodes.jsonl` →
+  `logs/training/episodes.pre-entropy-control-v2-20260419T102446Z.jsonl`
+  (1222 rows, 791859 bytes — 960 full-run rows + 6 smoke-test
+  rows + operator-launch smoke probes from earlier iterations).
+
+Fresh registry:
+
+- New `registry/models.db` initialised via `ModelStore()` — 0
+  models, all 6 core tables present (`models`,
+  `evaluation_runs`, `evaluation_days`, `sqlite_sequence`,
+  `genetic_events`, `exploration_runs`).
+- `registry/weights/` recreated empty.
+- `logs/training/episodes.jsonl` truncated to 0 bytes.
+
+Activation plans redrafted (`status='draft'`,
+`started_at=None`, `completed_at=None`,
+`current_generation=None`, `current_session=0`,
+`outcomes=[]`):
+
+| Plan | Pre-reset status | current_generation | outcomes |
+|---|---|---|---|
+| activation-A-baseline | completed | 3 | 4 |
+| activation-B-001 | draft | None | 0 |
+| activation-B-010 | draft | None | 0 |
+| activation-B-100 | draft | None | 0 |
+
+Configuration preserved byte-identical: `population_size`,
+`n_generations`, `arch_mix`, `hp_ranges`, `reward_overrides`,
+`seed`, `name`, `notes`, `plan_id` — the JSON edit only touched
+the runtime / status fields per hard_constraints §11 of
+`naked-clip-and-stability` (same convention).
+
+### Not changed
+
+- No code changes. Session 03 is archive + reset + docs only,
+  per hard_constraints §23.
+- No test changes. `pytest tests/ -q` was green after
+  Sessions 01–02 landed (2252 passed); Session 03 did not
+  re-run the suite.
+- `plans/INDEX.md` already carries the
+  `entropy-control-v2` row (added at plan-folder creation
+  time, 2026-04-19) — no further edit needed.
+
+### Gotchas
+
+- `registry/archive_*` folders are untracked per the project's
+  `.gitignore` pattern — the archive itself is on disk only.
+  The commit body documents the archive path so a reviewer
+  can find it post-hoc.
+- `registry/training_plans/` is also gitignored (same pattern
+  as `naked-clip-and-stability` Session 05) — the redrafted
+  JSONs don't appear in the commit diff either. The commit
+  body is the audit record.
+
+### Test suite
+
+Not re-run this session — the session touches no code or
+tests. Regression guard is the Session 01 + Session 02
+combined run (2252 passed, 7 skipped, 133 deselected,
+1 xfailed).
+
+### Next (operator action — not bundled into this commit)
+
+Per hard_constraints §25, the relaunch is NOT in this
+commit. Operator steps:
+
+1. Start the admin UI + API.
+2. Open the training-launch page for
+   `activation-A-baseline`.
+3. Confirm "Smoke test first" is checked (default per
+   `naked-clip-and-stability` Session 04).
+4. Click Launch.
+5. Watch the probe run in the learning-curves panel. The
+   new slope-based assertion ("entropy_slope",
+   threshold ≤ 1.0) should appear in the assertion list.
+6. On probe pass: full population launches. Watch for the
+   validation criteria in `master_todo.md` "After Session
+   03":
+   - Pop-avg entropy converging toward 112 by ep 10, within
+     ±20 % by ep 15.
+   - No ep-1 `policy_loss > 100` across the population.
+   - `arbs_closed > 0` on ≥ 1 agent AND
+     `arbs_closed / max(1, arbs_naked) > 0.3` sustained across
+     the last 5 episodes.
+   - ≥ 1 agent with a positive reward-trend slope across
+     eps 8–15.
+7. Capture findings in a new **Validation** entry on this
+   `progress.md` — commit hash, outcome, scoreboard
+   highlights, and either the green light for the B sweep or
+   the diagnostics for a follow-up plan.
+
+---
+
 ## Session 02 — Smoke-gate slope assertion (2026-04-19)
 
 **Commit:** _(to be filled in at commit time)_
