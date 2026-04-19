@@ -148,3 +148,87 @@ test in test_config.py).
 **Next.** Session 03 — archive the existing registry and
 redraft the probe training plan. Session 03 is
 operator-gated per hard_constraints §21.
+
+---
+
+## Session 03 — Training-plan redraft + archive
+
+**Date:** 2026-04-19.
+**Commit:** _pending_.
+
+**What landed.**
+
+- Archived the live registry into
+  `registry/archive_20260419T192404Z/`:
+  - `models.db` (25 models — partial
+    `activation-A-baseline` gen-0 + `fill-prob-aux-probe`
+    7 completed / 2 still-running agents).
+  - `weights/` (25 `.pt` files).
+  - `training_plans/` (snapshot of the 5 historical plans;
+    the live copies stay in-place for reference).
+- Moved `logs/training/episodes.jsonl` →
+  `logs/training/episodes.pre-reward-densification-20260419T192404Z.jsonl`
+  (758 rows).
+- Fresh registry:
+  - New `registry/models.db` via `ModelStore()` — 0 models.
+  - `registry/weights/` recreated empty.
+  - `logs/training/episodes.jsonl` truncated to 0 bytes.
+- New training plan
+  `registry/training_plans/3403aaf5-73c0-472f-a719-bda47ba96540.json`:
+  - `name: "reward-densification-probe"`
+  - 9 agents (3 per arch — same `arch_mix` as
+    `fill-prob-aux-probe` for clean comparison).
+  - 1 generation, 3 epochs, `auto_continue=false`,
+    `generations_per_session=1`.
+  - `reward_overrides`: `fill_prob_loss_weight: 0.0`,
+    `risk_loss_weight: 0.0` — aux heads off so the MTM
+    signal is clean (2026-04-19 `fill-prob-aux-probe`
+    showed aux-head weight 0.10 doesn't move the needle on
+    its own). No explicit `mark_to_market_weight` override
+    — picked up from the config.yaml default (0.05 per
+    Session 02).
+  - `hp_ranges`: copied from `fill-prob-aux-probe` so genes
+    roll identically.
+  - `seed: 421` (different from fill-prob-aux-probe's 137).
+  - `status: "draft"`; all runtime fields null.
+- Plan validates via
+  `PlanRegistry('registry/training_plans').list()` — the
+  new plan loads alongside the 5 historical plans as
+  expected.
+
+**Not changed.** Code / tests (none in Session 03 per
+hard_constraints §21). `plans/INDEX.md` already carries the
+`reward-densification` row from plan-folder creation.
+
+**Gotchas.**
+
+- The registry archive path is on disk only — the
+  `registry/archive_*/` folders are gitignored per the
+  project's standard pattern. Only plan docs
+  (`progress.md`, `INDEX.md`) show in the diff; the commit
+  body documents the archive location for post-mortem
+  reference.
+- `reward_overrides` does NOT carry
+  `mark_to_market_weight` — letting the config.yaml default
+  (0.05) apply avoids a duplicate source of truth. If the
+  probe's findings motivate a different weight, bumping the
+  config and keeping the plan override-free lets the A/B
+  swap live in one file.
+
+**Pre-reset state (archived).**
+
+- `registry/archive_20260419T192404Z/models.db` — 25 models.
+- `registry/archive_20260419T192404Z/weights/` — 25 `.pt`
+  files.
+- `logs/training/episodes.pre-reward-densification-20260419T192404Z.jsonl`
+  — 758 rows (A-baseline gen-0 partial + fill-prob-aux-probe
+  7-completed state).
+
+**Test suite.** Not re-run (Session 03 is registry + plan
+JSON only; no code changes). Sessions 01/02 covered the
+code-level regression suite.
+
+**Next.** Operator launches the
+`reward-densification-probe` plan with "Smoke test first"
+ticked. Post-run Validation entry follows here, per
+`master_todo.md §After Session 03`.
