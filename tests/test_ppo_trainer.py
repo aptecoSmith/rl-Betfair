@@ -1366,6 +1366,36 @@ class TestTargetEntropyController:
         trainer = PPOTrainer(policy, config)
         assert trainer._target_entropy == pytest.approx(112.0)
 
+    def test_alpha_lr_default_matches_session_04(self):
+        """Default ``alpha_lr`` is 3e-2 (entropy-control-v2 Session 04).
+        The original 1e-4 default was too timid to move alpha
+        meaningfully within a 3-episode smoke probe — the
+        2026-04-19 post-Session-03 probe logged log_alpha moving
+        ~2e-4 across 2 updates, well below any useful range. The
+        adaptive Adam normalisation makes per-update step size ~lr
+        regardless of gradient magnitude, so the fix is on the LR
+        side, not the loss formula."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+        # Read lr off the first param group of the alpha optimiser —
+        # Adam stores it there.
+        assert trainer._alpha_optimizer.param_groups[0]["lr"] == (
+            pytest.approx(3e-2, rel=1e-9)
+        )
+
+    def test_alpha_lr_explicit_hp_overrides_default(self):
+        """Explicit ``alpha_lr`` hp still wins — lets tests and
+        pathological configs pin the controller's aggressiveness."""
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config, hyperparams={"alpha_lr": 1e-4},
+        )
+        assert trainer._alpha_optimizer.param_groups[0]["lr"] == (
+            pytest.approx(1e-4, rel=1e-9)
+        )
+
     def test_log_episode_includes_alpha_and_log_alpha(self, tmp_path):
         """Per-episode JSONL row carries ``alpha``, ``log_alpha``, and
         ``target_entropy`` fields so the learning-curves panel can

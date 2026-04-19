@@ -255,7 +255,10 @@ is the load-bearing regression guard.
 
 Entropy coefficient is a *learned variable*, not a fixed
 hyperparameter. A small separate Adam optimiser (`alpha_lr`
-default `1e-4`) optimises `log_alpha = log(entropy_coefficient)`
+default `3e-2` — raised 1e-4 → 3e-2 on 2026-04-19 after the
+first post-Session-03 probe failed the slope check; see
+`plans/entropy-control-v2/lessons_learnt.md`) optimises
+`log_alpha = log(entropy_coefficient)`
 to hold the policy's current entropy at `target_entropy=112`
 (≈ 80 % of the observed ep-1 pop-avg entropy on a fresh-init
 population in the 2026-04-19 activation-A-baseline run).

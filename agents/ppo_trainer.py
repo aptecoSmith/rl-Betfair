@@ -545,9 +545,22 @@ class PPOTrainer:
             device=self.device,
             requires_grad=True,
         )
+        # ``alpha_lr`` default raised 1e-4 -> 3e-2 on 2026-04-19 after
+        # the first post-Session-03 probe FAILED the slope assertion
+        # (transformer slope +1.94, LSTM +3.71 over eps 1..3). Adam's
+        # adaptive normalisation makes per-update log_alpha movement
+        # roughly ``lr``-sized regardless of raw gradient magnitude;
+        # the SAC literature default (1e-4) is timed against training
+        # loops with 10^5-10^6 updates, whereas our ``_ppo_update``
+        # runs once per episode (dozens per run). At lr=3e-2 the
+        # controller can travel ~0.45 in log_alpha across 15 episodes
+        # -- enough to materially shift alpha when it needs to. The
+        # per-step ``log_alpha_min`` / ``log_alpha_max`` clamp remains
+        # the ultimate safety net against overshoot. See
+        # plans/entropy-control-v2/lessons_learnt.md 2026-04-19.
         self._alpha_optimizer = torch.optim.Adam(
             [self._log_alpha],
-            lr=float(hp.get("alpha_lr", 1e-4)),
+            lr=float(hp.get("alpha_lr", 3e-2)),
         )
         # Effective coefficient consumed by the surrogate-loss formula.
         # Kept in sync with ``log_alpha`` after every controller step.

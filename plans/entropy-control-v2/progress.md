@@ -8,6 +8,96 @@ Format per session follows `naked-clip-and-stability/
 progress.md` — "What landed", "Not changed", "Gotchas",
 "Next".
 
+## Session 04 — `alpha_lr` default 1e-4 → 3e-2 (2026-04-19)
+
+**Commit:** _(to be filled in at commit time)_
+
+### What landed
+
+- `agents/ppo_trainer.py`: `alpha_lr` default raised from
+  `1e-4` to `3e-2`. Rationale comment cross-references
+  `lessons_learnt.md` 2026-04-19. The `_log_alpha_min` /
+  `_log_alpha_max` clamp remains the ultimate safety net
+  against one-step overshoot.
+- `tests/test_ppo_trainer.py` — 2 new tests in
+  `TestTargetEntropyController`:
+  - `test_alpha_lr_default_matches_session_04` pins the new
+    default.
+  - `test_alpha_lr_explicit_hp_overrides_default` confirms
+    the hp override path still wins — internal tests and
+    pathological configs can still pin a slower lr.
+- `CLAUDE.md` — "Entropy control" paragraph updated to
+  reflect the new default and cross-reference the lesson.
+- `plans/entropy-control-v2/lessons_learnt.md` status line
+  flipped from "Awaiting operator decision" to "Resolved in
+  Session 04".
+- **Registry re-reset** (bundled into this commit's follow-on
+  operator action, not the commit itself). The fresh
+  registry from Session 03 had only the 6 failed-probe rows
+  from the post-Session-03 launch; truncate
+  `logs/training/episodes.jsonl` before re-launch. `models.db`
+  and `weights/` are already empty (probe agents don't
+  persist).
+
+### Trigger
+
+Post-Session-03 smoke probe FAILED on `entropy_slope`:
+
+| Agent | ep1 | ep2 | ep3 | slope |
+|---|---|---|---|---|
+| transformer | 139.52 | 140.65 | 143.39 | **+1.94** |
+| LSTM | 139.69 | 143.01 | 147.12 | **+3.71** |
+
+Assertion 1 (policy_loss) and assertion 3 (arbs_closed)
+passed. Slope assertion did its job — flagged a legitimate
+controller failure mode that earlier phases would have
+missed. See `lessons_learnt.md` 2026-04-19 for the diagnosis
+(Adam's adaptive normalisation makes per-update step size
+~`lr` regardless of gradient magnitude; `1e-4` is SAC
+literature default, timed against 10⁵–10⁶ updates, not our
+~dozens per run).
+
+### Not changed
+
+- Controller architecture, sign, loss formula, clamp bounds.
+- Reward shape, matcher, action/obs schemas.
+- PPO stability defences.
+- Smoke-gate slope threshold (`ENTROPY_SLOPE_MAX = 1.0`).
+- `target_entropy` default (112.0).
+
+### Gotchas
+
+- Existing controller tests use explicit `alpha_lr=1e-2`
+  (shrink / grow / clamp) or `1e-3` (roundtrip /
+  optimiser-separate / effective-coeff sync), so none of
+  them drift with the default raise. The only tests that
+  touch the default are the two new ones.
+- `test_real_ppo_update_updates_log_alpha` becomes stricter
+  under the new default — log_alpha now moves ~3e-2 per
+  update instead of ~1e-4, so the `after != before`
+  assertion passes more cleanly.
+
+### Test suite
+
+`pytest tests/ -q`: **2254 passed, 7 skipped, 133 deselected,
+1 xfailed** (0:06:44). +2 net tests from Session 03's 2252.
+
+### Next (operator action — not bundled into this commit)
+
+1. Truncate `logs/training/episodes.jsonl` before re-launch
+   (the fresh registry still carries the 6 failed-probe rows
+   from the post-Session-03 launch). `models.db` and
+   `weights/` already have 0 entries.
+2. Re-launch `activation-A-baseline` with "Smoke test first"
+   ticked.
+3. On probe pass: full population trains. Capture findings
+   in a new Validation entry.
+4. On probe fail: capture the new entropy trajectory in
+   `lessons_learnt.md`; Session 05 territory (extend the
+   probe window, or lower target_entropy).
+
+---
+
 ## Session 03 — Registry reset + activation-plan redraft (2026-04-19)
 
 **Commit:** _(to be filled in at commit time)_
