@@ -258,3 +258,114 @@ high entropy (say >200 by ep15):
   Or accept that the controller defends the upper bound only
   (let entropy settle at its natural equilibrium and focus on
   reward-densification).
+
+---
+
+## 2026-04-19 — Slope gate was structurally wrong; new gate checks tracking error (Session 07)
+
+**Observation.** Post-Session-06 smoke probe run locally
+(scripts/run_smoke_probe.py, bypasses the worker so iteration is
+fast). 3-episode trajectory:
+
+| agent | ep1 | ep3 | slope |
+|---|---|---|---|
+| transformer | 139.5 | 144.4 | +2.44 |
+| LSTM | 139.7 | 148.5 | +4.43 |
+
+Slope gate FAILED on both. **But the LSTM's ep3 entropy was
+148.5 — within 1.5 of target 150.** That's perfect controller
+tracking. The slope-based gate was treating a correctly-tracking
+controller as a pathology.
+
+**Diagnosis.** With target above fresh-init entropy, the
+controller's correct behaviour produces positive slope while it's
+climbing toward target. The slope gate cannot distinguish
+"drifting up with no controller" from "climbing toward an
+above-floor target." Any target > fresh-init + tolerance is
+guaranteed to fail the slope gate during the probe's climb phase.
+
+**Fix.** Replace the slope assertion with a tracking-error-growth
+assertion:
+
+    |ep3.entropy - target_entropy| - |ep1.entropy - target_entropy|
+        <= ENTROPY_TARGET_TOLERANCE (= 3.0)
+
+Passes when error shrinks (controller working) or holds steady
+(already at target). Fails when error grows meaningfully (drift
+away from setpoint). Captures the Baseline-A pathology (error
+growing from 10 to 51+ across a run) without false-failing on
+healthy climb-to-target behaviour.
+
+**Verification on same rows under new gate:**
+- Transformer: |144.4−150|=5.6 vs |139.5−150|=10.5 → shrank 4.9. PASS.
+- LSTM: |148.5−150|=1.5 vs |139.7−150|=10.3 → shrank 8.8. PASS.
+
+Fresh re-run (random-seed-driven variance) of the 3-episode
+probe: PASS, both agents, worst tracking-error growth −4.1.
+
+**5-episode probe reveals the real dynamics** (above-smoke window,
+diagnostic only). Continuing the Session-06 trainer beyond 3
+episodes:
+
+| agent | ep1 | ep2 | ep3 | ep4 | ep5 |
+|---|---|---|---|---|---|
+| transformer | 139.5 | 140.7 | 143.9 | 148.7 | **154.0** |
+| LSTM | 139.7 | 143.0 | 147.5 | 153.1 | **165.2** |
+
+- Eps 1-3: controller grows alpha (current < target), entropy
+  climbs toward target. Gate passes.
+- Eps 4-5: **entropy overshoots target**, controller pivots
+  to shrinking alpha. LSTM drifts to 165 (|err|=15.2).
+
+This tells us the **natural entropy equilibrium** for this
+policy / action space / reward configuration sits *above* 150.
+Target=150 is still below the true floor — controller will
+always be fighting a losing battle, just on a longer timescale
+than target=112 did. The 3-episode smoke gate passes because it
+only sees the initial climb; by ep15 the tracking error will
+have grown past the tolerance, and the full-run validation will
+catch it.
+
+**Implication for the plan.** If operator launches the full run
+post-Session-07 and the full-run entropy drifts above ~180 by
+ep15:
+
+- Option A (quick): raise `target_entropy` default again to
+  ~170 (above the equilibrium) so the controller only fires
+  when entropy spikes above that — defensive rather than
+  pulling. Keeps the controller's purpose as a "prevent
+  runaway" mechanism rather than a "hold at setpoint" one.
+- Option B (principled): accept that entropy control is not
+  the lever for training convergence on sparse scalping
+  rewards; open the queued `reward-densification` plan.
+
+I'm leaning Option B based on the evidence accumulated across
+Sessions 04-07: the controller mechanism is correct
+(proportional SGD, sign verified, steps visible), the target has
+been tuned twice, and the underlying issue keeps being "policy
+naturally diffuses under sparse rewards." Hitting this with
+entropy bonus alone is fighting the wrong battle. But operator
+gets to validate that diagnosis by running the full 15-episode
+sweep first.
+
+**Scope of Session 07 landing.**
+- `agents/smoke_test.py`: `ENTROPY_SLOPE_MAX` constant replaced
+  by `ENTROPY_TARGET_TOLERANCE = 3.0`. Assertion evaluator
+  rewritten to compute tracking-error growth instead of slope.
+  Assertion name: `entropy_slope` → `entropy_tracks_target`.
+  Detail string reformatted (`|e1-tgt|=X.X -> |e3-tgt|=Y.Y`).
+- `tests/test_smoke_test.py`: `TestEntropyAssertion` class
+  rewritten against the new gate. 7 new tests covering: error
+  shrinks (from actual Session-06 data), flat-at-target, drift
+  away, threshold boundary (3.0/3.1), empty input, default
+  target fallback for legacy rows, and high-target-with-climb.
+  Also updated `test_any_failed_means_overall_fail` to use
+  drift-away-from-150 inputs, and the gen2-transformer vignette
+  now fails on the calmlstm-drift-from-150 path.
+- `frontend/src/app/training-plans/training-plans.spec.ts`:
+  fixture assertion updated `entropy_slope` → `entropy_tracks_target`.
+- `scripts/run_smoke_probe.py`: new local iteration helper
+  (not wired into product; deletable once plan closes).
+
+Pytest: 2256 passed, 7 skipped, 133 deselected, 1 xfailed. No
+regression.

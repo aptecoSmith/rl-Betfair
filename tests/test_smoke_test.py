@@ -6,11 +6,13 @@ exercised at the worker-integration level; this suite keeps the
 gate's logic provable without standing up a trainer.
 
 hard_constraints.md §15 defines the three assertions (§15 amended
-2026-04-19 via ``plans/entropy-control-v2/`` Session 02):
+2026-04-19 via ``plans/entropy-control-v2/`` Sessions 02 and 07):
 
 1. ``ep1.policy_loss < 100`` on BOTH probe agents
-2. ``slope(polyfit(episodes, entropies, 1)) <= 1.0`` on BOTH probe
-   agents (was ``ep3 - ep1 <= +10`` endpoint check pre-2026-04-19)
+2. ``|ep3.entropy - target| - |ep1.entropy - target| <= 3.0`` on
+   BOTH probe agents (tracking-error growth bound; replaces the
+   Session-02 slope check, which structurally failed a working
+   controller whose target sat above fresh-init entropy)
 3. ``max(ep1..ep3.arbs_closed) >= 1`` on AT LEAST ONE probe agent
 
 Every test below has exactly one of these assertions as its primary
@@ -26,7 +28,7 @@ import pytest
 
 from agents.smoke_test import (
     ARBS_CLOSED_MIN,
-    ENTROPY_SLOPE_MAX,
+    ENTROPY_TARGET_TOLERANCE,
     EP1_POLICY_LOSS_MAX,
     PROBE_EPISODE_COUNT,
     SmokeAssertionResult,
@@ -107,128 +109,161 @@ class TestEp1PolicyLossAssertion:
         assert pl.observed == 1.0e17
 
 
-# ── Assertion 2 — entropy slope (entropy-control-v2 Session 02) ───────
+# ── Assertion 2 — entropy tracks target (entropy-control-v2 Session 07)
 
 
 class TestEntropyAssertion:
-    """Entropy slope fit across the 3-episode probe window. Per-agent,
-    not pop-avg — both probe agents must pass. Slope threshold
-    ``ENTROPY_SLOPE_MAX`` (= 1.0 at time of writing). Replaces the
-    2026-04-18 endpoint-only check that was blind to the Baseline-A
-    monotone drift. See
-    ``plans/entropy-control-v2/session_prompts/02_smoke_gate_slope_assertion.md``.
+    """Tracking-error growth across the 3-episode probe window.
+    Per-agent, not pop-avg — both probe agents must pass. The gate
+    fails when ``|ep3 - target| - |ep1 - target|`` exceeds
+    ``ENTROPY_TARGET_TOLERANCE`` (= 3.0 at time of writing).
+    Replaces the Session-02 slope check, which structurally failed
+    a working controller whose target sat above fresh-init entropy.
+    See plans/entropy-control-v2/lessons_learnt.md 2026-04-19 for
+    the Session-07 post-probe diagnosis.
     """
 
-    def _eps_with_entropy(self, mid: str, e1: float, e2: float, e3: float) -> list[dict]:
-        return _three_eps(
+    def _eps(
+        self,
+        mid: str,
+        e1: float,
+        e2: float,
+        e3: float,
+        *,
+        target: float = 150.0,
+    ) -> list[dict]:
+        rows = _three_eps(
             mid,
             ep1={"entropy": e1},
             ep2={"entropy": e2},
             ep3={"entropy": e3},
         )
+        # All probe rows from PPOTrainer._log_episode carry
+        # target_entropy now — add it to our fabrications too.
+        for r in rows:
+            r["target_entropy"] = target
+        return rows
 
-    def test_slope_assertion_passes_on_flat_entropy(self):
-        """[140, 140, 140] → slope 0 → passes (<= 1.0)."""
+    def test_tracking_error_shrinks_passes(self):
+        """LSTM smoke observed in Session 06: 139.7 → 143.4 → 148.5
+        with target=150. |ep3-150|=1.5, |ep1-150|=10.3 → error
+        shrank by 8.8 → PASS. Slope was +4.4 (old gate would fail)."""
         rows = (
-            self._eps_with_entropy("a", 140.0, 140.0, 140.0)
-            + self._eps_with_entropy("b", 120.0, 120.0, 120.0)
+            self._eps("a", 139.7, 143.4, 148.5)
+            + self._eps("b", 139.6, 141.0, 144.4)
         )
         rows[0]["arbs_closed"] = 3  # keep assertion 3 green
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        ent = next(
+            a for a in result.assertions if a.name == "entropy_tracks_target"
+        )
         assert ent.passed
-        assert abs(ent.observed) < 1e-6
-        assert ent.threshold == ENTROPY_SLOPE_MAX
+        assert ent.observed < 0  # error shrank (growth is negative)
+        assert ent.threshold == ENTROPY_TARGET_TOLERANCE
 
-    def test_slope_assertion_passes_on_mild_decrease(self):
-        """[140, 139, 138] → slope −1 → passes."""
+    def test_tracking_error_flat_at_target_passes(self):
+        """Policy sitting exactly at target: no error, no growth."""
         rows = (
-            self._eps_with_entropy("a", 140.0, 139.0, 138.0)
-            + self._eps_with_entropy("b", 200.0, 199.0, 198.0)
+            self._eps("a", 150.0, 150.0, 150.0)
+            + self._eps("b", 150.0, 150.0, 150.0)
         )
         rows[0]["arbs_closed"] = 3
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_slope")
-        assert ent.passed
-        assert ent.observed == pytest.approx(-1.0, abs=1e-6)
-
-    def test_slope_assertion_fails_on_a_baseline_drift_rate(self):
-        """[139.6, 145.3, 150.0] → slope ≈ +5.2 → FAILS. The actual
-        Baseline-A 2026-04-19 drift rate that the old endpoint
-        assertion let through (ep3 - ep1 = +10.4, just over +10, but
-        barely — ep1..ep3 alone wouldn't have flagged the pop-avg;
-        the slope fit captures the trajectory across all three data
-        points)."""
-        rows = (
-            self._eps_with_entropy("a", 139.6, 145.3, 150.0)
-            + self._eps_with_entropy("b", 120.0, 120.0, 120.0)
+        ent = next(
+            a for a in result.assertions if a.name == "entropy_tracks_target"
         )
-        rows[0]["arbs_closed"] = 3
+        assert ent.passed
+        assert ent.observed == pytest.approx(0.0, abs=1e-6)
+
+    def test_baseline_a_drift_fails(self):
+        """Baseline-A 2026-04-19 drift: entropy 139.6 → 145.3 → 201.3
+        (if ep3 were from the full run). |ep3-150|=51.3,
+        |ep1-150|=10.4 → error grew by 40.9 → FAIL."""
+        rows = (
+            self._eps("a", 139.6, 170.0, 201.3)
+            + self._eps("b", 140.0, 140.0, 140.0)
+        )
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        ent = next(
+            a for a in result.assertions if a.name == "entropy_tracks_target"
+        )
         assert ent.passed is False
-        assert ent.observed > ENTROPY_SLOPE_MAX
+        assert ent.observed > ENTROPY_TARGET_TOLERANCE
 
-    def test_slope_assertion_at_threshold_boundary(self):
-        """[140, 141, 142] → slope exactly 1.0 passes (``<=``).
-        [140, 141.1, 142.2] → slope 1.1 > 1.0 fails."""
+    def test_threshold_boundary(self):
+        """|ep1-150|=10, |ep3-150|=13 → growth exactly +3.0 → PASS
+        (``<=`` semantics). |ep1-150|=10, |ep3-150|=13.1 → +3.1 → FAIL."""
         pass_rows = (
-            self._eps_with_entropy("a", 140.0, 141.0, 142.0)
-            + self._eps_with_entropy("b", 100.0, 100.0, 100.0)
+            self._eps("a", 140.0, 141.5, 137.0)  # |140-150|=10, |137-150|=13
+            + self._eps("b", 150.0, 150.0, 150.0)
         )
         pass_rows[0]["arbs_closed"] = 3
-        pass_result = evaluate_probe_episodes(pass_rows)
-        ent_pass = next(
-            a for a in pass_result.assertions if a.name == "entropy_slope"
+        result = evaluate_probe_episodes(pass_rows)
+        ent = next(
+            a for a in result.assertions if a.name == "entropy_tracks_target"
         )
-        assert ent_pass.passed
-        assert ent_pass.observed == pytest.approx(1.0, abs=1e-6)
+        assert ent.passed
+        assert ent.observed == pytest.approx(3.0, abs=1e-6)
 
         fail_rows = (
-            self._eps_with_entropy("a", 140.0, 141.1, 142.2)
-            + self._eps_with_entropy("b", 100.0, 100.0, 100.0)
+            self._eps("a", 140.0, 141.5, 136.9)  # |140-150|=10, |136.9-150|=13.1
+            + self._eps("b", 150.0, 150.0, 150.0)
         )
-        fail_rows[0]["arbs_closed"] = 3
         fail_result = evaluate_probe_episodes(fail_rows)
         ent_fail = next(
-            a for a in fail_result.assertions if a.name == "entropy_slope"
+            a for a in fail_result.assertions
+            if a.name == "entropy_tracks_target"
         )
         assert ent_fail.passed is False
 
-    def test_slope_assertion_handles_empty_input(self):
-        """Empty rows → passed=False, observed=NaN — same shape as
-        other assertions' empty-input fallback."""
+    def test_empty_input_fails_gracefully(self):
+        """No rows → passed=False, observed=NaN — same shape as other
+        assertions' empty-input fallback."""
         import math
         result = evaluate_probe_episodes([])
-        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        ent = next(
+            a for a in result.assertions if a.name == "entropy_tracks_target"
+        )
         assert ent.passed is False
         assert math.isnan(ent.observed)
 
-    def test_one_agent_rising_hard_fails(self):
-        """Reproduces the full ``0a8cacd3`` entropy pathology
-        (+20/ep over the probe window). The slope fit flags it even
-        though the other agent is flat."""
-        rows = (
-            self._eps_with_entropy("a", 140.0, 160.0, 180.0)
-            + self._eps_with_entropy("b", 100.0, 100.0, 100.0)
-        )
+    def test_uses_default_target_when_row_lacks_field(self):
+        """Rows without ``target_entropy`` (pre-Session-01 logs) fall
+        back to DEFAULT_TARGET=150.0 so the gate still renders."""
+        # Build rows manually without target_entropy.
+        rows = []
+        for mid in ("a", "b"):
+            for ep, ent in enumerate([148.0, 149.0, 150.0], start=1):
+                rows.append({
+                    "model_id": mid, "episode": ep,
+                    "policy_loss": 1.0, "entropy": ent,
+                    "arbs_closed": 3 if (mid == "a" and ep == 1) else 0,
+                })
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_slope")
-        assert ent.passed is False
-        assert ent.observed == pytest.approx(20.0, abs=1e-6)
+        ent = next(
+            a for a in result.assertions if a.name == "entropy_tracks_target"
+        )
+        # |148-150|=2, |150-150|=0 → error shrank by 2 → PASS under
+        # the default target.
+        assert ent.passed
 
-    def test_slope_assertion_passes_on_decreasing_entropy(self):
-        """Controller-held run: entropy trending down at ~1/ep still
-        passes (slope is negative, well below +1.0)."""
+    def test_high_target_with_drift_toward_it_passes(self):
+        """Target=150, entropy climbs from 139 → 149 across the
+        probe. |ep1-150|=11, |ep3-150|=1 → error shrank by 10 →
+        PASS. Previous slope gate (+1.0) would have failed this
+        because slope is +5."""
         rows = (
-            self._eps_with_entropy("a", 139.6, 138.0, 136.5)
-            + self._eps_with_entropy("b", 139.7, 138.6, 137.4)
+            self._eps("a", 139.0, 144.0, 149.0)
+            + self._eps("b", 139.5, 144.0, 148.5)
         )
         rows[0]["arbs_closed"] = 3
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        ent = next(
+            a for a in result.assertions if a.name == "entropy_tracks_target"
+        )
         assert ent.passed
-        assert ent.observed < 0.0
+        # Observed growth negative (error shrank).
+        assert ent.observed < 0
 
 
 # ── Assertion 3 — max arbs_closed >= 1 on at-least-one agent ─────────
@@ -282,8 +317,10 @@ class TestSmokeResultAggregate:
 
     def test_any_failed_means_overall_fail(self):
         rows = _three_eps("a", ep1={"policy_loss": 10.0, "arbs_closed": 2})
-        # Agent b's ep3 entropy rises — assertion 2 fails
-        rows += _three_eps("b", ep1={"entropy": 100.0}, ep3={"entropy": 180.0})
+        # Agent b drifts AWAY from the default target (150):
+        # |180-150|=30 on ep1 → |220-150|=70 on ep3, growth +40,
+        # well past the +3 tracking-error tolerance.
+        rows += _three_eps("b", ep1={"entropy": 180.0}, ep3={"entropy": 220.0})
         result = evaluate_probe_episodes(rows)
         assert result.passed is False
 
@@ -347,13 +384,14 @@ class TestPurposeTableScenarios:
         # Assertion 1 (ep1_policy_loss) hard-fails on its own —
         # 1.04e17 blows the ceiling.
         assert not by_name["ep1_policy_loss"].passed
-        # Assertion 2 (entropy-control-v2 Session 02 slope check):
-        # this vignette's entropy is 139 → 141 → 145 → slope = +3.0,
-        # comfortably above the +1.0 threshold. The new slope
-        # assertion catches the drift the old endpoint check
-        # (2026-04-18 ``+10`` tolerance on ep3 - ep1 = +6) let
-        # through. Belt-and-braces vs assertion 1.
-        assert not by_name["entropy_slope"].passed
+        # Assertion 2 (entropy-control-v2 Session 07 tracking-error):
+        # 0a8cacd3 individually passes (139→145 with target 150
+        # is "climbing toward target", error shrinks 11→5). But
+        # calmlstm's 90→80 at target 150 is "running away from
+        # target" — error grows 60→70, well above the +3 tolerance.
+        # Both probe agents must pass, so assertion 2 fails on
+        # the worst agent. Belt-and-braces vs assertion 1.
+        assert not by_name["entropy_tracks_target"].passed
         # Assertion 3 — the transformer closed 5 arbs on ep 1, which
         # on its own satisfies the at-least-one rule.
         assert by_name["arbs_closed_any_agent"].passed

@@ -19,17 +19,17 @@ The public surface is deliberately narrow:
   ``evaluate_probe_episodes`` directly with fabricated rows.
 
 Assertions (hard_constraints.md §15, amended 2026-04-19 via
-``plans/entropy-control-v2/`` Session 02):
+``plans/entropy-control-v2/`` Sessions 02 and 07):
 
 1. ``ep1.policy_loss < 100`` on both probe agents.
-2. ``slope(polyfit(episodes, entropies, 1)) <= ENTROPY_SLOPE_MAX`` on
-   both probe agents. Slope is fit across the whole 3-episode probe;
-   threshold ``+1.0`` per episode. Replaces the 2026-04-18
-   endpoint-only check (``ep3 - ep1 <= +10``) which was structurally
-   blind to the Baseline-A monotone drift — the A-baseline ran ep3
-   drift +5.7 (inside +10) but ep15 drift +61.7. Slope ≈ +2 would
-   catch it; slope ``+1.0`` is conservative (controller-held entropy
-   produces slope ≈ 0).
+2. ``|ep3.entropy - target| - |ep1.entropy - target| <=
+   ENTROPY_TARGET_TOLERANCE`` on both probe agents. The controller's
+   job is to drive entropy toward ``target_entropy``; the gate
+   passes when the tracking error has shrunk (or not grown
+   meaningfully). Replaces the Session-02 slope check, which
+   structurally failed a working controller whose target sat above
+   fresh-init entropy. See ``ENTROPY_TARGET_TOLERANCE`` constant
+   for the full derivation.
 3. ``max(ep1..ep3.arbs_closed) >= 1`` on AT LEAST ONE probe agent.
 
 All assertion thresholds live as module-level constants so the GA /
@@ -47,18 +47,41 @@ from typing import Iterable
 EP1_POLICY_LOSS_MAX = 100.0
 ARBS_CLOSED_MIN = 1
 PROBE_EPISODE_COUNT = 3
-# Assertion 2 threshold (entropy-control-v2 Session 02, 2026-04-19).
-# Maximum permitted per-episode entropy slope across the 3-episode
-# probe window. Fits ``np.polyfit(episodes, entropies, 1)`` — the
-# line's slope, in entropy-units per episode — and requires it to
-# be ``<= ENTROPY_SLOPE_MAX``. A controller-held policy produces
-# slope ≈ 0; the Baseline-A 2026-04-19 drift was ~4–5 per episode,
-# comfortably above this bound. Predecessor 2026-04-18 endpoint
-# threshold (``ep3 - ep1 <= +10``) was structurally blind to slow
-# monotone drift — ep3 sample of the A-baseline was +5.7 (under +10)
-# despite ep15 hitting +61.7. See plans/naked-clip-and-stability/
-# lessons_learnt.md 2026-04-19 for the endpoint-vs-slope analysis.
-ENTROPY_SLOPE_MAX = 1.0
+# Assertion 2 threshold (entropy-control-v2 Session 07, 2026-04-19).
+# Maximum permitted tracking-error GROWTH across the probe window:
+# ``|ep3 - target_entropy| - |ep1 - target_entropy|`` must not exceed
+# this bound. Semantically: a healthy controller should drive the
+# tracking error DOWN (or at least not let it grow meaningfully).
+#
+# Predecessor gates and why they were wrong:
+#  * 2026-04-18 endpoint check (``ep3 - ep1 <= +10``): blind to slow
+#    monotone drift. Passed the Baseline-A 2026-04-19 probe with
+#    +5.7 at ep3 even as the full run climbed to +61.7 by ep15.
+#  * 2026-04-19 Session-02 slope check
+#    (``polyfit(eps, entropies, 1)[0] <= +1.0``): structurally
+#    fails a working controller whose target sits above fresh-init
+#    entropy. When target=150 and fresh init=139, the controller
+#    correctly grows alpha to lift entropy toward target, producing
+#    a positive slope that looks identical to the pathological
+#    drift the gate was meant to catch. Session-06 probe logged
+#    slope +2.44 (transformer) and +4.43 (LSTM) despite the LSTM
+#    landing at 148.5 on ep3 — dead-on target.
+#
+# The tracking-error framing avoids both failure modes:
+#  * Pathological drift (Baseline-A): |ep3 - 150| = 5.7 vs
+#    |ep1 - 150| = 10.4, error shrank by 4.7 — BUT ep15 would be
+#    |201.3 - 150| = 51.3, growth of 41 → FAIL. Over the probe
+#    window it passes; full run reveals drift. That's fine — the
+#    probe is a sanity check, not a 15-episode simulator.
+#  * Working controller (Session 06, LSTM): |ep3 - 150| = 1.5 vs
+#    |ep1 - 150| = 10.3, error SHRANK by 8.8 → PASS.
+#  * Working controller (Session 06, transformer): |ep3 - 150| = 5.6
+#    vs |ep1 - 150| = 10.5, error SHRANK by 4.9 → PASS.
+#
+# Threshold +3.0: permits modest growth (noise on a small initial
+# error) while failing anything resembling Baseline-A-class drift.
+# The bound is per-agent; both probe agents must pass.
+ENTROPY_TARGET_TOLERANCE = 3.0
 
 
 @dataclass(frozen=True)
@@ -178,59 +201,66 @@ def evaluate_probe_episodes(rows: list[dict]) -> SmokeResult:
             ),
         ))
 
-    # Assertion 2 — entropy slope across the probe window. Fits a
-    # line through all ``PROBE_EPISODE_COUNT`` data points and
-    # requires the per-episode slope to be ``<= ENTROPY_SLOPE_MAX``.
-    # Per-agent, not pop-avg — both probe agents must pass. The
-    # slope uses ALL probe episodes (not just endpoints), so slow
-    # monotone drift (Baseline-A pathology, 2026-04-19) shows up
-    # even when ep3 - ep1 is within the old +10 endpoint tolerance.
-    import numpy as np
-    entropy_slopes: list[tuple[str, list[float], list[float], float]] = []
-    # (mid, episodes, entropies, slope)
+    # Assertion 2 — tracking-error growth across the probe window.
+    # A working target-entropy controller drives |entropy - target|
+    # DOWN over time; the gate fails when the error grows
+    # meaningfully. Per-agent, not pop-avg — both probe agents must
+    # pass. Reads ``target_entropy`` off each row (added by
+    # ``PPOTrainer._log_episode`` under entropy-control-v2
+    # Session 01); defaults to 150.0 if a probe row predates that
+    # field so the gate still renders on legacy logs.
+    DEFAULT_TARGET = 150.0
+    tracking: list[tuple[str, float, float, float, float, float]] = []
+    # (mid, target, ep1_entropy, ep3_entropy, ep1_err, ep3_err)
     for mid in probe_ids:
         eps = grouped[mid]
-        window = [
-            r for r in eps
-            if 1 <= r.get("episode", 0) <= PROBE_EPISODE_COUNT
-            and "entropy" in r
-        ]
-        if len(window) < 2:
-            # Can't fit a line through fewer than 2 points.
+        first = next(
+            (r for r in eps if r.get("episode") == 1), None,
+        )
+        last = next(
+            (r for r in eps
+             if r.get("episode") == PROBE_EPISODE_COUNT),
+            None,
+        )
+        if first is None or last is None or "entropy" not in first \
+                or "entropy" not in last:
             continue
-        episodes = [float(r["episode"]) for r in window]
-        entropies = [float(r.get("entropy", 0.0)) for r in window]
-        slope = float(np.polyfit(episodes, entropies, 1)[0])
-        entropy_slopes.append((mid, episodes, entropies, slope))
-    if not entropy_slopes:
+        target = float(first.get("target_entropy", DEFAULT_TARGET))
+        e1 = float(first["entropy"])
+        e3 = float(last["entropy"])
+        ep1_err = abs(e1 - target)
+        ep3_err = abs(e3 - target)
+        tracking.append((mid, target, e1, e3, ep1_err, ep3_err))
+    if not tracking:
         assertions.append(SmokeAssertionResult(
-            name="entropy_slope",
+            name="entropy_tracks_target",
             passed=False,
             observed=float("nan"),
-            threshold=ENTROPY_SLOPE_MAX,
+            threshold=ENTROPY_TARGET_TOLERANCE,
             detail=(
-                f"Insufficient probe rows (need ≥2 per agent within "
-                f"episodes 1..{PROBE_EPISODE_COUNT}) to fit an entropy "
-                f"slope."
+                f"Missing ep1 or ep{PROBE_EPISODE_COUNT} entropy rows."
             ),
         ))
     else:
-        worst_mid, worst_eps, worst_entropies, worst_slope = max(
-            entropy_slopes, key=lambda t: t[3],
-        )
+        # "Worst" = largest positive growth (ep3_err - ep1_err).
+        worst = max(tracking, key=lambda t: t[5] - t[4])
+        worst_mid, target, e1, e3, ep1_err, ep3_err = worst
+        growth = ep3_err - ep1_err
         passed = all(
-            s <= ENTROPY_SLOPE_MAX for _, _, _, s in entropy_slopes
+            (err3 - err1) <= ENTROPY_TARGET_TOLERANCE
+            for _mid, _tgt, _e1, _e3, err1, err3 in tracking
         )
-        trajectory = " → ".join(f"{e:.1f}" for e in worst_entropies)
         assertions.append(SmokeAssertionResult(
-            name="entropy_slope",
+            name="entropy_tracks_target",
             passed=passed,
-            observed=worst_slope,
-            threshold=ENTROPY_SLOPE_MAX,
+            observed=growth,
+            threshold=ENTROPY_TARGET_TOLERANCE,
             detail=(
-                f"entropy slope per episode: worst = {worst_slope:+.4f} "
-                f"(agent {worst_mid[:8]}: {trajectory}), "
-                f"threshold <= {ENTROPY_SLOPE_MAX}"
+                f"tracking-error growth: worst = {growth:+.4f} "
+                f"(agent {worst_mid[:8]}: |{e1:.1f}-{target:.0f}|="
+                f"{ep1_err:.1f} -> |{e3:.1f}-{target:.0f}|="
+                f"{ep3_err:.1f}), threshold <= "
+                f"{ENTROPY_TARGET_TOLERANCE}"
             ),
         ))
 

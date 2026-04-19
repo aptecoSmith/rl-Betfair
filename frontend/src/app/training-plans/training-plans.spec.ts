@@ -594,11 +594,11 @@ describe('TrainingPlans', () => {
             detail: 'ep1 policy_loss: worst = 1.04e17 (agent 0a8cacd3), threshold < 100',
           },
           {
-            name: 'entropy_slope',
+            name: 'entropy_tracks_target',
             passed: false,
-            observed: 20.0,
-            threshold: 1.0,
-            detail: 'entropy slope per episode: worst = +20.0 (agent 0a8cacd3: 140.0 → 160.0 → 180.0), threshold <= 1.0',
+            observed: 40.0,
+            threshold: 3.0,
+            detail: 'tracking-error growth: worst = +40.0 (agent 0a8cacd3: |140.0-150|=10.0 -> |180.0-150|=30.0), threshold <= 3.0',
           },
           {
             name: 'arbs_closed_any_agent',

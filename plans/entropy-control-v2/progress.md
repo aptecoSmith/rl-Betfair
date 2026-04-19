@@ -8,6 +8,101 @@ Format per session follows `naked-clip-and-stability/
 progress.md` — "What landed", "Not changed", "Gotchas",
 "Next".
 
+## Session 07 — Smoke gate: slope → tracking-error (2026-04-19)
+
+**Commit:** _(to be filled in at commit time)_
+
+### What landed
+
+- `agents/smoke_test.py`:
+  - `ENTROPY_SLOPE_MAX = 1.0` replaced by
+    `ENTROPY_TARGET_TOLERANCE = 3.0`. Comment block rewritten
+    with the derivation — why the slope gate was structurally
+    wrong and how tracking-error semantics fix it.
+  - Assertion 2 evaluator rewritten: reads `target_entropy`
+    from each probe row (Session-01 addition; defaults to
+    150.0 for legacy logs), computes
+    `|ep3 − target| − |ep1 − target|`, requires growth
+    ≤ tolerance.
+  - Assertion name: `entropy_slope` → `entropy_tracks_target`.
+  - Detail string updated:
+    `"tracking-error growth: worst = +X.XX (agent ABCD:
+    |e1-tgt|=N.N -> |e3-tgt|=M.M), threshold <= 3.0"`.
+- `tests/test_smoke_test.py`:
+  - `TestEntropyAssertion` class rewritten (7 tests covering
+    the new gate's pass/fail paths).
+  - `test_any_failed_means_overall_fail` updated to use
+    drift-away-from-150 inputs.
+  - Gen-2 transformer vignette now fails assertion 2 via the
+    calmlstm-drift-from-target path rather than the slope
+    calculation.
+- `frontend/src/app/training-plans/training-plans.spec.ts`
+  fixture updated (`entropy_slope` → `entropy_tracks_target`,
+  observed/threshold/detail reshaped).
+- `scripts/run_smoke_probe.py` (new): local iteration helper
+  that runs `agents.smoke_test.run_smoke_test` directly
+  against `data/processed/` without the worker. Useful for
+  rapid iteration; deletable once the plan closes.
+- `plans/entropy-control-v2/lessons_learnt.md`: new entry
+  detailing the slope gate's structural flaw, the
+  tracking-error fix, verification on Session-06 probe
+  data, and — importantly — a 5-episode diagnostic showing
+  the controller overshoots target around ep4-5 (natural
+  equilibrium is above 150). Outlines Option-A (raise
+  target further) vs Option-B (open reward-densification)
+  paths for the plan's next move after the full-run
+  validation.
+
+### Trigger
+
+Post-Session-06 local smoke probe (iteration 1) failed
+`entropy_slope` with +2.44 / +4.43 per-agent slopes, even
+though the LSTM's ep3 entropy landed at 148.5 — dead-on the
+new target of 150. The slope gate cannot distinguish
+"climbing toward an above-floor target" from "drifting
+without a controller." Reframing the assertion around
+tracking-error growth resolves the structural flaw.
+
+### Not changed
+
+- Controller mechanism (SGD, proportional).
+- Controller defaults (`alpha_lr=1e-2`, `target_entropy=150`).
+- Clamp bounds, call site.
+- Reward shape, matcher, PPO stability defences.
+
+### Gotchas
+
+- The gate passing on a 3-episode probe does NOT guarantee the
+  controller stabilises entropy over 15 episodes. The local
+  5-episode probe documented in lessons_learnt shows the
+  controller overshoots target at ep4-5 (natural equilibrium
+  above 150). Full-run validation is still required.
+- `entropy_tracks_target` defaults to target=150.0 if a probe
+  row doesn't carry `target_entropy`. Pre-Session-01 logs
+  don't have the field; gate renders sensibly on legacy data.
+
+### Test suite
+
+`pytest tests/ -q`: **2256 passed, 7 skipped, 133 deselected,
+1 xfailed** (0:05:12). +0 net tests from Session 06 (7 tests
+in the rewritten `TestEntropyAssertion` class vs 7 before).
+
+### Next (operator action)
+
+1. Truncate `logs/training/episodes.jsonl` (iteration rows
+   from the local probe).
+2. Reset `models.db`, `weights/` (no actual fresh-run state
+   to clear — probes don't persist models).
+3. Reset `activation-A-baseline` plan to `draft` if needed.
+4. Re-launch with "Smoke test first" ticked. Gate should
+   pass first time.
+5. On full-run completion: inspect entropy trajectory against
+   target 150. If it overshoots substantially (ep15 > 180),
+   decide Option A (raise target, Session 08) vs Option B
+   (open reward-densification).
+
+---
+
 ## Session 06 — `target_entropy` default 112.0 → 150.0 (2026-04-19)
 
 **Commit:** _(to be filled in at commit time)_
