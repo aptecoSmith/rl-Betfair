@@ -671,14 +671,21 @@ class TestScalpingReward:
             f"positive={positive_bonus:.3f}"
         )
 
+    @pytest.mark.parametrize("mtm_weight", [0.0, 0.05])
     def test_invariant_raw_plus_shaped_equals_total_reward(
-        self, scalping_config,
+        self, scalping_config, mtm_weight,
     ):
-        """The raw+shaped accounting invariant survives scalping mode."""
+        """The raw+shaped accounting invariant survives scalping mode.
+
+        Parametrised to also cover the reward-densification Session 01
+        mark-to-market shaping path at weight=0.05 — the telescope
+        must close per-episode (hard_constraints §8-§9) so raw+shaped
+        still equals total even with MTM shaping alive."""
         cfg = dict(scalping_config)
         cfg["reward"] = dict(cfg["reward"])
         cfg["reward"]["naked_penalty_weight"] = 2.5
         cfg["reward"]["early_lock_bonus_weight"] = 1.5
+        cfg["reward"]["mark_to_market_weight"] = mtm_weight
 
         env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), cfg)
         obs, _ = env.reset()

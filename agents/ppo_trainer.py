@@ -420,6 +420,15 @@ class EpisodeStats:
     # Consumed by ``_publish_progress`` to emit one ``pair_closed``
     # activity-log line per event.
     close_events: list[dict] = field(default_factory=list)
+    # Reward-densification Session 01 (2026-04-19) — per-step
+    # mark-to-market shaping telemetry. ``mtm_weight_active`` is the
+    # weight the env used this episode (plan-level, not per-step).
+    # ``cumulative_mtm_shaped`` is the total shaped contribution from
+    # MTM across the episode; should be ≈ 0 at settle within float
+    # tolerance (telescope closes per hard_constraints §8-§9). Both
+    # default to 0 for pre-change rows / weight=0 runs.
+    mtm_weight_active: float = 0.0
+    cumulative_mtm_shaped: float = 0.0
 
 
 @dataclass
@@ -1219,6 +1228,10 @@ class PPOTrainer:
             signal_bias=float(current_signal_bias),
             arb_events=list(info.get("arb_events", []) or []),
             close_events=list(info.get("close_events", []) or []),
+            mtm_weight_active=float(info.get("mtm_weight_active", 0.0) or 0.0),
+            cumulative_mtm_shaped=float(
+                info.get("cumulative_mtm_shaped", 0.0) or 0.0
+            ),
         )
 
         return rollout, ep_stats
@@ -1984,6 +1997,13 @@ class PPOTrainer:
             "alpha": round(float(self._log_alpha.exp().item()), 8),
             "log_alpha": round(float(self._log_alpha.item()), 6),
             "target_entropy": round(float(self._target_entropy), 4),
+            # Reward-densification Session 01 — per-step mark-to-market
+            # shaping telemetry. Optional keys; pre-change rows lack
+            # them and downstream readers must tolerate absence.
+            "mtm_weight_active": round(float(ep.mtm_weight_active), 6),
+            "cumulative_mtm_shaped": round(
+                float(ep.cumulative_mtm_shaped), 6,
+            ),
             # Forced-arbitrage (scalping) rollups — zero for directional.
             "arbs_completed": ep.arbs_completed,
             "arbs_naked": ep.arbs_naked,

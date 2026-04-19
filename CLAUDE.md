@@ -180,6 +180,55 @@ Episode 3/9 [2026-04-02] reward=+12.345 (raw=+4.567 shaped=+7.778) pnl=+4.57 ...
 diverge, a reward term has been added outside either accumulator — fix
 the accounting, don't just silence the test.
 
+### Per-step mark-to-market shaping (2026-04-19)
+
+`shaped_bonus` also accumulates a per-tick contribution proportional
+to the delta in open-position mark-to-market P&L. For each open back
+bet of stake `S` at average matched price `P_matched`, with current
+runner LTP `P_current`:
+
+    mtm_back = S * (P_matched - P_current) / P_current
+    mtm_lay  = S * (P_current - P_matched) / P_current
+
+Portfolio MTM = sum across open bets. The per-step shaped
+contribution is `mark_to_market_weight * (MTM_t - MTM_{t-1})`. Default
+weight `0.0` (no-op — byte-identical to pre-change). Project-wide
+default lives in `config.reward.mark_to_market_weight` and is also
+exposed as a `reward_overrides` passthrough key so the GA can evolve
+it per-agent without the env rejecting the gene.
+
+**Key property:** cumulative `shaped_mtm` across a race telescopes to
+zero at settle. Resolved bets (outcome != UNSETTLED) drop out of the
+MTM sum; the last `mtm_delta` emitted on the settle step is exactly
+`-MTM_{t-1}`, unwinding whatever was on the books. The `raw + shaped
+≈ total` invariant holds episode-by-episode — the shaping only
+redistributes existing race-level P&L signal through the steps that
+caused it; the reward total per race is unchanged (to floating-point
+tolerance).
+
+Unpriceable runners (missing LTP or `LTP ≤ 1.0`) contribute zero MTM,
+matching the matcher's junk-filter rule (CLAUDE.md "Order matching").
+Commission is NOT deducted at MTM time — it applies at realised
+settle, so double-counting is avoided by keeping the MTM formula in
+exchange-value form.
+
+Per-episode JSONL rows gain optional `mtm_weight_active` and
+`cumulative_mtm_shaped` fields; `info["mtm_delta"]` on each env step
+carries the pre-weight delta for diagnostics. Downstream readers
+must tolerate absence on pre-change rows (same backward-compat
+pattern as `alpha` / `log_alpha` in entropy-control-v2).
+
+Motivation: the `entropy-control-v2` 2026-04-19 Validation concluded
+entropy control works correctly but entropy isn't the training-signal
+lever — reward sparsity is. Settle P&L arrives hundreds-to-thousands
+of ticks after the decisions that caused it; PPO sees ~0 gradient on
+99 % of steps. Mark-to-market surfaces the market's own instantaneous
+position valuation as a per-tick shaped signal without changing the
+raw P&L accumulator. See `plans/reward-densification/purpose.md`.
+`test_invariant_raw_plus_shaped_with_nonzero_weight` in
+`tests/test_mark_to_market.py` is the load-bearing regression guard
+per the 2026-04-18 units-mismatch lesson.
+
 ### Symmetry around random betting
 
 Both shaping terms are **zero-mean for random policies**:

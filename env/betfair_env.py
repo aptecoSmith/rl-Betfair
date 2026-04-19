@@ -495,6 +495,11 @@ class BetfairEnv(gymnasium.Env):
         # whitelisted here so the passthrough doesn't trip the env's
         # unknown-key debug log.
         "risk_loss_weight",
+        # Reward-densification Session 01 (2026-04-19): per-step
+        # mark-to-market shaping weight. Consumed by the env; listed
+        # here so a per-agent gene override can flow through the same
+        # passthrough path as the other reward knobs.
+        "mark_to_market_weight",
     })
 
     def __init__(
@@ -602,6 +607,18 @@ class BetfairEnv(gymnasium.Env):
         # apart from the skipped precision / early-pick bonuses.
         self._naked_penalty_weight = reward_cfg.get("naked_penalty_weight", 0.0)
         self._early_lock_bonus_weight = reward_cfg.get("early_lock_bonus_weight", 0.0)
+        # Per-step mark-to-market shaping
+        # (plans/reward-densification, Session 01, 2026-04-19).
+        # Default 0.0 => no-op; rollouts byte-identical to pre-change.
+        # When > 0, emits a shaped contribution proportional to the
+        # delta in open-position MTM between consecutive ticks.
+        # Cumulative shaped MTM across a race telescopes to zero at
+        # settle (resolved bets drop out of the MTM sum; the final
+        # delta unwinds whatever was on the books). See
+        # plans/reward-densification/hard_constraints.md §5-§9.
+        self._mark_to_market_weight: float = float(
+            reward_cfg.get("mark_to_market_weight", 0.0)
+        )
 
         # Scalping mechanics overrides (Issue 05, session 3). arb_spread_scale
         # stretches / compresses the agent's [-1, 1] → tick-count mapping so
@@ -1132,6 +1149,14 @@ class BetfairEnv(gymnasium.Env):
         self._cum_raw_reward = 0.0
         self._cum_shaped_reward = 0.0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
+        # Per-race running snapshot — last tick's portfolio MTM.
+        # Reset on race-start so cumulative shaped MTM across a race
+        # telescopes to zero at settle. See hard_constraints §8-§9.
+        self._mtm_prev: float = 0.0
+        # Per-episode cumulative shaped MTM — telemetry only (§13).
+        # Should equal 0 at episode end within float tolerance when
+        # the telescope closes correctly.
+        self._cumulative_mtm_shaped: float = 0.0
         self._settled_bets = []
         self._paired_place_rejects_day = {
             "no_ltp": 0,
@@ -1238,8 +1263,27 @@ class BetfairEnv(gymnasium.Env):
             reward += terminal_bonus
             self._cum_raw_reward += terminal_bonus
 
+        # 6. Per-step mark-to-market shaping
+        # (plans/reward-densification, Session 01, 2026-04-19). Runs on
+        # every step, including the settle step (where resolved bets
+        # drop out of the MTM sum → final delta unwinds the running
+        # portfolio value, closing the telescope to zero for the race).
+        # When ``mark_to_market_weight == 0.0`` the contribution is
+        # exactly zero — rollouts byte-identical to pre-change.
+        current_ltps = self._current_ltps()
+        mtm_now = self._compute_portfolio_mtm(current_ltps)
+        mtm_delta = mtm_now - self._mtm_prev
+        self._mtm_prev = mtm_now
+        mtm_shaped = self._mark_to_market_weight * mtm_delta
+        reward += mtm_shaped
+        self._cum_shaped_reward += mtm_shaped
+        self._cumulative_mtm_shaped += mtm_shaped
+
         obs = self._get_obs() if not terminated else self._terminal_obs()
         info = self._get_info()
+        info["mtm_delta"] = float(mtm_delta)
+        info["cumulative_mtm_shaped"] = float(self._cumulative_mtm_shaped)
+        info["mtm_weight_active"] = float(self._mark_to_market_weight)
         return obs, reward, terminated, False, info
 
     # ── P1c runtime windowed history ──────────────────────────────────────
@@ -2024,6 +2068,66 @@ class BetfairEnv(gymnasium.Env):
         _mark(close_attempted=True, close_placed=True,
               close_reason=None,
               cancelled=True)
+
+    # ── Mark-to-market (reward-densification Session 01) ──────────────────
+
+    def _compute_portfolio_mtm(
+        self, current_ltps: dict[int, float],
+    ) -> float:
+        """Sum mark-to-market P&L across all currently-open matched bets.
+
+        Uses LTP as the current market reference price (per
+        plans/reward-densification/hard_constraints.md §5). A bet with
+        no LTP available (runner unpriceable per CLAUDE.md's matcher
+        rule) contributes zero. Resolved bets (outcome != UNSETTLED)
+        are excluded so the portfolio MTM drops to zero at settle,
+        which is what makes the shaped-MTM contribution telescope to
+        zero across a race (§8-§9).
+
+        Formulas (hard_constraints §6 / §7):
+
+        - Back: ``S * (P_matched - LTP) / LTP``
+        - Lay:  ``S * (LTP - P_matched) / LTP``
+
+        Returns the portfolio-level sum (pounds).
+        """
+        bm = self.bet_manager
+        if bm is None:
+            return 0.0
+        total = 0.0
+        for bet in bm.bets:
+            if bet.outcome is not BetOutcome.UNSETTLED:
+                continue
+            if bet.matched_stake <= 0.0:
+                continue
+            ltp = current_ltps.get(bet.selection_id)
+            if ltp is None or ltp <= 1.0:
+                continue  # unpriceable
+            if bet.side is BetSide.BACK:
+                total += bet.matched_stake * (
+                    bet.average_price - ltp
+                ) / ltp
+            else:  # BetSide.LAY
+                total += bet.matched_stake * (
+                    ltp - bet.average_price
+                ) / ltp
+        return total
+
+    def _current_ltps(self) -> dict[int, float]:
+        """Return ``{selection_id: last_traded_price}`` for the current
+        tick, or an empty dict when past the last tick / last race.
+
+        Used by the per-step MTM computation; keeps the LTP access
+        pattern matching :meth:`_get_agent_state` / the scalping obs
+        helpers.
+        """
+        if self._race_idx >= self._total_races:
+            return {}
+        race = self.day.races[self._race_idx]
+        if self._tick_idx >= len(race.ticks):
+            return {}
+        tick = race.ticks[self._tick_idx]
+        return {r.selection_id: r.last_traded_price for r in tick.runners}
 
     # ── Settlement & reward ───────────────────────────────────────────────
 
