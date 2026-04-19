@@ -25,7 +25,8 @@ Don't renumber on top — numbers are append-only history.
 | 13 | [scalping-naked-asymmetry](scalping-naked-asymmetry/) | 2026-04-18 | Per-pair naked P&L penalty — fix luck-cancellation in raw reward |
 | 14 | [scalping-equal-profit-sizing](scalping-equal-profit-sizing/) | 2026-04-18 | Correct passive-leg sizing — equalises P&L (not exposure) after commission |
 | 15 | [policy-startup-stability](policy-startup-stability/) | 2026-04-18 | PPO advantage normalisation — prevents first-update spike that saturates `close_signal` head |
-| 16 | [naked-clip-and-stability](naked-clip-and-stability/) | 2026-04-18 | **(latest)** Naked-winner 95% shaped clip + close bonus + softener removed; PPO KL early-stop + ratio clamp; halved entropy + reward centering; smoke-test gate + full registry reset |
+| 16 | [naked-clip-and-stability](naked-clip-and-stability/) | 2026-04-18 | Naked-winner 95% shaped clip + close bonus + softener removed; PPO KL early-stop + ratio clamp; halved entropy + reward centering; smoke-test gate + full registry reset |
+| 17 | [entropy-control-v2](entropy-control-v2/) | 2026-04-19 | **(latest)** Target-entropy controller (learned log_alpha, SAC-style) replaces fixed entropy coefficient; smoke-gate slope assertion replaces endpoint check; registry reset + relaunch |
 
 ## Conventions
 
