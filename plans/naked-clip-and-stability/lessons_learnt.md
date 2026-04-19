@@ -5,6 +5,59 @@ decision made during implementation.
 
 ---
 
+## 2026-04-19 — 3-episode smoke gate can't catch slow entropy drift
+
+**Symptom.** `activation-A-baseline` validation (64 agents ×
+15 eps) passed the Session 04 smoke gate cleanly at launch
+but failed the "After Session 05" entropy criterion at the
+15-episode horizon: 0/64 agents showed entropy trending down,
+pop-avg drifted from 139.6 → 201.3 monotone across eps 1–15.
+No `policy_loss` blow-up, no runtime crash — the Session 02
+ratio-clamp + KL early-stop + Session 03 centering-units fix
+all held. Just slow, steady entropy diffusion that doesn't
+asymptote.
+
+**Why the gate passed.** `hard_constraints §15` asserts entropy
+monotone non-increasing across the 3-episode probe, relaxed
+in commit `61f22e7` to `ep3 ≤ ep1 + 10`. At ep3 the pop-avg
+was 145.3 (+5.7 over ep1), well inside tolerance. The drift
+only clearly exceeds the `+10` threshold at ep5+ — outside the
+probe window.
+
+**Why a longer probe isn't a free win.** The 3-episode probe
+takes ~18 min per launch attempt (Session 04 design
+constraint). Extending to 8 episodes triples probe cost, which
+is the budget that drove the 3-episode choice in the first
+place.
+
+**Test-design takeaway.** When the pathology is a *trajectory
+shape* (monotone drift, compounding divergence), endpoint
+comparisons are structurally blind to it. Two valid responses:
+
+1. **Fit a line.** Compute `entropy_slope = linregress(ep_idx,
+   ep_entropy).slope` and assert `slope ≤ small_positive`.
+   Detects drift in O(n) episodes with no extra compute — the
+   3-episode probe is enough data for a slope estimate, just
+   not for an endpoint comparison.
+2. **Different probe mode.** A single-agent extended probe
+   (1 agent × 10 eps) costs the same wall time as the current
+   2-agent × 3-ep probe but straddles the drift timescale.
+   Trade-off: loses the "both archs exercised" coverage the
+   current 2-agent probe gets.
+
+Logged here rather than fixed inline — the real fix is the
+underlying entropy control pathology (`plans/entropy-control-v2/`
+follow-up), not the probe. The probe should gate on whatever
+test catches the new regime's characteristic failure mode,
+which depends on which entropy-control approach ships.
+
+**General principle:** a validation gate must encode the
+*shape* the pathology takes, not the instantaneous magnitude
+at some chosen endpoint. If the pathology is drift, the test
+must measure drift.
+
+---
+
 ## 2026-04-18 — Session 03 reward centering: units mismatch bug
 
 **Symptom.** After the Session 05 launch, the smoke-test probe

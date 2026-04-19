@@ -5,6 +5,99 @@ commit hash, what landed, what's not changed, and any gotchas.
 
 ---
 
+## Validation — `activation-A-baseline` (fresh registry, 64 agents × 15 eps)
+
+**Commit at launch:** `61f22e7` (post Sessions 01–05 + the
+three post-launch patches `a281785`, `0ba199b`, `efd39c8`,
+`61f22e7`).
+**Date:** 2026-04-19
+
+**Outcome:** ❌ FAIL — do NOT proceed to the B sweep. Session
+02's stability defences held; Session 03's entropy fix did NOT
+hold over 15 episodes.
+
+Population was 64 agents (not the anticipated 16) — a mix of
+`ppo_transformer_v1` (24), `ppo_lstm_v1` (20), and
+`ppo_time_lstm_v1` (20). Every agent ran the full 15 episodes;
+no crashes, no `value_loss` blow-ups, no `policy_loss`
+overflow — the Session 02 clamps + Session 03 centering unit
+fix held at runtime.
+
+**Criterion scorecard** (per `master_todo.md` "After Session 05"):
+
+| # | Criterion | Target | Observed | Result |
+|---|---|---|---|---|
+| 1 | No ep-1 `policy_loss > 100` | max < 100 | max = **53.80** across 64 agents | ✅ PASS |
+| 2 | Entropy trending downward (most agents) | most ↓ | **0 / 64** agents ↓; all rising | ❌ FAIL |
+| 3 | `arbs_closed > 0` ∧ `arbs_closed / arbs_naked > 0.3` on ≥1 agent | > 0.30 | best = **0.285** (1fb997d4, 426/1495) | ❌ FAIL (borderline) |
+
+**Pop-avg entropy trajectory:**
+
+```
+ep 1: 139.6   ep 6: 158.9   ep11: 183.5
+ep 2: 142.0   ep 7: 163.5   ep12: 187.0
+ep 3: 145.3   ep 8: 168.6   ep13: 191.4
+ep 4: 148.9   ep 9: 173.8   ep14: 196.3
+ep 5: 154.1   ep10: 179.4   ep15: 201.3
+```
+
+Monotone rising, ~4–5 per episode, no plateau. Per-arch end
+state: transformer 139.5 → 187.7, lstm 139.7 → 209.2,
+time_lstm 139.7 → 209.7. Transformer rises slowest but still
+clearly rising.
+
+**Why Session 04's smoke gate didn't flag this:**
+`hard_constraints §15` asserts entropy monotone
+non-increasing across the 3-episode probe, later relaxed in
+`61f22e7` to `ep3 ≤ ep1 + 10`. At ep3 the pop-avg was 145.3
+(+5.7 over ep1), well inside that tolerance. The pathology is
+slow drift, not spike — over 15 episodes it compounds to
++61.7. The gate caught spikes; drift needs a longer window or
+a trend check, not just an endpoint comparison.
+
+**Criterion-3 near miss:** one `ppo_lstm_v1` agent
+(`1fb997d4`) reached 426 closes / 1495 nakeds = 0.285. Median
+across the population was ~0.06. The close-signal shaping
+(`+£1` bonus, Session 01) is being learned patchily — the
+agent that found it couldn't hold the ratio above 0.30
+because entropy drift keeps perturbing the policy away from
+its working point.
+
+**Mean reward:** deeply negative across the board. Best-5
+total_reward across 15 eps ranges from −2389 to −3321; worst-5
+from −33,237 to −37,653. Per-episode PnL pop-avg oscillates
+around −50 to −150 with no convergence trend. The training
+signal is consistent with "policy diffusing, sometimes
+sampling bet-heavy-and-lossy, sometimes sampling
+close-to-uniform" — entropy drift is the dominant dynamic.
+
+**Decision:** Do NOT launch `activation-B-001/010/100`.
+Session 03's entropy control is insufficient on the 15-episode
+horizon the activation playbook demands. Open follow-up plan
+to fix entropy drift before retrying.
+
+**Next step:** new plan folder `plans/entropy-control-v2/`
+(or similar) targeting the slow-drift pathology.
+Candidate approaches to evaluate:
+
+- Entropy-floor target schedule (adaptive coefficient that
+  scales up when entropy > target, down when <) — the
+  `_entropy_coeff_base` scaffolding from arb-improvements is
+  already in place.
+- Tighter default `entropy_coefficient` (0.005 → 0.002 or
+  lower) — Session 03 halved once; the result suggests more.
+- KL-based entropy regulation (lower entropy bonus when
+  `approx_kl` is small, i.e. policy already stable).
+- Longer/different smoke-test window — 3 episodes plus trend
+  extrapolation, or a 5–8 episode probe that actually
+  straddles the drift timescale.
+
+Artifacts preserved: `logs/training/episodes.jsonl` (966 rows
+— 6 smoke + 960 full run) stays in place for the follow-up
+plan's diagnostic work.
+
+---
+
 ## Session 05 — Registry reset + activation-plan redraft
 
 **Commit:** `853a60c`
