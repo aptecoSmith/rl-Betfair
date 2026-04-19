@@ -258,3 +258,24 @@ Once Session 03 lands and the registry is reset:
   policy-gradient variance traced to per-tick LTP noise,
   replace raw LTP with an EMA reference. Second-pass
   refinement only.
+- **`arb-improvements` Phase 3–5 (BC pretrain / oracle scan /
+  aux-head / verification)** — if the 2026-04-19 gene-sweep
+  (`reward-densification-gene-sweep`) confirms the structural
+  diagnosis from the probe (the policy finds "arb less" faster
+  than "arb better" because the aggregate gradient at init
+  points against all arbing), the next planned work is NOT a
+  new reward-shaping tweak. It is to pick up
+  `plans/arb-improvements/` Sessions 6 through 10 — **those
+  sessions are scoped but never built** (progress.md Phases
+  3–5 all read "Not yet started"). The design docs exist
+  (session_6_oracle_scan.md, session_7_bc_pretrainer.md,
+  session_8_bc_ui_evaluator.md, session_9_aux_head.md,
+  session_10_verification.md) and the hard-constraints guards
+  are already on paper (notably "per-agent BC, never shared").
+  Sequence: execute those five sessions, land them, THEN
+  return to reward-densification follow-ons. The operator
+  directive from 2026-04-19 is explicit: *if the work is
+  worth doing, roll in the arb-improvements sessions first,
+  come back afterwards.* Do not start a fresh BC-shaped plan
+  folder — reuse the existing one so past design review
+  isn't wasted.
