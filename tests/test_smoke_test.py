@@ -5,10 +5,12 @@ fabricated episode rows. The full ``run_smoke_test`` orchestrator is
 exercised at the worker-integration level; this suite keeps the
 gate's logic provable without standing up a trainer.
 
-hard_constraints.md §15 defines the three assertions:
+hard_constraints.md §15 defines the three assertions (§15 amended
+2026-04-19 via ``plans/entropy-control-v2/`` Session 02):
 
 1. ``ep1.policy_loss < 100`` on BOTH probe agents
-2. ``ep3.entropy <= ep1.entropy`` on BOTH probe agents
+2. ``slope(polyfit(episodes, entropies, 1)) <= 1.0`` on BOTH probe
+   agents (was ``ep3 - ep1 <= +10`` endpoint check pre-2026-04-19)
 3. ``max(ep1..ep3.arbs_closed) >= 1`` on AT LEAST ONE probe agent
 
 Every test below has exactly one of these assertions as its primary
@@ -24,7 +26,7 @@ import pytest
 
 from agents.smoke_test import (
     ARBS_CLOSED_MIN,
-    ENTROPY_RISE_TOLERANCE,
+    ENTROPY_SLOPE_MAX,
     EP1_POLICY_LOSS_MAX,
     PROBE_EPISODE_COUNT,
     SmokeAssertionResult,
@@ -105,89 +107,128 @@ class TestEp1PolicyLossAssertion:
         assert pl.observed == 1.0e17
 
 
-# ── Assertion 2 — ep3.entropy <= ep1.entropy ─────────────────────────
+# ── Assertion 2 — entropy slope (entropy-control-v2 Session 02) ───────
 
 
-class TestEntropyMonotoneAssertion:
-    """Entropy assertion allows a small positive drift — the
-    ``0a8cacd3`` diffusion pathology climbs +50 over 7 episodes;
-    normal early exploration can add +3-7 over 3. Tolerance lives
-    in ``ENTROPY_RISE_TOLERANCE`` (= 10.0 at time of writing).
+class TestEntropyAssertion:
+    """Entropy slope fit across the 3-episode probe window. Per-agent,
+    not pop-avg — both probe agents must pass. Slope threshold
+    ``ENTROPY_SLOPE_MAX`` (= 1.0 at time of writing). Replaces the
+    2026-04-18 endpoint-only check that was blind to the Baseline-A
+    monotone drift. See
+    ``plans/entropy-control-v2/session_prompts/02_smoke_gate_slope_assertion.md``.
     """
 
-    def test_strictly_decreasing_passes(self):
+    def _eps_with_entropy(self, mid: str, e1: float, e2: float, e3: float) -> list[dict]:
+        return _three_eps(
+            mid,
+            ep1={"entropy": e1},
+            ep2={"entropy": e2},
+            ep3={"entropy": e3},
+        )
+
+    def test_slope_assertion_passes_on_flat_entropy(self):
+        """[140, 140, 140] → slope 0 → passes (<= 1.0)."""
         rows = (
-            _three_eps("a", ep1={"entropy": 150.0}, ep3={"entropy": 140.0})
-            + _three_eps("b", ep1={"entropy": 200.0}, ep3={"entropy": 195.0})
+            self._eps_with_entropy("a", 140.0, 140.0, 140.0)
+            + self._eps_with_entropy("b", 120.0, 120.0, 120.0)
         )
         rows[0]["arbs_closed"] = 3  # keep assertion 3 green
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_non_increasing")
+        ent = next(a for a in result.assertions if a.name == "entropy_slope")
         assert ent.passed
-        # Worst (most-positive / least-negative) delta is reported.
-        assert ent.observed == -5.0  # ep3 − ep1 for agent b
+        assert abs(ent.observed) < 1e-6
+        assert ent.threshold == ENTROPY_SLOPE_MAX
 
-    def test_flat_passes(self):
+    def test_slope_assertion_passes_on_mild_decrease(self):
+        """[140, 139, 138] → slope −1 → passes."""
         rows = (
-            _three_eps("a", ep1={"entropy": 100.0}, ep3={"entropy": 100.0})
-            + _three_eps("b", ep1={"entropy": 100.0}, ep3={"entropy": 100.0})
-        )
-        rows[0]["arbs_closed"] = 1
-        result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_non_increasing")
-        assert ent.passed
-
-    def test_mild_rise_under_tolerance_passes(self):
-        """The 2026-04-18 post-clamp-fix probe showed +3.62
-        (transformer) and +7.14 (LSTM). Both under ±10 tolerance —
-        gate should pass."""
-        rows = (
-            _three_eps("a", ep1={"entropy": 139.52}, ep3={"entropy": 143.15})
-            + _three_eps("b", ep1={"entropy": 139.59}, ep3={"entropy": 146.72})
-        )
-        rows[0]["arbs_closed"] = 3  # keep assertion 3 green
-        result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_non_increasing")
-        assert ent.passed
-        # Worst Δ = agent b = 7.13 (reported regardless of pass/fail).
-        assert ent.observed == pytest.approx(7.13, abs=1e-2)
-        assert ent.threshold == ENTROPY_RISE_TOLERANCE
-
-    def test_rise_at_tolerance_exactly_passes(self):
-        """Boundary: Δ == tolerance passes (``<=`` semantics)."""
-        rows = (
-            _three_eps("a", ep1={"entropy": 100.0},
-                       ep3={"entropy": 100.0 + ENTROPY_RISE_TOLERANCE})
-            + _three_eps("b", ep1={"entropy": 100.0}, ep3={"entropy": 99.0})
+            self._eps_with_entropy("a", 140.0, 139.0, 138.0)
+            + self._eps_with_entropy("b", 200.0, 199.0, 198.0)
         )
         rows[0]["arbs_closed"] = 3
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_non_increasing")
+        ent = next(a for a in result.assertions if a.name == "entropy_slope")
         assert ent.passed
+        assert ent.observed == pytest.approx(-1.0, abs=1e-6)
 
-    def test_rise_just_past_tolerance_fails(self):
-        """Boundary: Δ strictly greater than tolerance fails."""
+    def test_slope_assertion_fails_on_a_baseline_drift_rate(self):
+        """[139.6, 145.3, 150.0] → slope ≈ +5.2 → FAILS. The actual
+        Baseline-A 2026-04-19 drift rate that the old endpoint
+        assertion let through (ep3 - ep1 = +10.4, just over +10, but
+        barely — ep1..ep3 alone wouldn't have flagged the pop-avg;
+        the slope fit captures the trajectory across all three data
+        points)."""
         rows = (
-            _three_eps("a", ep1={"entropy": 100.0},
-                       ep3={"entropy": 100.0 + ENTROPY_RISE_TOLERANCE + 0.01})
-            + _three_eps("b", ep1={"entropy": 100.0}, ep3={"entropy": 99.0})
+            self._eps_with_entropy("a", 139.6, 145.3, 150.0)
+            + self._eps_with_entropy("b", 120.0, 120.0, 120.0)
         )
+        rows[0]["arbs_closed"] = 3
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_non_increasing")
-        assert not ent.passed
+        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        assert ent.passed is False
+        assert ent.observed > ENTROPY_SLOPE_MAX
+
+    def test_slope_assertion_at_threshold_boundary(self):
+        """[140, 141, 142] → slope exactly 1.0 passes (``<=``).
+        [140, 141.1, 142.2] → slope 1.1 > 1.0 fails."""
+        pass_rows = (
+            self._eps_with_entropy("a", 140.0, 141.0, 142.0)
+            + self._eps_with_entropy("b", 100.0, 100.0, 100.0)
+        )
+        pass_rows[0]["arbs_closed"] = 3
+        pass_result = evaluate_probe_episodes(pass_rows)
+        ent_pass = next(
+            a for a in pass_result.assertions if a.name == "entropy_slope"
+        )
+        assert ent_pass.passed
+        assert ent_pass.observed == pytest.approx(1.0, abs=1e-6)
+
+        fail_rows = (
+            self._eps_with_entropy("a", 140.0, 141.1, 142.2)
+            + self._eps_with_entropy("b", 100.0, 100.0, 100.0)
+        )
+        fail_rows[0]["arbs_closed"] = 3
+        fail_result = evaluate_probe_episodes(fail_rows)
+        ent_fail = next(
+            a for a in fail_result.assertions if a.name == "entropy_slope"
+        )
+        assert ent_fail.passed is False
+
+    def test_slope_assertion_handles_empty_input(self):
+        """Empty rows → passed=False, observed=NaN — same shape as
+        other assertions' empty-input fallback."""
+        import math
+        result = evaluate_probe_episodes([])
+        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        assert ent.passed is False
+        assert math.isnan(ent.observed)
 
     def test_one_agent_rising_hard_fails(self):
         """Reproduces the full ``0a8cacd3`` entropy pathology
-        (+40 rise over 3 episodes). Far above any tolerance — flags
-        regardless of how we tune ``ENTROPY_RISE_TOLERANCE``."""
+        (+20/ep over the probe window). The slope fit flags it even
+        though the other agent is flat."""
         rows = (
-            _three_eps("a", ep1={"entropy": 140.0}, ep3={"entropy": 180.0})
-            + _three_eps("b", ep1={"entropy": 100.0}, ep3={"entropy": 95.0})
+            self._eps_with_entropy("a", 140.0, 160.0, 180.0)
+            + self._eps_with_entropy("b", 100.0, 100.0, 100.0)
         )
         result = evaluate_probe_episodes(rows)
-        ent = next(a for a in result.assertions if a.name == "entropy_non_increasing")
-        assert not ent.passed
-        assert ent.observed == 40.0  # worst Δ surfaces
+        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        assert ent.passed is False
+        assert ent.observed == pytest.approx(20.0, abs=1e-6)
+
+    def test_slope_assertion_passes_on_decreasing_entropy(self):
+        """Controller-held run: entropy trending down at ~1/ep still
+        passes (slope is negative, well below +1.0)."""
+        rows = (
+            self._eps_with_entropy("a", 139.6, 138.0, 136.5)
+            + self._eps_with_entropy("b", 139.7, 138.6, 137.4)
+        )
+        rows[0]["arbs_closed"] = 3
+        result = evaluate_probe_episodes(rows)
+        ent = next(a for a in result.assertions if a.name == "entropy_slope")
+        assert ent.passed
+        assert ent.observed < 0.0
 
 
 # ── Assertion 3 — max arbs_closed >= 1 on at-least-one agent ─────────
@@ -306,18 +347,16 @@ class TestPurposeTableScenarios:
         # Assertion 1 (ep1_policy_loss) hard-fails on its own —
         # 1.04e17 blows the ceiling.
         assert not by_name["ep1_policy_loss"].passed
-        # Assertion 2 after 2026-04-18 tolerance relaxation: this
-        # vignette's entropy Δ is only +6 over 3 episodes. That
-        # PASSES the new ``ENTROPY_RISE_TOLERANCE = 10`` threshold.
-        # The full ``0a8cacd3`` pathology climbed +50 over 7 episodes;
-        # over the 3-episode probe window it's only +6, too small to
-        # flag on entropy alone. Assertions 1 and 3 still catch it.
-        assert by_name["entropy_non_increasing"].passed
+        # Assertion 2 (entropy-control-v2 Session 02 slope check):
+        # this vignette's entropy is 139 → 141 → 145 → slope = +3.0,
+        # comfortably above the +1.0 threshold. The new slope
+        # assertion catches the drift the old endpoint check
+        # (2026-04-18 ``+10`` tolerance on ep3 - ep1 = +6) let
+        # through. Belt-and-braces vs assertion 1.
+        assert not by_name["entropy_slope"].passed
         # Assertion 3 — the transformer closed 5 arbs on ep 1, which
         # on its own satisfies the at-least-one rule.
         assert by_name["arbs_closed_any_agent"].passed
-        # Conservative "any assertion fails → gate fails" invariant:
-        # assertion 1's blow-up is sufficient even when 2 and 3 pass.
 
 
 # ── Orchestrator smoke (regression guard for signature drift) ────────

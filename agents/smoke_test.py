@@ -18,11 +18,18 @@ The public surface is deliberately narrow:
   evaluates them. The real launch path calls this; tests mostly call
   ``evaluate_probe_episodes`` directly with fabricated rows.
 
-Assertions (hard_constraints.md §15):
+Assertions (hard_constraints.md §15, amended 2026-04-19 via
+``plans/entropy-control-v2/`` Session 02):
 
 1. ``ep1.policy_loss < 100`` on both probe agents.
-2. ``ep3.entropy - ep1.entropy <= ENTROPY_RISE_TOLERANCE`` on both
-   probe agents (non-increasing allowing for mild exploration noise).
+2. ``slope(polyfit(episodes, entropies, 1)) <= ENTROPY_SLOPE_MAX`` on
+   both probe agents. Slope is fit across the whole 3-episode probe;
+   threshold ``+1.0`` per episode. Replaces the 2026-04-18
+   endpoint-only check (``ep3 - ep1 <= +10``) which was structurally
+   blind to the Baseline-A monotone drift — the A-baseline ran ep3
+   drift +5.7 (inside +10) but ep15 drift +61.7. Slope ≈ +2 would
+   catch it; slope ``+1.0`` is conservative (controller-held entropy
+   produces slope ≈ 0).
 3. ``max(ep1..ep3.arbs_closed) >= 1`` on AT LEAST ONE probe agent.
 
 All assertion thresholds live as module-level constants so the GA /
@@ -40,20 +47,18 @@ from typing import Iterable
 EP1_POLICY_LOSS_MAX = 100.0
 ARBS_CLOSED_MIN = 1
 PROBE_EPISODE_COUNT = 3
-# Assertion 2 tolerance: the gate flags entropy rises over the 3-episode
-# window at or above this magnitude. Originally strict (``ep3 <= ep1``)
-# per Session 04's initial design. Relaxed on 2026-04-18 after the
-# post-clamp-fix probe showed healthy agents (policy_loss ~40,
-# arbs_closed 11–19) with a mild +3–7 unit entropy rise — normal early
-# exploration, nothing like the transformer ``0a8cacd3`` pathology that
-# climbed +50 units over 7 episodes. The tolerance is calibrated:
-#   - passes 2026-04-18 healthy run (worst +7.14, LSTM)
-#   - still catches the ``0a8cacd3``-class diffusion IF it happens
-#     (that pathology had policy_loss 1e17 and arbs_closed collapsing
-#     to 0 anyway — caught by assertions 1 and 3 even if entropy alone
-#     wouldn't catch it over a 3-episode window)
-# See plans/naked-clip-and-stability/lessons_learnt.md for the decision.
-ENTROPY_RISE_TOLERANCE = 10.0
+# Assertion 2 threshold (entropy-control-v2 Session 02, 2026-04-19).
+# Maximum permitted per-episode entropy slope across the 3-episode
+# probe window. Fits ``np.polyfit(episodes, entropies, 1)`` — the
+# line's slope, in entropy-units per episode — and requires it to
+# be ``<= ENTROPY_SLOPE_MAX``. A controller-held policy produces
+# slope ≈ 0; the Baseline-A 2026-04-19 drift was ~4–5 per episode,
+# comfortably above this bound. Predecessor 2026-04-18 endpoint
+# threshold (``ep3 - ep1 <= +10``) was structurally blind to slow
+# monotone drift — ep3 sample of the A-baseline was +5.7 (under +10)
+# despite ep15 hitting +61.7. See plans/naked-clip-and-stability/
+# lessons_learnt.md 2026-04-19 for the endpoint-vs-slope analysis.
+ENTROPY_SLOPE_MAX = 1.0
 
 
 @dataclass(frozen=True)
@@ -173,43 +178,59 @@ def evaluate_probe_episodes(rows: list[dict]) -> SmokeResult:
             ),
         ))
 
-    # Assertion 2 — ep3.entropy <= ep1.entropy on BOTH agents.
-    entropy_diffs: list[tuple[str, float, float, float]] = []  # mid, ep1, ep3, delta
+    # Assertion 2 — entropy slope across the probe window. Fits a
+    # line through all ``PROBE_EPISODE_COUNT`` data points and
+    # requires the per-episode slope to be ``<= ENTROPY_SLOPE_MAX``.
+    # Per-agent, not pop-avg — both probe agents must pass. The
+    # slope uses ALL probe episodes (not just endpoints), so slow
+    # monotone drift (Baseline-A pathology, 2026-04-19) shows up
+    # even when ep3 - ep1 is within the old +10 endpoint tolerance.
+    import numpy as np
+    entropy_slopes: list[tuple[str, list[float], list[float], float]] = []
+    # (mid, episodes, entropies, slope)
     for mid in probe_ids:
         eps = grouped[mid]
-        first = next((r for r in eps if r.get("episode") == 1), None)
-        third = next(
-            (r for r in eps if r.get("episode") == PROBE_EPISODE_COUNT), None,
-        )
-        if first is None or third is None:
+        window = [
+            r for r in eps
+            if 1 <= r.get("episode", 0) <= PROBE_EPISODE_COUNT
+            and "entropy" in r
+        ]
+        if len(window) < 2:
+            # Can't fit a line through fewer than 2 points.
             continue
-        e1 = float(first.get("entropy", 0.0))
-        e3 = float(third.get("entropy", 0.0))
-        entropy_diffs.append((mid, e1, e3, e3 - e1))
-    if not entropy_diffs:
+        episodes = [float(r["episode"]) for r in window]
+        entropies = [float(r.get("entropy", 0.0)) for r in window]
+        slope = float(np.polyfit(episodes, entropies, 1)[0])
+        entropy_slopes.append((mid, episodes, entropies, slope))
+    if not entropy_slopes:
         assertions.append(SmokeAssertionResult(
-            name="entropy_non_increasing",
+            name="entropy_slope",
             passed=False,
-            observed=0.0,
-            threshold=0.0,
+            observed=float("nan"),
+            threshold=ENTROPY_SLOPE_MAX,
             detail=(
-                f"Missing ep1 or ep{PROBE_EPISODE_COUNT} entropy rows."
+                f"Insufficient probe rows (need ≥2 per agent within "
+                f"episodes 1..{PROBE_EPISODE_COUNT}) to fit an entropy "
+                f"slope."
             ),
         ))
     else:
-        worst_mid, e1, e3, delta = max(entropy_diffs, key=lambda t: t[3])
-        passed = all(
-            d <= ENTROPY_RISE_TOLERANCE for _, _, _, d in entropy_diffs
+        worst_mid, worst_eps, worst_entropies, worst_slope = max(
+            entropy_slopes, key=lambda t: t[3],
         )
+        passed = all(
+            s <= ENTROPY_SLOPE_MAX for _, _, _, s in entropy_slopes
+        )
+        trajectory = " → ".join(f"{e:.1f}" for e in worst_entropies)
         assertions.append(SmokeAssertionResult(
-            name="entropy_non_increasing",
+            name="entropy_slope",
             passed=passed,
-            observed=delta,
-            threshold=ENTROPY_RISE_TOLERANCE,
+            observed=worst_slope,
+            threshold=ENTROPY_SLOPE_MAX,
             detail=(
-                f"ep3−ep1 entropy: worst Δ = {delta:+.4f} "
-                f"(agent {worst_mid[:8]}: {e1:.3f} → {e3:.3f}), "
-                f"threshold <= {ENTROPY_RISE_TOLERANCE}"
+                f"entropy slope per episode: worst = {worst_slope:+.4f} "
+                f"(agent {worst_mid[:8]}: {trajectory}), "
+                f"threshold <= {ENTROPY_SLOPE_MAX}"
             ),
         ))
 

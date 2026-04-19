@@ -267,3 +267,21 @@ broken.
 commit. Session 05 is "archive + reset + docs"; the launch is
 a follow-on operator action that writes back into
 `progress.md` as a Validation entry.
+
+
+---
+
+## Post-plan amendments
+
+**2026-04-19** (via `plans/entropy-control-v2/` Session 02):
+§15's entropy assertion is updated from the endpoint check
+(`ep3.entropy <= ep1.entropy + 10.0`) to a slope check
+(`np.polyfit(episodes, entropies, 1)[0] <= 1.0`). Fits a line
+through all three probe-episode entropies and requires the
+per-episode slope to be within bound. The endpoint check was
+structurally blind to the Baseline-A slow monotone drift
+(2026-04-19: ep3 delta was +5.7, under the old +10 tolerance,
+even as the full 15-episode run drifted to +61.7). The slope
+check catches it. See `plans/entropy-control-v2/hard_constraints.md`
+§13 for the new formula and `plans/naked-clip-and-stability/lessons_learnt.md`
+2026-04-19 for the rationale.

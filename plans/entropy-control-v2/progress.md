@@ -8,6 +8,95 @@ Format per session follows `naked-clip-and-stability/
 progress.md` — "What landed", "Not changed", "Gotchas",
 "Next".
 
+## Session 02 — Smoke-gate slope assertion (2026-04-19)
+
+**Commit:** _(to be filled in at commit time)_
+
+### What landed
+
+- `agents/smoke_test.py`:
+  - `ENTROPY_RISE_TOLERANCE = 10.0` replaced by
+    `ENTROPY_SLOPE_MAX = 1.0`. Comment block updated with the
+    Baseline-A evidence for why the endpoint check was
+    structurally blind.
+  - Assertion 2 evaluator refactored: fits
+    `np.polyfit(episodes, entropies, 1)[0]` across all probe
+    episodes (1..`PROBE_EPISODE_COUNT`), returns a
+    `SmokeAssertionResult` with `name="entropy_slope"`,
+    `observed=slope`, `threshold=1.0`, and a human-readable
+    `detail` string that shows the trajectory of the worst
+    agent (`"entropy slope per episode: worst = +5.21 (agent
+    abc12345: 139.6 → 145.3 → 150.0), threshold <= 1.0"`).
+  - Empty-input / insufficient-data fallback: returns
+    `passed=False`, `observed=NaN`, matching the existing
+    empty-rows shape for other assertions.
+- `tests/test_smoke_test.py`:
+  - `TestEntropyMonotoneAssertion` replaced by
+    `TestEntropyAssertion` (7 tests): flat slope passes, mild
+    decrease passes, Baseline-A drift-rate fails, threshold
+    boundary (pass at exactly +1.0 / fail at +1.1), empty-input
+    handles gracefully, hard rise fails, decreasing entropy
+    passes.
+  - `TestPurposeTableScenarios.test_gen2_transformer_0a8cacd3_would_fail_gate`
+    updated — the vignette's entropy trajectory (139 → 141 → 145
+    over 3 episodes) now fails the slope assertion (slope +3.0
+    > +1.0); under the old +10 endpoint tolerance it passed.
+    Belt-and-braces alongside assertion 1.
+  - Import updated: `ENTROPY_RISE_TOLERANCE` → `ENTROPY_SLOPE_MAX`.
+- `frontend/src/app/training-plans/training-plans.spec.ts`:
+  - Fixture with `name: 'entropy_non_increasing'` updated to
+    `name: 'entropy_slope'` with matching observed/threshold
+    (20.0 / 1.0) so the failure-modal rendering test
+    continues to exercise the same code path on the new
+    assertion shape.
+- `plans/naked-clip-and-stability/hard_constraints.md` gets a
+  post-plan amendments footnote appended (per §13 — §15 is
+  append-only in the predecessor plan). Cross-references this
+  plan's §13 and the 2026-04-19 `lessons_learnt.md` entry.
+
+### Not changed
+
+- Controller implementation (that's Session 01 territory).
+- Reward shape.
+- PPO numerical stability defences.
+- Probe infrastructure (`run_smoke_test` orchestrator) —
+  untouched; tests continue to exercise the full
+  orchestration path.
+- Policy-loss (assertion 1, `EP1_POLICY_LOSS_MAX = 100`) and
+  arbs-closed (assertion 3, `ARBS_CLOSED_MIN = 1`)
+  assertions. Per hard_constraints §1 they're out of scope.
+
+### Gotchas
+
+- The slope check is per-agent (not pop-avg), matching the
+  existing per-agent endpoint structure. Both probe agents
+  must pass; the evaluator surfaces the worst slope in the
+  assertion detail.
+- `numpy` is already a project dependency — imported locally
+  inside `evaluate_probe_episodes` to keep the module's
+  top-level import graph identical (the module is imported
+  from the API process, where lazy imports matter for
+  startup latency).
+- Frontend-side rendering is driven by the assertion's
+  backend `detail` string plus its `name` field. No frontend
+  source map of assertion names exists, so the new
+  `entropy_slope` name surfaces in the modal with no Angular
+  source change — only the test fixture needs updating.
+
+### Test suite
+
+`pytest tests/ -q`: **2252 passed, 7 skipped, 133 deselected,
+1 xfailed** (0:05:04). Net delta from this session: +1 test
+(7 tests in TestEntropyAssertion replacing 6 in the old
+TestEntropyMonotoneAssertion).
+
+### Next
+
+Session 03 — registry reset + activation-plan redraft
+(operator-gated).
+
+---
+
 ## Session 01 — Target-entropy controller (2026-04-19)
 
 **Commit:** _(to be filled in at commit time)_
