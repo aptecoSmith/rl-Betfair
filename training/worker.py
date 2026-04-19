@@ -68,7 +68,49 @@ from training.ipc import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Reconfigure stdout/stderr to utf-8 BEFORE constructing the Rich
+# Console so its Windows renderer doesn't fall back to the cp1252
+# codepath. The default Windows code page can't encode em-dash,
+# box-drawing, ellipsis, or the checkmark/cross markers the worker
+# prints after a smoke-test probe -- and Rich raises
+# ``UnicodeEncodeError`` on the first such character, which in
+# ``_run_smoke_test`` propagated out of the coroutine AFTER the probe
+# had passed, preventing the full population launch (observed
+# 2026-04-19 operator launch, plans/entropy-control-v2/ iteration
+# loop). ``errors="replace"`` is belt-and-braces: even if some downstream
+# code bypasses reconfigure, it'll substitute ``?`` for offending
+# characters rather than crashing. Python 3.7+ supports
+# ``TextIOWrapper.reconfigure``; no-op when already utf-8.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        # Redirected or wrapped streams that don't implement
+        # reconfigure -- skip silently.
+        pass
+
 console = Console()
+
+
+def _format_smoke_assertion_line(assertion: dict) -> str:
+    """Render one smoke-test assertion result as a single ASCII-safe
+    line for the worker's Rich console.
+
+    Extracted as a helper so the "no unicode leaks to the console"
+    invariant can be tested without standing up the whole worker.
+    Returns a Rich-markup string that uses bracketed ``[PASS]`` /
+    ``[FAIL]`` markers rather than unicode check/cross characters;
+    non-ASCII characters in the assertion's ``detail`` string are
+    substituted via ``errors="replace"`` so a downstream cp1252
+    renderer can't crash.
+    """
+    passed = bool(assertion.get("passed"))
+    colour = "green" if passed else "red"
+    marker = f"[{colour}][PASS][/{colour}]" if passed else f"[{colour}][FAIL][/{colour}]"
+    detail = str(assertion.get("detail", ""))
+    detail_safe = detail.encode("ascii", errors="replace").decode("ascii")
+    return f"  {marker} {detail_safe}"
 
 
 # ── Async bridge queue ─────────────────────────────────────────────
@@ -423,8 +465,7 @@ class TrainingWorker:
             f"{'passed' if passed else 'FAILED'}[/{colour}]"
         )
         for a in result.get("assertions", []):
-            marker = "[green]✓[/green]" if a.get("passed") else "[red]✗[/red]"
-            console.print(f"  {marker} {a.get('detail', '')}")
+            console.print(_format_smoke_assertion_line(a))
         return result
 
     # ── Training lifecycle ──────────────────────────────────────────
