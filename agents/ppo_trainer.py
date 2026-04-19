@@ -271,6 +271,16 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     # ``fill_prob_loss_weight`` — the env doesn't read it, but the
     # passthrough whitelist keeps the unknown-key debug log quiet.
     "risk_loss_weight": ("risk_loss_weight",),
+    # Reward-densification follow-on (2026-04-19): per-step mark-to-
+    # market shaping weight. Config-level default lives in
+    # config.reward.mark_to_market_weight (0.05 per Session 02).
+    # Mapping here lets a ``reward-densification-gene-sweep``-style
+    # plan put the knob into hp_ranges so the GA can mutate it
+    # per-agent. Reward-densification Session 01's plan kept this
+    # plan-level-only per its hard_constraints §11; follow-on plans
+    # that explicitly opt into evolving the knob route through this
+    # map.
+    "mark_to_market_weight": ("mark_to_market_weight",),
 }
 
 
