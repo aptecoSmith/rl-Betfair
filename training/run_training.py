@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import threading
 import time
 import traceback
@@ -63,7 +64,7 @@ from registry.model_store import ModelStore
 from registry.scoreboard import ModelScore, Scoreboard
 from agents.bc_pretrainer import BCPretrainer, measure_entropy
 from training.arb_annealing import effective_naked_loss_scale
-from training.arb_oracle import load_samples
+from training.arb_oracle import load_samples, order_days_by_density
 from training.evaluator import Evaluator
 from training.perf_log import gpu_memory_summary, perf_log
 from training.progress_tracker import ProgressTracker, RunProgressTracker
@@ -704,13 +705,33 @@ class TrainingOrchestrator:
                             trainer._post_bc_entropy,
                         )
 
+                # Arb-curriculum Session 05: per-agent curriculum day ordering.
+                # Reorder train_days per oracle density; membership preserved.
+                _curriculum_mode = self.config.get("training", {}).get(
+                    "curriculum_day_order", "random"
+                )
+                _rng = random.Random(hash(agent.model_id) & 0xFFFFFFFF)
+                _date_to_day = {d.date: d for d in train_days}
+                _dates_ordered = order_days_by_density(
+                    [d.date for d in train_days],
+                    _curriculum_mode,
+                    Path("data/oracle_cache"),
+                    _rng,
+                )
+                _ordered_train_days = [_date_to_day[dt] for dt in _dates_ordered]
+                logger.info(
+                    "Curriculum mode=%s agent=%s day order: %s",
+                    _curriculum_mode, agent.model_id[:12],
+                    [d[:10] for d in _dates_ordered[:5]],
+                )
+
                 train_start = time.time()
                 with perf_log(
                     logger,
                     f"Train agent {agent.model_id[:12]}",
                     log_gpu=(self.device == "cuda"),
                 ):
-                    stats = trainer.train(train_days, n_epochs=n_epochs)
+                    stats = trainer.train(_ordered_train_days, n_epochs=n_epochs)
                 self._train_wall_s += time.time() - train_start
                 self._train_agent_days += len(train_days) * n_epochs
                 self._total_agents_trained += 1

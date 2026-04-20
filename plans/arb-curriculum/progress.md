@@ -10,6 +10,65 @@ Format per session follows
 
 ---
 
+## Session 05 — 2026-04-20
+
+**Commit:** (see git log)
+
+**What landed:**
+
+- `training/arb_oracle.py` — 2 new public functions:
+  - `density_for_date(date, data_dir)`: reads only `data_dir/{date}/header.json`
+    (no .npz load); returns `float(data["density"])` or `0.0` on any error or
+    missing cache. `data_dir` is the oracle_cache dir directly (e.g.
+    `Path("data/oracle_cache")`), NOT the processed-data dir.
+  - `order_days_by_density(dates, mode, data_dir, rng)`: reorders dates per
+    mode (`random` | `density_desc` | `density_asc`); invalid mode logs
+    `logger.error` and falls back to random. Membership always preserved.
+    `random` mode uses `rng.sample(dates, len(dates))`.
+  - Added `import random` at module level.
+- `agents/ppo_trainer.py` — 3 changes:
+  - `EpisodeStats`: added `curriculum_day_order: str = "random"`.
+  - `_collect_rollout`: populates `curriculum_day_order` from
+    `self.config.get("training", {}).get("curriculum_day_order", "random")`.
+  - `_log_episode`: always emits `"curriculum_day_order": ep.curriculum_day_order`
+    to JSONL row.
+- `training/run_training.py` — 3 changes:
+  - Added `import random` to module imports.
+  - Updated `from training.arb_oracle import load_samples` →
+    `from training.arb_oracle import load_samples, order_days_by_density`.
+  - Per-agent loop: before `trainer.train(...)`, reorders `train_days` via
+    `order_days_by_density` with a `random.Random(hash(agent.model_id) & 0xFFFFFFFF)`
+    seed; passes `_ordered_train_days` to trainer instead of raw `train_days`.
+    Logs the first 5 dates of the final order.
+- `config.yaml`: added `curriculum_day_order: random` under `training:` with
+  doc comment explaining the three modes and missing-cache behaviour.
+- `CLAUDE.md`: new "Curriculum day ordering (2026-04-19)" subsection after the
+  BC-pretrain warmup handshake section.
+- `tests/arb_curriculum/test_curriculum_ordering.py`: 9 tests across 7 categories
+  (parametrize expands membership test to 3). All 9 pass.
+
+**Not changed:** oracle scan semantics, BC pretrainer, reward path, matcher,
+  controller, action/obs schemas.
+
+**Gotchas:**
+- `density_for_date(date, data_dir)` takes the oracle_cache dir directly
+  (e.g. `Path("data/oracle_cache")`), whereas `load_samples(date, data_dir)`
+  takes the processed-data dir and derives `data_dir.parent / "oracle_cache" / date`.
+  These two conventions differ — don't confuse them.
+- `order_days_by_density` with `density_asc` places missing-cache dates
+  (density=0) at the START (sparsest first); with `density_desc` they land at
+  the END. Both emit a warning via `logger.warning`.
+- Agent seed for per-agent rng: `hash(agent.model_id) & 0xFFFFFFFF`. UUID
+  model_ids hash deterministically within a Python session but not across
+  restarts — this is acceptable because curriculum order is a training
+  heuristic, not a reproducibility requirement.
+
+**Test suite:** `pytest tests/arb_curriculum/ -v` → 90 passed, 1 skipped.
+
+**Next:** Session 06 — Registry reset + plan redraft.
+
+---
+
 ## Session 04 — 2026-04-20
 
 **Commit:** (see git log)

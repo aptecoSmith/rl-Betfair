@@ -452,6 +452,8 @@ class EpisodeStats:
     bc_pretrain_steps: int = 0
     bc_final_signal_loss: float = 0.0
     bc_final_arb_spread_loss: float = 0.0
+    # Arb-curriculum Session 05: active day-ordering mode for JSONL telemetry.
+    curriculum_day_order: str = "random"
 
 
 @dataclass
@@ -1281,6 +1283,9 @@ class PPOTrainer:
             naked_loss_scale_active=float(
                 info.get("naked_loss_scale_active", 1.0) or 1.0
             ),
+            curriculum_day_order=self.config.get(
+                "training", {}
+            ).get("curriculum_day_order", "random"),
         )
 
         return rollout, ep_stats
@@ -2110,6 +2115,8 @@ class PPOTrainer:
             record["bc_final_arb_spread_loss"] = round(
                 float(ep.bc_final_arb_spread_loss), 6,
             )
+        # Arb-curriculum Session 05: always emit active day-ordering mode.
+        record["curriculum_day_order"] = ep.curriculum_day_order
 
         log_file = self.log_dir / "episodes.jsonl"
         with open(log_file, "a", encoding="utf-8") as f:

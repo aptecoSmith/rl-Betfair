@@ -115,6 +115,13 @@ training:
   # dimension per runner (arb_spread) and the observation gains arb
   # state features. Off by default — legacy behaviour is byte-identical.
   scalping_mode: true
+  # Arb-curriculum Session 05 (2026-04-19). Per-agent training-day ordering
+  # derived from oracle density. Every day is still seen exactly once per
+  # epoch; only the order changes. Default random = pre-change behaviour.
+  # density_desc: arb-rich days first (pairs with BC warm-start).
+  # density_asc:  arb-sparse days first (ablation only).
+  # Missing oracle cache for a date is treated as density=0.
+  curriculum_day_order: random
 discard_policy:
   min_win_rate: 0.35
   min_mean_pnl: 0.0

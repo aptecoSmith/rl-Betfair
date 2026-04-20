@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -285,6 +286,65 @@ def load_samples(
         )
         for i in range(len(tick_arr))
     ]
+
+
+def density_for_date(date: str, data_dir: Path) -> float:
+    """Return cached arb density for a date.
+
+    Reads only ``header.json`` — does not load the full ``.npz``.
+    ``data_dir`` is the oracle_cache directory (e.g. ``Path("data/oracle_cache")``),
+    not the processed-data directory.
+
+    Missing or unreadable cache → returns 0.0 (hard_constraints.md s23 fallback).
+    """
+    p = data_dir / date / "header.json"
+    if not p.exists():
+        return 0.0
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return float(data.get("density", 0.0))
+    except Exception:
+        return 0.0
+
+
+def order_days_by_density(
+    dates: list[str],
+    mode: str,
+    data_dir: Path,
+    rng: random.Random,
+) -> list[str]:
+    """Return *dates* reordered by arb-oracle density per *mode*.
+
+    Modes
+    -----
+    random        : per-seed shuffle (default — pre-change behaviour).
+    density_desc  : densest day first; missing-cache dates (density=0) go last.
+    density_asc   : sparsest day first; missing-cache dates (density=0) go first.
+                    Provided for ablation only; see CLAUDE.md.
+    <invalid>     : logs an error and falls back to random.
+
+    Membership is always preserved (hard_constraints.md s22).
+    """
+    if mode == "random":
+        return rng.sample(dates, len(dates))
+    if mode not in ("density_desc", "density_asc"):
+        logger.error(
+            "Curriculum: unknown mode %r — falling back to random. "
+            "Valid modes: random, density_desc, density_asc.",
+            mode,
+        )
+        return rng.sample(dates, len(dates))
+    densities = {d: density_for_date(d, data_dir) for d in dates}
+    missing = [d for d, v in densities.items() if v == 0.0]
+    if missing:
+        logger.warning(
+            "Curriculum mode=%s: %d date(s) have density=0 "
+            "(cache missing or empty). Will be placed at the %s.",
+            mode, len(missing),
+            "end" if mode == "density_desc" else "start",
+        )
+    reverse = mode == "density_desc"
+    return sorted(dates, key=lambda d: densities[d], reverse=reverse)
 
 
 def count_pre_race_ticks(date: str, data_dir: Path) -> int:

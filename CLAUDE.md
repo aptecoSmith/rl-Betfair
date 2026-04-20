@@ -478,6 +478,28 @@ Default `bc_target_entropy_warmup_eps = 5` is a first cut; tune via
 the gene. `0` disables the warmup and restores pre-BC controller
 behaviour for that agent — useful for ablation.
 
+### Curriculum day ordering (2026-04-19)
+
+Per-agent training-day order is driven by arb-oracle density when
+`training.curriculum_day_order` is set to `density_desc` or
+`density_asc`. Default `random` preserves pre-change behaviour
+(per-seed shuffle).
+
+`density_desc`: arb-rich days first. Pairs naturally with BC
+warm-start — the post-BC policy sees days where oracle targets
+match the data before encountering curriculum-hostile sparse days.
+
+`density_asc`: reverse. Provided for ablation only.
+
+Every day is still seen exactly once per epoch regardless of mode
+(hard_constraints.md s22). Curriculum changes order, not membership.
+
+Missing oracle cache for a date is treated as density zero (placed at
+the end/start per mode). Worker logs a warning so the operator knows
+to re-run the oracle scan.
+
+Invalid mode falls back to random with an error log — never crashes.
+
 ---
 
 ## `info["realised_pnl"]` is last-race-only
