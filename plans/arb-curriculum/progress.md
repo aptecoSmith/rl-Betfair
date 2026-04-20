@@ -10,6 +10,111 @@ Format per session follows
 
 ---
 
+## Session 06 — 2026-04-20
+
+**Commit:** (see git log)
+
+**What landed (tracked files — registry is gitignored):**
+
+- `plans/arb-curriculum/progress.md` — this entry.
+
+**What landed on disk (gitignored, not in diff):**
+
+- `registry/training_plans/277bbf49-8a2b-4d84-b8a3-3b9286e115eb.json` —
+  `arb-curriculum-probe` plan (status=draft, seed=7919, pop=33, gens=4,
+  naked_loss_anneal={start_gen:0, end_gen:2}).
+  Written to `registry/training_plans/` in the MAIN REPO (the worktree
+  does not share gitignored files with master).
+
+**What operator must do BEFORE Session 07 (archive + reset):**
+
+1. Confirm no active training: `tasklist | findstr python.exe` (Windows)
+2. Run `pytest tests/ -q` on the latest commit — must be green.
+3. Archive the current registry:
+   ```powershell
+   $ISO = (Get-Date -Format "yyyyMMddTHHmmssZ")
+   New-Item -ItemType Directory -Path "registry/archive_$ISO"
+   Move-Item registry/models.db "registry/archive_$ISO/"
+   Move-Item registry/weights "registry/archive_$ISO/"
+   Copy-Item -Recurse registry/training_plans "registry/archive_$ISO/"
+   Move-Item logs/training/episodes.jsonl "logs/training/episodes.pre-arb-curriculum-$ISO.jsonl"
+   ```
+4. Initialize fresh registry:
+   ```python
+   from registry.model_store import ModelStore
+   ModelStore()   # creates a fresh models.db with 0 models
+   ```
+   ```powershell
+   New-Item -ItemType Directory -Force -Path registry/weights
+   New-Item -ItemType File -Force -Path logs/training/episodes.jsonl
+   ```
+5. Set `config.yaml training.curriculum_day_order: density_desc` before
+   launching (the probe plan JSON stores `training_overrides.curriculum_day_order`
+   as documentation metadata, but the current code reads it from config.yaml —
+   see Gotchas below).
+6. Run oracle scan on the current training-date window if not already done:
+   `python -m training.arb_oracle scan --dates <dates>` — BC pretrainer and
+   curriculum ordering depend on `data/oracle_cache/` being populated.
+
+**Probe plan details:**
+
+- Plan ID: `277bbf49-8a2b-4d84-b8a3-3b9286e115eb`
+- Name: `arb-curriculum-probe`
+- Population: 33 (11 per arch × 3 archs)
+- Generations: 4, epochs: 3, auto_continue: true
+- Seed: 7919 (differs from gene-sweep seed 1337)
+- `naked_loss_anneal`: `{start_gen: 0, end_gen: 2}` — naked-loss-scale
+  anneals from each agent's gene value to 1.0 across gen 0-1; full scale
+  from gen 2 onward.
+- hp_ranges: gene-sweep ranges + 5 new arb-curriculum genes:
+  - `matured_arb_bonus_weight` [0.0, 2.0]
+  - `naked_loss_scale` [0.05, 1.0]
+  - `bc_pretrain_steps` [0, 1500]
+  - `bc_learning_rate` [1e-5, 1e-3]
+  - `bc_target_entropy_warmup_eps` [2, 15]
+
+**Validation (ran from worktree):**
+
+```
+probe validates OK: 277bbf49-8a2b-4d84-b8a3-3b9286e115eb
+hp_ranges keys: ['arb_spread_scale', 'architecture_name', 'bc_learning_rate',
+  'bc_pretrain_steps', 'bc_target_entropy_warmup_eps', 'early_lock_bonus_weight',
+  'entropy_coefficient', 'entropy_floor', 'fill_prob_loss_weight',
+  'inactivity_penalty', 'mark_to_market_weight', 'market_type_filter',
+  'matured_arb_bonus_weight', 'naked_loss_scale', 'naked_penalty_weight',
+  'reward_clip', 'reward_spread_cost_weight', 'risk_loss_weight']
+```
+
+**Not changed:** no code or test changes in this session (hard_constraints §35).
+
+**Gotchas:**
+- `training_overrides.curriculum_day_order: density_desc` is stored in the
+  plan JSON as documentation metadata. `TrainingPlan.from_dict` ignores unknown
+  keys, so this field survives the round-trip as JSON but is NOT applied by
+  the current code. Operator must set `config.yaml training.curriculum_day_order:
+  density_desc` before launching. A follow-on session can wire up
+  `training_overrides` to `TrainingOrchestrator.__init__` alongside the
+  existing `reward_overrides` pattern.
+- The probe plan JSON lives in the MAIN REPO's `registry/training_plans/`
+  (created before the archive step). Since the archive step uses `cp -r`
+  (not `mv`) for training_plans, the plan survives the archive intact.
+- After the registry reset, `registry/models.db` will have 0 models and
+  the UI will show an empty population. This is expected — the probe launches
+  a fresh Gen 0.
+- Worktree commits (Sessions 01–05 of this plan) must be merged to master
+  BEFORE the operator runs the archive+reset. The worktree branch is
+  `claude/romantic-hodgkin-b2897d`.
+
+**Test suite:** no new tests in this session. Full suite still green on
+  Session 05 commit.
+
+**Next:** Operator: (1) merge branch to master, (2) run archive+reset steps
+  above, (3) set config.yaml curriculum_day_order: density_desc, (4) run
+  oracle scan on training dates, (5) launch arb-curriculum-probe with
+  smoke test first. Session 07 writes the validation entry.
+
+---
+
 ## Session 05 — 2026-04-20
 
 **Commit:** (see git log)
