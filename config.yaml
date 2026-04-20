@@ -121,7 +121,7 @@ training:
   # density_desc: arb-rich days first (pairs with BC warm-start).
   # density_asc:  arb-sparse days first (ablation only).
   # Missing oracle cache for a date is treated as density=0.
-  curriculum_day_order: random
+  curriculum_day_order: density_desc
 discard_policy:
   min_win_rate: 0.35
   min_mean_pnl: 0.0
