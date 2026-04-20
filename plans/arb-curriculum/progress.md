@@ -10,6 +10,58 @@ Format per session follows
 
 ---
 
+## Session 03 — 2026-04-20
+
+**Commit:** (see git log)
+
+**What landed:**
+
+- `env/betfair_env.py` — 4 changes:
+  - `_REWARD_OVERRIDE_KEYS`: added `"naked_loss_scale"`.
+  - `__init__`: reads `naked_loss_scale` (default 1.0) from reward config;
+    clamps to [0, 1] with a logger warning on bad gene values.
+  - `_compute_scalping_reward_terms`: new `naked_loss_scale` parameter (default 1.0);
+    applies `race_pnl_adjusted = race_pnl - (1-scale) * loss_sum` to scale the loss
+    side of naked cash flows. Winners untouched. At scale=1.0 is byte-identical.
+  - `_get_info()`: emits `"naked_loss_scale_active": self._naked_loss_scale`.
+- `agents/ppo_trainer.py` — 3 changes:
+  - `_REWARD_GENE_MAP`: added `"naked_loss_scale": ("naked_loss_scale",)`.
+  - `EpisodeStats`: added `naked_loss_scale_active: float = 1.0`.
+  - `_build_episode_stats` / `_log_episode`: reads and writes the field.
+- `training/arb_annealing.py` — new module: pure functions `anneal_factor` and
+  `effective_naked_loss_scale` for generation-level linear interpolation of
+  `naked_loss_scale` toward 1.0 over a `{start_gen, end_gen}` window.
+- `training/training_plan.py`: `TrainingPlan` gains `naked_loss_anneal: dict | None = None`
+  field; serialise/deserialise methods updated to round-trip it.
+- `training/run_training.py`: per-agent HP dict is shallow-copied before trainer
+  creation; if `training_plan.naked_loss_anneal` is set and the gene is present, the
+  effective scale is computed and written into the copy before `PPOTrainer` sees it.
+- `config.yaml`: added `naked_loss_scale: 1.0` under `reward:`.
+- `CLAUDE.md`: new "Naked-loss annealing (2026-04-19)" subsection.
+- `tests/arb_curriculum/test_naked_loss_annealing.py`: 25 tests across 8 categories.
+  All 25 pass.
+
+**Not changed:** matcher, obs/action schemas, raw P&L accounting for scale=1.0,
+  oracle scan, BC pretrain plumbing (Sessions 04-05 scope), other reward knobs.
+
+**Gotchas:**
+- The annealing operates on a SHALLOW COPY of `agent.hyperparameters` so the
+  original gene survives for breeding — the orchestrator never mutates the live agent.
+- `_compute_scalping_reward_terms` receives pre-computed `race_pnl` which already
+  includes full unscaled naked P&L. The adjustment formula
+  `race_pnl - (1-scale)*loss_sum` correctly backs out the excess loss signal;
+  it does NOT re-sum the naked array (which would double-count locked and closed P&L).
+
+**Test suite:** `pytest tests/arb_curriculum/ -v` → 59 passed, 1 skipped.
+
+**Scoreboard comparability:** Runs with `naked_loss_scale < 1.0` are NOT comparable
+  to scale=1.0 runs on `raw_pnl_reward`. Document this in any plan that activates
+  the gene.
+
+**Next:** Session 04 — BC pretrainer (the big one).
+
+---
+
 ## Session 02 — 2026-04-20
 
 **Commit:** (see git log)

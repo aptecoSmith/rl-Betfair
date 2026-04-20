@@ -261,6 +261,29 @@ random betting, which taught the agent to bet more without caring
 whether its bets were profitable. That's the opposite of what you
 want.
 
+### Naked-loss annealing (2026-04-19)
+
+```
+scaled_naked_sum = sum(
+    min(0, p) * naked_loss_scale   # loss side scaled
+    + max(0, p)                    # win side untouched
+    for p in per_pair_naked_pnl
+)
+race_pnl = scalping_locked_pnl
+         + scalping_closed_pnl
+         + scaled_naked_sum
+```
+
+Default scale 1.0 = byte-identical. Plan-level
+`naked_loss_anneal: {start_gen, end_gen}` linearly interpolates each
+agent's effective scale toward 1.0 over the window. Used to bootstrap
+the policy past the naked valley early in training without rewarding
+lucky naked winners (those remain 95% clipped in shaped).
+
+Scoreboard comparability: scale<1 runs are NOT comparable to scale=1
+runs on `raw_pnl_reward`. The loss side is intentionally undercounted
+during annealing; the agent pays full price once `end_gen` is reached.
+
 ### Matured-arb bonus (2026-04-19)
 
 A small shaped reward per pair that matured (second leg filled,

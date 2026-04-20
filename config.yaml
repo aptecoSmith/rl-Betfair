@@ -71,6 +71,11 @@ reward:
   matured_arb_bonus_weight: 0.0
   matured_arb_bonus_cap: 10.0
   matured_arb_expected_random: 2.0
+  # Arb-curriculum Session 03 (2026-04-19). Per-pair loss-side scalar on
+  # naked cash flows (winners untouched). 1.0 = byte-identical. Per-agent
+  # gene in [0.05, 1.0]; plan-level naked_loss_anneal schedule may
+  # interpolate toward 1.0 across generations.
+  naked_loss_scale: 1.0
   # Scalping-active-management auxiliary-head loss weights (plumbing
   # off by default — activation playbook bumps these per its Step E
   # before Session 07 validation). Declared here so per-plan

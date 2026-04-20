@@ -61,6 +61,7 @@ from data.episode_builder import Day
 from env.betfair_env import ACTION_SCHEMA_VERSION, OBS_SCHEMA_VERSION
 from registry.model_store import ModelStore
 from registry.scoreboard import ModelScore, Scoreboard
+from training.arb_annealing import effective_naked_loss_scale
 from training.evaluator import Evaluator
 from training.perf_log import gpu_memory_summary, perf_log
 from training.progress_tracker import ProgressTracker, RunProgressTracker
@@ -606,10 +607,26 @@ class TrainingOrchestrator:
                     detail=f"Training agent {agent.model_id[:12]} ({agent.architecture_name})",
                 )
 
+                # Arb-curriculum Session 03: apply generation-level
+                # naked_loss_scale annealing before the trainer sees the
+                # HP dict so the env receives the interpolated effective
+                # scale, not the raw gene value.
+                hp = dict(agent.hyperparameters)
+                anneal_schedule = (
+                    self.training_plan.naked_loss_anneal
+                    if self.training_plan is not None else None
+                )
+                if anneal_schedule is not None and "naked_loss_scale" in hp:
+                    hp["naked_loss_scale"] = effective_naked_loss_scale(
+                        float(hp["naked_loss_scale"]),
+                        current_gen=generation,
+                        schedule=anneal_schedule,
+                    )
+
                 trainer = PPOTrainer(
                     policy=agent.policy,
                     config=self.config,
-                    hyperparams=agent.hyperparameters,
+                    hyperparams=hp,
                     progress_queue=self.progress_queue,
                     device=self.device,
                     feature_cache=self.feature_cache,

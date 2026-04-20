@@ -209,6 +209,12 @@ class TrainingPlan:
     #: keys are rejected at create time to prevent silent typos training
     #: at defaults. None means "no overrides".
     reward_overrides: dict[str, float] | None = None
+    #: Arb-curriculum Session 03 (2026-04-19). Optional generation-level
+    #: annealing schedule for ``naked_loss_scale``. When set, each agent's
+    #: effective scale is linearly interpolated from ``gene_value`` toward
+    #: ``1.0`` over ``[start_gen, end_gen)``. None = no annealing (gene
+    #: value used as-is). Example: ``{"start_gen": 0, "end_gen": 2}``.
+    naked_loss_anneal: dict | None = None
 
     # ---- session helpers ----
     def session_boundaries(self) -> list[tuple[int, int]]:
@@ -276,6 +282,9 @@ class TrainingPlan:
             "reward_overrides": (
                 dict(self.reward_overrides) if self.reward_overrides else None
             ),
+            "naked_loss_anneal": (
+                dict(self.naked_loss_anneal) if self.naked_loss_anneal else None
+            ),
         }
 
     @classmethod
@@ -321,6 +330,10 @@ class TrainingPlan:
             reward_overrides=(
                 dict(raw["reward_overrides"])
                 if raw.get("reward_overrides") else None
+            ),
+            naked_loss_anneal=(
+                dict(raw["naked_loss_anneal"])
+                if raw.get("naked_loss_anneal") else None
             ),
         )
 
