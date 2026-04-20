@@ -261,6 +261,67 @@ random betting, which taught the agent to bet more without caring
 whether its bets were profitable. That's the opposite of what you
 want.
 
+### Naked-loss annealing (2026-04-19)
+
+```
+scaled_naked_sum = sum(
+    min(0, p) * naked_loss_scale   # loss side scaled
+    + max(0, p)                    # win side untouched
+    for p in per_pair_naked_pnl
+)
+race_pnl = scalping_locked_pnl
+         + scalping_closed_pnl
+         + scaled_naked_sum
+```
+
+Default scale 1.0 = byte-identical. Plan-level
+`naked_loss_anneal: {start_gen, end_gen}` linearly interpolates each
+agent's effective scale toward 1.0 over the window. Used to bootstrap
+the policy past the naked valley early in training without rewarding
+lucky naked winners (those remain 95% clipped in shaped).
+
+Scoreboard comparability: scale<1 runs are NOT comparable to scale=1
+runs on `raw_pnl_reward`. The loss side is intentionally undercounted
+during annealing; the agent pays full price once `end_gen` is reached.
+
+### Matured-arb bonus (2026-04-19)
+
+A small shaped reward per pair that matured (second leg filled,
+naturally or via close_signal), zero-mean corrected against an
+expected random-policy pair count. Shaped contribution per race:
+
+    raw_bonus = weight * (n_matured - expected_random)
+    matured_arb_term = clip(raw_bonus, -cap, +cap)
+
+Default weight 0.0 = no-op. When > 0, the bonus rewards the SKILL
+of closing pair lifecycles (independent of P&L sign), not the
+outcome. Cap prevents a runaway race from dominating shaped reward.
+See `plans/arb-curriculum/purpose.md` for the credit-assignment
+motivation.
+
+### BC pretrain (2026-04-19)
+
+Per-agent behavioural cloning on arb oracle samples
+(plans/arb-curriculum/session_prompts/01_oracle_scan.md) runs before
+PPO when `bc_pretrain_steps > 0`. Only `actor_head` parameters are
+trained — value_head, LSTM, and feature encoders are frozen
+(`requires_grad_(False)`) during BC and restored to
+`requires_grad_(True)` only after BC completes. BC uses its own
+Adam optimiser; PPO's optimiser state is untouched so LR warmup and
+reward-centering still apply as designed.
+
+Per-agent, never shared. Sharing BC-pretrained weights across the
+population collapses GA diversity irreparably (inherited lesson from
+`plans/arb-improvements/lessons_learnt.md`).
+
+BC targets (scalping mode, 7 dims per runner):
+- Signal dim (index 0): push action to +1.0 at `runner_idx`.
+- Arb_spread dim (index 4): push to `arb_spread_ticks / MAX_ARB_TICKS`.
+All other per-runner dims receive zero gradient from BC.
+
+New genes: `bc_pretrain_steps` [0, 2000], `bc_learning_rate`
+[1e-5, 1e-3], `bc_target_entropy_warmup_eps` [0, 20].
+
 ## PPO update stability — advantage normalisation
 
 The PPO update normalises the per-mini-batch advantage tensor
@@ -392,6 +453,52 @@ post-controller rows. Per-episode JSONL rows gain `alpha`,
 `log_alpha`, and `target_entropy` optional fields for the
 learning-curves panel; downstream readers must tolerate
 their absence on pre-controller rows.
+
+### BC-pretrain warmup handshake (2026-04-19)
+
+When an agent's `bc_pretrain_steps > 0`, behavioural cloning runs
+before the first PPO rollout. Post-BC, the policy's forward-pass
+entropy is typically LOW (confident on oracle targets) while the
+controller's standing target is 150. Without intervention, the
+controller would boost `alpha` aggressively on the first PPO update
+and undo BC.
+
+The handshake: after BC completes, the agent's effective target
+entropy anneals linearly from the post-BC measured entropy up to 150
+over `bc_target_entropy_warmup_eps` episodes (gene, default 5). The
+stored `self._target_entropy` is unchanged; only the value read BY
+the controller step (via `_effective_target_entropy()`) is
+transformed. Once the warmup episodes are done, the effective target
+equals the configured target and normal controller behaviour resumes.
+
+`target_entropy` in episodes.jsonl logs the EFFECTIVE target so
+operators can see the warmup trajectory.
+
+Default `bc_target_entropy_warmup_eps = 5` is a first cut; tune via
+the gene. `0` disables the warmup and restores pre-BC controller
+behaviour for that agent — useful for ablation.
+
+### Curriculum day ordering (2026-04-19)
+
+Per-agent training-day order is driven by arb-oracle density when
+`training.curriculum_day_order` is set to `density_desc` or
+`density_asc`. Default `random` preserves pre-change behaviour
+(per-seed shuffle).
+
+`density_desc`: arb-rich days first. Pairs naturally with BC
+warm-start — the post-BC policy sees days where oracle targets
+match the data before encountering curriculum-hostile sparse days.
+
+`density_asc`: reverse. Provided for ablation only.
+
+Every day is still seen exactly once per epoch regardless of mode
+(hard_constraints.md s22). Curriculum changes order, not membership.
+
+Missing oracle cache for a date is treated as density zero (placed at
+the end/start per mode). Worker logs a warning so the operator knows
+to re-run the oracle scan.
+
+Invalid mode falls back to random with an error log — never crashes.
 
 ---
 

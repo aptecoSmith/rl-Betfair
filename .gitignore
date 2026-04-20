@@ -5,6 +5,9 @@ venv/
 # Processed data (large, regenerated from DB) — keep the directory marker
 data/processed/*.parquet
 
+# Oracle sample cache (arb-curriculum Session 01) — gitignored, regenerated offline
+data/oracle_cache/
+
 # Model weights (large binary files)
 registry/weights/
 

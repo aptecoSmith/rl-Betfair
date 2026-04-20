@@ -146,6 +146,7 @@ def _compute_scalping_reward_terms(
     race_pnl: float,
     naked_per_pair: list[float],
     n_close_signal_successes: int,
+    naked_loss_scale: float = 1.0,
 ) -> tuple[float, float]:
     """Split a scalping race's settlement into raw and shaped terms.
 
@@ -170,13 +171,20 @@ def _compute_scalping_reward_terms(
     n_close_signal_successes:
         Count of pairs that completed via a ``close_signal`` action
         this race (pairs whose second leg carries ``close_leg=True``).
+    naked_loss_scale:
+        Per-pair loss-side scalar in [0, 1] (arb-curriculum Session 03).
+        Applied only to losses; naked winners are untouched. 1.0 is
+        byte-identical to pre-change. < 1.0 reduces the raw P&L penalty
+        of losing naked bets to bootstrap the policy past the naked
+        valley. See plans/arb-curriculum/hard_constraints.md s13-s15.
 
     Returns
     -------
     ``(race_reward_pnl, race_shaping)``
         ``race_reward_pnl`` feeds the raw accumulator and reports
-        actual race cashflow; ``race_shaping`` feeds the shaped
-        accumulator and carries the training-signal adjustments.
+        actual race cashflow (with loss-side scaling when enabled);
+        ``race_shaping`` feeds the shaped accumulator and carries the
+        training-signal adjustments.
 
     The two training-signal terms are:
 
@@ -191,7 +199,12 @@ def _compute_scalping_reward_terms(
     (outcome table) — the tests in ``TestNakedWinnerClipAndCloseBonus``
     assert every row.
     """
-    race_reward_pnl = race_pnl
+    # Arb-curriculum Session 03: scale the LOSS side of naked cash flows.
+    # Winners are untouched so directional luck keeps its full value.
+    # At scale=1.0 this is a no-op: loss_sum * 0 = 0.
+    loss_sum = sum(min(0.0, p) for p in naked_per_pair)
+    race_reward_pnl = race_pnl - (1.0 - naked_loss_scale) * loss_sum
+
     naked_winner_clip = -NAKED_WINNER_CLIP_FRACTION * sum(
         max(0.0, p) for p in naked_per_pair
     )
@@ -500,6 +513,14 @@ class BetfairEnv(gymnasium.Env):
         # here so a per-agent gene override can flow through the same
         # passthrough path as the other reward knobs.
         "mark_to_market_weight",
+        # Arb-curriculum Session 02 (2026-04-19): per-pair shaped bonus
+        # on pair maturation. Whitelisted so a per-agent gene override
+        # flows through.
+        "matured_arb_bonus_weight",
+        # Arb-curriculum Session 03 (2026-04-19): per-pair loss-side
+        # scalar on naked cash flows. Whitelisted so the generation-level
+        # annealed effective scale flows through as a per-agent override.
+        "naked_loss_scale",
     })
 
     def __init__(
@@ -618,6 +639,35 @@ class BetfairEnv(gymnasium.Env):
         # plans/reward-densification/hard_constraints.md §5-§9.
         self._mark_to_market_weight: float = float(
             reward_cfg.get("mark_to_market_weight", 0.0)
+        )
+        # Arb-curriculum Session 03 (2026-04-19). Per-pair loss-side scalar
+        # on naked cash flows; naked winners are untouched. 1.0 =
+        # byte-identical to pre-change. < 1.0 reduces the raw P&L penalty
+        # during early training so the policy can survive long enough to
+        # learn entry selection. See hard_constraints.md s13-s15.
+        self._naked_loss_scale: float = float(
+            reward_cfg.get("naked_loss_scale", 1.0)
+        )
+        if not (0.0 <= self._naked_loss_scale <= 1.0):
+            logger.warning(
+                "naked_loss_scale=%s out of [0,1]; clamping",
+                self._naked_loss_scale,
+            )
+            self._naked_loss_scale = float(
+                np.clip(self._naked_loss_scale, 0.0, 1.0)
+            )
+        # Arb-curriculum Session 02 (2026-04-19). Shaped contribution per
+        # pair that matured (second leg filled — naturally or via
+        # close_signal). Zero-mean corrected so random policies don't
+        # harvest free reward. See hard_constraints.md s10-s12.
+        self._matured_arb_bonus_weight: float = float(
+            reward_cfg.get("matured_arb_bonus_weight", 0.0)
+        )
+        self._matured_arb_bonus_cap: float = float(
+            reward_cfg.get("matured_arb_bonus_cap", 10.0)
+        )
+        self._matured_arb_expected_random: float = float(
+            reward_cfg.get("matured_arb_expected_random", 2.0)
         )
 
         # Scalping mechanics overrides (Issue 05, session 3). arb_spread_scale
@@ -1117,6 +1167,12 @@ class BetfairEnv(gymnasium.Env):
             # Rendered as a distinct "Pair closed at loss" activity-log
             # line by the trainer, separate from arb_events / nakeds.
             "close_events": list(self._close_events),
+            # Arb-curriculum Session 02: active weight for telemetry.
+            # 0.0 when bonus is disabled (default).
+            "matured_arb_bonus_active": self._matured_arb_bonus_weight,
+            # Arb-curriculum Session 03: active loss scale for telemetry.
+            # 1.0 = no scaling (default / byte-identical).
+            "naked_loss_scale_active": self._naked_loss_scale,
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -2397,6 +2453,19 @@ class BetfairEnv(gymnasium.Env):
             )
         early_lock_term = scalping_early_lock_bonus if self.scalping_mode else 0.0
 
+        matured_arb_term = 0.0
+        if self.scalping_mode and self._matured_arb_bonus_weight > 0.0:
+            n_matured = scalping_arbs_completed + scalping_arbs_closed
+            raw_matured_contribution = (
+                self._matured_arb_bonus_weight
+                * (n_matured - self._matured_arb_expected_random)
+            )
+            matured_arb_term = float(np.clip(
+                raw_matured_contribution,
+                -self._matured_arb_bonus_cap,
+                +self._matured_arb_bonus_cap,
+            ))
+
         shaped = (
             early_pick_bonus
             + precision_reward
@@ -2406,6 +2475,7 @@ class BetfairEnv(gymnasium.Env):
             + inactivity_term
             + naked_penalty_term
             + early_lock_term
+            + matured_arb_term
         )
         # Scalping-close-signal session 01: post-settlement, sum the
         # realised cash P&L of every pair whose second leg came from
@@ -2461,6 +2531,7 @@ class BetfairEnv(gymnasium.Env):
                 race_pnl=race_pnl,
                 naked_per_pair=naked_per_pair,
                 n_close_signal_successes=scalping_arbs_closed,
+                naked_loss_scale=self._naked_loss_scale,
             )
             shaped += race_shaping
         else:

@@ -63,6 +63,19 @@ reward:
   # hard_constraints.md §11 for why this is NOT a GA gene in this
   # plan.
   mark_to_market_weight: 0.05
+  # Arb-curriculum Session 02 (2026-04-19). Per-pair shaped bonus on
+  # pair maturation (completed or agent-closed). Zero-mean corrected
+  # against matured_arb_expected_random (default 2 pairs/race).
+  # Bounded by matured_arb_bonus_cap. Default 0.0 is a no-op.
+  # See plans/arb-curriculum/purpose.md.
+  matured_arb_bonus_weight: 0.0
+  matured_arb_bonus_cap: 10.0
+  matured_arb_expected_random: 2.0
+  # Arb-curriculum Session 03 (2026-04-19). Per-pair loss-side scalar on
+  # naked cash flows (winners untouched). 1.0 = byte-identical. Per-agent
+  # gene in [0.05, 1.0]; plan-level naked_loss_anneal schedule may
+  # interpolate toward 1.0 across generations.
+  naked_loss_scale: 1.0
   # Scalping-active-management auxiliary-head loss weights (plumbing
   # off by default — activation playbook bumps these per its Step E
   # before Session 07 validation). Declared here so per-plan
@@ -102,6 +115,13 @@ training:
   # dimension per runner (arb_spread) and the observation gains arb
   # state features. Off by default — legacy behaviour is byte-identical.
   scalping_mode: true
+  # Arb-curriculum Session 05 (2026-04-19). Per-agent training-day ordering
+  # derived from oracle density. Every day is still seen exactly once per
+  # epoch; only the order changes. Default random = pre-change behaviour.
+  # density_desc: arb-rich days first (pairs with BC warm-start).
+  # density_asc:  arb-sparse days first (ablation only).
+  # Missing oracle cache for a date is treated as density=0.
+  curriculum_day_order: random
 discard_policy:
   min_win_rate: 0.35
   min_mean_pnl: 0.0
@@ -251,6 +271,24 @@ hyperparameters:
       - ppo_lstm_v1
       - ppo_time_lstm_v1
       - ppo_transformer_v1
+    # Arb-curriculum Session 04 (2026-04-19). BC pretrain genes.
+    # bc_pretrain_steps=0 disables BC entirely (default — no-op).
+    # bc_learning_rate governs the separate BC Adam optimiser only.
+    # bc_target_entropy_warmup_eps controls how many PPO episodes the
+    # target-entropy controller anneals from post-BC measured entropy
+    # up to the configured target (150). 0 disables warmup.
+    bc_pretrain_steps:
+      type: int
+      min: 0
+      max: 2000
+    bc_learning_rate:
+      type: float_log
+      min: 1.0e-05
+      max: 1.0e-03
+    bc_target_entropy_warmup_eps:
+      type: int
+      min: 0
+      max: 20
 actions:
   force_aggressive: false
 features:
