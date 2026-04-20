@@ -94,6 +94,34 @@ class MatchResult:
         return self.unmatched_stake <= 0.0 and self.matched_stake > 0.0
 
 
+def passes_junk_filter(
+    price: float,
+    reference_price: float,
+    max_dev_pct: float,
+) -> bool:
+    """True iff *price* is within ±*max_dev_pct* of *reference_price*.
+
+    Pure-function mirror of the filter applied inside
+    :meth:`ExchangeMatcher._match`. Exported so the oracle and other
+    offline tools can apply the same filter without instantiating the
+    class.
+    """
+    if reference_price is None or reference_price <= 0.0 or price <= 0.0:
+        return False
+    lo = reference_price * (1.0 - max_dev_pct)
+    hi = reference_price * (1.0 + max_dev_pct)
+    return lo <= price <= hi
+
+
+def passes_price_cap(price: float, max_price: float | None) -> bool:
+    """True iff *price* does not exceed the optional hard cap.
+
+    Pure-function mirror of the cap check inside
+    :meth:`ExchangeMatcher._match`.
+    """
+    return max_price is None or price <= max_price
+
+
 class ExchangeMatcher:
     """Single-price order matcher with junk-level filtering.
 
