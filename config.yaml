@@ -63,6 +63,14 @@ reward:
   # hard_constraints.md §11 for why this is NOT a GA gene in this
   # plan.
   mark_to_market_weight: 0.05
+  # Arb-curriculum Session 02 (2026-04-19). Per-pair shaped bonus on
+  # pair maturation (completed or agent-closed). Zero-mean corrected
+  # against matured_arb_expected_random (default 2 pairs/race).
+  # Bounded by matured_arb_bonus_cap. Default 0.0 is a no-op.
+  # See plans/arb-curriculum/purpose.md.
+  matured_arb_bonus_weight: 0.0
+  matured_arb_bonus_cap: 10.0
+  matured_arb_expected_random: 2.0
   # Scalping-active-management auxiliary-head loss weights (plumbing
   # off by default — activation playbook bumps these per its Step E
   # before Session 07 validation). Declared here so per-plan

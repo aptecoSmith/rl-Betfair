@@ -10,6 +10,50 @@ Format per session follows
 
 ---
 
+## Session 02 — 2026-04-20
+
+**Commit:** (see git log)
+
+**What landed:**
+
+- `env/betfair_env.py` — 4 changes:
+  - `_REWARD_OVERRIDE_KEYS`: added `"matured_arb_bonus_weight"`.
+  - `__init__`: reads `matured_arb_bonus_weight` (0.0), `matured_arb_bonus_cap` (10.0),
+    `matured_arb_expected_random` (2.0) from reward config.
+  - `_settle_current_race`: computes `matured_arb_term` using
+    `clip(weight * (n_matured - expected_random), -cap, +cap)` where
+    `n_matured = scalping_arbs_completed + scalping_arbs_closed`. Added to
+    `shaped` sum. Term is 0.0 when `weight == 0.0` (no-op by construction).
+  - `_get_info()`: emits `"matured_arb_bonus_active": self._matured_arb_bonus_weight`.
+- `agents/ppo_trainer.py` — 3 changes:
+  - `_REWARD_GENE_MAP`: added `"matured_arb_bonus_weight": ("matured_arb_bonus_weight",)`.
+  - `EpisodeStats`: added `matured_arb_bonus_active: float = 0.0`.
+  - `_build_episode_stats`: reads `info.get("matured_arb_bonus_active", 0.0)`.
+  - `_log_episode`: writes `"matured_arb_bonus_active"` to JSONL row.
+- `config.yaml`: added `matured_arb_bonus_weight: 0.0`, `matured_arb_bonus_cap: 10.0`,
+  `matured_arb_expected_random: 2.0` under `reward:`.
+- `CLAUDE.md`: new "Matured-arb bonus (2026-04-19)" subsection under
+  "Symmetry around random betting".
+- `tests/arb_curriculum/test_matured_arb_bonus.py`: 15 tests across 8 categories.
+  All 15 pass.
+
+**Not changed:** matcher behaviour, env schemas, raw P&L accounting, oracle scan,
+  PPO stability defences, other reward knobs, action/obs schemas.
+
+**Gotchas:**
+- The env's `action_space` is a flat Box of shape `(max_runners × actions_per_runner,)`;
+  tests that step the env must pass a float32 array, not scalar 0. Use
+  `np.zeros(env.action_space.shape, dtype=np.float32)` as the noop action.
+- `BetfairEnv.__init__` hard-requires `early_pick_bonus_min`, `early_pick_bonus_max`,
+  `early_pick_min_seconds`, and `efficiency_penalty` in the reward config dict.
+  Minimal test configs must include these four keys.
+
+**Test suite:** `pytest tests/arb_curriculum/ -v` → 34 passed, 1 skipped.
+
+**Next:** Session 03 — Naked-loss annealing.
+
+---
+
 ## Session 01 — 2026-04-20
 
 **Commit:** (see git log)
@@ -65,7 +109,7 @@ Format per session follows
   `python -m training.arb_oracle scan --dates <dates>` after confirming
   no active training. Append results here. Flag any day with density < 0.001.
 
-**Next:** Session 02 — Matured-arb bonus (knob at 0 default).
+**Next:** Session 03 — Naked-loss annealing.
 
 ---
 

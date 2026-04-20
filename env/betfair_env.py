@@ -500,6 +500,10 @@ class BetfairEnv(gymnasium.Env):
         # here so a per-agent gene override can flow through the same
         # passthrough path as the other reward knobs.
         "mark_to_market_weight",
+        # Arb-curriculum Session 02 (2026-04-19): per-pair shaped bonus
+        # on pair maturation. Whitelisted so a per-agent gene override
+        # flows through.
+        "matured_arb_bonus_weight",
     })
 
     def __init__(
@@ -618,6 +622,19 @@ class BetfairEnv(gymnasium.Env):
         # plans/reward-densification/hard_constraints.md §5-§9.
         self._mark_to_market_weight: float = float(
             reward_cfg.get("mark_to_market_weight", 0.0)
+        )
+        # Arb-curriculum Session 02 (2026-04-19). Shaped contribution per
+        # pair that matured (second leg filled — naturally or via
+        # close_signal). Zero-mean corrected so random policies don't
+        # harvest free reward. See hard_constraints.md s10-s12.
+        self._matured_arb_bonus_weight: float = float(
+            reward_cfg.get("matured_arb_bonus_weight", 0.0)
+        )
+        self._matured_arb_bonus_cap: float = float(
+            reward_cfg.get("matured_arb_bonus_cap", 10.0)
+        )
+        self._matured_arb_expected_random: float = float(
+            reward_cfg.get("matured_arb_expected_random", 2.0)
         )
 
         # Scalping mechanics overrides (Issue 05, session 3). arb_spread_scale
@@ -1117,6 +1134,9 @@ class BetfairEnv(gymnasium.Env):
             # Rendered as a distinct "Pair closed at loss" activity-log
             # line by the trainer, separate from arb_events / nakeds.
             "close_events": list(self._close_events),
+            # Arb-curriculum Session 02: active weight for telemetry.
+            # 0.0 when bonus is disabled (default).
+            "matured_arb_bonus_active": self._matured_arb_bonus_weight,
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -2397,6 +2417,19 @@ class BetfairEnv(gymnasium.Env):
             )
         early_lock_term = scalping_early_lock_bonus if self.scalping_mode else 0.0
 
+        matured_arb_term = 0.0
+        if self.scalping_mode and self._matured_arb_bonus_weight > 0.0:
+            n_matured = scalping_arbs_completed + scalping_arbs_closed
+            raw_matured_contribution = (
+                self._matured_arb_bonus_weight
+                * (n_matured - self._matured_arb_expected_random)
+            )
+            matured_arb_term = float(np.clip(
+                raw_matured_contribution,
+                -self._matured_arb_bonus_cap,
+                +self._matured_arb_bonus_cap,
+            ))
+
         shaped = (
             early_pick_bonus
             + precision_reward
@@ -2406,6 +2439,7 @@ class BetfairEnv(gymnasium.Env):
             + inactivity_term
             + naked_penalty_term
             + early_lock_term
+            + matured_arb_term
         )
         # Scalping-close-signal session 01: post-settlement, sum the
         # realised cash P&L of every pair whose second leg came from

@@ -281,6 +281,8 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     # that explicitly opt into evolving the knob route through this
     # map.
     "mark_to_market_weight": ("mark_to_market_weight",),
+    # Arb-curriculum Session 02 (2026-04-19).
+    "matured_arb_bonus_weight": ("matured_arb_bonus_weight",),
 }
 
 
@@ -439,6 +441,8 @@ class EpisodeStats:
     # default to 0 for pre-change rows / weight=0 runs.
     mtm_weight_active: float = 0.0
     cumulative_mtm_shaped: float = 0.0
+    # Arb-curriculum Session 02: active weight for JSONL telemetry.
+    matured_arb_bonus_active: float = 0.0
 
 
 @dataclass
@@ -1242,6 +1246,9 @@ class PPOTrainer:
             cumulative_mtm_shaped=float(
                 info.get("cumulative_mtm_shaped", 0.0) or 0.0
             ),
+            matured_arb_bonus_active=float(
+                info.get("matured_arb_bonus_active", 0.0) or 0.0
+            ),
         )
 
         return rollout, ep_stats
@@ -2013,6 +2020,10 @@ class PPOTrainer:
             "mtm_weight_active": round(float(ep.mtm_weight_active), 6),
             "cumulative_mtm_shaped": round(
                 float(ep.cumulative_mtm_shaped), 6,
+            ),
+            # Arb-curriculum Session 02: active weight telemetry.
+            "matured_arb_bonus_active": round(
+                float(ep.matured_arb_bonus_active), 6,
             ),
             # Forced-arbitrage (scalping) rollups — zero for directional.
             "arbs_completed": ep.arbs_completed,

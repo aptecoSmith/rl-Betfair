@@ -261,6 +261,21 @@ random betting, which taught the agent to bet more without caring
 whether its bets were profitable. That's the opposite of what you
 want.
 
+### Matured-arb bonus (2026-04-19)
+
+A small shaped reward per pair that matured (second leg filled,
+naturally or via close_signal), zero-mean corrected against an
+expected random-policy pair count. Shaped contribution per race:
+
+    raw_bonus = weight * (n_matured - expected_random)
+    matured_arb_term = clip(raw_bonus, -cap, +cap)
+
+Default weight 0.0 = no-op. When > 0, the bonus rewards the SKILL
+of closing pair lifecycles (independent of P&L sign), not the
+outcome. Cap prevents a runaway race from dominating shaped reward.
+See `plans/arb-curriculum/purpose.md` for the credit-assignment
+motivation.
+
 ## PPO update stability — advantage normalisation
 
 The PPO update normalises the per-mini-batch advantage tensor
