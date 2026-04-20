@@ -10,6 +10,111 @@ Format per session follows
 
 ---
 
+## Session 07 — 2026-04-20
+
+**Commit:** (see git log)
+
+**What landed:**
+
+- `scripts/check_arb_curriculum_prereqs.py` — pre-launch checklist (5 checks):
+  1. `config.yaml training.curriculum_day_order == "density_desc"`
+  2. `registry/models.db` has 0 models (fresh registry)
+  3. `arb-curriculum-probe` plan exists in `registry/training_plans/` with
+     status=draft; validates seed=7919, pop=33, gens=4, `naked_loss_anneal` set.
+  4. `data/oracle_cache/` has ≥1 date with `oracle_samples.npz`
+  5. `logs/training/episodes.jsonl` is empty (fresh start)
+  Exit 0 = all pass. Run this BEFORE launching the probe.
+
+- `scripts/validate_arb_curriculum.py` — post-run validator (5 criteria):
+  1. ≥80% of agents remain active (bets>0) through episode 15.
+  2. `arbs_closed/(arbs_closed+arbs_naked) > 15%` on ≥3 agents at ep15.
+  3. `policy_loss ≥ 0.1` on ≥50% of agents at ep15.
+  4. ≥3 agents reach `total_reward > 0` at any point in the run.
+  5. `raw_pnl_reward + shaped_bonus ≈ total_reward` (spot-check, tol=0.01).
+  Reads `logs/training/episodes.jsonl` (skips `smoke_test` rows).
+  Prints BC diagnostics table + per-agent summary before criteria.
+  Exit 0 = all pass; exit 1 = some fail; exit 2 = no data.
+  Usage: `python scripts/validate_arb_curriculum.py [--log PATH] [--spot-check-n N]`
+
+- `plans/arb-curriculum/progress.md` — this entry + validation template below.
+
+**Not changed:** no code or test changes in this session (hard_constraints §35).
+
+**What's blocked (operator prereqs — Session 06 checklist):**
+
+1. Merge `claude/romantic-hodgkin-b2897d` to master.
+2. Run Session 06 archive + registry reset steps (see Session 06 entry below).
+3. Set `config.yaml training.curriculum_day_order: density_desc`.
+4. Run oracle scan: `python -m training.arb_oracle scan --dates <training_dates>`.
+5. Run prereq checker: `python scripts/check_arb_curriculum_prereqs.py` — must exit 0.
+6. Launch probe via admin UI (smoke test first; then full run with pop=33, gens=4).
+
+**Launch sequence (once prereqs pass):**
+
+```powershell
+# Step 1 — verify prereqs
+python scripts/check_arb_curriculum_prereqs.py
+
+# Step 2 — launch via admin UI
+#   Start dev stack, navigate to Training Plans, select "arb-curriculum-probe",
+#   tick "Smoke test first", click Launch. Monitor episodes.jsonl.
+
+# Step 3 — after run completes, evaluate criteria
+python scripts/validate_arb_curriculum.py
+
+# Step 4 — fill in the Validation template below with results.
+```
+
+**Test suite:** no new tests (the two scripts are standalone CLI tools).
+  Full suite still green from Session 05 (90 tests, 1 skipped).
+
+**Next:** Operator: complete Session 06 prereqs, launch probe, run validator.
+  Record results in the Validation section below.
+
+---
+
+## Validation — arb-curriculum-probe
+
+_Fill in after running `python scripts/validate_arb_curriculum.py` on the
+completed probe run. Replace every `[FILL IN]` marker._
+
+**Run date:** [FILL IN — YYYY-MM-DD]
+**Probe plan ID:** 277bbf49-8a2b-4d84-b8a3-3b9286e115eb
+**Agents:** 33 (pop) × 4 gens × 3 epochs
+**Seed:** 7919
+**curriculum_day_order:** density_desc
+**Total episodes logged:** [FILL IN]
+
+**Criteria results:**
+
+| # | Criterion | Pass? | Detail |
+|---|---|---|---|
+| C1 | ≥80% active at ep15 | [PASS/FAIL] | [X/Y agents, Z%] |
+| C2 | arbs_closed/total > 15% on ≥3 agents at ep15 | [PASS/FAIL] | [N qualifying agents] |
+| C3 | policy_loss ≥ 0.1 on ≥50% agents at ep15 | [PASS/FAIL] | [X/Y agents, Z%] |
+| C4 | ≥3 agents reach total_reward > 0 | [PASS/FAIL] | [N agents, top-3 peaks] |
+| C5 | raw+shaped ≈ total (invariant) | [PASS/FAIL] | [0 violations / N checked] |
+
+**Summary score:** [X/5 criteria pass]
+
+**BC diagnostics (from validator output):**
+
+```
+[paste bc_pretrain diagnostics table here]
+```
+
+**Decision:**
+
+- [ ] ≥4/5 pass → open `arb-curriculum-scale` (16-agent × 10-gen scale run)
+- [ ] C5 fails → STOP. Fix invariant. Do not ship.
+- [ ] 1–4 criteria fail → open `observation-space-audit`
+- [ ] partial → open `arb-curriculum-tune` (tighten gene ranges)
+
+**Chosen path:** [FILL IN]
+**Notes:** [FILL IN — any anomalies, eg agent(s) that collapsed, unexpected arb ratios]
+
+---
+
 ## Session 06 — 2026-04-20
 
 **Commit:** (see git log)
