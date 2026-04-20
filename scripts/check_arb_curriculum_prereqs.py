@@ -7,8 +7,8 @@ Usage (from repo root):
     python scripts/check_arb_curriculum_prereqs.py
 
 Exit codes:
-    0: all checks pass — safe to launch
-    1: one or more checks failed — do not launch yet
+    0: all checks pass -- safe to launch
+    1: one or more checks failed -- do not launch yet
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def main() -> int:
     print("=" * 60)
     results: list[bool] = []
 
-    # ── 1. config.yaml has curriculum_day_order: density_desc ─────────────
+    # -- 1. config.yaml has curriculum_day_order: density_desc -------------
     try:
         config = yaml.safe_load(CONFIG_PATH.read_text())
         mode = config.get("training", {}).get("curriculum_day_order", "random")
@@ -57,7 +57,7 @@ def main() -> int:
     except Exception as exc:
         results.append(_check("config.yaml readable", False, str(exc)))
 
-    # ── 2. registry/models.db has 0 models (fresh registry) ───────────────
+    # -- 2. registry/models.db has 0 models (fresh registry) ---------------
     if REGISTRY_DB.exists():
         try:
             conn = sqlite3.connect(REGISTRY_DB)
@@ -66,7 +66,7 @@ def main() -> int:
             results.append(_check(
                 "registry/models.db has 0 models (fresh registry)",
                 n == 0,
-                f"Found {n} model(s) — run ModelStore() to initialise a fresh registry, "
+                f"Found {n} model(s) -- run ModelStore() to initialise a fresh registry, "
                 "or verify you archived the old one.",
             ))
         except Exception as exc:
@@ -75,10 +75,10 @@ def main() -> int:
         results.append(_check(
             "registry/models.db exists",
             False,
-            "File missing — run: from registry.model_store import ModelStore; ModelStore()",
+            "File missing -- run: from registry.model_store import ModelStore; ModelStore()",
         ))
 
-    # ── 3. arb-curriculum-probe plan exists in draft status ───────────────
+    # -- 3. arb-curriculum-probe plan exists in draft status ---------------
     if TRAINING_PLANS_DIR.exists():
         plans = list(TRAINING_PLANS_DIR.glob("*.json"))
         probe_plan = None
@@ -122,7 +122,7 @@ def main() -> int:
             "Directory missing.",
         ))
 
-    # ── 4. oracle cache exists for at least some training dates ───────────
+    # -- 4. oracle cache exists for at least some training dates -----------
     if ORACLE_CACHE_DIR.exists():
         date_dirs = [d for d in ORACLE_CACHE_DIR.iterdir() if d.is_dir()]
         npz_count = sum(
@@ -140,14 +140,14 @@ def main() -> int:
                 except Exception:
                     pass
         results.append(_check(
-            f"Oracle cache has ≥1 date with samples",
+            f"Oracle cache has >=1 date with samples",
             npz_count > 0,
             f"Dates with cache: {npz_count}/{len(date_dirs)}. "
             "Run: python -m training.arb_oracle scan --dates <dates>",
         ))
         if zero_density:
             print(
-                f"         ⚠ {len(zero_density)} date(s) have density=0 "
+                f"         [!] {len(zero_density)} date(s) have density=0 "
                 f"(sparse days): {zero_density[:5]}"
             )
     else:
@@ -157,7 +157,7 @@ def main() -> int:
             "Run: python -m training.arb_oracle scan --dates <your_training_dates>",
         ))
 
-    # ── 5. episodes.jsonl is empty (fresh start) ──────────────────────────
+    # -- 5. episodes.jsonl is empty (fresh start) --------------------------
     episodes_log = Path("logs/training/episodes.jsonl")
     if episodes_log.exists():
         size = episodes_log.stat().st_size
@@ -174,16 +174,16 @@ def main() -> int:
             "Create it: New-Item -ItemType File -Force logs/training/episodes.jsonl",
         ))
 
-    # ── Summary ───────────────────────────────────────────────────────────
+    # -- Summary -----------------------------------------------------------
     print()
     passed = sum(results)
     total = len(results)
     print(f"Result: {passed}/{total} checks passed")
     if passed == total:
-        print("✓ All checks passed — safe to launch arb-curriculum-probe.")
+        print("OK All checks passed - safe to launch arb-curriculum-probe.")
         return 0
     else:
-        print("✗ Fix the failed checks before launching.")
+        print("FAIL Fix the failed checks before launching.")
         return 1
 
 

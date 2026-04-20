@@ -1,7 +1,7 @@
 """Post-run validator for arb-curriculum-probe.
 
 Reads logs/training/episodes.jsonl (or a path you supply) and evaluates the
-5 validation criteria from plans/arb-curriculum/purpose.md §What success
+5 validation criteria from plans/arb-curriculum/purpose.md sWhat success
 looks like.
 
 Usage (from repo root):
@@ -11,11 +11,11 @@ Usage (from repo root):
 
 Criteria evaluated
 ------------------
-1. ≥80% of agents remain active (bets>0) through episode 15.
-2. arbs_closed/arbs_naked > 15% on ≥3 agents by episode 15.
-3. policy_loss stays O(1)+ (≥0.1) through episode 15 on ≥50% of agents.
-4. ≥3 agents reach total_reward > 0 at any point in the run.
-5. raw_pnl_reward + shaped_bonus ≈ total_reward every episode
+1. >=80% of agents remain active (bets>0) through episode 15.
+2. arbs_closed/arbs_naked > 15% on >=3 agents by episode 15.
+3. policy_loss stays O(1)+ (>=0.1) through episode 15 on >=50% of agents.
+4. >=3 agents reach total_reward > 0 at any point in the run.
+5. raw_pnl_reward + shaped_bonus ~= total_reward every episode
    (spot-check on --spot-check-n random rows; tolerance 0.01).
 
 Exit codes:
@@ -94,8 +94,8 @@ def evaluate(rows: list[dict], spot_check_n: int = DEFAULT_SPOT_CHECK_N) -> dict
 
     results: dict[str, bool] = {}
 
-    # ── Criterion 1: ≥80% active at ep15 ──────────────────────────────────
-    print("Criterion 1: ≥80% of agents active (bets>0) through episode 15")
+    # -- Criterion 1: >=80% active at ep15 ----------------------------------
+    print("Criterion 1: >=80% of agents active (bets>0) through episode 15")
     active_count = 0
     missing_ep15 = 0
     for mid, eps in by_agent.items():
@@ -113,13 +113,13 @@ def evaluate(rows: list[dict], spot_check_n: int = DEFAULT_SPOT_CHECK_N) -> dict
         + (f"{missing_ep15} agents didn't reach ep{TARGET_EPISODE}." if missing_ep15 else "")
     )
     results["c1_active"] = _check(
-        f"≥{MIN_ACTIVE_FRACTION:.0%} active at ep{TARGET_EPISODE}",
+        f">={MIN_ACTIVE_FRACTION:.0%} active at ep{TARGET_EPISODE}",
         fraction >= MIN_ACTIVE_FRACTION,
         detail,
     )
 
-    # ── Criterion 2: arbs_closed/arbs_naked > 15% on ≥3 agents at ep15 ────
-    print("\nCriterion 2: arbs_closed/arbs_naked > 15% on ≥3 agents by ep15")
+    # -- Criterion 2: arbs_closed/arbs_naked > 15% on >=3 agents at ep15 ----
+    print("\nCriterion 2: arbs_closed/arbs_naked > 15% on >=3 agents by ep15")
     qualifying_agents = 0
     for mid, eps in by_agent.items():
         ep15 = episode_at(eps, TARGET_EPISODE)
@@ -131,15 +131,15 @@ def evaluate(rows: list[dict], spot_check_n: int = DEFAULT_SPOT_CHECK_N) -> dict
         if total_arbs > 0 and (closed / total_arbs) > MIN_CLOSE_RATIO:
             qualifying_agents += 1
     results["c2_close_ratio"] = _check(
-        f"≥{MIN_CLOSE_RATIO_AGENTS} agents with arbs_closed/arbs_naked > "
+        f">={MIN_CLOSE_RATIO_AGENTS} agents with arbs_closed/arbs_naked > "
         f"{MIN_CLOSE_RATIO:.0%} at ep{TARGET_EPISODE}",
         qualifying_agents >= MIN_CLOSE_RATIO_AGENTS,
         f"{qualifying_agents} qualifying agent(s). "
-        f"(Baseline: 5–7% population-wide; target: triple to >15%)",
+        f"(Baseline: 5-7% population-wide; target: triple to >15%)",
     )
 
-    # ── Criterion 3: policy_loss ≥0.1 through ep15 on ≥50% of agents ──────
-    print("\nCriterion 3: policy_loss stays ≥0.1 through ep15 on ≥50% of agents")
+    # -- Criterion 3: policy_loss >=0.1 through ep15 on >=50% of agents ------
+    print("\nCriterion 3: policy_loss stays >=0.1 through ep15 on >=50% of agents")
     stable_count = 0
     for mid, eps in by_agent.items():
         ep15 = episode_at(eps, TARGET_EPISODE)
@@ -149,14 +149,14 @@ def evaluate(rows: list[dict], spot_check_n: int = DEFAULT_SPOT_CHECK_N) -> dict
             stable_count += 1
     stable_frac = stable_count / measurable if measurable > 0 else 0.0
     results["c3_policy_loss"] = _check(
-        f"≥50% of agents have policy_loss ≥{MIN_POLICY_LOSS} at ep{TARGET_EPISODE}",
+        f">=50% of agents have policy_loss >={MIN_POLICY_LOSS} at ep{TARGET_EPISODE}",
         stable_frac >= 0.50,
         f"{stable_count}/{measurable} agents ({stable_frac:.0%}) still have "
-        f"policy_loss ≥{MIN_POLICY_LOSS}.",
+        f"policy_loss >={MIN_POLICY_LOSS}.",
     )
 
-    # ── Criterion 4: ≥3 agents reach total_reward > 0 ─────────────────────
-    print("\nCriterion 4: ≥3 agents reach total_reward > 0 at any point")
+    # -- Criterion 4: >=3 agents reach total_reward > 0 ---------------------
+    print("\nCriterion 4: >=3 agents reach total_reward > 0 at any point")
     positive_agents = 0
     best_rewards: list[tuple[str, float]] = []
     for mid, eps in by_agent.items():
@@ -166,17 +166,17 @@ def evaluate(rows: list[dict], spot_check_n: int = DEFAULT_SPOT_CHECK_N) -> dict
         best_rewards.append((mid, peak))
     best_rewards.sort(key=lambda t: t[1], reverse=True)
     top3 = ", ".join(
-        f"{mid[:8]}…={rw:+.2f}" for mid, rw in best_rewards[:3]
+        f"{mid[:8]}...={rw:+.2f}" for mid, rw in best_rewards[:3]
     )
     results["c4_positive_reward"] = _check(
-        f"≥{MIN_POSITIVE_AGENTS} agents reach total_reward > 0",
+        f">={MIN_POSITIVE_AGENTS} agents reach total_reward > 0",
         positive_agents >= MIN_POSITIVE_AGENTS,
         f"{positive_agents} agent(s) ever reached positive reward. "
         f"Top-3 peak: {top3}",
     )
 
-    # ── Criterion 5: invariant raw+shaped≈total ────────────────────────────
-    print(f"\nCriterion 5: raw+shaped ≈ total (spot-check {spot_check_n} random rows, "
+    # -- Criterion 5: invariant raw+shaped~=total ----------------------------
+    print(f"\nCriterion 5: raw+shaped ~= total (spot-check {spot_check_n} random rows, "
           f"tol={INVARIANT_TOL})")
     sample = random.sample(rows, min(spot_check_n, len(rows))) if rows else []
     violations: list[tuple[int, float]] = []
@@ -195,11 +195,11 @@ def evaluate(rows: list[dict], spot_check_n: int = DEFAULT_SPOT_CHECK_N) -> dict
     detail = (
         f"Checked {len(sample)} rows; {len(violations)} violations "
         f"(tol={INVARIANT_TOL}). "
-        + ("✓ All pass." if not violations else
-           "✗ Fix accounting in Sessions 02/03 before proceeding.")
+        + ("All pass." if not violations else
+           "FAIL: Fix accounting in Sessions 02/03 before proceeding.")
     )
     results["c5_invariant"] = _check(
-        "raw+shaped ≈ total (correctness gate — non-negotiable)",
+        "raw+shaped ~= total (correctness gate -- non-negotiable)",
         len(violations) == 0,
         detail,
     )
@@ -228,7 +228,7 @@ def print_bc_diagnostics(by_agent: dict[str, list[dict]]) -> None:
                 f"{ep1.get('target_entropy', float('nan')):>11.2f}"
             )
     if not any_bc:
-        print("  (no BC pretrain rows found — all agents may have bc_pretrain_steps=0)")
+        print("  (no BC pretrain rows found -- all agents may have bc_pretrain_steps=0)")
 
 
 def print_per_agent_summary(by_agent: dict[str, list[dict]]) -> None:
@@ -295,9 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     print_bc_diagnostics(by_agent)
     print_per_agent_summary(by_agent)
 
-    print("\n" + "─" * 60)
+    print("\n" + "-" * 60)
     print("Criteria evaluation")
-    print("─" * 60)
+    print("-" * 60)
     results = evaluate(rows, spot_check_n=args.spot_check_n)
 
     # Summary
@@ -307,31 +307,31 @@ def main(argv: list[str] | None = None) -> int:
     print(f"SUMMARY: {passed}/{total} criteria passed")
 
     criterion_labels = {
-        "c1_active":        "C1 active ≥80%",
-        "c2_close_ratio":   "C2 close_ratio >15% (≥3 agents)",
-        "c3_policy_loss":   "C3 policy_loss O(1)+ (≥50% agents)",
-        "c4_positive_reward": "C4 positive reward (≥3 agents)",
-        "c5_invariant":     "C5 invariant raw+shaped≈total",
+        "c1_active":        "C1 active >=80%",
+        "c2_close_ratio":   "C2 close_ratio >15% (>=3 agents)",
+        "c3_policy_loss":   "C3 policy_loss O(1)+ (>=50% agents)",
+        "c4_positive_reward": "C4 positive reward (>=3 agents)",
+        "c5_invariant":     "C5 invariant raw+shaped~=total",
     }
     for key, label in criterion_labels.items():
         tag = "PASS" if results.get(key) else "FAIL"
         print(f"  [{tag}] {label}")
 
     if not results.get("c5_invariant"):
-        print("\n⚠ CORRECTNESS GATE FAILED (C5). Do NOT proceed.")
+        print("\n[!] CORRECTNESS GATE FAILED (C5). Do NOT proceed.")
         print("  Roll back Sessions 02/03, fix accounting, retest, redo Session 06.")
     elif passed == total:
-        print("\n✓ All criteria pass. Next: open arb-curriculum-scale plan.")
+        print("\nOK All criteria pass. Next: open arb-curriculum-scale plan.")
     elif passed >= 4:
-        print("\n~ ≥4 criteria pass. Partial success — consider arb-curriculum-tune.")
+        print("\n~~ >=4 criteria pass. Partial success - consider arb-curriculum-tune.")
     else:
-        print("\n✗ <4 criteria pass. See master_todo.md §After Session 07 for decision tree.")
+        print("\nFAIL <4 criteria pass. See master_todo.md after Session 07 for decision tree.")
 
     # Decision guide
-    print("\n" + "─" * 60)
-    print("Decision guide (master_todo.md §After Session 07)")
-    print("─" * 60)
-    print("  ≥4 pass:    open arb-curriculum-scale (16-agent x 10-gen scale run)")
+    print("\n" + "-" * 60)
+    print("Decision guide (master_todo.md sAfter Session 07)")
+    print("-" * 60)
+    print("  >=4 pass:    open arb-curriculum-scale (16-agent x 10-gen scale run)")
     print("  C5 fails:   STOP. Fix invariant. Do not ship.")
     print("  1-4 fail:   open observation-space-audit")
     print("  partial:    open arb-curriculum-tune (tighten gene ranges)")
