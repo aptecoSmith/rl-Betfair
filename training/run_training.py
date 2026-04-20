@@ -61,7 +61,9 @@ from data.episode_builder import Day
 from env.betfair_env import ACTION_SCHEMA_VERSION, OBS_SCHEMA_VERSION
 from registry.model_store import ModelStore
 from registry.scoreboard import ModelScore, Scoreboard
+from agents.bc_pretrainer import BCPretrainer, measure_entropy
 from training.arb_annealing import effective_naked_loss_scale
+from training.arb_oracle import load_samples
 from training.evaluator import Evaluator
 from training.perf_log import gpu_memory_summary, perf_log
 from training.progress_tracker import ProgressTracker, RunProgressTracker
@@ -633,6 +635,75 @@ class TrainingOrchestrator:
                     model_id=agent.model_id,
                     architecture_name=agent.architecture_name,
                 )
+
+                # Arb-curriculum Session 04: BC pretrain before first
+                # PPO rollout. Only runs when scalping_mode is on and
+                # bc_pretrain_steps > 0 in the agent's gene.
+                _bc_steps = int(hp.get("bc_pretrain_steps", 0) or 0)
+                _scalping_on = self.config.get(
+                    "training", {}
+                ).get("scalping_mode", False)
+                if _scalping_on and _bc_steps > 0:
+                    _all_samples: list = []
+                    for _date in [d.date for d in train_days]:
+                        try:
+                            _all_samples.extend(
+                                load_samples(
+                                    _date,
+                                    Path("data/processed"),
+                                    strict=True,
+                                )
+                            )
+                        except FileNotFoundError:
+                            logger.warning(
+                                "BC: oracle cache missing for %s; "
+                                "skipping date",
+                                _date,
+                            )
+                        except ValueError as _exc:
+                            logger.warning(
+                                "BC: oracle schema mismatch for %s "
+                                "(%s); skipping date",
+                                _date, _exc,
+                            )
+                    if not _all_samples:
+                        logger.warning(
+                            "BC requested (steps=%d) but no oracle "
+                            "samples available; skipping BC for "
+                            "agent %s",
+                            _bc_steps, agent.model_id[:12],
+                        )
+                    else:
+                        _bc_lr = float(
+                            hp.get("bc_learning_rate", 3e-4) or 3e-4
+                        )
+                        _bc = BCPretrainer(lr=_bc_lr)
+                        _bc_history = _bc.pretrain(
+                            agent.policy, _all_samples,
+                            n_steps=_bc_steps,
+                        )
+                        trainer._bc_loss_history = _bc_history
+                        trainer._bc_pretrain_steps_done = len(
+                            _bc_history.signal_losses
+                        )
+                        trainer._post_bc_entropy = measure_entropy(
+                            agent.policy, _all_samples[:256],
+                        )
+                        trainer._bc_target_entropy_warmup_eps = int(
+                            hp.get(
+                                "bc_target_entropy_warmup_eps", 5
+                            ) or 5
+                        )
+                        logger.info(
+                            "BC pretrain: agent=%s steps=%d "
+                            "signal_loss=%.4f arb_spread_loss=%.4f "
+                            "post_bc_entropy=%.1f",
+                            agent.model_id[:12], _bc_steps,
+                            _bc_history.final_signal_loss,
+                            _bc_history.final_arb_spread_loss,
+                            trainer._post_bc_entropy,
+                        )
+
                 train_start = time.time()
                 with perf_log(
                     logger,

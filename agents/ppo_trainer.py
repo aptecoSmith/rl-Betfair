@@ -447,6 +447,11 @@ class EpisodeStats:
     matured_arb_bonus_active: float = 0.0
     # Arb-curriculum Session 03: active loss scale for JSONL telemetry.
     naked_loss_scale_active: float = 1.0
+    # Arb-curriculum Session 04: BC pretrain diagnostics — written only
+    # on the first post-BC episode (bc_pretrain_steps > 0 marks it).
+    bc_pretrain_steps: int = 0
+    bc_final_signal_loss: float = 0.0
+    bc_final_arb_spread_loss: float = 0.0
 
 
 @dataclass
@@ -757,6 +762,14 @@ class PPOTrainer:
         # decayed bias for the current epoch without re-threading args.
         self._current_epoch: int = 0
 
+        # Arb-curriculum Session 04: BC-pretrain + controller handshake.
+        # Set externally by run_training after bc.pretrain() completes.
+        self._bc_target_entropy_warmup_eps: int = 0
+        self._post_bc_entropy: float | None = None
+        self._eps_since_bc: int = 0
+        self._bc_loss_history = None
+        self._bc_pretrain_steps_done: int = 0
+
         # Build per-agent reward overrides from the sampled genes. This is
         # how reward-shaping hyperparameters reach BetfairEnv — previously
         # these genes were sampled but silently dropped here, so every
@@ -873,6 +886,18 @@ class PPOTrainer:
                     }
 
                 tracker.tick()
+
+                # Arb-curriculum Session 04: populate BC fields on the
+                # first post-BC episode so they appear in episodes.jsonl.
+                if self._eps_since_bc == 0 and self._bc_loss_history is not None:
+                    ep_stats.bc_pretrain_steps = self._bc_pretrain_steps_done
+                    ep_stats.bc_final_signal_loss = (
+                        self._bc_loss_history.final_signal_loss
+                    )
+                    ep_stats.bc_final_arb_spread_loss = (
+                        self._bc_loss_history.final_arb_spread_loss
+                    )
+                self._eps_since_bc += 1
 
                 # Log and publish progress
                 self._log_episode(ep_stats, loss_info, tracker)
@@ -1745,6 +1770,27 @@ class PPOTrainer:
 
     # -- Target-entropy controller (entropy-control-v2) ---------------------
 
+    def _effective_target_entropy(self) -> float:
+        """Post-BC warmup: anneal effective target from post-BC measured
+        entropy up to the configured target over
+        ``_bc_target_entropy_warmup_eps`` episodes.
+
+        When no BC was run (``_post_bc_entropy is None``), or warmup is
+        complete (``_eps_since_bc >= _bc_target_entropy_warmup_eps``), or
+        warmup is disabled (``_bc_target_entropy_warmup_eps <= 0``), returns
+        the configured ``_target_entropy`` unchanged.
+        """
+        if (
+            self._post_bc_entropy is None
+            or self._bc_target_entropy_warmup_eps <= 0
+            or self._eps_since_bc >= self._bc_target_entropy_warmup_eps
+        ):
+            return float(self._target_entropy)
+        p = self._eps_since_bc / self._bc_target_entropy_warmup_eps
+        return self._post_bc_entropy + p * (
+            float(self._target_entropy) - self._post_bc_entropy
+        )
+
     def _update_entropy_coefficient(self, current_entropy: float) -> None:
         """Proportional target-entropy controller step.
 
@@ -1793,7 +1839,7 @@ class PPOTrainer:
         plans/entropy-control-v2/lessons_learnt.md 2026-04-19.
         """
         alpha_loss = -self._log_alpha * (
-            self._target_entropy - float(current_entropy)
+            self._effective_target_entropy() - float(current_entropy)
         )
         self._alpha_optimizer.zero_grad()
         alpha_loss.backward()
@@ -2020,7 +2066,7 @@ class PPOTrainer:
             # absence.
             "alpha": round(float(self._log_alpha.exp().item()), 8),
             "log_alpha": round(float(self._log_alpha.item()), 6),
-            "target_entropy": round(float(self._target_entropy), 4),
+            "target_entropy": round(float(self._effective_target_entropy()), 4),
             # Reward-densification Session 01 — per-step mark-to-market
             # shaping telemetry. Optional keys; pre-change rows lack
             # them and downstream readers must tolerate absence.
@@ -2054,6 +2100,16 @@ class PPOTrainer:
         # and plans/naked-clip-and-stability/hard_constraints.md §16.
         if self.smoke_test_tag:
             record["smoke_test"] = True
+        # Arb-curriculum Session 04: write BC diagnostics only on the
+        # first post-BC episode (bc_pretrain_steps > 0 is the marker).
+        if ep.bc_pretrain_steps > 0:
+            record["bc_pretrain_steps"] = ep.bc_pretrain_steps
+            record["bc_final_signal_loss"] = round(
+                float(ep.bc_final_signal_loss), 6,
+            )
+            record["bc_final_arb_spread_loss"] = round(
+                float(ep.bc_final_arb_spread_loss), 6,
+            )
 
         log_file = self.log_dir / "episodes.jsonl"
         with open(log_file, "a", encoding="utf-8") as f:

@@ -264,6 +264,24 @@ hyperparameters:
       - ppo_lstm_v1
       - ppo_time_lstm_v1
       - ppo_transformer_v1
+    # Arb-curriculum Session 04 (2026-04-19). BC pretrain genes.
+    # bc_pretrain_steps=0 disables BC entirely (default — no-op).
+    # bc_learning_rate governs the separate BC Adam optimiser only.
+    # bc_target_entropy_warmup_eps controls how many PPO episodes the
+    # target-entropy controller anneals from post-BC measured entropy
+    # up to the configured target (150). 0 disables warmup.
+    bc_pretrain_steps:
+      type: int
+      min: 0
+      max: 2000
+    bc_learning_rate:
+      type: float_log
+      min: 1.0e-05
+      max: 1.0e-03
+    bc_target_entropy_warmup_eps:
+      type: int
+      min: 0
+      max: 20
 actions:
   force_aggressive: false
 features:

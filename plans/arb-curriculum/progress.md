@@ -10,6 +10,77 @@ Format per session follows
 
 ---
 
+## Session 04 — 2026-04-20
+
+**Commit:** (see git log)
+
+**What landed:**
+
+- `agents/bc_pretrainer.py` — new module:
+  - `BCLossHistory` dataclass (signal_losses, arb_spread_losses, total_losses,
+    final_signal_loss, final_arb_spread_loss).
+  - `BCPretrainer.pretrain(policy, samples, n_steps)`: freezes all non-actor_head
+    params, trains signal + arb_spread dims via separate Adam, restores
+    requires_grad=True. Returns BCLossHistory.
+  - `measure_entropy(policy, samples)`: forward pass on up to 256 samples,
+    returns mean Normal entropy; used post-BC to seed controller warmup.
+  - `_is_bc_target_head(name)`: True iff `"actor_head" in name`.
+  - `_sample_batch(samples, batch_size)`: sampling with replacement.
+- `agents/ppo_trainer.py` — 5 changes:
+  - `EpisodeStats`: added `bc_pretrain_steps: int = 0`,
+    `bc_final_signal_loss: float = 0.0`, `bc_final_arb_spread_loss: float = 0.0`.
+  - `__init__`: added `_bc_target_entropy_warmup_eps`, `_post_bc_entropy`,
+    `_eps_since_bc`, `_bc_loss_history`, `_bc_pretrain_steps_done` fields.
+  - `_effective_target_entropy()`: new method; anneals effective target from
+    post-BC measured entropy up to `_target_entropy` over warmup episodes.
+  - `_update_entropy_coefficient`: routes to `_effective_target_entropy()` instead
+    of `self._target_entropy` so the controller respects the BC warmup.
+  - `train()`: populates BC EpisodeStats fields on first post-BC episode;
+    increments `_eps_since_bc` after each episode.
+  - `_log_episode`: writes `bc_pretrain_steps`, `bc_final_signal_loss`,
+    `bc_final_arb_spread_loss` to JSONL on first post-BC episode; logs effective
+    target (not raw `_target_entropy`) in `target_entropy` field.
+- `training/run_training.py` — 2 changes:
+  - Imports: `BCPretrainer`, `measure_entropy` from `agents.bc_pretrainer`;
+    `load_samples` from `training.arb_oracle`.
+  - BC block after `PPOTrainer(...)` and before `trainer.train()`: unions oracle
+    samples across all training dates, runs BC, sets trainer BC state fields.
+    Skips gracefully on missing cache (FileNotFoundError) or schema mismatch
+    (ValueError) with logger.warning. No-op when `bc_pretrain_steps=0` or
+    `scalping_mode=False`.
+- `config.yaml`: added 3 genes under `hyperparameters.search_ranges`:
+  `bc_pretrain_steps` [0, 2000], `bc_learning_rate` [float_log, 1e-5,1e-3],
+  `bc_target_entropy_warmup_eps` [0, 20].
+- `CLAUDE.md`: new "BC pretrain (2026-04-19)" subsection under
+  "Symmetry around random betting"; new "BC-pretrain warmup handshake
+  (2026-04-19)" subsection under "Entropy control".
+- `tests/arb_curriculum/test_bc_pretrainer.py`: 22 tests across 9 categories.
+  All 22 pass.
+
+**Not changed:** matcher, obs/action schemas, raw P&L accounting, oracle scan,
+  matured-arb bonus, naked-loss annealing (all orthogonal).
+
+**Gotchas:**
+- `_is_bc_target_head` checks for `"actor_head"` (not `"signal_head"` or
+  `"arb_spread_head"` — those don't exist as separate modules). All three
+  policy architectures share a single `actor_head` MLP. BC targets dims
+  0 (signal) and 4 (arb_spread) within that shared MLP's output; the other
+  5 dims (stake, agg, cancel, requote, close) receive zero BC gradient.
+- `load_samples(date, data_dir, strict=True)` looks in
+  `data_dir.parent/oracle_cache/{date}/`. Pass `Path("data/processed")` to
+  find cache at `data/oracle_cache/{date}/`. Tests: use `tmp_path/processed`
+  so cache lands in `tmp_path/oracle_cache/`.
+- `measure_entropy` uses `torch.no_grad()` — no grad pollution to the policy
+  between BC and the first PPO update.
+- `_effective_target_entropy` is called inside `_log_episode` to log the
+  EFFECTIVE target (not raw), so operators see the warmup trajectory.
+
+**Test suite:** `pytest tests/arb_curriculum/ -v` → 81 passed, 1 skipped.
+
+**Next:** Session 05 — Curriculum day ordering.
+
+---
+
 ## Session 03 — 2026-04-20
 
 **Commit:** (see git log)
