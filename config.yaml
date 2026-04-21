@@ -107,6 +107,15 @@ training:
     max_back_price: 50.0
     max_lay_price: null
     min_seconds_before_off: 0
+    # Force-close at T−N (plans/arb-signal-cleanup, Session 01,
+    # 2026-04-21). Triggers env-initiated best-available close on any
+    # open pair with an unfilled second leg once time_to_off drops to
+    # or below this threshold (scalping_mode only). Default 0 =
+    # disabled = byte-identical to pre-change. Typical active value:
+    # 30. Plan files enable this on the probe cohorts via
+    # constraints overrides; config-level stays disabled so
+    # non-probe runs don't accidentally inherit it.
+    force_close_before_off_seconds: 0
   retraining:
     min_days: 30
   # Forced-arbitrage (scalping) mode — Issue 05. When true, every
@@ -141,6 +150,19 @@ hyperparameters:
       type: float
       min: 0.001
       max: 0.05
+    # Arb-signal-cleanup Session 01 (2026-04-21): target-entropy
+    # controller SGD learning rate. Previously hardcoded at 1e-2 in
+    # PPOTrainer; promoted to a per-agent gene because the 2026-04-21
+    # arb-curriculum-probe Validation observed monotone entropy drift
+    # that the hardcoded value could not arrest once entropy passed
+    # ~157. Default (no gene override) stays 1e-2 so reference runs
+    # without alpha_lr in their gene schema are byte-identical. Plan-
+    # level hp_ranges on the probe widen this to [1e-2, 1e-1].
+    # hard_constraints.md §15–§18.
+    alpha_lr:
+      type: float_log
+      min: 0.01
+      max: 0.1
     gamma:
       type: float
       min: 0.95
@@ -204,6 +226,12 @@ hyperparameters:
       - 32
       - 64
       - 128
+      # 256 added 2026-04-21 per plans/arb-signal-cleanup §14a-§14d.
+      # Default gene-level membership is additive — strictly no
+      # choices removed. Plan files can pin this via hp_ranges override
+      # without this list changing (they do so for transformer cohorts
+      # that need full-race attention coverage).
+      - 256
     early_pick_bonus_min:
       type: float
       min: 1.0

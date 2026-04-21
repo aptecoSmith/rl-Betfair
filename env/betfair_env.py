@@ -422,10 +422,20 @@ class RaceRecord:
     # Scalping-close-signal session 01: count of pairs whose second leg
     # came from an agent-initiated close (_attempt_close) rather than a
     # natural passive fill. Sum of arbs_completed + arbs_closed +
-    # arbs_naked equals total paired attempts.
+    # arbs_force_closed + arbs_naked equals total paired attempts.
     arbs_closed: int = 0
+    # Arb-signal-cleanup Session 01 (2026-04-21): count of pairs whose
+    # second leg came from an env-initiated force-close at T−N, distinct
+    # from agent-initiated ``arbs_closed``. Excluded from matured-arb
+    # and close_signal bonuses (hard_constraints.md §7, §14).
+    arbs_force_closed: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
+    # Arb-signal-cleanup Session 01 (2026-04-21): cash P&L realised via
+    # env-initiated force-closes in this race. Distinct from
+    # ``locked_pnl`` (natural matures + agent-closed worst-case floor)
+    # and lands in ``race_pnl`` via the new additive term.
+    force_closed_pnl: float = 0.0
 
 
 # ── Environment ─────────────────────────────────────────────────────────────
@@ -545,6 +555,17 @@ class BetfairEnv(gymnasium.Env):
         self._max_back_price: float | None = constraints.get("max_back_price")
         self._max_lay_price: float | None = constraints.get("max_lay_price")
         self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
+        # Force-close at T−N (plans/arb-signal-cleanup, Session 01,
+        # 2026-04-21). When > 0 and scalping_mode is on, any open pair
+        # with an unfilled second leg is force-closed via
+        # _attempt_close once time_to_off drops to or below the
+        # threshold. Best-effort: if the matcher can't find a priceable
+        # counter-leg the pair stays open and settles naked (subject to
+        # naked_loss_scale). Default 0 = disabled = byte-identical to
+        # pre-change. See hard_constraints.md §9–§14.
+        self._force_close_before_off_seconds: int = int(
+            constraints.get("force_close_before_off_seconds", 0)
+        )
         actions_cfg = config.get("actions", {})
         self._force_aggressive: bool = actions_cfg.get("force_aggressive", False)
         # Forced-arbitrage / scalping mode. When true, every aggressive
@@ -1138,6 +1159,19 @@ class BetfairEnv(gymnasium.Env):
             "arbs_closed": sum(
                 r.arbs_closed for r in self._race_records
             ),
+            # Arb-signal-cleanup Session 01 (2026-04-21) — env-initiated
+            # force-close telemetry. Pre-change rollouts: counter stays
+            # 0 and scalping_force_closed_pnl stays 0.0 so downstream
+            # consumers reading the defaults see no behaviour change.
+            "arbs_force_closed": sum(
+                r.arbs_force_closed for r in self._race_records
+            ),
+            "scalping_force_closed_pnl": sum(
+                r.force_closed_pnl for r in self._race_records
+            ),
+            "force_close_before_off_seconds": (
+                self._force_close_before_off_seconds
+            ),
             "locked_pnl": sum(r.locked_pnl for r in self._race_records),
             "naked_pnl": sum(r.naked_pnl for r in self._race_records),
             # Paired-arb silent-failure diagnostics. ``paired_place_rejects``
@@ -1260,6 +1294,25 @@ class BetfairEnv(gymnasium.Env):
         #     before the action is processed (mirrors live order-stream timing).
         assert self.bet_manager is not None
         self.bet_manager.passive_book.on_tick(tick, tick_index=self._tick_idx)
+
+        # 0c. Force-close pass (plans/arb-signal-cleanup, Session 01,
+        #     2026-04-21). Runs BEFORE action handling so any force-
+        #     closed leg is visible to downstream accounting exactly
+        #     the same way an agent-initiated close_signal close would
+        #     be. Gated on scalping_mode + knob > 0 + pre-off; the
+        #     threshold check compares seconds-to-off against the knob.
+        #     Default knob 0 disables entirely (rollouts byte-identical
+        #     to pre-change). See hard_constraints.md §9.
+        if (
+            self.scalping_mode
+            and self._force_close_before_off_seconds > 0
+            and not tick.in_play
+        ):
+            time_to_off = (
+                race.market_start_time - tick.timestamp
+            ).total_seconds()
+            if 0.0 <= time_to_off <= self._force_close_before_off_seconds:
+                self._force_close_open_pairs(race, tick, time_to_off)
 
         # 1. Process action (bets only on pre-race ticks)
         if not tick.in_play:
@@ -1965,6 +2018,8 @@ class BetfairEnv(gymnasium.Env):
         race: Race,
         time_to_off: float,
         action_debug: dict,
+        *,
+        force_close: bool = False,
     ) -> None:
         """Close the open paired position on *sid* by crossing the spread.
 
@@ -2116,14 +2171,81 @@ class BetfairEnv(gymnasium.Env):
             return
 
         # Mark the bet as a close leg so settlement can classify the
-        # pair as arbs_closed rather than arbs_completed.
+        # pair as arbs_closed rather than arbs_completed. Arb-signal-
+        # cleanup Session 01: force_close also stamps the leg so
+        # settlement can route it into arbs_force_closed (a subtype of
+        # closed; hard_constraints §7, §12, §14).
         close_bet.close_leg = True
+        close_bet.force_close = force_close
         close_bet.tick_index = self._tick_idx
         self._bet_times[len(bm.bets) - 1] = time_to_off
 
         _mark(close_attempted=True, close_placed=True,
               close_reason=None,
               cancelled=True)
+
+    # ── Force-close at T−N (arb-signal-cleanup Session 01) ──────────────
+
+    def _force_close_open_pairs(
+        self, race: Race, tick: Tick, time_to_off: float,
+    ) -> None:
+        """Force-close every open pair with only one leg matched.
+
+        Called once per pre-off tick when
+        ``time_to_off <= self._force_close_before_off_seconds``.
+        "Open" here means exactly one of the pair's legs has landed in
+        ``bm.bets`` (the aggressive leg matched) and the opposite leg
+        has NOT matched (the paired passive may or may not still be
+        resting in ``passive_book``). Calls :meth:`_attempt_close` for
+        each such pair with ``force_close=True`` so the placed close
+        bet routes into the ``arbs_force_closed`` bucket at settlement
+        (hard_constraints.md §7, §12, §14).
+
+        Best-effort: ``_attempt_close`` may decline (no outstanding
+        passive, unpriceable opposite book, junk filter trip, price cap,
+        insufficient liquidity) — in every failure mode the pair stays
+        open and settles naked via the existing accounting path.
+        """
+        bm = self.bet_manager
+        assert bm is not None
+        # Collect pair_ids with only one side matched on this market,
+        # plus a representative selection_id for each.
+        by_pair_sides: dict[str, set[BetSide]] = {}
+        sid_by_pair_id: dict[str, int] = {}
+        for bet in bm.bets:
+            if bet.pair_id is None or bet.market_id != race.market_id:
+                continue
+            by_pair_sides.setdefault(bet.pair_id, set()).add(bet.side)
+            sid_by_pair_id[bet.pair_id] = bet.selection_id
+
+        open_pair_ids = [
+            pid for pid, sides in by_pair_sides.items()
+            if not (BetSide.BACK in sides and BetSide.LAY in sides)
+        ]
+        if not open_pair_ids:
+            return
+
+        runner_by_sid = {r.selection_id: r for r in tick.runners}
+        # Force-close pass uses a local action_debug dict — it does not
+        # feed the per-runner agent action_debug exposed on info so the
+        # frontend's action-debug panel stays a record of agent-
+        # initiated decisions only.
+        action_debug: dict = {}
+        for pid in open_pair_ids:
+            sid = sid_by_pair_id.get(pid)
+            if sid is None:
+                continue
+            runner = runner_by_sid.get(sid)
+            if runner is None or runner.status != "ACTIVE":
+                continue
+            self._attempt_close(
+                sid=sid,
+                runner=runner,
+                race=race,
+                time_to_off=time_to_off,
+                action_debug=action_debug,
+                force_close=True,
+            )
 
     # ── Mark-to-market (reward-densification Session 01) ──────────────────
 
@@ -2215,6 +2337,11 @@ class BetfairEnv(gymnasium.Env):
         scalping_locked_pnl = 0.0
         scalping_arbs_completed = 0
         scalping_arbs_closed = 0
+        # Arb-signal-cleanup Session 01 (2026-04-21): separate counter
+        # for env-initiated force-closes. A subtype of "closed" but
+        # accounted distinctly so matured-arb / close_signal bonuses
+        # can stay agent-only (hard_constraints §7, §12, §14).
+        scalping_arbs_force_closed = 0
         scalping_arbs_naked = 0
         scalping_naked_exposure = 0.0
         scalping_early_lock_bonus = 0.0
@@ -2237,10 +2364,19 @@ class BetfairEnv(gymnasium.Env):
                         (agg is not None and agg.close_leg)
                         or (pas is not None and pas.close_leg)
                     )
+                    # Arb-signal-cleanup Session 01 (2026-04-21): a
+                    # force-closed pair is a subtype of closed (both
+                    # flags get set at placement in _attempt_close). A
+                    # pair whose ANY leg carries force_close=True is a
+                    # force-close; everything else with close_leg is
+                    # agent-initiated.
+                    is_force_closed = (
+                        (agg is not None and agg.force_close)
+                        or (pas is not None and pas.force_close)
+                    )
                     back_bet = agg if agg.side is BetSide.BACK else pas
                     lay_bet = agg if agg.side is BetSide.LAY else pas
                     if is_closed:
-                        scalping_arbs_closed += 1
                         # realised_pnl ≈ min(win_pnl, lose_pnl) without
                         # flooring at zero — this is the close's actual
                         # cash cost (small negative for close-at-loss,
@@ -2258,12 +2394,20 @@ class BetfairEnv(gymnasium.Env):
                             -b.matched_stake
                             + l.matched_stake * (1.0 - self._commission)
                         )
+                        if is_force_closed:
+                            scalping_arbs_force_closed += 1
+                        else:
+                            scalping_arbs_closed += 1
                         self._close_events.append({
                             "selection_id": agg.selection_id,
                             "back_price": back_bet.average_price,
                             "lay_price": lay_bet.average_price,
                             "realised_pnl": min(win_pnl, lose_pnl),
                             "race_idx": self._race_idx,
+                            # Distinguishes env-initiated force-closes
+                            # from agent-initiated closes in the
+                            # activity-log / replay UI.
+                            "force_close": bool(is_force_closed),
                         })
                     else:
                         scalping_arbs_completed += 1
@@ -2455,6 +2599,11 @@ class BetfairEnv(gymnasium.Env):
 
         matured_arb_term = 0.0
         if self.scalping_mode and self._matured_arb_bonus_weight > 0.0:
+            # Matured-arb bonus counts ONLY pair maturations the agent
+            # caused — natural completions and close_signal-initiated
+            # closes. Force-closes at T−N are env-initiated and do NOT
+            # earn the agent credit (hard_constraints.md §7,
+            # plans/arb-signal-cleanup).
             n_matured = scalping_arbs_completed + scalping_arbs_closed
             raw_matured_contribution = (
                 self._matured_arb_bonus_weight
@@ -2486,18 +2635,34 @@ class BetfairEnv(gymnasium.Env):
         # contribution to raw reward is zero. The cash loss still
         # flows through ``race_pnl`` → ``day_pnl``, visible to the
         # operator and the terminal-bonus calculation.
+        #
+        # Arb-signal-cleanup Session 01 (2026-04-21): the close-pair
+        # summation is further split so env-initiated force-closes
+        # (``force_close=True``) land in ``scalping_force_closed_pnl``
+        # while agent-initiated closes stay in ``scalping_closed_pnl``.
+        # Both sum into ``race_pnl`` but the split lets telemetry and
+        # the close_signal bonus keep env-initiated and agent-initiated
+        # closes distinct (hard_constraints §13, §14).
         scalping_closed_pnl = 0.0
+        scalping_force_closed_pnl = 0.0
         if self.scalping_mode:
             closed_pair_ids: set[str] = set()
+            force_closed_pair_ids: set[str] = set()
             for b in bm.bets:
-                if b.market_id == race.market_id and b.close_leg:
-                    if b.pair_id is not None:
-                        closed_pair_ids.add(b.pair_id)
+                if b.market_id != race.market_id or b.pair_id is None:
+                    continue
+                if not b.close_leg:
+                    continue
+                if b.force_close:
+                    force_closed_pair_ids.add(b.pair_id)
+                else:
+                    closed_pair_ids.add(b.pair_id)
             for b in bm.bets:
-                if (
-                    b.market_id == race.market_id
-                    and b.pair_id in closed_pair_ids
-                ):
+                if b.market_id != race.market_id or b.pair_id is None:
+                    continue
+                if b.pair_id in force_closed_pair_ids:
+                    scalping_force_closed_pnl += b.pnl
+                elif b.pair_id in closed_pair_ids:
                     scalping_closed_pnl += b.pnl
 
         # Naked P&L = portion of race_pnl NOT explained by completed-arb
@@ -2505,7 +2670,18 @@ class BetfairEnv(gymnasium.Env):
         # both locked_pnl and closed_pnl are 0, collapsing this to
         # race_pnl as before. Computed BEFORE race_reward_pnl so the
         # asymmetric loss term below can use it.
-        naked_pnl = race_pnl - scalping_locked_pnl - scalping_closed_pnl
+        #
+        # Arb-signal-cleanup Session 01 (2026-04-21): subtract force-
+        # closed cash too so ``naked_pnl`` for RaceRecord logging is
+        # the residual-naked slice (unpriceable pairs force-close
+        # couldn't reach). race_pnl still sums all buckets end-to-end
+        # (hard_constraints.md §13).
+        naked_pnl = (
+            race_pnl
+            - scalping_locked_pnl
+            - scalping_closed_pnl
+            - scalping_force_closed_pnl
+        )
 
         # Scalping reward split across raw and shaped channels
         # (naked-clip-and-stability, 2026-04-18). Raw is the whole-race
@@ -2556,8 +2732,10 @@ class BetfairEnv(gymnasium.Env):
             arbs_completed=scalping_arbs_completed,
             arbs_naked=scalping_arbs_naked,
             arbs_closed=scalping_arbs_closed,
+            arbs_force_closed=scalping_arbs_force_closed,
             locked_pnl=scalping_locked_pnl,
             naked_pnl=naked_pnl,
+            force_closed_pnl=scalping_force_closed_pnl,
         ))
 
         return reward

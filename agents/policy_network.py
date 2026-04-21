@@ -1232,7 +1232,10 @@ class PPOTransformerPolicy(BasePolicy):
     Three structural genes:
     * ``transformer_heads`` ∈ {2, 4, 8}
     * ``transformer_depth`` ∈ {1, 2, 3}
-    * ``transformer_ctx_ticks`` ∈ {32, 64, 128}
+    * ``transformer_ctx_ticks`` ∈ {32, 64, 128, 256}
+      (256 added 2026-04-21 per plans/arb-signal-cleanup §14a-§14d;
+      covers the full race for the median case (~238 ticks) where
+      128 only reaches ~54%.)
 
     ``lstm_hidden_size`` is reused as the transformer's ``d_model``
     (all valid choices divide evenly by any of the allowed head counts).

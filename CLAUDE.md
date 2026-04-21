@@ -43,6 +43,42 @@ can hold up to 20 distinct positions"*. The rate-limit framing matches
 how a live bot would count its own order-placement rate against the
 Betfair API, so this simulator stays consistent with live operation.
 
+### Force-close at T−N (2026-04-21)
+
+When `constraints.force_close_before_off_seconds > 0` and
+`scalping_mode` is on, the env force-closes any pair with an
+unfilled second leg once `time_to_off` drops to or below the
+threshold. Closes go through the existing `_attempt_close` path —
+same matcher, same junk filter, same LTP guard, same hard price cap.
+Each placed close leg is flagged `force_close=True` on the `Bet`
+object so settlement routes the pair into a new
+`scalping_arbs_force_closed` counter (distinct from
+`scalping_arbs_closed` which stays agent-initiated only).
+
+`race_pnl` gains a `scalping_force_closed_pnl` term:
+
+```
+race_pnl = scalping_locked_pnl
+         + scalping_closed_pnl
+         + scalping_force_closed_pnl
+         + scaled_naked_sum
+```
+
+The matured-arb bonus (`n_matured = completed + closed`) and the
+`+£1 per close_signal success` shaped bonus BOTH exclude force-
+closes — the agent didn't choose them (`plans/arb-signal-cleanup/
+hard_constraints.md` §7, §14). A force-close the matcher refuses
+(unpriceable runner, junk-filter trip, price above cap) leaves the
+pair open; it settles naked via the existing naked-term accounting.
+
+Default `0` = disabled = byte-identical to pre-change. See
+`plans/arb-signal-cleanup/purpose.md` for the design rationale
+(naked variance dominates the first-10-ep training signal; force-
+close converts ±£100s naked variance into bounded ±£0.50–£3.00
+spread cost). Runs with `force_close_before_off_seconds > 0` are
+NOT byte-identical to pre-change runs; scoreboard rows are
+comparable only when the knob is 0 on both sides.
+
 ---
 
 ## Order matching: single-price, no walking
@@ -454,6 +490,25 @@ post-controller rows. Per-episode JSONL rows gain `alpha`,
 learning-curves panel; downstream readers must tolerate
 their absence on pre-controller rows.
 
+### alpha_lr as per-agent gene (2026-04-21)
+
+`alpha_lr` (the SGD learning rate on `log_alpha`) is now a per-agent
+gene, typical range `[1e-2, 1e-1]`. Previously hardcoded at `1e-2`
+in `PPOTrainer`; the 2026-04-21 `arb-curriculum-probe` Validation
+observed entropy drifting monotone 139 → 170–184 across ep1–ep10
+on 17/66 agents with `1e-2` unable to arrest drift once entropy
+passed ~157. Promoting the knob lets the GA find the right velocity.
+
+Default (no gene override) stays `1e-2` so reference runs without
+`alpha_lr` in their schema are byte-identical. The controller's
+structure (SGD, momentum 0, `log_alpha` clamp
+`[log(1e-5), log(0.1)]`, target 150, BC handshake via
+`bc_target_entropy_warmup_eps`) is unchanged — only the LR value
+becomes a per-agent gene. Set once at `PPOTrainer` construction and
+NEVER mutated during the agent's lifetime
+(`plans/arb-signal-cleanup/hard_constraints.md` §16). Per-episode
+JSONL rows gain `alpha_lr_active` carrying the value actually used.
+
 ### BC-pretrain warmup handshake (2026-04-19)
 
 When an agent's `bc_pretrain_steps > 0`, behavioural cloning runs
@@ -499,6 +554,39 @@ the end/start per mode). Worker logs a warning so the operator knows
 to re-run the oracle scan.
 
 Invalid mode falls back to random with an error log — never crashes.
+
+---
+
+## Transformer context window — 256 available (2026-04-21)
+
+`PPOTransformerPolicy.transformer_ctx_ticks` is a structural gene
+with allowed values `{32, 64, 128, 256}` (2026-04-21: 256 added;
+previous max was 128). The new value is strictly additive — 32, 64,
+and 128 remain valid.
+
+**Scale context:** training-data races average ~150–250 ticks. At
+`ctx_ticks=32` (the current default) the transformer attends to
+only the last ~13 % of a race; at 128 it covers ~54 %; at 256 it
+covers the full race for the median case. The LSTM variants don't
+have this limitation — their hidden state is initialised once per
+rollout and carries across every tick of the day.
+
+**Architectural invariance:** `self.position_embedding =
+nn.Embedding(ctx_ticks, d_model)` and the causal mask
+(`torch.triu` at `ctx × ctx`) already size off the gene value; no
+architectural change was needed to support 256. The widening is a
+range edit in the class docstring + the `config.yaml` choice list.
+
+A transformer trained at one `ctx_ticks` value CANNOT cross-load
+weights into a policy built at another — the `position_embedding`
+matrix has a different shape. `registry/model_store.py`'s
+architecture-hash check already treats each ctx_ticks value as a
+distinct variant.
+
+See `plans/arb-signal-cleanup/purpose.md` and
+`hard_constraints.md §14a–§14d` for the decision rationale
+(2026-04-21 transformer-memory audit; the `arb-signal-cleanup-probe`
+plan pins transformer cohorts at 256 to remove a systematic handicap).
 
 ---
 

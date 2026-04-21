@@ -409,6 +409,26 @@ class EpisodeStats:
     # deliberately closed via ``close_signal`` (distinct from
     # ``arbs_completed``, whose passive legs filled naturally).
     arbs_closed: int = 0
+    # Arb-signal-cleanup Session 01 (2026-04-21) — count of pairs the
+    # env force-closed at T−N seconds before off. Distinct from
+    # ``arbs_closed`` (agent-initiated). Excluded from matured-arb and
+    # close_signal shaped bonuses. Zero on directional runs and on
+    # scalping runs with ``force_close_before_off_seconds == 0``.
+    arbs_force_closed: int = 0
+    # Arb-signal-cleanup Session 01 — £ cash P&L realised via force-
+    # closes this episode. Separate from ``locked_pnl`` / ``naked_pnl``.
+    scalping_force_closed_pnl: float = 0.0
+    # Arb-signal-cleanup Session 01 — the plan-level threshold the env
+    # used this episode (0 = disabled). Recorded for telemetry so the
+    # learning-curves panel can mark episodes where force-close fired.
+    force_close_before_off_seconds: int = 0
+    # Arb-signal-cleanup Session 01 — the SGD learning rate the target-
+    # entropy controller was instantiated with. Previously hardcoded
+    # at 1e-2; now a per-agent gene so this records the value the GA
+    # actually used. Default 1e-2 mirrors the legacy constant so pre-
+    # change agents serialize byte-identically when this field is
+    # omitted.
+    alpha_lr_active: float = 1e-2
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
     # Session 3 (arb-improvements) — action diagnostics.
@@ -618,9 +638,17 @@ class PPOTrainer:
         # ``log_alpha_min`` / ``log_alpha_max`` clamp is still the
         # ultimate safety net against runaway. See
         # plans/entropy-control-v2/lessons_learnt.md 2026-04-19.
+        # Arb-signal-cleanup Session 01 (2026-04-21): promote
+        # ``alpha_lr`` from a hardcoded constant to a per-agent gene.
+        # Default 1e-2 stays identical for runs without a gene
+        # override; plan-level ranges (typical [1e-2, 1e-1]) widen the
+        # controller's authority on arb-signal-cleanup-probe. Set once
+        # at construction and NEVER mutated during training
+        # (hard_constraints §16).
+        self._alpha_lr: float = float(hp.get("alpha_lr", 1e-2))
         self._alpha_optimizer = torch.optim.SGD(
             [self._log_alpha],
-            lr=float(hp.get("alpha_lr", 1e-2)),
+            lr=self._alpha_lr,
             momentum=0.0,
         )
         # Effective coefficient consumed by the surrogate-loss formula.
@@ -1263,6 +1291,17 @@ class PPOTrainer:
             arbs_completed=int(info.get("arbs_completed", 0) or 0),
             arbs_naked=int(info.get("arbs_naked", 0) or 0),
             arbs_closed=int(info.get("arbs_closed", 0) or 0),
+            # Arb-signal-cleanup Session 01 (2026-04-21).
+            arbs_force_closed=int(
+                info.get("arbs_force_closed", 0) or 0
+            ),
+            scalping_force_closed_pnl=float(
+                info.get("scalping_force_closed_pnl", 0.0) or 0.0
+            ),
+            force_close_before_off_seconds=int(
+                info.get("force_close_before_off_seconds", 0) or 0
+            ),
+            alpha_lr_active=float(self._alpha_lr),
             locked_pnl=float(info.get("locked_pnl", 0.0) or 0.0),
             naked_pnl=float(info.get("naked_pnl", 0.0) or 0.0),
             bet_rate=(float(bet_steps) / float(n_steps)) if n_steps > 0 else 0.0,
@@ -2091,6 +2130,21 @@ class PPOTrainer:
             "arbs_completed": ep.arbs_completed,
             "arbs_naked": ep.arbs_naked,
             "arbs_closed": ep.arbs_closed,
+            # Arb-signal-cleanup Session 01 (2026-04-21) — force-close
+            # rollups. Zero on pre-change / disabled rows; downstream
+            # readers tolerate absence on older jsonl.
+            "arbs_force_closed": ep.arbs_force_closed,
+            "scalping_force_closed_pnl": round(
+                ep.scalping_force_closed_pnl, 4,
+            ),
+            "force_close_before_off_seconds": (
+                ep.force_close_before_off_seconds
+            ),
+            # Arb-signal-cleanup Session 01 — target-entropy controller
+            # SGD learning rate actually used this agent. Replaces the
+            # previously-hardcoded 1e-2; recorded per-episode so the
+            # learning-curves panel can plot the per-agent value.
+            "alpha_lr_active": round(float(ep.alpha_lr_active), 8),
             "locked_pnl": round(ep.locked_pnl, 4),
             "naked_pnl": round(ep.naked_pnl, 4),
             # Session 3 — action-diagnostics rollup.

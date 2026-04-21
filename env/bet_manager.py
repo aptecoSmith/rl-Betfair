@@ -121,6 +121,16 @@ class Bet:
     # every non-close bet — including the original aggressive leg of
     # the closed pair.
     close_leg: bool = False
+    # Arb-signal-cleanup Session 01 (2026-04-21) — distinguishes env-
+    # initiated force-closes at T−N seconds from agent-initiated
+    # ``close_signal`` closes. ``force_close=True`` implies
+    # ``close_leg=True`` (both are set together at placement). A pair
+    # with any ``force_close=True`` leg is classified as
+    # ``arbs_force_closed`` at settlement — excluded from the matured-
+    # arb bonus and from the ``+£1 per close_signal`` shaped bonus
+    # (the agent didn't choose these closes). See
+    # plans/arb-signal-cleanup/hard_constraints.md §7, §12, §14.
+    force_close: bool = False
 
     @property
     def liability(self) -> float:

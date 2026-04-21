@@ -114,15 +114,16 @@ def test_sampler_emits_transformer_genes_in_range(real_search_ranges):
         hp = sample_hyperparams(specs, rng)
         assert hp["transformer_heads"] in (2, 4, 8)
         assert hp["transformer_depth"] in (1, 2, 3)
-        assert hp["transformer_ctx_ticks"] in (32, 64, 128)
+        # 256 added 2026-04-21 (plans/arb-signal-cleanup §14a-§14d).
+        assert hp["transformer_ctx_ticks"] in (32, 64, 128, 256)
         seen_heads.add(hp["transformer_heads"])
         seen_depth.add(hp["transformer_depth"])
         seen_ctx.add(hp["transformer_ctx_ticks"])
 
-    # 300 samples of a uniform 3-way choice should exercise every value.
+    # 300 samples should exercise every value in the choice set.
     assert seen_heads == {2, 4, 8}
     assert seen_depth == {1, 2, 3}
-    assert seen_ctx == {32, 64, 128}
+    assert seen_ctx == {32, 64, 128, 256}
 
 
 # ── 3. Instantiation grid + two-call forward pass ──────────────────────────
