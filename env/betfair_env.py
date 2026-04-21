@@ -2082,6 +2082,7 @@ class BetfairEnv(gymnasium.Env):
         action_debug: dict,
         *,
         force_close: bool = False,
+        pair_id_hint: "str | None" = None,
     ) -> None:
         """Close the open paired position on *sid* by crossing the spread.
 
@@ -2102,11 +2103,29 @@ class BetfairEnv(gymnasium.Env):
         doomed pairs, not closing ones.
 
         Silent no-op (with a diagnostic tag) when:
-        - no outstanding paired passive on this runner (``no_open_aggressive``);
+        - no outstanding paired passive on this runner (``no_open_aggressive``)
+          AND this is an agent-initiated close or no ``pair_id_hint`` was
+          supplied — see force-close variant below;
         - the aggressive partner can't be located (``orphan_passive``);
         - the matcher can't price the close side (``no_close_price``);
         - the passive cancel fails (``cancel_failed``);
         - the aggressive placement is refused (``insufficient_liquidity``).
+
+        **Force-close variant (arb-signal-cleanup, 2026-04-21).** When
+        ``force_close=True`` and ``pair_id_hint`` is supplied, the close
+        can still proceed even if the outstanding passive has been
+        evicted (auto-cancelled by the junk-band requote logic,
+        partially filled then removed, or never lingered in the book).
+        In that case the aggressive partner is located by pair_id
+        directly from ``bm.bets`` and the close leg is placed without a
+        passive to cancel first. Without this branch, most nakeds in a
+        real-data race slip past force-close because passives routinely
+        get evicted long before T−N — see the 2026-04-21 smoke-run
+        diagnosis in ``plans/arb-signal-cleanup/progress.md``.
+        Agent-initiated closes (``force_close=False``) still require a
+        resting passive, matching the pre-2026-04-21 contract
+        (hard_constraints §1 — never place an unpaired bet via the
+        agent's close_signal).
         """
         bm = self.bet_manager
         assert bm is not None
@@ -2136,13 +2155,20 @@ class BetfairEnv(gymnasium.Env):
                 break
 
         if target is None:
-            # Hard_constraints §1 — never open a naked leg. If there's
-            # nothing to close, silent no-op.
-            _mark(close_attempted=True, close_placed=False,
-                  close_reason="no_open_aggressive")
-            return
-
-        pair_id = target.pair_id
+            # Agent-initiated close bails — without a resting passive
+            # there's nothing to close against (hard_constraints §1).
+            # Force-close bails only if no pair_id_hint was supplied;
+            # with a hint it proceeds against the already-matched
+            # aggressive partner (the passive was evicted mid-race, e.g.
+            # by the junk-band requote path on line 2020, but the
+            # aggressive leg's open exposure still needs flattening).
+            if not force_close or pair_id_hint is None:
+                _mark(close_attempted=True, close_placed=False,
+                      close_reason="no_open_aggressive")
+                return
+            pair_id = pair_id_hint
+        else:
+            pair_id = target.pair_id
 
         # Find the aggressive partner so we know which side the close
         # leg must cross to. An agg-back pair closes via an aggressive
@@ -2200,12 +2226,17 @@ class BetfairEnv(gymnasium.Env):
 
         # Cancel the outstanding passive FIRST so its budget reservation
         # is released before the close bet reserves new capital. Matches
-        # the order-of-operations in _attempt_requote.
-        cancelled_order = bm.passive_book.cancel_order(target, reason="close")
-        if cancelled_order is None:
-            _mark(close_attempted=True, close_placed=False,
-                  close_reason="cancel_failed")
-            return
+        # the order-of-operations in _attempt_requote. When force-close
+        # is cleaning up a pair whose passive has already been evicted,
+        # there's nothing to cancel — we skip straight to placement.
+        if target is not None:
+            cancelled_order = bm.passive_book.cancel_order(
+                target, reason="close",
+            )
+            if cancelled_order is None:
+                _mark(close_attempted=True, close_placed=False,
+                      close_reason="cancel_failed")
+                return
 
         # Place the aggressive close leg with the same pair_id — no
         # commission gate, no tick-floor bump. place_back / place_lay
@@ -2307,6 +2338,7 @@ class BetfairEnv(gymnasium.Env):
                 time_to_off=time_to_off,
                 action_debug=action_debug,
                 force_close=True,
+                pair_id_hint=pid,
             )
 
     # ── Mark-to-market (reward-densification Session 01) ──────────────────

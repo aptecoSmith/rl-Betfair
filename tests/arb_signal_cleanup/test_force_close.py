@@ -298,6 +298,62 @@ class TestForceCloseUsesMatcher:
         bm = env.bet_manager
         assert any(b.force_close for b in bm.bets)
 
+    def test_evicted_passive_still_force_closes(self):
+        """Force-close must fire even when the passive was evicted
+        mid-race (2026-04-21 smoke-run bug).
+
+        The junk-band requote path (``_attempt_requote_if_out_of_band``)
+        and other mid-race cancel paths routinely evict a pair's passive
+        before T−N. Before the fix, ``_attempt_close`` bailed with
+        ``no_open_aggressive`` because it required a resting passive to
+        cancel first. The fix: when called via
+        ``_force_close_open_pairs`` the pair_id is known from
+        ``bm.bets`` directly, so the aggressive close leg can still be
+        placed without a passive to cancel.
+
+        This test scripts that sequence explicitly: place the pair at
+        T−60s, manually cancel the passive at T−31s (simulating
+        eviction), then let force-close fire at T−29s. A close leg
+        must land and ``arbs_force_closed`` must be 1 on the settle
+        row.
+        """
+        day = _scripted_day([60.0, 31.0, 29.0, 15.0])
+        env = BetfairEnv(
+            day,
+            _scalping_config(force_close_before_off_seconds=30),
+        )
+        env.reset()
+        agg, passive = _place_initial_pair(env)
+        bm = env.bet_manager
+        # Simulate mid-race eviction of the passive (e.g. junk-band
+        # requote cancel). This leaves the aggressive leg matched with
+        # no resting passive on the runner — exactly the state the
+        # smoke run showed at T−N on ~5 pairs per race.
+        cancelled = bm.passive_book.cancel_order(
+            passive, reason="test-eviction",
+        )
+        assert cancelled is not None, "test setup: passive must cancel"
+        assert all(
+            o.cancelled or o.pair_id != agg.pair_id
+            for o in bm.passive_book.orders
+        ), "passive must be gone before force-close tick"
+        # Step through T−31s (above threshold, no force-close) → T−29s
+        # (below threshold, force-close must fire) → T−15s settle.
+        zero = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(zero)  # T−31s: above threshold, nothing forced
+        assert not any(b.force_close for b in bm.bets)
+        _, _, terminated, _, info = env.step(zero)  # T−29s
+        assert any(
+            b.force_close for b in bm.bets
+        ), "force-close must place a closing leg when passive is gone"
+        # Drive to terminal + verify settle counter.
+        while not terminated:
+            _, _, terminated, _, info = env.step(zero)
+        assert info["arbs_force_closed"] == 1, (
+            f"expected arbs_force_closed=1, got "
+            f"{info['arbs_force_closed']}"
+        )
+
 
 # ===========================================================================
 # 3. Force-close respects hard price cap
