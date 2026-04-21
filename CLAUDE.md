@@ -80,6 +80,25 @@ Agent-initiated closes via `close_signal` keep the strict match
 the relaxation. See `env/exchange_matcher.py::_match` and
 `env/bet_manager.py::place_back/place_lay`.
 
+**Sizing (force-close): 1:1 with the aggressive leg, not equal-P&L.**
+Agent-initiated closes via `close_signal` use the equal-profit
+helper (`equal_profit_lay_stake` / `equal_profit_back_stake`) so
+closing at the current spread equalises win-vs-lose P&L at the
+close price. Force-close instead uses `close_stake =
+agg.matched_stake` — 1:1 with the matched aggressive leg.
+
+Why: equal-profit sizing is a profitability target useful when
+BUILDING a paired position at a tight spread. When FLATTENING at a
+drifted price, the formula can demand stakes far larger than the
+agent's remaining per-race budget, and `place_back` / `place_lay`
+refuses to open a £30 close when only £2 is free. 1:1 sizing
+matches the real-trader's mental model ("I have £5 staked, I close
+£5 the other way") and fits the remaining budget whenever the
+original aggressive was placed within budget. MIN_BET_STAKE (£2)
+still applies — if 1:1 close can't match at least £2 (opposite-side
+book too thin, budget too depleted), the pair stays open and
+settles naked, same as any other refusal.
+
 `race_pnl` gains a `scalping_force_closed_pnl` term:
 
 ```

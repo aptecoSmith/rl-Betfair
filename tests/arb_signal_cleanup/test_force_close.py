@@ -814,6 +814,47 @@ class TestForceCloseRelaxedMatcher:
         assert last_info["force_close_refused_place"] >= 1
         assert last_info["force_close_refused_above_cap"] >= 1
 
+    def test_close_sizes_1_to_1_with_aggressive_leg(self):
+        """Force-close sizing is 1:1 with the aggressive leg, not equal-profit.
+
+        Agent-initiated ``close_signal`` closes use equal-profit sizing
+        (equalises P&L on win vs lose at the current close price).
+        Env-initiated force-close uses 1:1 stake matching — ``close_stake
+        == agg.matched_stake`` — because equal-profit sizing at drifted
+        prices often produces stakes far larger than the agent's
+        remaining budget and refuses every close. 1:1 is the real-
+        trader's mental model: "close the £X I have on". See
+        ``plans/arb-signal-cleanup/hard_constraints.md`` §11.
+
+        Scripted: place an aggressive back ~ £1.6 (per ``_place_initial_pair``
+        with stake fraction 0.8 × 20 % budget = ~16 % of £100 = ~£16), then
+        let force-close fire. The lay close leg's matched_stake should
+        equal the aggressive back's matched_stake (subject to opposite-
+        side liquidity and commission-free 1:1 book match).
+        """
+        day = _scripted_day([60.0, 29.0, 15.0])
+        env = BetfairEnv(
+            day,
+            _scalping_config(force_close_before_off_seconds=30),
+        )
+        env.reset()
+        agg, _ = _place_initial_pair(env)
+        env.step(np.zeros(env.action_space.shape, dtype=np.float32))
+        bm = env.bet_manager
+        close_legs = [b for b in bm.bets if b.force_close]
+        assert close_legs, "force-close must place a closing leg"
+        close = close_legs[0]
+        # 1:1: the close leg's requested_stake equals the aggressive
+        # leg's matched_stake. Actual matched_stake can be smaller if
+        # opposite-side book thins, but the INTENT is 1:1.
+        assert close.requested_stake == pytest.approx(
+            agg.matched_stake, abs=1e-9,
+        ), (
+            f"force-close should target 1:1 with aggressive leg "
+            f"({agg.matched_stake:.4f}) but requested "
+            f"{close.requested_stake:.4f}"
+        )
+
     def test_counters_zero_on_successful_close(self):
         """Happy path: force-close lands, refusal counters stay zero."""
         day = _scripted_day([60.0, 29.0, 15.0])

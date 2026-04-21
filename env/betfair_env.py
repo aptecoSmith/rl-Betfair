@@ -2279,11 +2279,20 @@ class BetfairEnv(gymnasium.Env):
                 self._force_close_refusals["no_book"] += 1
             return
 
-        # Equal-P&L sizing via the equal-profit helper (matches the
-        # placement path; see _maybe_place_paired for the formula).
-        # close_price is guaranteed > 0 here; the helper tolerates any
-        # positive price including well outside the ±50% LTP band.
-        if agg_bet.side is BetSide.BACK:
+        # Sizing: agent-initiated closes use equal-P&L sizing (matches
+        # the open path; see _maybe_place_paired for the formula).
+        # Env-initiated FORCE-closes use 1:1 stake matching — we have
+        # ``agg.matched_stake`` committed on one side and want to close
+        # as much of that as we can on the other. Equal-P&L sizing is
+        # a profitability target that makes sense when BUILDING a
+        # paired position; when FLATTENING at a drifted price it
+        # produces absurd stakes (often >> available_budget) and
+        # refuses to place anything, leaving the pair naked. 1:1 is
+        # the real-trader's mental model: "close the £X I have on".
+        # See plans/arb-signal-cleanup/hard_constraints.md §11.
+        if force_close:
+            close_stake = agg_bet.matched_stake
+        elif agg_bet.side is BetSide.BACK:
             close_stake = equal_profit_lay_stake(
                 back_stake=agg_bet.matched_stake,
                 back_price=agg_bet.average_price,
