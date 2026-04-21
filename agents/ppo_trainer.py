@@ -2284,8 +2284,20 @@ class PPOTrainer:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
+        # Arb-signal-cleanup Session 03b (2026-04-21): surface force-
+        # close activity in the operator log so the cost of flattening
+        # at T−N is visible per episode. Omitted entirely when there
+        # was no force-close activity (either threshold == 0 or no
+        # pairs qualified) to keep directional-run lines clean.
+        force_close_detail = ""
+        if ep.arbs_force_closed > 0 or ep.scalping_force_closed_pnl != 0.0:
+            force_close_detail = (
+                f" force_closed={ep.arbs_force_closed}"
+                f" cost=£{ep.scalping_force_closed_pnl:+.2f}"
+            )
         logger.info(
-            "Episode %d/%d [%s] reward=%.3f (raw=%.3f shaped=%+.3f) pnl=%.2f bets=%d loss=%.4f",
+            "Episode %d/%d [%s] reward=%.3f (raw=%.3f shaped=%+.3f) "
+            "pnl=%.2f bets=%d loss=%.4f%s",
             tracker.completed,
             tracker.total,
             ep.day_date,
@@ -2295,6 +2307,7 @@ class PPOTrainer:
             ep.total_pnl,
             ep.bet_count,
             loss_info["policy_loss"],
+            force_close_detail,
         )
 
     def _publish_progress(
@@ -2319,6 +2332,14 @@ class PPOTrainer:
                 f" locked=£{ep.locked_pnl:+.2f}"
                 f" naked=£{ep.naked_pnl:+.2f}"
             )
+            if (
+                ep.arbs_force_closed > 0
+                or ep.scalping_force_closed_pnl != 0.0
+            ):
+                scalping_detail += (
+                    f" force_closed={ep.arbs_force_closed}"
+                    f" cost=£{ep.scalping_force_closed_pnl:+.2f}"
+                )
         progress = {
             "event": "progress",
             "phase": "training",

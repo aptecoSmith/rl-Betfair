@@ -873,10 +873,24 @@ class BetManager:
 
         ``force_close=True`` switches to the relaxed match semantics
         (no LTP requirement, no junk filter; hard price cap still
-        enforced). Only the env's force-close path sets this — regular
-        opens and agent-initiated closes keep the strict matching.
+        enforced). It ALSO bypasses the per-race budget clamp — the
+        live trader has more than the per-race budget in the bank,
+        so an overdraft to flatten an already-matched position is
+        always available (and the cost flows through ``race_pnl`` at
+        settle so the agent learns from it). ``MIN_BET_STAKE`` (£2)
+        still applies — Betfair's real minimum. Only the env's
+        force-close path sets this — regular opens and agent-
+        initiated closes keep the strict matching. See CLAUDE.md
+        "Force-close at T−N" and
+        plans/arb-signal-cleanup/hard_constraints.md §11.
         """
-        capped = min(stake, self.available_budget)
+        if force_close:
+            # Overdraft allowed: skip the ``available_budget`` clamp.
+            # ``bm.budget`` may go negative after this placement; that's
+            # real cash cost the agent sees in raw P&L at settle.
+            capped = stake
+        else:
+            capped = min(stake, self.available_budget)
         if capped <= 0.0:
             return None
 
@@ -949,7 +963,9 @@ class BetManager:
 
         ``force_close=True`` switches to the relaxed match semantics
         (no LTP requirement, no junk filter; hard price cap still
-        enforced). Only the env's force-close path sets this.
+        enforced). It ALSO bypasses the liability budget gate — see
+        ``place_back`` for the overdraft rationale. ``MIN_BET_STAKE``
+        still applies. Only the env's force-close path sets this.
         """
         if stake <= 0.0:
             return None
@@ -982,8 +998,12 @@ class BetManager:
         liability = result.matched_stake * (result.average_price - 1.0)
 
         # If the liability exceeds available budget, scale the requested
-        # stake down so the liability fits and re-match.
-        if liability > self.available_budget:
+        # stake down so the liability fits and re-match. Force-close
+        # bypasses this scale-down (overdraft allowed per place_back
+        # docstring) — the close leg lands at the requested 1:1 stake
+        # even if liability > available_budget; ``bm.budget`` goes
+        # negative and the cost surfaces in raw P&L at settle.
+        if not force_close and liability > self.available_budget:
             if result.average_price <= 1.0:
                 return None
             max_stake = self.available_budget / (result.average_price - 1.0)

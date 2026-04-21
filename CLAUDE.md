@@ -80,6 +80,17 @@ Agent-initiated closes via `close_signal` keep the strict match
 the relaxation. See `env/exchange_matcher.py::_match` and
 `env/bet_manager.py::place_back/place_lay`.
 
+**Overdraft allowed for force-close (2026-04-21).** `place_back`
+and `place_lay` with `force_close=True` bypass the per-race budget
+gate (`capped = min(stake, available_budget)` and the liability
+scale-down for lays). `bm.budget` / `_open_liability` can go past
+`starting_budget`; the assumption is that the live trader has more
+than one race's worth of capital in the bank, so a Betfair
+overdraft to flatten an already-matched position at T−N is always
+available. The cost flows through `race_pnl` at settle so the
+agent learns from it. `MIN_BET_STAKE` (£2) still applies —
+Betfair's real minimum.
+
 **Sizing (force-close): 1:1 with the aggressive leg, not equal-P&L.**
 Agent-initiated closes via `close_signal` use the equal-profit
 helper (`equal_profit_lay_stake` / `equal_profit_back_stake`) so

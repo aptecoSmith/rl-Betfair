@@ -814,6 +814,55 @@ class TestForceCloseRelaxedMatcher:
         assert last_info["force_close_refused_place"] >= 1
         assert last_info["force_close_refused_above_cap"] >= 1
 
+    def test_overdraft_allows_close_when_budget_exhausted(self):
+        """Force-close must land even when available_budget is £0.
+
+        Design: the live trader has more than one race's worth in the
+        bank, so an overdraft to flatten an already-matched position
+        at T−N is always available. ``place_back`` and ``place_lay``
+        with ``force_close=True`` bypass the per-race budget clamp
+        and the liability scale-down respectively; ``bm.budget`` can
+        go negative and the cost flows through ``race_pnl`` at
+        settle so the agent sees it. ``MIN_BET_STAKE`` (£2) still
+        applies — Betfair real rule, not an overdraft knob. See
+        CLAUDE.md "Force-close at T−N" and
+        plans/arb-signal-cleanup/hard_constraints.md §11.
+        """
+        day = _scripted_day([60.0, 29.0, 15.0])
+        env = BetfairEnv(
+            day,
+            _scalping_config(force_close_before_off_seconds=30),
+        )
+        env.reset()
+        agg, _ = _place_initial_pair(env)
+        bm = env.bet_manager
+        # Drain available_budget to 0 — the 1:1 close leg would need
+        # ≈ ``agg.matched_stake`` of capital which is nowhere near
+        # available. Pre-overdraft, place_back/lay would refuse
+        # (capped = 0 → return None). Post-overdraft, the close
+        # lands and ``bm.budget`` goes negative by the matched
+        # amount.
+        bm.budget -= bm.available_budget
+        assert bm.available_budget == pytest.approx(0.0, abs=1e-9)
+        available_before = bm.available_budget
+        env.step(np.zeros(env.action_space.shape, dtype=np.float32))
+        close_legs = [b for b in bm.bets if b.force_close]
+        assert close_legs, "force-close must land in overdraft"
+        # The aggressive in _place_initial_pair is a BACK, so the
+        # close is a LAY — lay bets reserve liability (not stake),
+        # so ``_open_liability`` increases past ``bm.budget`` and
+        # ``available_budget`` goes negative. This is the overdraft.
+        assert bm.available_budget < available_before, (
+            f"available_budget should have gone negative after the "
+            f"lay close; pre={available_before:+.4f} "
+            f"post={bm.available_budget:+.4f}"
+        )
+        close = close_legs[0]
+        assert close.matched_stake >= 2.0, (
+            f"close leg must match at least MIN_BET_STAKE (£2); got "
+            f"£{close.matched_stake:.2f}"
+        )
+
     def test_close_sizes_1_to_1_with_aggressive_leg(self):
         """Force-close sizing is 1:1 with the aggressive leg, not equal-profit.
 
