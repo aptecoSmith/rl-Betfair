@@ -131,6 +131,15 @@ training:
   # density_asc:  arb-sparse days first (ablation only).
   # Missing oracle cache for a date is treated as density=0.
   curriculum_day_order: density_desc
+  # Shaped-penalty warmup (plans/arb-signal-cleanup, Session 02,
+  # 2026-04-21). Linearly scales efficiency_cost and precision_reward
+  # from 0 to 1 across the first N PPO rollout episodes. BC pretrain
+  # episodes don't count. Default 0 = disabled = byte-identical to
+  # pre-change. Typical active value: 10. Plan files enable this on
+  # the probe cohorts; config-level stays disabled so non-probe runs
+  # don't accidentally inherit it. See
+  # plans/arb-signal-cleanup/purpose.md.
+  shaped_penalty_warmup_eps: 0
 discard_policy:
   min_win_rate: 0.35
   min_mean_pnl: 0.0

@@ -429,6 +429,15 @@ class EpisodeStats:
     # change agents serialize byte-identically when this field is
     # omitted.
     alpha_lr_active: float = 1e-2
+    # Arb-signal-cleanup Session 02 (2026-04-21) — shaped-penalty
+    # warmup telemetry. ``shaped_penalty_warmup_scale`` is the 0..1
+    # multiplier applied to ``efficiency_cost`` and
+    # ``precision_reward`` at the most recent settle this episode;
+    # ``shaped_penalty_warmup_eps`` is the plan-level warmup length
+    # the env used. Default scale=1.0 (disabled / past-warmup); default
+    # eps=0 (disabled) so pre-change rows serialize byte-identically.
+    shaped_penalty_warmup_scale: float = 1.0
+    shaped_penalty_warmup_eps: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
     # Session 3 (arb-improvements) — action diagnostics.
@@ -958,6 +967,19 @@ class PPOTrainer:
             scalping_mode=self._scalping_mode_override,
             scalping_overrides=self.scalping_overrides or None,
         )
+        # Arb-signal-cleanup Session 02 (2026-04-21) — feed the env the
+        # PPO-only episode index so its shaped-penalty warmup scale
+        # computes correctly. ``_eps_since_bc`` is incremented after
+        # each rollout completes, so on the ep1 rollout it reads 0 and
+        # on ep2 reads 1. BC pretrain episodes do NOT increment this
+        # counter, which matches the warmup contract per
+        # hard_constraints.md §21. When
+        # ``training.shaped_penalty_warmup_eps == 0`` (default) the
+        # env's warmup path is a no-op regardless. ``hasattr`` guard
+        # tolerates scripted test envs that monkey-patch ``BetfairEnv``
+        # without implementing the setter.
+        if hasattr(env, "set_episode_idx"):
+            env.set_episode_idx(self._eps_since_bc)
         obs, info = env.reset()
 
         rollout = Rollout()
@@ -1302,6 +1324,16 @@ class PPOTrainer:
                 info.get("force_close_before_off_seconds", 0) or 0
             ),
             alpha_lr_active=float(self._alpha_lr),
+            # Arb-signal-cleanup Session 02 (2026-04-21) — shaped-penalty
+            # warmup telemetry. Default scale 1.0 and eps 0 mean the
+            # warmup path was inactive this episode (byte-identical to
+            # pre-change runs).
+            shaped_penalty_warmup_scale=float(
+                info.get("shaped_penalty_warmup_scale", 1.0) or 1.0
+            ),
+            shaped_penalty_warmup_eps=int(
+                info.get("shaped_penalty_warmup_eps", 0) or 0
+            ),
             locked_pnl=float(info.get("locked_pnl", 0.0) or 0.0),
             naked_pnl=float(info.get("naked_pnl", 0.0) or 0.0),
             bet_rate=(float(bet_steps) / float(n_steps)) if n_steps > 0 else 0.0,
@@ -2145,6 +2177,17 @@ class PPOTrainer:
             # previously-hardcoded 1e-2; recorded per-episode so the
             # learning-curves panel can plot the per-agent value.
             "alpha_lr_active": round(float(ep.alpha_lr_active), 8),
+            # Arb-signal-cleanup Session 02 (2026-04-21) — shaped-penalty
+            # warmup telemetry. Optional keys; pre-change rows lack them
+            # and downstream readers must tolerate absence (same
+            # backward-compat pattern as ``mtm_weight_active`` /
+            # ``alpha``).
+            "shaped_penalty_warmup_scale": round(
+                float(ep.shaped_penalty_warmup_scale), 6,
+            ),
+            "shaped_penalty_warmup_eps": int(
+                ep.shaped_penalty_warmup_eps
+            ),
             "locked_pnl": round(ep.locked_pnl, 4),
             "naked_pnl": round(ep.naked_pnl, 4),
             # Session 3 — action-diagnostics rollup.

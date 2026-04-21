@@ -10,6 +10,123 @@ Format per session follows
 
 ---
 
+## Session 02 — 2026-04-21
+
+**Commit:** _(pending — see git log)_ `feat(env): shaped-penalty warmup across first N episodes (default disabled)`
+
+**What landed:**
+
+- `env/betfair_env.py`:
+  - `BetfairEnv.__init__` reads
+    `training.shaped_penalty_warmup_eps` (default 0 = disabled =
+    byte-identical to pre-change). Initialises
+    `self._episode_idx = 0`.
+  - New `set_episode_idx(idx)` method. Called by `PPOTrainer`
+    before each rollout; BC pretrain episodes do NOT call it (BC
+    doesn't increment `_eps_since_bc`), so the warmup index
+    counts PPO rollouts only per hard_constraints.md §21.
+  - `_settle_current_race` computes
+    `warmup_scale = min(1.0, episode_idx / warmup_eps)` when
+    `warmup_eps > 0`, else 1.0. Applies the scale to
+    `efficiency_cost` and `precision_reward` ONLY — all other
+    shaping terms (early_pick, drawdown, spread, inactivity,
+    naked_penalty, early_lock, matured_arb, MTM, naked-clip and
+    close_signal bonus from `_compute_scalping_reward_terms`)
+    stay at full strength.
+  - `reset` initialises `self._shaped_penalty_warmup_scale_last`
+    so `_get_info` reads a defined value before the first
+    settle.
+  - `_get_info` exposes `shaped_penalty_warmup_scale` (last
+    settle's applied scalar) and `shaped_penalty_warmup_eps`
+    (plan-level length).
+- `agents/ppo_trainer.py`:
+  - `_collect_rollout` calls `env.set_episode_idx(self._eps_
+    since_bc)` before `env.reset()`. A `hasattr` guard tolerates
+    scripted test envs that monkey-patch `BetfairEnv` without
+    implementing the setter.
+  - `EpisodeStats` gains `shaped_penalty_warmup_scale` (default
+    1.0) and `shaped_penalty_warmup_eps` (default 0).
+  - `_log_episode` writes both fields into `episodes.jsonl`.
+    Pre-change rows lack them; downstream readers must tolerate
+    absence (same backward-compat pattern as `mtm_weight_active`
+    / `alpha`).
+- `config.yaml`: `training.shaped_penalty_warmup_eps: 0` (default
+  disabled). Plan files enable this on the probe cohorts via
+  overrides.
+- `tests/arb_signal_cleanup/test_shaped_penalty_warmup.py`
+  (32 tests across 6 categories, all passing):
+  - Default byte-identical (absent key ≡ explicit 0; episode_idx
+    ignored when disabled).
+  - Linear ramp parametrised over
+    `episode_idx ∈ {0, 5, 9, 10, 20}` with expected scales
+    `{0.0, 0.5, 0.9, 1.0, 1.0}`.
+  - Only-two-terms-scaled: linear interpolation of shaped across
+    `scale ∈ {0.0, 0.5, 1.0}`; non-scaled drawdown term survives
+    through scale=0.
+  - JSONL field present (info dict carries both keys; trainer
+    log row carries both keys).
+  - No cliff at warmup+1 (constant delta across ramp, zero delta
+    after, no spike at the boundary).
+  - Invariant `raw + shaped ≈ total` parametrised across
+    `warmup_eps ∈ {0, 5}` × `episode_idx ∈ {0, 2, 4, 5, 10}` ×
+    `force_close_before_off_seconds ∈ {0, 30}` (Session 01 axis
+    stacks cleanly).
+- `CLAUDE.md`: new `### Shaped-penalty warmup (2026-04-21)`
+  subsection under *Reward function: raw vs shaped*, after the
+  BC-pretrain entry.
+
+**Not changed:** matcher semantics, action/obs schemas, PPO
+stability defences (advantage normalisation / KL early-stop /
+reward centering / LR warmup), target-entropy controller
+structure or LR, BC pretrain semantics, matured-arb bonus
+formula, naked-loss annealing schedule, curriculum day ordering,
+MTM weight, transformer architecture. `training/worker.py`
+stays out of this commit (only Session 01's pre-plan fix lives
+there).
+
+**Gotchas:**
+
+- Scripted test envs that monkey-patch `BetfairEnv` with their
+  own `_ScriptedEnv` class (e.g.
+  `tests/arb_improvements/test_reward_clipping.py`) don't
+  implement `set_episode_idx`. The trainer wraps the call in a
+  `hasattr` guard so those tests stay green without forcing
+  every stub to grow the method.
+- `_eps_since_bc` is incremented AFTER each `_collect_rollout`
+  completes (ppo_trainer.py:935 equivalent). So at the top of
+  the ep1 rollout it reads 0, the ep2 rollout 1, etc. This
+  matches the 0-based warmup index contract in
+  hard_constraints.md §21. Agents without BC still work: the
+  counter initialises to 0 and counts PPO episodes identically.
+- The `warmup_scale_last` stored on the env is OVERWRITTEN on
+  every `_settle_current_race` call but never varies within a
+  single episode (episode_idx is fixed for the rollout). The
+  telemetry field is therefore well-defined regardless of
+  how many races a day contains.
+- `precision_reward` is zeroed unconditionally in scalping mode
+  (Issue 05 hard constraint — planned-loss leg makes a
+  directional precision metric nonsense). So in the scalping
+  cohorts Session 02's warmup effectively scales
+  `efficiency_cost` only; the code path for
+  `precision_reward` stays intact for directional runs and for
+  future ablations. Test 3's scalping-mode linear-interpolation
+  check is still diagnostic because no non-scaled term depends
+  on `warmup_scale`.
+
+**Test suite:** `pytest tests/ -q --timeout=120
+--ignore=tests/test_e2e_training.py` → **2440 passed, 7 skipped,
+1 xfailed** in 5m 30s. No training was active during the
+full-suite run. Full suite confirms no regressions in
+`test_ppo_trainer`, `test_mark_to_market`, `arb_curriculum`,
+`arb_improvements` (the scripted-env pattern is now exercised
+via the `hasattr` guard), `arch_exploration`, `test_config`.
+
+**Next:** Session 03 — plan draft + validator + launch (operator
+gated). See
+[`session_prompts/03_plan_draft_validator_launch.md`](session_prompts/03_plan_draft_validator_launch.md).
+
+---
+
 ## Session 01 — 2026-04-21
 
 **Commit:** `3e5c201 feat(env+arch): force-close before off + per-agent alpha_lr gene + transformer ctx 256 option`

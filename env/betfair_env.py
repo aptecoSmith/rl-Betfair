@@ -566,6 +566,28 @@ class BetfairEnv(gymnasium.Env):
         self._force_close_before_off_seconds: int = int(
             constraints.get("force_close_before_off_seconds", 0)
         )
+        # Shaped-penalty warmup (plans/arb-signal-cleanup, Session 02,
+        # 2026-04-21). Linearly scales efficiency_cost and
+        # precision_reward from 0 to 1 across the first N PPO episodes.
+        # Zero-mean terms (precision centred at 0.5; efficiency_cost
+        # symmetric under random-policy bet-count distribution) scaled
+        # by a scalar preserve their zero-mean property, so this is
+        # safe per CLAUDE.md "Symmetry around random betting". BC
+        # pretrain episodes do NOT count toward the index — the PPO
+        # trainer only calls ``set_episode_idx`` with its PPO-only
+        # rollout counter. Default 0 = disabled = byte-identical. See
+        # hard_constraints.md §19-§23.
+        training_cfg = config.get("training", {})
+        self._shaped_penalty_warmup_eps: int = int(
+            training_cfg.get("shaped_penalty_warmup_eps", 0)
+        )
+        # Per-episode index set by ``PPOTrainer`` via
+        # ``set_episode_idx`` before each rollout. Drives the warmup
+        # scale computation at settle time. Default 0 — with
+        # ``shaped_penalty_warmup_eps == 0`` the scale is always 1.0
+        # regardless of this value, so pre-change rollouts stay
+        # byte-identical.
+        self._episode_idx: int = 0
         actions_cfg = config.get("actions", {})
         self._force_aggressive: bool = actions_cfg.get("force_aggressive", False)
         # Forced-arbitrage / scalping mode. When true, every aggressive
@@ -1024,6 +1046,22 @@ class BetfairEnv(gymnasium.Env):
                 vec[offset + POSITION_DIM + 3] = price_delta
         return vec
 
+    def set_episode_idx(self, episode_idx: int) -> None:
+        """Record the PPO-only episode index for shaped-penalty warmup.
+
+        Called by ``PPOTrainer`` before each rollout. ``episode_idx`` is
+        0-based and counts PPO rollout episodes only — BC pretrain
+        episodes do NOT increment it. The recorded value feeds the
+        linear warmup scale computed at settle time (see
+        ``_settle_current_race`` and hard_constraints.md §19-§23).
+
+        Pre-existing call sites (tests, evaluator) that never call this
+        method leave ``self._episode_idx`` at its default 0, which is
+        the correct behaviour when ``shaped_penalty_warmup_eps == 0``
+        (byte-identical to pre-change).
+        """
+        self._episode_idx = int(episode_idx)
+
     @property
     def all_settled_bets(self) -> list:
         """All bets settled across the entire day so far.
@@ -1207,6 +1245,19 @@ class BetfairEnv(gymnasium.Env):
             # Arb-curriculum Session 03: active loss scale for telemetry.
             # 1.0 = no scaling (default / byte-identical).
             "naked_loss_scale_active": self._naked_loss_scale,
+            # Arb-signal-cleanup Session 02 (2026-04-21) — shaped-penalty
+            # warmup telemetry. ``scale`` reflects the multiplier
+            # applied to efficiency_cost / precision_reward at the most
+            # recent settle. ``eps`` is the plan-level warmup length
+            # (0 = disabled). Pre-change rollouts see scale=1.0 and
+            # eps=0; downstream readers must tolerate absence on older
+            # JSONL rows.
+            "shaped_penalty_warmup_scale": (
+                self._shaped_penalty_warmup_scale_last
+            ),
+            "shaped_penalty_warmup_eps": (
+                self._shaped_penalty_warmup_eps
+            ),
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -1239,6 +1290,17 @@ class BetfairEnv(gymnasium.Env):
         self._cum_raw_reward = 0.0
         self._cum_shaped_reward = 0.0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
+        # Shaped-penalty warmup scale used by the last settle step —
+        # emitted via info/JSONL telemetry. Initialised here so
+        # ``_get_info`` reads a defined value before the first race
+        # settles. Overwritten on every ``_settle_current_race`` call.
+        # When ``shaped_penalty_warmup_eps == 0`` the value stays 1.0
+        # (scale is 1.0 everywhere in that case). See
+        # plans/arb-signal-cleanup, Session 02.
+        self._shaped_penalty_warmup_scale_last: float = (
+            1.0 if self._shaped_penalty_warmup_eps <= 0
+            else min(1.0, self._episode_idx / self._shaped_penalty_warmup_eps)
+        )
         # Per-race running snapshot — last tick's portfolio MTM.
         # Reset on race-start so cumulative shaped MTM across a race
         # telescopes to zero at settle. See hard_constraints §8-§9.
@@ -2615,10 +2677,35 @@ class BetfairEnv(gymnasium.Env):
                 +self._matured_arb_bonus_cap,
             ))
 
+        # Shaped-penalty warmup scale (plans/arb-signal-cleanup,
+        # Session 02, 2026-04-21). Linearly ramps efficiency_cost and
+        # precision_reward from 0 to 1 across the first N PPO
+        # episodes. Default 0 = disabled = scale stays 1.0 →
+        # byte-identical to pre-change. ``self._episode_idx`` is set
+        # by the trainer via ``set_episode_idx`` before each rollout;
+        # BC pretrain episodes don't increment it. See
+        # hard_constraints.md §19-§23.
+        if self._shaped_penalty_warmup_eps > 0:
+            warmup_scale = min(
+                1.0,
+                self._episode_idx / self._shaped_penalty_warmup_eps,
+            )
+        else:
+            warmup_scale = 1.0
+        self._shaped_penalty_warmup_scale_last = float(warmup_scale)
+
+        # NOTE: efficiency_cost is SUBTRACTED in the shaped sum (it's
+        # a cost); precision_reward is ADDED (it's a signed reward
+        # centred at 0.5). Both get scaled by warmup_scale — "warmup"
+        # means "less signal" from both, and scaling a zero-mean term
+        # by a scalar preserves its zero-mean property.
+        scaled_efficiency_cost = efficiency_cost * warmup_scale
+        scaled_precision_reward = precision_reward * warmup_scale
+
         shaped = (
             early_pick_bonus
-            + precision_reward
-            - efficiency_cost
+            + scaled_precision_reward
+            - scaled_efficiency_cost
             + drawdown_term
             + spread_cost_term
             + inactivity_term

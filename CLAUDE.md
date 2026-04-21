@@ -358,6 +358,57 @@ All other per-runner dims receive zero gradient from BC.
 New genes: `bc_pretrain_steps` [0, 2000], `bc_learning_rate`
 [1e-5, 1e-3], `bc_target_entropy_warmup_eps` [0, 20].
 
+### Shaped-penalty warmup (2026-04-21)
+
+Plan-level `training.shaped_penalty_warmup_eps` linearly scales
+`efficiency_cost` and `precision_reward` from 0 → 1 across the
+first N PPO rollout episodes. Default `0` = no-op
+(byte-identical).
+
+    if episode_idx < warmup_eps:
+        scale = episode_idx / warmup_eps
+    else:
+        scale = 1.0
+
+    shaped = early_pick_bonus
+           + scale * precision_reward
+           - scale * efficiency_cost
+           + other shaping terms unchanged
+
+BC pretrain episodes do NOT count toward the warmup index. Only
+PPO rollout episodes do — the trainer calls
+`env.set_episode_idx(self._eps_since_bc)` before each rollout,
+and `_eps_since_bc` is incremented post-rollout, not post-BC-step.
+
+Motivation: the 2026-04-21 `arb-curriculum-probe` Validation
+observed 7/66 agents with positive cumulative cash P&L but only
+1/66 with positive `total_reward` — the efficiency and precision
+terms overwhelmed early cash P&L when the post-BC policy's
+exploration shape (high bet count, un-calibrated precision) was
+exactly what those two terms penalise at full strength. Warmup
+gives the agent a penalty-lite window to learn before the full
+shaping discipline kicks in.
+
+Why only those two terms: the other shaping contributions either
+reward behaviour we want (MTM, matured-arb, early_pick) or
+penalise behaviour we definitely do not want at any episode
+(naked losses, drawdowns, inactivity). Warming only the penalties
+avoids rewarding "do nothing" — the agent still gets positive
+gradient for good arbing from ep1.
+
+Zero-mean property preserved: `precision_reward` is centred at
+0.5 symmetrically; scaling by a scalar keeps it zero-mean.
+`efficiency_cost` is symmetric around the per-bet count expected
+under a random policy; scaling preserves that too. See "Symmetry
+around random betting" above.
+
+Reward-scale change: `shaped_penalty_warmup_eps > 0` changes
+per-episode `shaped_bonus` magnitude during the warmup window.
+Scoreboard rows from runs with warmup active are NOT comparable
+to pre-plan rows on `shaped_bonus` during ep1..warmup_eps;
+`raw_pnl_reward` is unchanged. See
+`plans/arb-signal-cleanup/`.
+
 ## PPO update stability — advantage normalisation
 
 The PPO update normalises the per-mini-batch advantage tensor
