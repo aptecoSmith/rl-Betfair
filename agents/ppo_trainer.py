@@ -483,6 +483,11 @@ class EpisodeStats:
     bc_final_arb_spread_loss: float = 0.0
     # Arb-curriculum Session 05: active day-ordering mode for JSONL telemetry.
     curriculum_day_order: str = "random"
+    # Arb-signal-cleanup Session 03 (2026-04-21) — cohort label for the
+    # three-way ablation. "A" / "B" / "C" on probe runs; "ungrouped" on
+    # any plan without a cohort set. Pre-change rows lack the field;
+    # downstream readers must tolerate absence.
+    cohort: str = "ungrouped"
 
 
 @dataclass
@@ -1357,6 +1362,9 @@ class PPOTrainer:
             curriculum_day_order=self.config.get(
                 "training", {}
             ).get("curriculum_day_order", "random"),
+            cohort=(
+                self.config.get("training", {}).get("plan_cohort") or "ungrouped"
+            ),
         )
 
         return rollout, ep_stats
@@ -2214,6 +2222,10 @@ class PPOTrainer:
             )
         # Arb-curriculum Session 05: always emit active day-ordering mode.
         record["curriculum_day_order"] = ep.curriculum_day_order
+        # Arb-signal-cleanup Session 03: always emit cohort label
+        # ("A"/"B"/"C" for probe runs; "ungrouped" for plans without a
+        # cohort set). Pre-change rows lack the field.
+        record["cohort"] = ep.cohort
 
         log_file = self.log_dir / "episodes.jsonl"
         with open(log_file, "a", encoding="utf-8") as f:

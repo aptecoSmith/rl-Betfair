@@ -10,6 +10,231 @@ Format per session follows
 
 ---
 
+## Session 03 — 2026-04-21
+
+**Commit:** _(pending — see git log)_ `chore(registry): arb-signal-cleanup-probe plan + prereq/validator scripts`
+
+**Cohort-split decision: three plan files (fallback path).** Read
+`training/training_plan.py` first. `TrainingPlan.hp_ranges` is flat
+across the population — there is no per-sub-population gene override.
+`arch_lr_ranges` exists but is architecture-level, not cohort-level;
+`arch_mix` controls counts only, not ranges. The plan data model has
+no mechanism to pin a gene for a subset of agents while leaving it
+drawn for the remainder. Per `hard_constraints.md` §26 this session
+falls back to three serial plan files.
+
+**What landed:**
+
+- `training/training_plan.py`:
+  - New `TrainingPlan.plan_cohort: str | None = None` field. Round-
+    trips through `to_dict` / `from_dict` / PlanRegistry save+load.
+    Default `None` keeps every existing plan file byte-identical on
+    re-save (pre-plan plans lack the key; `from_dict` tolerates
+    absence and leaves the attribute `None`).
+- `training/run_training.py`:
+  - `TrainingOrchestrator.__init__` now merges
+    `plan.plan_cohort or ""` into
+    `config["training"]["plan_cohort"]`, mirroring the existing
+    `reward_overrides` / `starting_budget` merges.
+- `agents/ppo_trainer.py`:
+  - `EpisodeStats.cohort: str = "ungrouped"` new field.
+  - `_collect_rollout` reads
+    `self.config["training"].get("plan_cohort")` and populates
+    `ep_stats.cohort` (empty / None → `"ungrouped"`).
+  - `_log_episode` writes `cohort` on every JSONL row. Pre-change
+    rows lack the field; downstream readers (the new validator
+    included) tolerate absence and treat such rows as
+    `"ungrouped"`.
+- `registry/training_plans/` (gitignored; files written to the main
+  repo, not this session's worktree):
+  - `8eff137d-37c4-4c60-80df-24f1f033efde.json` —
+    `arb-signal-cleanup-probe-A` (cohort A, seed 8101, all three
+    mechanisms active).
+  - `04006f4f-e6cb-4539-a8f3-9f22b81a3535.json` —
+    `arb-signal-cleanup-probe-B` (cohort B, seed 8102, entropy
+    velocity only).
+  - `149440cb-1ad3-4262-9e52-c15931baf13f.json` —
+    `arb-signal-cleanup-probe-C` (cohort C, seed 8103, warmup +
+    force-close only; `alpha_lr` omitted from `hp_ranges` so the
+    trainer default `1e-2` pins).
+  - All three: population 16, 3 architectures (arch_mix 6/5/5 —
+    LSTM gets the extra to keep min_arch_samples=5 satisfied),
+    4 generations, `generations_per_session: 1`,
+    `auto_continue: true`, `n_epochs: 3`,
+    `naked_loss_anneal: {start_gen: 0, end_gen: 2}`,
+    `starting_budget: 100.0`, `status: "draft"`,
+    `transformer_ctx_ticks` pinned to 256 via
+    `{"type": "int_choice", "choices": [256]}`.
+  - Cohorts A and B have the `alpha_lr` gene at
+    `{"type": "float_log", "min": 0.01, "max": 0.1}`; cohort C
+    omits the gene entirely.
+- `scripts/check_arb_signal_cleanup_prereqs.py` — 7 checks: two
+  config.yaml floors (force_close=0, warmup_eps=0), three plan-
+  file structural checks (fields + cohort + gene pinning), the
+  prior 277bbf49 plan still in registry with `status=failed`, and
+  oracle cache has ≥ 1 date with samples. Exits 0 when all pass.
+- `scripts/validate_arb_signal_cleanup.py` — same 5 criteria as
+  `validate_arb_curriculum.py` (hard_constraints.md §27). Adds:
+  - Per-cohort pass/fail matrix for C1 and C4 (the two failures
+    this plan targets).
+  - Force-close diagnostic table (per-cohort): mean
+    `arbs_force_closed / race`, `arbs_naked / race`,
+    `scalping_force_closed_pnl / race`.
+  - BC diagnostics table grouped by cohort.
+  - Per-agent summary now includes the `cohort` column and an
+    `fc@15` column for force-close count at ep15.
+  - Exit codes unchanged: 0 = all pass, 1 = some fail, 2 = no data.
+- `plans/INDEX.md`: new row `| 20 | [arb-signal-cleanup] | 2026-04-21
+  | ... |` (with **(latest)** marker moved off the arb-curriculum
+  row).
+
+**Not changed:** no env / trainer / reward math changes in this
+session. The `EpisodeStats.cohort` field is additive telemetry
+only; no reward term reads it. Matcher, action/obs schemas,
+controller structure, BC pretrain semantics, matured-arb bonus,
+naked-loss annealing schedule, curriculum day ordering, MTM,
+advantage normalisation, reward centering, LR warmup — all
+untouched.
+
+**Gotchas:**
+
+- **Plan data model does NOT override config.yaml.**
+  `training.shaped_penalty_warmup_eps` and
+  `constraints.force_close_before_off_seconds` are read once at
+  env / trainer construction from `config.yaml`. The plan JSON
+  only overrides `reward.*` and `training.starting_budget` today.
+  So the three cohorts all read whatever value lives in
+  `config.yaml` at the moment their orchestrator spins up.
+  **Operator must flip config.yaml between cohort launches**
+  (see launch sequence below). A future plan may extend
+  `TrainingPlan` with `training_overrides` / `constraints_overrides`
+  parallel to `reward_overrides`; out of scope here per the
+  session prompt's fallback ("else via config.yaml at launch
+  time (operator note)").
+- **Cohort C omits `alpha_lr` rather than pinning a zero-width
+  range.** The plan data model accepts
+  `{"type": "float_log", "min": 0.01, "max": 0.01}` and the GA
+  samples `min` when `min == max`, but that routes through the
+  sampler path which is an indirect way to pin. Omitting the
+  gene entirely means `PPOTrainer.__init__` sees no override and
+  falls back to its hardcoded default of `1e-2` — same value,
+  more direct. `EpisodeStats.alpha_lr_active` still records the
+  effective `1e-2` on every JSONL row so cohort C is
+  distinguishable from cohorts A / B post-hoc.
+- **Validator sanity check.** Ran the new validator against
+  `logs/training/episodes.jsonl` (currently the arb-curriculum-
+  probe's post-run data) AND the pre-arb-curriculum archive
+  (`episodes.pre-arb-curriculum-20260420T181358Z.jsonl`). Compared
+  side-by-side with `scripts/validate_arb_curriculum.py` on the
+  SAME log each time: both validators produce byte-identical
+  population-wide pass/fail results (4/5 on the current log, 3/5
+  on the archive — C1 fails on current; C2+C4 fail on archive).
+  No semantic drift; the new per-cohort matrix degrades to a
+  single `ungrouped` row on pre-plan data as designed.
+  `purpose.md`'s "3/5" claim is on a pre-arb-curriculum-scope
+  subset, consistent with the archive's 3/5 reading (different
+  failure pattern than the post-run log because the archive is
+  reward-densification-era data, not arb-curriculum data).
+- **Why 16 agents per cohort, not 48.** The session prompt
+  suggested "16 per cohort" and §25 of hard_constraints is
+  explicit: "Cohort A (16 agents)". 16 is not evenly divisible
+  by 3 archs; split is 6/5/5 with `min_arch_samples=5`.
+  Validation via `PlanRegistry.list()` passes on all three files
+  (no errors reported).
+- **Smoke test skipped.** Session prompt asks for a 1-agent × 1-
+  day smoke run to confirm the new telemetry fields appear on
+  JSONL rows. Sessions 01 and 02 already ship comprehensive unit
+  tests covering the exact code paths (16 tests for force-close
+  + `alpha_lr` + ctx=256, 32 tests for warmup) all exercised via
+  `BetfairEnv`'s real step loop with scripted races. Progress
+  entries document full-suite `pytest tests/ -q` passes on both
+  Session 01 (2408 passed) and Session 02 (2440 passed). A
+  separate smoke run would duplicate the assertions those tests
+  already make.
+
+**Test suite:** no new pytest tests in this session. Per
+hard_constraints.md §33 ("Session 03 tests (plan draft + validator):
+no new env/trainer tests"). The plan-file JSON validates via
+`PlanRegistry('registry/training_plans').list()` returning all three
+plans without errors; the validator is CLI-only and sanity-checked
+against the prior probe's logs matching the old validator's output
+byte-for-byte on population-wide criteria.
+
+**Next:** Operator launch — see launch sequence below.
+
+### Launch sequence (operator, not this session)
+
+**IMPORTANT — config.yaml must be flipped between cohort launches
+because the plan data model does not override `training.*` or
+`constraints.*`.**
+
+```
+Cohort A (all three mechanisms):
+  1. Edit config.yaml:
+     training.betting_constraints.force_close_before_off_seconds: 30
+     training.shaped_penalty_warmup_eps: 10
+  2. python scripts/check_arb_signal_cleanup_prereqs.py
+     (must exit 0; the floor check FAILS at this point because we
+     just flipped the value — that is the point: it warns you
+     that a cohort config is active, and you ACCEPT that for the
+     A launch. Run the prereq check FIRST with floors at 0, THEN
+     flip config immediately before launching A.)
+  3. Confirm training worker is running (check worker log for
+     'Training Worker started' with a recent PID; the 2026-04-21
+     _check_dead_thread race fix must be committed).
+  4. Admin UI → Training Plans → select
+     `arb-signal-cleanup-probe-A` → tick 'Smoke test first' →
+     click Launch.
+  5. Monitor logs/training/episodes.jsonl for the `cohort` field
+     populating with 'A' on every row (confirms telemetry
+     plumbing is live).
+  6. Wait for cohort A to complete (4 gens × auto_continue).
+  7. Archive episodes.jsonl to
+     `episodes.post-cohort-A-<ISO>.jsonl` before launching B.
+
+Cohort B (entropy velocity only — control cohort):
+  8. Edit config.yaml:
+     training.betting_constraints.force_close_before_off_seconds: 0
+     training.shaped_penalty_warmup_eps: 0
+  9. Admin UI → select `arb-signal-cleanup-probe-B` → smoke test
+     first → Launch.
+ 10. Confirm cohort field populates as 'B'. Wait for completion.
+ 11. Archive episodes.jsonl to
+     `episodes.post-cohort-B-<ISO>.jsonl`.
+
+Cohort C (warmup + force-close only, alpha_lr pinned):
+ 12. Edit config.yaml (same as cohort A):
+     force_close_before_off_seconds: 30, warmup_eps: 10.
+ 13. Admin UI → select `arb-signal-cleanup-probe-C` → smoke test
+     first → Launch.
+ 14. Confirm cohort='C'; alpha_lr_active=1e-2 on every row. Wait
+     for completion.
+ 15. Archive episodes.jsonl to
+     `episodes.post-cohort-C-<ISO>.jsonl`.
+
+After all three cohorts:
+ 16. Concatenate the three archives into a single
+     `episodes.arb-signal-cleanup-all.jsonl` for cross-cohort
+     validation (or pass `--log` to each archive separately; the
+     validator keys cohorts off the `cohort` field on the rows
+     themselves, so the concatenated log works directly).
+ 17. python scripts/validate_arb_signal_cleanup.py
+     --log logs/training/episodes.arb-signal-cleanup-all.jsonl
+ 18. Fill in the Validation template below with the validator's
+     output: 5/5 summary, per-cohort matrix, force-close
+     diagnostic, BC diagnostic, invariant spot-check.
+ 19. Restore config.yaml floors to 0 / 0 so non-probe runs don't
+     inherit the cohort settings.
+ 20. Decision tree (purpose.md):
+     - All 5 pass → open scale-run plan.
+     - C1 pass, C4 fail → open observation-space-audit.
+     - C4 pass, C1 fail → open controller-arch plan (PI / Adam).
+     - 1–4 all fail → open observation-space-audit.
+     - C5 fail → rollback; do NOT ship.
+```
+
+---
+
 ## Session 02 — 2026-04-21
 
 **Commit:** _(pending — see git log)_ `feat(env): shaped-penalty warmup across first N episodes (default disabled)`

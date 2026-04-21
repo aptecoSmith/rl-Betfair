@@ -166,6 +166,14 @@ class TrainingOrchestrator:
             for key, value in training_plan.reward_overrides.items():
                 reward_cfg[key] = value
 
+        # Arb-signal-cleanup Session 03 (2026-04-21). Per-plan cohort label
+        # recorded on every episodes.jsonl row so the validator can
+        # attribute per-criterion pass/fail to the cohort that produced
+        # the agents. "" / None → "ungrouped" at log time.
+        if training_plan is not None:
+            cohort = training_plan.plan_cohort or ""
+            config.setdefault("training", {})["plan_cohort"] = cohort
+
         # GPU auto-detection (config.training.device overrides auto-detect)
         config_device = config.get("training", {}).get("device")
         if device is not None:

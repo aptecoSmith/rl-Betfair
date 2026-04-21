@@ -28,7 +28,8 @@ Don't renumber on top — numbers are append-only history.
 | 16 | [naked-clip-and-stability](naked-clip-and-stability/) | 2026-04-18 | Naked-winner 95% shaped clip + close bonus + softener removed; PPO KL early-stop + ratio clamp; halved entropy + reward centering; smoke-test gate + full registry reset |
 | 17 | [entropy-control-v2](entropy-control-v2/) | 2026-04-19 | Target-entropy controller (learned log_alpha, SAC-style) replaces fixed entropy coefficient; smoke-gate slope assertion replaces endpoint check; registry reset + relaunch |
 | 18 | [reward-densification](reward-densification/) | 2026-04-19 | Per-step mark-to-market shaping — redistributes race-level P&L across the ticks that caused it, closing out entropy-control-v2's conclusion that reward sparsity, not entropy, is the training-signal bottleneck |
-| 19 | [arb-curriculum](arb-curriculum/) | 2026-04-19 | **(latest)** BC pretrain on arb oracle + matured-arb shaped bonus + naked-loss annealing + density-ordered curriculum — attacks the 2026-04-19 local-minimum diagnosis (policy finds "arb less" before "arb better") at four points simultaneously |
+| 19 | [arb-curriculum](arb-curriculum/) | 2026-04-19 | BC pretrain on arb oracle + matured-arb shaped bonus + naked-loss annealing + density-ordered curriculum — attacks the 2026-04-19 local-minimum diagnosis (policy finds "arb less" before "arb better") at four points simultaneously |
+| 20 | [arb-signal-cleanup](arb-signal-cleanup/) | 2026-04-21 | **(latest)** Force-close at T−30s + per-agent `alpha_lr` gene + shaped-penalty warmup — attacks the 2026-04-21 arb-curriculum-probe Validation's 3/5 result (C1 entropy collapse + C4 reward-shape penalty) with a three-cohort ablation |
 
 ## Conventions
 

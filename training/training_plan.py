@@ -215,6 +215,14 @@ class TrainingPlan:
     #: ``1.0`` over ``[start_gen, end_gen)``. None = no annealing (gene
     #: value used as-is). Example: ``{"start_gen": 0, "end_gen": 2}``.
     naked_loss_anneal: dict | None = None
+    #: Arb-signal-cleanup Session 03 (2026-04-21). Optional cohort label
+    #: recorded on every episodes.jsonl row produced while this plan is
+    #: active. Used by the three-cohort ablation
+    #: (``arb-signal-cleanup-probe-A/B/C``) so the validator can attribute
+    #: per-criterion pass/fail to the cohort that produced the agents.
+    #: ``""`` (or ``None``) is serialised as ``"ungrouped"`` on the JSONL
+    #: row — pre-change plans stay backwards-compatible.
+    plan_cohort: str | None = None
 
     # ---- session helpers ----
     def session_boundaries(self) -> list[tuple[int, int]]:
@@ -285,6 +293,7 @@ class TrainingPlan:
             "naked_loss_anneal": (
                 dict(self.naked_loss_anneal) if self.naked_loss_anneal else None
             ),
+            "plan_cohort": self.plan_cohort,
         }
 
     @classmethod
@@ -335,6 +344,7 @@ class TrainingPlan:
                 dict(raw["naked_loss_anneal"])
                 if raw.get("naked_loss_anneal") else None
             ),
+            plan_cohort=raw.get("plan_cohort"),
         )
 
     @staticmethod
