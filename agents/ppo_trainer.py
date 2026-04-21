@@ -488,6 +488,17 @@ class EpisodeStats:
     # any plan without a cohort set. Pre-change rows lack the field;
     # downstream readers must tolerate absence.
     cohort: str = "ungrouped"
+    # Arb-signal-cleanup Session 03b (2026-04-21) — force-close
+    # diagnostics (see ``BetfairEnv.__init__`` for semantics). Let us
+    # attribute naked residuals to the correct refusal reason.
+    force_close_attempts: int = 0
+    force_close_refused_no_book: int = 0
+    force_close_refused_place: int = 0
+    force_close_refused_above_cap: int = 0
+    force_close_via_evicted: int = 0
+    # Diagnostic for the ep1 warmup bug — removable after a clean run
+    # confirms scale=0.0 is flowing through the JSONL path.
+    episode_idx_at_settle: int = 0
 
 
 @dataclass
@@ -1333,11 +1344,21 @@ class PPOTrainer:
             # warmup telemetry. Default scale 1.0 and eps 0 mean the
             # warmup path was inactive this episode (byte-identical to
             # pre-change runs).
+            #
+            # DO NOT use ``or 1.0`` / ``or 0`` here — 0.0 is a VALID
+            # scale value on ep1 (idx=0 → 0/warmup_eps → 0.0) and
+            # ``0.0 or 1.0`` evaluates to ``1.0`` in Python (falsy
+            # coercion), silently re-enabling full penalty on the very
+            # first PPO episode. That bug shipped in Session 02 and was
+            # traced in the 2026-04-21 cohort-A smoke run where every
+            # agent's ep1 row logged ``warmup_scale=1.0`` instead of
+            # 0.0. The ``info.get(..., default)`` already handles key-
+            # missing safely; no falsy-coercion needed.
             shaped_penalty_warmup_scale=float(
-                info.get("shaped_penalty_warmup_scale", 1.0) or 1.0
+                info.get("shaped_penalty_warmup_scale", 1.0)
             ),
             shaped_penalty_warmup_eps=int(
-                info.get("shaped_penalty_warmup_eps", 0) or 0
+                info.get("shaped_penalty_warmup_eps", 0)
             ),
             locked_pnl=float(info.get("locked_pnl", 0.0) or 0.0),
             naked_pnl=float(info.get("naked_pnl", 0.0) or 0.0),
@@ -1364,6 +1385,27 @@ class PPOTrainer:
             ).get("curriculum_day_order", "random"),
             cohort=(
                 self.config.get("training", {}).get("plan_cohort") or "ungrouped"
+            ),
+            # Arb-signal-cleanup Session 03b (2026-04-21) — force-close
+            # diagnostics for post-hoc analysis. Zeros for pre-change
+            # / non-scalping runs.
+            force_close_attempts=int(
+                info.get("force_close_attempts", 0)
+            ),
+            force_close_refused_no_book=int(
+                info.get("force_close_refused_no_book", 0)
+            ),
+            force_close_refused_place=int(
+                info.get("force_close_refused_place", 0)
+            ),
+            force_close_refused_above_cap=int(
+                info.get("force_close_refused_above_cap", 0)
+            ),
+            force_close_via_evicted=int(
+                info.get("force_close_via_evicted", 0)
+            ),
+            episode_idx_at_settle=int(
+                info.get("episode_idx_at_settle", 0)
             ),
         )
 
@@ -2226,6 +2268,17 @@ class PPOTrainer:
         # ("A"/"B"/"C" for probe runs; "ungrouped" for plans without a
         # cohort set). Pre-change rows lack the field.
         record["cohort"] = ep.cohort
+        # Arb-signal-cleanup Session 03b (2026-04-21): force-close
+        # diagnostics + warmup index. Zeros on non-scalping / pre-change
+        # runs; downstream readers must tolerate absence.
+        record["force_close_attempts"] = ep.force_close_attempts
+        record["force_close_refused_no_book"] = ep.force_close_refused_no_book
+        record["force_close_refused_place"] = ep.force_close_refused_place
+        record["force_close_refused_above_cap"] = (
+            ep.force_close_refused_above_cap
+        )
+        record["force_close_via_evicted"] = ep.force_close_via_evicted
+        record["episode_idx_at_settle"] = ep.episode_idx_at_settle
 
         log_file = self.log_dir / "episodes.jsonl"
         with open(log_file, "a", encoding="utf-8") as f:

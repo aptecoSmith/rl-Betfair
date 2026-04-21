@@ -856,6 +856,7 @@ class BetManager:
         max_price: float | None = None,
         *,
         pair_id: str | None = None,
+        force_close: bool = False,
     ) -> Bet | None:
         """Place a back bet via the :class:`ExchangeMatcher`.
 
@@ -869,6 +870,11 @@ class BetManager:
         Returns ``None`` if nothing could be matched, the budget is
         exhausted, the bet is refused by the price cap, or the runner
         has no LTP.
+
+        ``force_close=True`` switches to the relaxed match semantics
+        (no LTP requirement, no junk filter; hard price cap still
+        enforced). Only the env's force-close path sets this — regular
+        opens and agent-initiated closes keep the strict matching.
         """
         capped = min(stake, self.available_budget)
         if capped <= 0.0:
@@ -880,6 +886,7 @@ class BetManager:
             runner.available_to_back,
             reference_price=runner.last_traded_price,
             lower_is_better=False,
+            force_close=force_close,
         )
         already_matched = (
             self._matched_at_level.get((runner.selection_id, BetSide.BACK, top_price), 0.0)
@@ -892,6 +899,7 @@ class BetManager:
             reference_price=runner.last_traded_price,
             max_price=max_price,
             already_matched_at_top=already_matched,
+            force_close=force_close,
         )
         if result.matched_stake < MIN_BET_STAKE:
             return None
@@ -922,6 +930,7 @@ class BetManager:
         max_price: float | None = None,
         *,
         pair_id: str | None = None,
+        force_close: bool = False,
     ) -> Bet | None:
         """Place a lay bet via the :class:`ExchangeMatcher`.
 
@@ -937,6 +946,10 @@ class BetManager:
         Returns ``None`` if nothing could be matched, the liability
         cannot be reserved, the bet is refused by the price cap, or
         the runner has no LTP.
+
+        ``force_close=True`` switches to the relaxed match semantics
+        (no LTP requirement, no junk filter; hard price cap still
+        enforced). Only the env's force-close path sets this.
         """
         if stake <= 0.0:
             return None
@@ -947,6 +960,7 @@ class BetManager:
             runner.available_to_lay,
             reference_price=runner.last_traded_price,
             lower_is_better=True,
+            force_close=force_close,
         )
         already_matched = (
             self._matched_at_level.get((runner.selection_id, BetSide.LAY, top_price), 0.0)
@@ -960,6 +974,7 @@ class BetManager:
             reference_price=runner.last_traded_price,
             max_price=max_price,
             already_matched_at_top=already_matched,
+            force_close=force_close,
         )
         if result.matched_stake < MIN_BET_STAKE:
             return None
@@ -980,6 +995,7 @@ class BetManager:
                 reference_price=runner.last_traded_price,
                 max_price=max_price,
                 already_matched_at_top=already_matched,
+                force_close=force_close,
             )
             if result.matched_stake < MIN_BET_STAKE:
                 return None

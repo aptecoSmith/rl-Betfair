@@ -159,6 +159,8 @@ class ExchangeMatcher:
         levels: Iterable[PriceLevel],
         reference_price: float,
         lower_is_better: bool,
+        *,
+        force_close: bool = False,
     ) -> float | None:
         """Return the best post-filter top-of-book price without executing a fill.
 
@@ -166,18 +168,27 @@ class ExchangeMatcher:
         or all levels outside the junk filter).  Used by ``BetManager`` to
         peek at the fill price before consulting the ``_matched_at_level``
         accumulator, keeping filter logic in one place.
+
+        ``force_close=True`` flips this to the force-close semantics
+        (see :meth:`_match`): the LTP requirement is dropped and the
+        ±``max_price_deviation_pct`` junk filter is skipped. Useful for
+        env-initiated close-out attempts at T−N where leaving a pair
+        naked is worse than crossing into a thin / unpriced book.
         """
-        if reference_price is None or reference_price <= 0.0:
-            return None
         lst = list(levels)
         if not lst:
             return None
-        lo = reference_price * (1.0 - self.max_price_deviation_pct)
-        hi = reference_price * (1.0 + self.max_price_deviation_pct)
-        filtered = [
-            lv for lv in lst
-            if lv.price > 0.0 and lv.size > 0.0 and lo <= lv.price <= hi
-        ]
+        valid = [lv for lv in lst if lv.price > 0.0 and lv.size > 0.0]
+        if not valid:
+            return None
+        if force_close:
+            filtered = valid
+        else:
+            if reference_price is None or reference_price <= 0.0:
+                return None
+            lo = reference_price * (1.0 - self.max_price_deviation_pct)
+            hi = reference_price * (1.0 + self.max_price_deviation_pct)
+            filtered = [lv for lv in valid if lo <= lv.price <= hi]
         if not filtered:
             return None
         top = min(filtered, key=lambda lv: lv.price) if lower_is_better \
@@ -191,6 +202,8 @@ class ExchangeMatcher:
         reference_price: float,
         max_price: float | None = None,
         already_matched_at_top: float = 0.0,
+        *,
+        force_close: bool = False,
     ) -> MatchResult:
         """Attempt to fill a back bet against the back side of the book.
 
@@ -206,6 +219,7 @@ class ExchangeMatcher:
             max_price=max_price,
             lower_is_better=False,
             already_matched_at_top=already_matched_at_top,
+            force_close=force_close,
         )
 
     def match_lay(
@@ -215,6 +229,8 @@ class ExchangeMatcher:
         reference_price: float,
         max_price: float | None = None,
         already_matched_at_top: float = 0.0,
+        *,
+        force_close: bool = False,
     ) -> MatchResult:
         """Attempt to fill a lay bet against the lay side of the book.
 
@@ -230,6 +246,7 @@ class ExchangeMatcher:
             max_price=max_price,
             lower_is_better=True,
             already_matched_at_top=already_matched_at_top,
+            force_close=force_close,
         )
 
     # ── Internals ───────────────────────────────────────────────────
@@ -243,28 +260,45 @@ class ExchangeMatcher:
         max_price: float | None,
         lower_is_better: bool,
         already_matched_at_top: float = 0.0,
+        force_close: bool = False,
     ) -> MatchResult:
         if stake <= 0.0:
             return MatchResult(0.0, 0.0, 0.0, "non-positive stake")
-        if reference_price is None or reference_price <= 0.0:
-            return MatchResult(0.0, stake, 0.0, "no LTP for runner")
         if not levels:
             return MatchResult(0.0, stake, 0.0, "empty ladder")
 
-        # Filter junk: drop any level whose price is more than
-        # ``max_price_deviation_pct`` away from the LTP.
-        lo = reference_price * (1.0 - self.max_price_deviation_pct)
-        hi = reference_price * (1.0 + self.max_price_deviation_pct)
-        filtered = [
-            lv for lv in levels
-            if lv.price > 0.0 and lv.size > 0.0 and lo <= lv.price <= hi
-        ]
-        if not filtered:
-            return MatchResult(
-                0.0, stake, 0.0,
-                f"all ladder levels outside ±{self.max_price_deviation_pct:.0%} "
-                f"of LTP {reference_price:.2f}",
-            )
+        # Force-close path (arb-signal-cleanup, 2026-04-21): crossing to
+        # close an already-matched aggressive leg is strictly better than
+        # leaving the pair naked through the off (±£100s of directional
+        # variance). So for close-out attempts at T−N we drop the LTP
+        # requirement and the ±``max_price_deviation_pct`` junk filter
+        # — a thin or unpriced book is still a valid close target. The
+        # hard ``max_price`` cap stays in force so £1–£1000 parked
+        # orders can never be hit. See CLAUDE.md "Force-close at T−N"
+        # and ``plans/arb-signal-cleanup/hard_constraints.md`` §11.
+        if force_close:
+            filtered = [
+                lv for lv in levels if lv.price > 0.0 and lv.size > 0.0
+            ]
+            if not filtered:
+                return MatchResult(0.0, stake, 0.0, "empty ladder after filter")
+        else:
+            if reference_price is None or reference_price <= 0.0:
+                return MatchResult(0.0, stake, 0.0, "no LTP for runner")
+            # Filter junk: drop any level whose price is more than
+            # ``max_price_deviation_pct`` away from the LTP.
+            lo = reference_price * (1.0 - self.max_price_deviation_pct)
+            hi = reference_price * (1.0 + self.max_price_deviation_pct)
+            filtered = [
+                lv for lv in levels
+                if lv.price > 0.0 and lv.size > 0.0 and lo <= lv.price <= hi
+            ]
+            if not filtered:
+                return MatchResult(
+                    0.0, stake, 0.0,
+                    f"all ladder levels outside ±{self.max_price_deviation_pct:.0%} "
+                    f"of LTP {reference_price:.2f}",
+                )
 
         # The input ladder is ordered best-first by the upstream parser,
         # but we don't trust that after filtering — pick the best level

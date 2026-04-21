@@ -563,6 +563,39 @@ class BetfairEnv(gymnasium.Env):
         # counter-leg the pair stays open and settles naked (subject to
         # naked_loss_scale). Default 0 = disabled = byte-identical to
         # pre-change. See hard_constraints.md §9–§14.
+        # Arb-signal-cleanup Session 03b (2026-04-21): per-episode
+        # force-close diagnostics. Reset in ``reset()``; written in
+        # ``_attempt_close`` (attempts + refusal reasons) and
+        # ``_force_close_open_pairs``. Exposed via ``_get_info`` so the
+        # trainer's JSONL row records the per-episode breakdown. Pre-
+        # change rows lack these fields; readers must tolerate absence.
+        #
+        # Successful closes are already tracked by ``arbs_force_closed``
+        # via settlement; these are the REFUSAL counters so we can see
+        # why force-close missed a pair.
+        #   no_book       — pick_top_price returned None (no priceable
+        #                   level on the opposite side of the book).
+        #   place_refused — matcher returned no fill despite a priceable
+        #                   peek price (stake < MIN_BET_STAKE after
+        #                   self-depletion, or hard price cap, or
+        #                   liability exceeds free budget).
+        #   above_cap     — subset of place_refused: top price exceeded
+        #                   the hard max_back_price / max_lay_price cap.
+        # Plus two informational counters:
+        #   attempts      — total _attempt_close calls with
+        #                   force_close=True. ``attempts =
+        #                   arbs_force_closed + no_book + place_refused``
+        #                   at end of episode.
+        #   via_evicted   — attempts that hit the pair_id_hint fallback
+        #                   path (passive had been cancelled before
+        #                   force-close fired). Informational only.
+        self._force_close_refusals: dict[str, int] = {
+            "no_book": 0,
+            "place_refused": 0,
+            "above_cap": 0,
+        }
+        self._force_close_attempts: int = 0
+        self._force_close_via_evicted: int = 0
         self._force_close_before_off_seconds: int = int(
             constraints.get("force_close_before_off_seconds", 0)
         )
@@ -1258,6 +1291,26 @@ class BetfairEnv(gymnasium.Env):
             "shaped_penalty_warmup_eps": (
                 self._shaped_penalty_warmup_eps
             ),
+            # Arb-signal-cleanup Session 03b (2026-04-21): per-episode
+            # force-close diagnostics. See ``__init__`` comment for key
+            # semantics. Pre-change rows lack these fields.
+            "force_close_attempts": self._force_close_attempts,
+            "force_close_refused_no_book": (
+                self._force_close_refusals["no_book"]
+            ),
+            "force_close_refused_place": (
+                self._force_close_refusals["place_refused"]
+            ),
+            "force_close_refused_above_cap": (
+                self._force_close_refusals["above_cap"]
+            ),
+            "force_close_via_evicted": self._force_close_via_evicted,
+            # Arb-signal-cleanup Session 03b (2026-04-21): diagnostic
+            # for the ep1 warmup_scale=1.0 bug. Exposes the env-side
+            # ``_episode_idx`` at _get_info time so the trainer can
+            # cross-check against ``_eps_since_bc``. Removable once
+            # the bug is confirmed fixed.
+            "episode_idx_at_settle": self._episode_idx,
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -1301,6 +1354,14 @@ class BetfairEnv(gymnasium.Env):
             1.0 if self._shaped_penalty_warmup_eps <= 0
             else min(1.0, self._episode_idx / self._shaped_penalty_warmup_eps)
         )
+        # Reset force-close diagnostics — see __init__ for key meanings.
+        self._force_close_refusals = {
+            "no_book": 0,
+            "place_refused": 0,
+            "above_cap": 0,
+        }
+        self._force_close_attempts = 0
+        self._force_close_via_evicted = 0
         # Per-race running snapshot — last tick's portfolio MTM.
         # Reset on race-start so cumulative shaped MTM across a race
         # telescopes to zero at settle. See hard_constraints §8-§9.
@@ -2167,8 +2228,11 @@ class BetfairEnv(gymnasium.Env):
                       close_reason="no_open_aggressive")
                 return
             pair_id = pair_id_hint
+            self._force_close_via_evicted += 1
         else:
             pair_id = target.pair_id
+        if force_close:
+            self._force_close_attempts += 1
 
         # Find the aggressive partner so we know which side the close
         # leg must cross to. An agg-back pair closes via an aggressive
@@ -2186,6 +2250,10 @@ class BetfairEnv(gymnasium.Env):
         # Determine close side and peek the top opposite-side price so we
         # can compute the stake up-front. The actual fill uses the same
         # matcher path via place_back/place_lay so no ladder walking.
+        # Force-close passes ``force_close=True`` through the matcher so
+        # the LTP requirement and the ±50% junk filter are dropped —
+        # the hard max_back_price / max_lay_price cap still applies. See
+        # CLAUDE.md "Force-close at T−N" and hard_constraints.md §11.
         if agg_bet.side is BetSide.BACK:
             # Close a back by laying at the aggressive-best lay price
             # (the top of runner.available_to_lay).
@@ -2194,6 +2262,7 @@ class BetfairEnv(gymnasium.Env):
                 runner.available_to_lay,
                 reference_price=runner.last_traded_price,
                 lower_is_better=True,
+                force_close=force_close,
             )
         else:
             close_side = BetSide.BACK
@@ -2201,14 +2270,19 @@ class BetfairEnv(gymnasium.Env):
                 runner.available_to_back,
                 reference_price=runner.last_traded_price,
                 lower_is_better=False,
+                force_close=force_close,
             )
         if close_price is None or close_price <= 0.0:
             _mark(close_attempted=True, close_placed=False,
                   close_reason="no_close_price")
+            if force_close:
+                self._force_close_refusals["no_book"] += 1
             return
 
         # Equal-P&L sizing via the equal-profit helper (matches the
         # placement path; see _maybe_place_paired for the formula).
+        # close_price is guaranteed > 0 here; the helper tolerates any
+        # positive price including well outside the ±50% LTP band.
         if agg_bet.side is BetSide.BACK:
             close_stake = equal_profit_lay_stake(
                 back_stake=agg_bet.matched_stake,
@@ -2250,17 +2324,40 @@ class BetfairEnv(gymnasium.Env):
                 runner, close_stake, market_id=race.market_id,
                 max_price=self._max_back_price,
                 pair_id=pair_id,
+                force_close=force_close,
             )
         else:
             close_bet = bm.place_lay(
                 runner, close_stake, market_id=race.market_id,
                 max_price=self._max_lay_price,
                 pair_id=pair_id,
+                force_close=force_close,
             )
         if close_bet is None:
             _mark(close_attempted=True, close_placed=False,
                   close_reason="insufficient_liquidity",
                   cancelled=True)
+            if force_close:
+                # ``place_*`` refused even under relaxed match semantics.
+                # The remaining gates are (a) stake < MIN_BET_STAKE after
+                # self-depletion, (b) best post-filter price > hard cap,
+                # (c) liability exceeds available budget. Lump them as
+                # "place_refused"; the granularity can be split later if
+                # one dominates.
+                self._force_close_refusals["place_refused"] += 1
+                # If the hard cap was the culprit, also count that — we
+                # peeked at close_price above without the cap applied,
+                # and place_* re-applies it.
+                if (
+                    close_side is BetSide.BACK
+                    and self._max_back_price is not None
+                    and close_price > self._max_back_price
+                ) or (
+                    close_side is BetSide.LAY
+                    and self._max_lay_price is not None
+                    and close_price > self._max_lay_price
+                ):
+                    self._force_close_refusals["above_cap"] += 1
             return
 
         # Mark the bet as a close leg so settlement can classify the

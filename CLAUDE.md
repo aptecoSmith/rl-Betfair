@@ -48,12 +48,37 @@ Betfair API, so this simulator stays consistent with live operation.
 When `constraints.force_close_before_off_seconds > 0` and
 `scalping_mode` is on, the env force-closes any pair with an
 unfilled second leg once `time_to_off` drops to or below the
-threshold. Closes go through the existing `_attempt_close` path —
-same matcher, same junk filter, same LTP guard, same hard price cap.
-Each placed close leg is flagged `force_close=True` on the `Bet`
-object so settlement routes the pair into a new
-`scalping_arbs_force_closed` counter (distinct from
-`scalping_arbs_closed` which stays agent-initiated only).
+threshold. Closes go through `_attempt_close` with a **relaxed
+matcher path** (2026-04-21 revision; see below) so the close lands
+against any priceable opposite-side level, not only those inside
+the ±50 % LTP junk filter. Each placed close leg is flagged
+`force_close=True` on the `Bet` object so settlement routes the
+pair into a new `scalping_arbs_force_closed` counter (distinct
+from `scalping_arbs_closed` which stays agent-initiated only).
+
+**Relaxed matcher for force-close only (2026-04-21).** The original
+force-close routed through the same matcher as opens — LTP required,
+±50 % junk filter applied. In the cohort-A smoke run that refused
+~95 % of force-close attempts because data near the off is sparse
+(~3–4 ticks in the [0, 30]s window) and book depth is thin. Leaving
+a pair naked costs ±£100s of directional variance; crossing a thin
+or unpriced book costs ±£0.50–£5 of spread — always strictly better.
+So `ExchangeMatcher.match_back / match_lay / pick_top_price` now
+take a `force_close: bool = False` flag. When `True`:
+
+- LTP requirement dropped (`reference_price=None` accepted).
+- ±`max_price_deviation_pct` junk filter skipped (any priceable
+  level is a valid close target).
+- Hard `max_back_price` / `max_lay_price` cap still enforced (the
+  cap protects against £1–£1000 parked orders where the
+  consequence of a match is catastrophic).
+- Single-price, no-walking invariant still holds (the core matcher
+  contract is unchanged — we take ONE level, not a sweep).
+
+Agent-initiated closes via `close_signal` keep the strict match
+(`force_close=False`). Only env-initiated force-close at T−N sees
+the relaxation. See `env/exchange_matcher.py::_match` and
+`env/bet_manager.py::place_back/place_lay`.
 
 `race_pnl` gains a `scalping_force_closed_pnl` term:
 
@@ -67,9 +92,14 @@ race_pnl = scalping_locked_pnl
 The matured-arb bonus (`n_matured = completed + closed`) and the
 `+£1 per close_signal success` shaped bonus BOTH exclude force-
 closes — the agent didn't choose them (`plans/arb-signal-cleanup/
-hard_constraints.md` §7, §14). A force-close the matcher refuses
-(unpriceable runner, junk-filter trip, price above cap) leaves the
-pair open; it settles naked via the existing naked-term accounting.
+hard_constraints.md` §7, §14). A force-close the matcher still
+refuses (empty opposite-side book, price above hard cap, or stake
+below `MIN_BET_STAKE` after self-depletion) leaves the pair open;
+it settles naked via the existing naked-term accounting. Per-
+episode refusal counters (`force_close_refused_no_book`,
+`force_close_refused_place`, `force_close_refused_above_cap`) are
+exposed on the `info` dict and JSONL row so the validator can
+quantify residual-naked causes.
 
 Default `0` = disabled = byte-identical to pre-change. See
 `plans/arb-signal-cleanup/purpose.md` for the design rationale

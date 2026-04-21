@@ -660,3 +660,243 @@ class TestTransformerCtx256:
         buf, valid = out.hidden_state
         assert buf.shape == (1, 256, 32)
         assert valid.shape == (1,)
+
+
+# ===========================================================================
+# 11. Relaxed-matcher force-close — arb-signal-cleanup 2026-04-21 revision
+# ===========================================================================
+#
+# The first cohort-A smoke run showed force-close catching only ~2-5 %
+# of would-be-nakeds because the original matcher path refused closes
+# on a missing LTP or on a book outside ±50 % of LTP. For force-close
+# at T−N (env-initiated, not agent-initiated), crossing a thin /
+# unpriced book is strictly better than leaving the pair naked through
+# the off. The matcher now takes a ``force_close=True`` flag that:
+#   - drops the LTP requirement (accepts ``reference_price=None``)
+#   - drops the ±50 % junk filter
+#   - still honours the hard ``max_back_price`` / ``max_lay_price`` cap
+#
+# Agent-initiated closes (``force_close=False``) keep the strict match.
+
+
+class TestForceCloseRelaxedMatcher:
+    """Force-close must succeed where the strict match refuses."""
+
+    def test_close_succeeds_with_missing_ltp(self):
+        """LTP=0 on a runner with a real opposite-side book → close lands.
+
+        Pre-revision this refused at ``pick_top_price`` because
+        ``reference_price<=0.0`` returned ``None`` unconditionally. Now
+        the force-close path ignores LTP and takes the top of book.
+        """
+        normal = _snap(101)
+        # Tick 1: LTP=0 but lay side has real liquidity. Force-close
+        # should cross anyway.
+        ltp_missing = RunnerSnap(
+            selection_id=101, status="ACTIVE", last_traded_price=0.0,
+            total_matched=500.0, starting_price_near=0.0,
+            starting_price_far=0.0, adjustment_factor=None, bsp=None,
+            sort_priority=1, removal_date=None,
+            available_to_back=[PriceSize(price=4.0, size=100.0)],
+            available_to_lay=[PriceSize(price=4.2, size=100.0)],
+        )
+        race = _scripted_race(
+            [60.0, 29.0, 15.0],
+            tick_snaps=[normal, ltp_missing, ltp_missing],
+        )
+        day = Day(date="2026-04-21", races=[race])
+        env = BetfairEnv(
+            day,
+            _scalping_config(force_close_before_off_seconds=30),
+        )
+        env.reset()
+        _place_initial_pair(env)
+        env.step(np.zeros(env.action_space.shape, dtype=np.float32))
+        bm = env.bet_manager
+        assert any(b.force_close for b in bm.bets), (
+            "force-close must succeed with missing LTP under relaxed match"
+        )
+
+    def test_close_succeeds_outside_junk_band(self):
+        """Opposite-side best price outside ±50 % of LTP → close lands.
+
+        Aggressive back placed at price 4.0 (LTP 4.0 at placement). On
+        the force-close tick the market has drifted; LTP is 4.0 still
+        but the available-to-lay book shows only a price 8.0 (100 %
+        above LTP — outside ±50 % band). Strict match would refuse as
+        "junk"; force-close takes the 8.0 and crosses at a spread cost.
+        """
+        normal = _snap(101)  # back=4.0, lay=4.2, LTP=4.0
+        # Tick at T−29: LTP still 4.0 but the lay side has drifted far
+        # out of band. Strict matcher rejects; force-close crosses.
+        drifted = RunnerSnap(
+            selection_id=101, status="ACTIVE", last_traded_price=4.0,
+            total_matched=500.0, starting_price_near=0.0,
+            starting_price_far=0.0, adjustment_factor=None, bsp=None,
+            sort_priority=1, removal_date=None,
+            available_to_back=[PriceSize(price=4.0, size=100.0)],
+            available_to_lay=[PriceSize(price=8.0, size=100.0)],
+        )
+        race = _scripted_race(
+            [60.0, 29.0, 15.0],
+            tick_snaps=[normal, drifted, drifted],
+        )
+        day = Day(date="2026-04-21", races=[race])
+        env = BetfairEnv(
+            day,
+            _scalping_config(force_close_before_off_seconds=30),
+        )
+        env.reset()
+        _place_initial_pair(env)
+        env.step(np.zeros(env.action_space.shape, dtype=np.float32))
+        bm = env.bet_manager
+        # Close bet should exist at the drifted price.
+        close_legs = [b for b in bm.bets if b.force_close]
+        assert close_legs, "force-close must succeed outside ±50 % band"
+        assert close_legs[0].average_price == pytest.approx(8.0), (
+            f"close leg price should be the top-of-book 8.0, "
+            f"got {close_legs[0].average_price}"
+        )
+
+    def test_close_refused_on_truly_empty_book(self):
+        """Empty opposite-side book → refused, no_book counter bumps."""
+        normal = _snap(101)
+        empty = RunnerSnap(
+            selection_id=101, status="ACTIVE", last_traded_price=4.0,
+            total_matched=500.0, starting_price_near=0.0,
+            starting_price_far=0.0, adjustment_factor=None, bsp=None,
+            sort_priority=1, removal_date=None,
+            available_to_back=[],
+            available_to_lay=[],
+        )
+        race = _scripted_race(
+            [60.0, 29.0, 15.0],
+            tick_snaps=[normal, empty, empty],
+        )
+        day = Day(date="2026-04-21", races=[race])
+        env = BetfairEnv(
+            day,
+            _scalping_config(force_close_before_off_seconds=30),
+        )
+        env.reset()
+        _place_initial_pair(env)
+        zero = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        last_info: dict = {}
+        while not terminated:
+            _, _, terminated, _, last_info = env.step(zero)
+        bm = env.bet_manager
+        assert not any(b.force_close for b in bm.bets)
+        assert last_info["force_close_attempts"] >= 1
+        assert last_info["force_close_refused_no_book"] >= 1
+
+    def test_close_refused_above_hard_cap(self):
+        """Opposite-side best price above max_lay_price cap → refused.
+
+        Aggressive BACK pair closes via LAY. Set ``max_lay_price=3.0``
+        while the best available-to-lay is 4.2 → cap rejects inside
+        ``place_lay``. Force-close attempt counted as refused-place
+        with the above_cap flag set.
+        """
+        day = _scripted_day([60.0, 29.0, 15.0])
+        cfg = _scalping_config(force_close_before_off_seconds=30)
+        cfg["training"]["betting_constraints"]["max_lay_price"] = 3.0
+        env = BetfairEnv(day, cfg)
+        env.reset()
+        _place_initial_pair(env)
+        zero = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        last_info: dict = {}
+        while not terminated:
+            _, _, terminated, _, last_info = env.step(zero)
+        bm = env.bet_manager
+        assert not any(b.force_close for b in bm.bets)
+        assert last_info["force_close_refused_place"] >= 1
+        assert last_info["force_close_refused_above_cap"] >= 1
+
+    def test_counters_zero_on_successful_close(self):
+        """Happy path: force-close lands, refusal counters stay zero."""
+        day = _scripted_day([60.0, 29.0, 15.0])
+        env = BetfairEnv(
+            day,
+            _scalping_config(force_close_before_off_seconds=30),
+        )
+        env.reset()
+        _place_initial_pair(env)
+        zero = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        last_info: dict = {}
+        while not terminated:
+            _, _, terminated, _, last_info = env.step(zero)
+        assert last_info["force_close_attempts"] >= 1
+        assert last_info["force_close_refused_no_book"] == 0
+        assert last_info["force_close_refused_place"] == 0
+        assert last_info["force_close_refused_above_cap"] == 0
+
+
+# ===========================================================================
+# 12. ep1 warmup_scale must reach JSONL at 0.0 — 2026-04-21 falsy-coerce fix
+# ===========================================================================
+#
+# The Session 02 trainer had ``info.get("shaped_penalty_warmup_scale",
+# 1.0) or 1.0`` at the EpisodeStats construction site. ``0.0 or 1.0``
+# evaluates to ``1.0`` in Python — so on ep1 (idx=0 → scale=0.0) the
+# JSONL row silently reported 1.0, re-enabling full efficiency/precision
+# penalty on the episode the warmup was designed to protect.
+# Regression guard: exercise the trainer's end-to-end path (not just
+# the env), assert ep1 scale reaches EpisodeStats as 0.0.
+
+
+class TestWarmupScaleReachesEpisodeStatsAsZero:
+    def test_ep1_scale_is_zero_end_to_end(self):
+        """EpisodeStats.shaped_penalty_warmup_scale must be 0.0 at ep1.
+
+        Mimics the production path: trainer creates env, calls
+        ``set_episode_idx(0)``, runs a rollout, reads ``info`` via its
+        own code path into an ``EpisodeStats`` record. The fix at
+        ``ppo_trainer.py:1337`` removes ``or 1.0`` so a legitimate 0.0
+        scale flows through instead of being coerced to 1.0.
+        """
+        from agents.ppo_trainer import EpisodeStats
+
+        day = _scripted_day([60.0, 29.0, 15.0])
+        env = BetfairEnv(
+            day,
+            _scalping_config(
+                force_close_before_off_seconds=0,
+            ),
+        )
+        # Opt-in warmup — 10 episodes, ep1 → scale 0.0.
+        env._shaped_penalty_warmup_eps = 10
+        env.set_episode_idx(0)
+        env.reset()
+        _place_initial_pair(env)
+        done = False
+        last_info: dict = {}
+        while not done:
+            _, _, terminated, truncated, last_info = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32),
+            )
+            done = terminated or truncated
+        # Env info carries the correct value.
+        assert last_info["shaped_penalty_warmup_scale"] == pytest.approx(0.0)
+        # The trainer's EpisodeStats construction used to silently
+        # coerce this via ``or 1.0``; replicate the fixed idiom.
+        scale_via_trainer_path = float(
+            last_info.get("shaped_penalty_warmup_scale", 1.0)
+        )
+        assert scale_via_trainer_path == pytest.approx(0.0), (
+            "info.get(..., 1.0) must preserve legitimate 0.0 scale; "
+            "the pre-fix `or 1.0` coerced this to 1.0 on every ep1 row"
+        )
+        # And round-trip through EpisodeStats the same way
+        # ``_collect_rollout`` does (the actual JSONL path).
+        stats = EpisodeStats(
+            day_date="2026-04-21", total_reward=0.0, total_pnl=0.0,
+            bet_count=0, winning_bets=0, races_completed=1,
+            final_budget=100.0, n_steps=3,
+            shaped_penalty_warmup_scale=float(
+                last_info.get("shaped_penalty_warmup_scale", 1.0)
+            ),
+        )
+        assert stats.shaped_penalty_warmup_scale == 0.0
