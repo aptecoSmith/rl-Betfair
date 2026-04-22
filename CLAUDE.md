@@ -7,6 +7,12 @@ this before touching anything in `env/`, `agents/`, or the reward path.
 
 ## Bet accounting: matched orders, not netted positions
 
+For the operator's model of how Betfair markets work and how the
+simulator approximates them, see
+[docs/betfair_market_model.md](docs/betfair_market_model.md).
+Cross-check simulator behaviour against that spec before adding
+or changing any matching / passive-fill logic.
+
 **"Bet count" in this codebase means "distinct matched orders", not
 "distinct netted positions"** — i.e. the way Betfair's API rate-limits
 count, *not* the way the Betfair UI displays your open positions.
