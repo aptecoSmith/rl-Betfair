@@ -388,6 +388,58 @@ class TestPopulationManagerWithStore:
         with pytest.raises(RuntimeError, match="Cannot load agent"):
             pm.load_agent("nonexistent-id")
 
+    def test_load_agent_survives_hp_drift_via_shape_inference(
+        self, small_config: dict, store,
+    ):
+        """Hyperparams can drift from saved weight shapes (e.g. breeding
+        re-wrote genes on a child without re-initialising weights).
+        load_agent must recover by inferring the architecture shape from
+        the state dict and rebuilding the policy at matching dimensions.
+
+        Diagnosed in the 2026-04-22 reeval failure on 308236be — stored
+        hyperparams said hidden=512, ctx=128; saved weights were
+        hidden=256, ctx=32, from an earlier training run. load_state_dict
+        rejected with size mismatch; the fix retries with shape-inferred
+        hyperparams.
+        """
+        pm = PopulationManager(small_config, model_store=store)
+        agents = pm.initialise_population(generation=0, seed=42)
+        original = agents[0]
+
+        # Forge the drift: after weights are saved at the original hp,
+        # mutate the record's hp to claim a different (bigger) hidden
+        # size. A naive re-build would construct a hidden=1024 LSTM
+        # that can't load the hidden=256 weights.
+        original_hp = dict(original.hyperparameters)
+        drifted_hp = {**original_hp}
+        if original.architecture_name in ("ppo_lstm_v1", "ppo_time_lstm_v1"):
+            drifted_hp["lstm_hidden_size"] = (
+                int(original_hp.get("lstm_hidden_size", 256)) * 2
+            )
+        else:
+            # transformer: bump ctx_ticks to a value that won't match
+            # the position_embedding shape.
+            drifted_hp["transformer_ctx_ticks"] = (
+                int(original_hp.get("transformer_ctx_ticks", 32)) * 2
+            )
+        store.update_hyperparameters(original.model_id, drifted_hp)
+
+        # Without the fix: naively rebuilding at drifted_hp and calling
+        # load_state_dict would raise "size mismatch". With the fix:
+        # load_agent detects the mismatch, infers the original shape
+        # from the state dict, and rebuilds.
+        loaded = pm.load_agent(original.model_id)
+
+        # The loaded policy's weights match the original (shape + values).
+        obs = torch.randn(1, OBS_DIM)
+        torch.manual_seed(0)
+        out_orig = original.policy(obs)
+        torch.manual_seed(0)
+        out_loaded = loaded.policy(obs)
+        assert torch.allclose(
+            out_orig.action_mean, out_loaded.action_mean, atol=1e-6,
+        )
+
 
 # ── Edge cases ───────────────────────────────────────────────────────────────
 

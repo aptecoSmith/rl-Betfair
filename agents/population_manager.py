@@ -497,7 +497,13 @@ class PopulationManager:
         """Load an existing agent from the model store.
 
         Reconstructs the policy network from stored hyperparameters and
-        weights.
+        weights. If the record's hyperparameters have drifted out of
+        sync with the saved weight shapes (e.g. via breeding that
+        rewrote genes on a child without re-initialising its weights),
+        the mismatch is detected on ``load_state_dict`` and the policy
+        is rebuilt with architecture dimensions inferred directly from
+        the state dict. See
+        ``agents.architecture_registry.infer_arch_hp_from_state_dict``.
         """
         if self.model_store is None:
             raise RuntimeError("Cannot load agent without a model store")
@@ -506,6 +512,13 @@ class PopulationManager:
         hp = record.hyperparameters
         arch_name = record.architecture_name
 
+        # Load saved weights FIRST so we can inspect shapes if the
+        # primary build fails. Schema-version check still runs loudly
+        # on both the primary and retry paths.
+        state_dict = self.model_store.load_weights(
+            model_id, expected_obs_schema_version=self._obs_schema_version,
+        )
+
         policy = create_policy(
             name=arch_name,
             obs_dim=self.obs_dim,
@@ -513,12 +526,45 @@ class PopulationManager:
             max_runners=self.max_runners,
             hyperparams=hp,
         )
-
-        # Load saved weights — validate schema version before touching layers
-        state_dict = self.model_store.load_weights(
-            model_id, expected_obs_schema_version=self._obs_schema_version,
-        )
-        policy.load_state_dict(state_dict)
+        try:
+            policy.load_state_dict(state_dict)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if not (
+                "size mismatch" in msg
+                or "Missing key" in msg
+                or "Unexpected key" in msg
+            ):
+                raise
+            from agents.architecture_registry import (
+                infer_arch_hp_from_state_dict,
+            )
+            inferred = infer_arch_hp_from_state_dict(arch_name, state_dict)
+            # Nothing recoverable from the shapes → give up, surface
+            # the original error so the caller sees the real mismatch.
+            if not inferred:
+                raise
+            drift = {
+                k: (hp.get(k), v)
+                for k, v in inferred.items()
+                if hp.get(k) != v
+            }
+            if not drift:
+                raise
+            logger.warning(
+                "Model %s: record hyperparams drift from weights — "
+                "rebuilding with inferred shapes %s",
+                model_id[:8], drift,
+            )
+            merged_hp = {**hp, **inferred}
+            policy = create_policy(
+                name=arch_name,
+                obs_dim=self.obs_dim,
+                action_dim=self.action_dim,
+                max_runners=self.max_runners,
+                hyperparams=merged_hp,
+            )
+            policy.load_state_dict(state_dict)
 
         return AgentRecord(
             model_id=model_id,

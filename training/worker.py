@@ -872,6 +872,10 @@ class TrainingWorker:
                         market_type_filter = hp.get("market_type_filter", "BOTH")
                         obs_dim, action_dim = _shapes_for(hp)
 
+                        state_dict = self.store.load_weights(
+                            mid,
+                            expected_obs_schema_version=OBS_SCHEMA_VERSION,
+                        )
                         policy = create_policy(
                             name=arch_name,
                             obs_dim=obs_dim,
@@ -879,11 +883,42 @@ class TrainingWorker:
                             max_runners=max_runners,
                             hyperparams=hp,
                         )
-                        state_dict = self.store.load_weights(
-                            mid,
-                            expected_obs_schema_version=OBS_SCHEMA_VERSION,
-                        )
-                        policy.load_state_dict(state_dict)
+                        try:
+                            policy.load_state_dict(state_dict)
+                        except RuntimeError as ex:
+                            msg = str(ex)
+                            if not (
+                                "size mismatch" in msg
+                                or "Missing key" in msg
+                                or "Unexpected key" in msg
+                            ):
+                                raise
+                            from agents.architecture_registry import (
+                                infer_arch_hp_from_state_dict,
+                            )
+                            inferred = infer_arch_hp_from_state_dict(
+                                arch_name, state_dict,
+                            )
+                            drift = {
+                                k: (hp.get(k), v)
+                                for k, v in inferred.items()
+                                if hp.get(k) != v
+                            }
+                            if not inferred or not drift:
+                                raise
+                            logger.warning(
+                                "Model %s: record hyperparams drift from "
+                                "weights — rebuilding with inferred shapes %s",
+                                mid[:8], drift,
+                            )
+                            policy = create_policy(
+                                name=arch_name,
+                                obs_dim=obs_dim,
+                                action_dim=action_dim,
+                                max_runners=max_runners,
+                                hyperparams={**hp, **inferred},
+                            )
+                            policy.load_state_dict(state_dict)
 
                         evaluator.evaluate(
                             model_id=mid,
@@ -1098,28 +1133,52 @@ class TrainingWorker:
 
     async def _check_dead_thread(self) -> None:
         """Periodically check if the training thread died without sending
-        a terminal event."""
+        a terminal event.
+
+        Requires the condition (thread dead + running==True) to persist
+        across two consecutive polls before marking the plan failed.  The
+        training thread can emit its terminal event via
+        ``_AsyncBridgeQueue.put_nowait`` (which schedules the handler via
+        ``call_soon_threadsafe``) and then immediately exit — so for a
+        brief window the thread is dead while the scheduled
+        ``_handle_event`` callback has not yet run.  Without the grace
+        poll, that window spuriously marked successfully-completed plans
+        as failed and cleared ``_active_plan_id``, suppressing
+        auto-continue for the next session.
+        """
+        previously_dead = False
         while True:
             await asyncio.sleep(2.0)
-            if self.running and self.training_thread and not self.training_thread.is_alive():
-                self.running = False
-                self.latest_process = None
-                self.latest_item = None
-                self.latest_overall = None
-                console.print("[red]Training thread exited unexpectedly[/red]")
-                # Update plan status if a plan-based run died
-                plan_id = self._active_plan_id
-                if plan_id is not None:
-                    try:
-                        from datetime import datetime, timezone
-                        self.plan_registry.set_status(
-                            plan_id,
-                            "failed",
-                            completed_at=datetime.now(timezone.utc).isoformat(),
-                        )
-                    except Exception:
-                        logger.exception("Failed to set plan status to failed (dead thread)")
-                    self._active_plan_id = None
+            is_dead_now = (
+                self.running
+                and self.training_thread
+                and not self.training_thread.is_alive()
+            )
+            if is_dead_now and not previously_dead:
+                previously_dead = True
+                continue
+            if not is_dead_now:
+                previously_dead = False
+                continue
+            self.running = False
+            self.latest_process = None
+            self.latest_item = None
+            self.latest_overall = None
+            console.print("[red]Training thread exited unexpectedly[/red]")
+            previously_dead = False
+            # Update plan status if a plan-based run died
+            plan_id = self._active_plan_id
+            if plan_id is not None:
+                try:
+                    from datetime import datetime, timezone
+                    self.plan_registry.set_status(
+                        plan_id,
+                        "failed",
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception:
+                    logger.exception("Failed to set plan status to failed (dead thread)")
+                self._active_plan_id = None
 
     async def _broadcast(self, msg: str) -> None:
         dead: set = set()
