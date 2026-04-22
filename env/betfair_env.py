@@ -2279,20 +2279,28 @@ class BetfairEnv(gymnasium.Env):
                 self._force_close_refusals["no_book"] += 1
             return
 
-        # Sizing: agent-initiated closes use equal-P&L sizing (matches
-        # the open path; see _maybe_place_paired for the formula).
-        # Env-initiated FORCE-closes use 1:1 stake matching — we have
-        # ``agg.matched_stake`` committed on one side and want to close
-        # as much of that as we can on the other. Equal-P&L sizing is
-        # a profitability target that makes sense when BUILDING a
-        # paired position; when FLATTENING at a drifted price it
-        # produces absurd stakes (often >> available_budget) and
-        # refuses to place anything, leaving the pair naked. 1:1 is
-        # the real-trader's mental model: "close the £X I have on".
-        # See plans/arb-signal-cleanup/hard_constraints.md §11.
-        if force_close:
-            close_stake = agg_bet.matched_stake
-        elif agg_bet.side is BetSide.BACK:
+        # Sizing: both agent-initiated closes (close_signal) AND env-
+        # initiated force-closes use equal-P&L sizing. Equal-profit
+        # produces a hedge whose net P&L at settle is the same whether
+        # the race wins or loses — bounded by spread × stake, no race-
+        # outcome variance. 1:1 stake matching (used in an earlier
+        # revision of force-close, 2026-04-21) produces HIGHLY
+        # asymmetric hedges at drifted close prices: e.g. back £50 @
+        # 5.0 + 1:1 lay £50 @ 8.0 settles at −£160 on race-win but −£2
+        # on race-lose — a £158 range per pair. Summed over ~600 force-
+        # closes per episode the asymmetric tails produce −£800 to
+        # −£1900 episode rewards, blowing up PPO log-prob ratios
+        # (approx_kl observed at 39,786 vs the 0.03 early-stop
+        # threshold) and collapsing agents to bets=0 by ep10. See
+        # worker.log 2026-04-21T22:37 for the diagnosis.
+        #
+        # The earlier 1:1 switch was justified by "equal-profit stakes
+        # don't fit available_budget". That was true BEFORE overdraft;
+        # with overdraft now allowed for force_close (see place_back/
+        # place_lay) the larger equal-profit stake simply lands in the
+        # overdraft and the hedge is bounded by construction. See
+        # plans/arb-signal-cleanup/hard_constraints.md §11.
+        if agg_bet.side is BetSide.BACK:
             close_stake = equal_profit_lay_stake(
                 back_stake=agg_bet.matched_stake,
                 back_price=agg_bet.average_price,

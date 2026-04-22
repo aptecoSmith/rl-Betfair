@@ -91,24 +91,31 @@ available. The cost flows through `race_pnl` at settle so the
 agent learns from it. `MIN_BET_STAKE` (£2) still applies —
 Betfair's real minimum.
 
-**Sizing (force-close): 1:1 with the aggressive leg, not equal-P&L.**
-Agent-initiated closes via `close_signal` use the equal-profit
-helper (`equal_profit_lay_stake` / `equal_profit_back_stake`) so
-closing at the current spread equalises win-vs-lose P&L at the
-close price. Force-close instead uses `close_stake =
-agg.matched_stake` — 1:1 with the matched aggressive leg.
+**Sizing (force-close): equal-P&L helper, same as `close_signal`
+(2026-04-22, revised).** Both agent-initiated closes (via
+`close_signal`) AND env-initiated force-closes use the
+`equal_profit_lay_stake` / `equal_profit_back_stake` helpers from
+`env/scalping_math.py`. Equal-profit produces a hedge whose net
+P&L at settle is the same on race-win vs race-lose — bounded by
+`~spread × stake`, no race-outcome variance.
 
-Why: equal-profit sizing is a profitability target useful when
-BUILDING a paired position at a tight spread. When FLATTENING at a
-drifted price, the formula can demand stakes far larger than the
-agent's remaining per-race budget, and `place_back` / `place_lay`
-refuses to open a £30 close when only £2 is free. 1:1 sizing
-matches the real-trader's mental model ("I have £5 staked, I close
-£5 the other way") and fits the remaining budget whenever the
-original aggressive was placed within budget. MIN_BET_STAKE (£2)
-still applies — if 1:1 close can't match at least £2 (opposite-side
-book too thin, budget too depleted), the pair stays open and
-settles naked, same as any other refusal.
+An earlier 2026-04-21 revision used 1:1 stake matching
+(`close_stake = agg.matched_stake`) on force-close under the
+argument that equal-profit stakes don't fit the remaining budget.
+The cohort-A probe (worker.log 2026-04-21T22:37) showed the flaw:
+at drifted close prices the 1:1 hedge is highly asymmetric. Back
+£50 @ 5.0 + 1:1 lay £50 @ 8.0 settles at −£160 on race-win but
+−£2 on race-lose. Summed over ~600 force-closes per episode that
+race-outcome variance produced −£800 to −£1900 episode rewards,
+blew up PPO log-prob ratios (approx_kl 39,786 vs the 0.03 early-
+stop threshold), and collapsed agents to bets=0 by ep10.
+
+The "equal-profit stake doesn't fit budget" issue no longer binds
+because force_close also overdrafts the per-race budget (see above).
+The larger equal-profit stake simply lands in the overdraft and
+the hedge is bounded by construction. MIN_BET_STAKE (£2) still
+applies; if equal-profit can't match at least £2 the pair stays
+open and settles naked, same as any other refusal.
 
 `race_pnl` gains a `scalping_force_closed_pnl` term:
 

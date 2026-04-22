@@ -863,24 +863,25 @@ class TestForceCloseRelaxedMatcher:
             f"£{close.matched_stake:.2f}"
         )
 
-    def test_close_sizes_1_to_1_with_aggressive_leg(self):
-        """Force-close sizing is 1:1 with the aggressive leg, not equal-profit.
+    def test_close_sizes_with_equal_profit_helper(self):
+        """Force-close sizing uses equal-profit, not 1:1.
 
-        Agent-initiated ``close_signal`` closes use equal-profit sizing
-        (equalises P&L on win vs lose at the current close price).
-        Env-initiated force-close uses 1:1 stake matching — ``close_stake
-        == agg.matched_stake`` — because equal-profit sizing at drifted
-        prices often produces stakes far larger than the agent's
-        remaining budget and refuses every close. 1:1 is the real-
-        trader's mental model: "close the £X I have on". See
-        ``plans/arb-signal-cleanup/hard_constraints.md`` §11.
+        Equal-profit produces a hedge whose net P&L at settle is the
+        same on race-win vs race-lose — bounded by spread × stake,
+        no race-outcome variance. The 2026-04-21 1:1 revision
+        created asymmetric hedges at drifted prices (−£160 on win vs
+        −£2 on lose for a £50 back → £50 lay at 8.0 close) whose
+        variance blew up PPO's log-prob ratios. See worker.log for
+        the diagnosis and ``plans/arb-signal-cleanup/
+        hard_constraints.md`` §11 for the decision.
 
-        Scripted: place an aggressive back ~ £1.6 (per ``_place_initial_pair``
-        with stake fraction 0.8 × 20 % budget = ~16 % of £100 = ~£16), then
-        let force-close fire. The lay close leg's matched_stake should
-        equal the aggressive back's matched_stake (subject to opposite-
-        side liquidity and commission-free 1:1 book match).
+        Overdraft (added in the same round) is what makes equal-profit
+        workable despite its sometimes-larger stakes — the close just
+        lands in the overdraft and the hedge is bounded by
+        construction.
         """
+        from env.scalping_math import equal_profit_lay_stake
+
         day = _scripted_day([60.0, 29.0, 15.0])
         env = BetfairEnv(
             day,
@@ -893,15 +894,29 @@ class TestForceCloseRelaxedMatcher:
         close_legs = [b for b in bm.bets if b.force_close]
         assert close_legs, "force-close must place a closing leg"
         close = close_legs[0]
-        # 1:1: the close leg's requested_stake equals the aggressive
-        # leg's matched_stake. Actual matched_stake can be smaller if
-        # opposite-side book thins, but the INTENT is 1:1.
+        # Expected stake: equal_profit_lay_stake of the aggressive
+        # back against the close's fill price (the top-of-book lay
+        # price at the force-close tick — 4.2 in this scripted race).
+        expected = equal_profit_lay_stake(
+            back_stake=agg.matched_stake,
+            back_price=agg.average_price,
+            lay_price=close.average_price,
+            commission=0.05,
+        )
         assert close.requested_stake == pytest.approx(
+            expected, abs=1e-6,
+        ), (
+            f"force-close should use equal-profit sizing "
+            f"(expected £{expected:.4f}) but requested "
+            f"£{close.requested_stake:.4f}"
+        )
+        # The requested stake will differ from the aggressive stake in
+        # general — confirm we're NOT doing the buggy 1:1 path.
+        assert close.requested_stake != pytest.approx(
             agg.matched_stake, abs=1e-9,
         ), (
-            f"force-close should target 1:1 with aggressive leg "
-            f"({agg.matched_stake:.4f}) but requested "
-            f"{close.requested_stake:.4f}"
+            "force-close stake equals aggressive stake — regressed to "
+            "the 2026-04-21 1:1 sizing bug"
         )
 
     def test_counters_zero_on_successful_close(self):
