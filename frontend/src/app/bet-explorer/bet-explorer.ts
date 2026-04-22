@@ -52,7 +52,7 @@ interface EwLegs {
  * represents earned profit; the others flag luck (neutral/directional) or
  * unhedged exposure (naked).
  */
-type PairClass = 'locked' | 'neutral' | 'directional' | 'naked';
+type PairClass = 'locked' | 'neutral' | 'directional' | 'naked' | 'force_closed' | 'closed';
 
 /**
  * Confidence-chip bucket for the fill-probability aux head (purpose.md §4).
@@ -85,7 +85,26 @@ function pairFloorPnl(back: ExplorerBet, lay: ExplorerBet): number {
   return Math.min(winPnl, losePnl);
 }
 
-/** Classify a bet given the lookup of pair legs. */
+/** Classify a bet given the lookup of pair legs.
+ *
+ * Classification order (first match wins):
+ *   1. ``force_closed`` — any leg in the pair has force_close=true.
+ *      These are env-initiated closes at T−N and are distinct from
+ *      both naked residuals and agent-chosen closes. See CLAUDE.md
+ *      "Force-close at T−N".
+ *   2. ``closed`` — any leg in the pair has close_leg=true but no
+ *      force_close=true. These are agent-initiated closes via the
+ *      close_signal action. Distinct from naturally-matured pairs.
+ *   3. ``naked`` — no pair_id, or only one leg of the pair matched
+ *      (force-close refused, passive never filled).
+ *   4. ``locked`` / ``neutral`` / ``directional`` — pair fully matched;
+ *      category is determined by the min-outcome P&L floor.
+ *
+ * Added in the 2026-04-22 bet-explorer fix: the force_close / close_leg
+ * flags come from evaluator → parquet → API. Pre-fix rows have both
+ * flags default false and fall through to the original naked / locked /
+ * neutral / directional classification.
+ */
 function classifyBet(
   bet: ExplorerBet,
   legsByPair: Map<string, ExplorerBet[]>,
@@ -96,6 +115,8 @@ function classifyBet(
   const back = legs.find(l => l.action === 'back');
   const lay = legs.find(l => l.action === 'lay');
   if (!back || !lay) return 'naked';
+  if (legs.some(l => l.force_close === true)) return 'force_closed';
+  if (legs.some(l => l.close_leg === true)) return 'closed';
   const floor = pairFloorPnl(back, lay);
   if (floor > 0.005) return 'locked';
   if (floor >= -0.005) return 'neutral';
@@ -158,14 +179,17 @@ export class BetExplorer implements OnInit {
   readonly classCounts = computed(() => {
     const map = this.legsByPair();
     let locked = 0, neutral = 0, directional = 0, naked = 0;
+    let forceClosed = 0, closed = 0;
     for (const b of this.allBets()) {
       const c = classifyBet(b, map);
       if (c === 'locked') locked++;
       else if (c === 'neutral') neutral++;
       else if (c === 'directional') directional++;
+      else if (c === 'force_closed') forceClosed++;
+      else if (c === 'closed') closed++;
       else naked++;
     }
-    return { locked, neutral, directional, naked };
+    return { locked, neutral, directional, naked, force_closed: forceClosed, closed };
   });
 
   readonly uniqueDates = computed(() => {
@@ -474,7 +498,8 @@ export class BetExplorer implements OnInit {
     return { win_stake: halfStake, place_stake: halfStake, place_odds: placeOdds, win_pnl: winPnl, place_pnl: placePnl };
   }
 
-  /** Classification badge for a bet: locked / neutral / directional / naked. */
+  /** Classification badge for a bet: locked / neutral / directional /
+   *  naked / force_closed / closed. */
   pairClass(bet: ExplorerBet): PairClass {
     return classifyBet(bet, this.legsByPair());
   }
@@ -486,6 +511,8 @@ export class BetExplorer implements OnInit {
       case 'neutral': return 'NEUTRAL';
       case 'directional': return 'DIRECTIONAL';
       case 'naked': return 'NAKED';
+      case 'force_closed': return 'FORCE-CLOSED';
+      case 'closed': return 'CLOSED';
     }
   }
 

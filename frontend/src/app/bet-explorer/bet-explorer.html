@@ -83,6 +83,14 @@
         <span class="pair-class-label">Naked</span>
         <span class="pair-class-value">{{ classCounts().naked }}</span>
       </div>
+      <div class="pair-class-stat force-closed">
+        <span class="pair-class-label">Force-closed</span>
+        <span class="pair-class-value">{{ classCounts().force_closed }}</span>
+      </div>
+      <div class="pair-class-stat closed">
+        <span class="pair-class-label">Closed</span>
+        <span class="pair-class-value">{{ classCounts().closed }}</span>
+      </div>
     </div>
 
     <!-- ── Filters ── -->
@@ -222,6 +230,8 @@
                                 [class.neutral]="pairClass(bet) === 'neutral'"
                                 [class.directional]="pairClass(bet) === 'directional'"
                                 [class.naked]="pairClass(bet) === 'naked'"
+                                [class.force-closed]="pairClass(bet) === 'force_closed'"
+                                [class.closed]="pairClass(bet) === 'closed'"
                                 [title]="'Pair classification: ' + pairClassLabel(pairClass(bet))">
                             {{ pairClassLabel(pairClass(bet)) }}
                           </span>

@@ -28,6 +28,14 @@ export interface ExplorerBet {
   fill_prob_at_placement?: number | null;
   predicted_locked_pnl_at_placement?: number | null;
   predicted_locked_stddev_at_placement?: number | null;
+  // Arb-signal-cleanup Session 03b (2026-04-22). `close_leg=true` marks a
+  // bet placed via _attempt_close (agent close_signal OR env force-close).
+  // `force_close=true` narrows that to env-initiated force-close at T−N;
+  // implies close_leg=true. Both default false on pre-fix bets. Feeds the
+  // FORCE-CLOSED / CLOSED badges and stops force-closed pairs being
+  // misread as naked by the pair-classifier.
+  close_leg?: boolean;
+  force_close?: boolean;
 }
 
 export interface BetExplorerResponse {

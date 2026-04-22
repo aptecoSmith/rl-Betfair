@@ -147,6 +147,18 @@ class EvaluationBetRecord:
     # for pre-Session-03 runs.
     predicted_locked_pnl_at_placement: float | None = None
     predicted_locked_stddev_at_placement: float | None = None
+    # Arb-signal-cleanup Session 03b (2026-04-22). Distinguishes closing
+    # legs placed via agent-initiated ``close_signal`` from env-initiated
+    # force-close at T−N. Without these, the bet-explorer UI treats both
+    # as regular matched bets — a force-closed pair's legs look the same
+    # as any other closed pair, and the operator can't tell why the
+    # agent ended up in that trade. ``close_leg`` is True for any bet
+    # placed via ``_attempt_close`` (either force-close or close_signal).
+    # ``force_close`` is True only when ``_attempt_close`` was called
+    # with ``force_close=True`` (env-initiated). Both default to False
+    # so pre-fix parquet rows stay readable without schema migration.
+    close_leg: bool = False
+    force_close: bool = False
 
 
 @dataclass
@@ -744,6 +756,12 @@ class ModelStore:
                 "predicted_locked_stddev_at_placement": (
                     r.predicted_locked_stddev_at_placement
                 ),
+                # Arb-signal-cleanup Session 03b (2026-04-22). Surfaces
+                # force-close metadata to the bet-explorer UI. Booleans
+                # stored as-is; ``None`` isn't possible here because the
+                # source ``Bet`` object always has these flags.
+                "close_leg": r.close_leg,
+                "force_close": r.force_close,
             }
             for r in records
         ])
@@ -856,6 +874,10 @@ class ModelStore:
         has_predicted_locked_stddev = (
             "predicted_locked_stddev_at_placement" in df.columns
         )
+        # Arb-signal-cleanup Session 03b (2026-04-22). Pre-fix parquet
+        # files lack these columns — default to False on the read side.
+        has_close_leg = "close_leg" in df.columns
+        has_force_close = "force_close" in df.columns
         return [
             EvaluationBetRecord(
                 run_id=str(row["run_id"]),
@@ -918,6 +940,12 @@ class ModelStore:
                     if has_predicted_locked_stddev
                     and pd.notna(row.get("predicted_locked_stddev_at_placement"))
                     else None
+                ),
+                close_leg=(
+                    bool(row["close_leg"]) if has_close_leg else False
+                ),
+                force_close=(
+                    bool(row["force_close"]) if has_force_close else False
                 ),
             )
             for _, row in df.iterrows()

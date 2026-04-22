@@ -462,6 +462,24 @@ $bet-grid: 3rem 1fr 4.5rem 4.5rem 4.5rem 4rem 2rem 2rem 3.5rem 4.5rem 2.5rem 3.7
     background: rgba(248, 113, 113, 0.1);
     border: 1px solid rgba(248, 113, 113, 0.3);
   }
+
+  // Arb-signal-cleanup Session 03b (2026-04-22). Force-closed: env
+  // flattened the pair at T−N. Purple/violet — distinct from the
+  // green (locked) / amber (directional) / red (naked) axis so
+  // operators can scan quickly.
+  &.force-closed {
+    color: #c084fc;
+    background: rgba(192, 132, 252, 0.12);
+    border: 1px solid rgba(192, 132, 252, 0.4);
+  }
+
+  // Closed: agent-initiated close via close_signal. Blue — "the agent
+  // chose this" vs force-closed's "the env cleaned up".
+  &.closed {
+    color: #60a5fa;
+    background: rgba(96, 165, 250, 0.12);
+    border: 1px solid rgba(96, 165, 250, 0.4);
+  }
 }
 
 // Confidence chip — aux-head fill-probability prediction bucketed into
@@ -540,6 +558,8 @@ $bet-grid: 3rem 1fr 4.5rem 4.5rem 4.5rem 4rem 2rem 2rem 3.5rem 4.5rem 2.5rem 3.7
   &.neutral .pair-class-value { color: #9ca3af; }
   &.directional .pair-class-value { color: #fbbf24; }
   &.naked .pair-class-value { color: #f87171; }
+  &.force-closed .pair-class-value { color: #c084fc; }
+  &.closed .pair-class-value { color: #60a5fa; }
 }
 
 .bet-pnl {

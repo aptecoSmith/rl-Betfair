@@ -471,6 +471,12 @@ class Evaluator:
                 predicted_locked_stddev_at_placement=(
                     bet.predicted_locked_stddev_at_placement
                 ),
+                # Arb-signal-cleanup Session 03b (2026-04-22) — surface
+                # the force-close / close-leg flags to the bet-explorer
+                # UI so the operator can distinguish naked residuals
+                # from force-closed pairs and agent-initiated closes.
+                close_leg=bool(getattr(bet, "close_leg", False)),
+                force_close=bool(getattr(bet, "force_close", False)),
             ))
 
         # Compute opportunity window aggregates for the day record

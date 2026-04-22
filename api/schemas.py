@@ -316,6 +316,9 @@ class ReplayRaceResponse(BaseModel):
     runner_names: dict[str, str] = {}  # selection_id → horse name
 
 
+# ExplorerBet definition — see api/routers/replay.py for construction
+# and frontend/src/app/models/bet-explorer.model.ts for the TypeScript
+# mirror.
 class ExplorerBet(BaseModel):
     date: str
     race_id: str
@@ -348,6 +351,17 @@ class ExplorerBet(BaseModel):
     fill_prob_at_placement: float | None = None
     predicted_locked_pnl_at_placement: float | None = None
     predicted_locked_stddev_at_placement: float | None = None
+    # Arb-signal-cleanup Session 03b (2026-04-22). Distinguishes closing
+    # legs placed via ``close_signal`` (close_leg=True, force_close=False)
+    # from env-initiated force-close at T−N (close_leg=True,
+    # force_close=True) from regular opening legs (both False). Lets the
+    # bet-explorer UI render a FORCE-CLOSED or CLOSED badge on the right
+    # rows and stops a force-closed pair's legs being misread as naked.
+    # Both default False for backwards compatibility with pre-fix runs
+    # whose parquet rows lack the columns (loaded as False via the
+    # model_store reader's has_close_leg / has_force_close branch).
+    close_leg: bool = False
+    force_close: bool = False
 
 
 class BetExplorerResponse(BaseModel):

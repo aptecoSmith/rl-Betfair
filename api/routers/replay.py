@@ -160,6 +160,8 @@ def get_model_bets(model_id: str, request: Request):
             fill_prob_at_placement=b.fill_prob_at_placement,
             predicted_locked_pnl_at_placement=b.predicted_locked_pnl_at_placement,
             predicted_locked_stddev_at_placement=b.predicted_locked_stddev_at_placement,
+            close_leg=getattr(b, "close_leg", False),
+            force_close=getattr(b, "force_close", False),
         ))
 
     total_bets = len(bets)
