@@ -667,6 +667,26 @@ class PassiveOrderBook:
 
         # ── Phase 1: accumulate traded-volume deltas ──────────────────────
         # Use the sid index to avoid scanning all orders per runner.
+        #
+        # Per-order crossability gate (2026-04-22 fix). Without this guard
+        # the cumulative-volume threshold a resting order needs to fill
+        # was advanced by ANY trade on the runner, regardless of price.
+        # A resting LAY at 1.29 would be filled from trades at 1.52 that
+        # couldn't possibly cross it — a backer getting 1.52 has no
+        # reason to drop to 1.29. That produced fictional "locked"
+        # pairs in the bet log (e.g. operator-flagged Wolverhampton
+        # 17:05 Rb Yas Sir A on 313cec8e, lay@1.29 and back@1.52 at
+        # the same tick_timestamp with back > lay — impossible in a
+        # real Betfair book).
+        #
+        # The crossability check: a LAY at price P fills only when a
+        # trade happens at or below P (a backer crosses the spread
+        # down to take the lay). A BACK at price P fills only when a
+        # trade happens at or above P. We proxy "trade price" with
+        # LTP, the last-traded-price on this tick — not perfect (LTP
+        # is a single value but many trades can happen between ticks
+        # at different prices) but strictly better than counting ALL
+        # volume at ALL prices.
         for sid, sid_orders in self._orders_by_sid.items():
             if not sid_orders:
                 continue
@@ -678,7 +698,23 @@ class PassiveOrderBook:
             self._last_total_matched[sid] = snap.total_matched
 
             if delta > 0.0:
+                ltp = snap.last_traded_price
                 for order in sid_orders:
+                    if ltp is None or ltp <= 0.0:
+                        # No LTP on this tick — we can't tell whether
+                        # trades would have crossed. Skip accumulation
+                        # rather than wrongly advancing the queue.
+                        continue
+                    if order.side is BetSide.LAY and ltp > order.price:
+                        # Trades at a price strictly above this lay's
+                        # price — a backer taking higher prices has no
+                        # reason to cross down. Order stays in queue.
+                        continue
+                    if order.side is BetSide.BACK and ltp < order.price:
+                        # Trades at a price strictly below this back's
+                        # price — a layer taking lower prices has no
+                        # reason to cross up.
+                        continue
                     order.traded_volume_since_placement += delta
 
         # ── Phase 2: fill check ───────────────────────────────────────────

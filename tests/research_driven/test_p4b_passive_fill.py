@@ -481,3 +481,148 @@ class TestRewardInvariant:
         # Passive fill at 3.9, aggressive fill at 3.9 (both match on back side).
         expected = 10.0 * (3.9 - 1.0) + 15.0 * (3.9 - 1.0)
         assert pnl == pytest.approx(expected, rel=1e-6)
+
+
+# ── Test 11: crossability gate — no fills from non-crossing volume ────────────
+#
+# 2026-04-22 bug fix. Before the fix the fill-threshold counter
+# accumulated the runner's entire traded-volume delta per tick
+# regardless of where trades were actually happening — so a lay at
+# 1.29 would be "filled" by trades at 1.52 that couldn't possibly
+# cross it. Operator observed this on the bet-explorer: a lay at 1.29
+# and a back at 1.52 on the same runner at the same tick_timestamp,
+# forming an economically impossible locked pair.
+#
+# The fix gates Phase 1 accumulation per-order: LAY at P accumulates
+# only when LTP ≤ P; BACK at P only when LTP ≥ P. These tests pin the
+# behaviour so the bug can't silently regress.
+
+
+class TestCrossabilityGate:
+    """Passive orders must not fill from traded volume at prices that
+    couldn't have crossed them."""
+
+    def test_lay_not_filled_by_trades_at_higher_price(self):
+        """Lay at 1.29 stays unfilled even with massive volume at 1.52."""
+        mgr = _mgr(budget=500.0)
+        place_snap = _runner(
+            selection_id=1001, ltp=1.29,
+            back_levels=[(1.28, 100.0)],
+            lay_levels=[(1.29, 100.0)],
+            total_matched=0.0,
+        )
+        mgr.passive_book.place(
+            place_snap, stake=5.0, side=BetSide.LAY,
+            market_id="1.99", tick_index=0,
+        )
+        # Market drifted UP; LTP=1.52. Massive volume delta but at a
+        # price that couldn't cross the 1.29 lay. Pre-fix the fill-
+        # threshold was exceeded and the lay filled at 1.29.
+        drifted = _runner(
+            selection_id=1001, ltp=1.52,
+            back_levels=[(1.51, 100.0)],
+            lay_levels=[(1.52, 100.0)],
+            total_matched=50.0,
+        )
+        mgr.passive_book.on_tick(_tick([drifted]))
+        assert len(mgr.bets) == 0
+        assert len(mgr.passive_book.orders) == 1
+
+    def test_back_not_filled_by_trades_at_lower_price(self):
+        """Back at 5.0 stays unfilled by volume at 3.0."""
+        mgr = _mgr(budget=500.0)
+        place_snap = _runner(
+            selection_id=1001, ltp=5.0,
+            back_levels=[(5.0, 100.0)],
+            lay_levels=[(5.1, 100.0)],
+            total_matched=0.0,
+        )
+        mgr.passive_book.place(
+            place_snap, stake=5.0, side=BetSide.BACK,
+            market_id="1.99", tick_index=0,
+        )
+        drifted = _runner(
+            selection_id=1001, ltp=3.0,
+            back_levels=[(2.9, 100.0)],
+            lay_levels=[(3.0, 100.0)],
+            total_matched=100.0,
+        )
+        mgr.passive_book.on_tick(_tick([drifted]))
+        assert len(mgr.bets) == 0
+        assert len(mgr.passive_book.orders) == 1
+
+    def test_lay_fills_when_trades_at_its_price(self):
+        """Regression guard: correctly-priced volume must still fill
+        the order — otherwise the fix broke the whole match path."""
+        mgr = _mgr(budget=500.0)
+        snap = _runner(
+            selection_id=1001, ltp=4.0,
+            back_levels=[(3.9, 100.0)],
+            lay_levels=[(4.0, 100.0)],
+            total_matched=0.0,
+        )
+        mgr.passive_book.place(
+            snap, stake=5.0, side=BetSide.LAY,
+            market_id="1.99", tick_index=0,
+        )
+        mgr.passive_book.orders[0].queue_ahead_at_placement = 0.0
+        # Trades at LTP=4.0 (equal to order price) — crossability
+        # gate (LTP <= 4.0) passes; fill proceeds.
+        after = _runner(
+            selection_id=1001, ltp=4.0,
+            back_levels=[(3.9, 100.0)],
+            lay_levels=[(4.0, 100.0)],
+            total_matched=20.0,
+        )
+        mgr.passive_book.on_tick(_tick([after]))
+        assert len(mgr.bets) == 1
+        assert mgr.bets[0].average_price == pytest.approx(4.0)
+        assert mgr.bets[0].side is BetSide.LAY
+
+    def test_lay_fills_from_strictly_lower_trades(self):
+        """Lay at 4.0 fills from LTP=3.9 — crossability (LTP <= P) holds."""
+        mgr = _mgr(budget=500.0)
+        snap = _runner(
+            selection_id=1001, ltp=4.0,
+            back_levels=[(3.9, 100.0)],
+            lay_levels=[(4.0, 100.0)],
+            total_matched=0.0,
+        )
+        mgr.passive_book.place(
+            snap, stake=5.0, side=BetSide.LAY,
+            market_id="1.99", tick_index=0,
+        )
+        mgr.passive_book.orders[0].queue_ahead_at_placement = 0.0
+        after = _runner(
+            selection_id=1001, ltp=3.9,
+            back_levels=[(3.8, 100.0)],
+            lay_levels=[(3.9, 100.0)],
+            total_matched=20.0,
+        )
+        mgr.passive_book.on_tick(_tick([after]))
+        assert len(mgr.bets) == 1
+
+    def test_no_ltp_skips_accumulation(self):
+        """No LTP → can't judge crossability → conservative skip."""
+        mgr = _mgr(budget=500.0)
+        snap = _runner(
+            selection_id=1001, ltp=4.0,
+            back_levels=[(3.9, 100.0)],
+            lay_levels=[(4.0, 100.0)],
+            total_matched=0.0,
+        )
+        mgr.passive_book.place(
+            snap, stake=5.0, side=BetSide.LAY,
+            market_id="1.99", tick_index=0,
+        )
+        mgr.passive_book.orders[0].queue_ahead_at_placement = 0.0
+        broken = RunnerSnap(
+            selection_id=1001, status="ACTIVE", last_traded_price=0.0,
+            total_matched=100.0, starting_price_near=0.0,
+            starting_price_far=0.0, adjustment_factor=None, bsp=None,
+            sort_priority=1, removal_date=None,
+            available_to_back=[], available_to_lay=[],
+        )
+        mgr.passive_book.on_tick(_tick([broken]))
+        assert len(mgr.bets) == 0
+        assert len(mgr.passive_book.orders) == 1
