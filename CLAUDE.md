@@ -599,17 +599,51 @@ TestRecurrentStateThroughPpoUpdate`:
    This is the strictest signature: same weights + same obs +
    same state ⇒ same log-prob, so any non-zero KL is exactly the
    signature of the state/action-clipping mismatch reappearing.
+4. `test_kl_early_stop_is_per_mini_batch_not_per_epoch` — verifies
+   the Session 02 granularity change. Sets threshold to 1e-12
+   (guaranteed trip) and asserts `n_updates < mini_batches_per_epoch`
+   after `_ppo_update` returns. A regression to per-epoch granularity
+   would run a full epoch before the first KL check and fail this.
 
-See `plans/ppo-kl-fix/` for the fix rationale and
+### Per-mini-batch KL check (Session 02, 2026-04-25)
+
+The KL early-stop check runs **inside** the mini-batch loop, not at
+end-of-epoch. On a 10k-transition rollout with `mini_batch_size=64`
+each epoch is ~156 gradient steps; per-epoch checks fire only after
+all 156 have run, by which point the accumulated drift routinely
+exceeds 3.0 even though individual steps are healthy. Per-mini-batch
+checks stop the update at the first breach and skip all remaining
+mini-batches (current epoch + all subsequent epochs).
+
+The check is positioned immediately after `optimiser.step()` and
+reads `(mb_old_log_probs − new_log_probs).mean()` under `no_grad`,
+reusing the mini-batch's own forward-pass log-probs. When the
+threshold trips, the log line reports "skipping X remaining
+mini-batches across Y epoch(s)" so compute savings are visible.
+
+Pre-Session-02, post-Session-01 observed `approx_kl` at the per-
+epoch check point: **3.94 – 18.87** (100× threshold → early-stop
+on every update, PPO starved to one-epoch-worth of updates).
+Post-Session-02 the check is surgical — training runs the full
+budget when KL is healthy and exits cleanly when it isn't.
+`loss_info` gains `n_updates` so episodes.jsonl surfaces how many
+gradient steps actually ran each update (full budget = healthy;
+low = KL tripped).
+
+See `plans/ppo-kl-fix/lessons_learnt.md` (Session 02 section + the
+five meta-lessons at the top) for the full diagnostic trail and
 `plans/ppo-stability-and-force-close-investigation/findings.md`
-for the evidence trail (median observed KL = 12,740 pre-fix;
-ρ(episode_idx, KL) = +0.435 confirming the drift pattern).
+for the original evidence (median observed KL = 12,740 pre-
+Session-01; ρ(episode_idx, KL) = +0.435 confirming the drift
+pattern).
 
-Reward-scale: the fix does NOT change per-episode rewards — the
+Reward-scale: neither session changes per-episode rewards — the
 gradient pathway is corrected but raw and shaped reward
 accumulators are unchanged. Scoreboard rows from before this
 commit remain comparable on `raw_pnl_reward`; post-fix runs will
-show `approx_kl` in the 0.01-0.5 range (was 1e3-1e6).
+show `approx_kl` in the 0.001-0.1 range (was 1e3-1e6) and
+`n_updates` at or near `ppo_epochs × mini_batches_per_epoch`
+instead of one-epoch-worth.
 
 ## Entropy control — target-entropy controller (2026-04-19)
 

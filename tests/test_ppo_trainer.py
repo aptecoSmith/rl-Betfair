@@ -1668,3 +1668,69 @@ class TestRecurrentStateThroughPpoUpdate:
             f"a different hidden state than the rollout did. See "
             f"plans/ppo-kl-fix/."
         )
+
+    def test_kl_early_stop_is_per_mini_batch_not_per_epoch(self):
+        """Session 02 (2026-04-24) — the KL early-stop fires INSIDE
+        the mini-batch loop, not after a full-epoch sweep.
+
+        Construction: push ``kl_early_stop_threshold`` to a tiny
+        positive number so at least one mini-batch will breach,
+        then assert ``_last_kl_early_stop_epoch`` is set BEFORE
+        the full epoch's mini-batches have all run. A per-epoch
+        check would record n_updates == mini_batches_per_epoch ×
+        epochs_completed; a per-mini-batch check stops earlier, so
+        n_updates < mini_batches_per_epoch if the first epoch trips.
+
+        This is the load-bearing regression guard against reverting
+        to the per-epoch granularity that starved PPO pre-fix — see
+        ``plans/ppo-kl-fix/lessons_learnt.md`` Session 02 for the
+        diagnosis.
+        """
+        config = _make_config()
+        policy = _make_policy(config)
+        # Threshold of 1e-12 → first mini-batch with ANY gradient
+        # step will trip. ppo_epochs=4 so a per-epoch check would
+        # do at least one full epoch's worth of mini-batches before
+        # the first KL evaluation.
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={
+                "ppo_epochs": 4,
+                "mini_batch_size": 2,
+                "kl_early_stop_threshold": 1e-12,
+            },
+        )
+
+        # 12-transition rollout → 6 mini-batches per epoch at
+        # mini_batch_size=2. A per-epoch check would run all 6
+        # before the first KL evaluation; a per-mini-batch check
+        # trips after mini-batch 1 (the one after the first
+        # gradient step).
+        day = _make_day(n_races=2, n_ticks=6, n_runners=3)
+        rollout, _ = trainer._collect_rollout(day)
+        n_transitions = len(rollout.transitions)
+        mini_batches_per_epoch = (n_transitions + 1) // 2
+        assert mini_batches_per_epoch >= 4, (
+            f"test needs at least 4 mini-batches per epoch to "
+            f"distinguish per-epoch from per-mini-batch granularity; "
+            f"got {mini_batches_per_epoch}"
+        )
+
+        loss_info = trainer._ppo_update(rollout)
+
+        # KL should have tripped early-stop on epoch 0.
+        assert trainer._last_kl_early_stop_epoch == 0, (
+            f"_last_kl_early_stop_epoch = "
+            f"{trainer._last_kl_early_stop_epoch} — expected 0 "
+            f"(mini-batch check should trip on epoch 0's first "
+            f"post-gradient-step mini-batch at threshold 1e-12)"
+        )
+        # And crucially FEWER mini-batches ran than one full epoch.
+        # Per-epoch granularity would have run all
+        # mini_batches_per_epoch before checking KL.
+        n_updates = int(loss_info["n_updates"])
+        assert n_updates < mini_batches_per_epoch, (
+            f"n_updates={n_updates} >= mini_batches_per_epoch="
+            f"{mini_batches_per_epoch}. The KL check is running at "
+            f"per-epoch granularity (Session 02 regression)."
+        )

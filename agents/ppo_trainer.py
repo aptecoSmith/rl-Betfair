@@ -1863,6 +1863,15 @@ class PPOTrainer:
         self._last_kl_early_stop_epoch = None
         self._last_approx_kl = 0.0
         epochs_completed = 0
+        # ppo-kl-fix Session 02 (2026-04-24): signal from the per-
+        # mini-batch KL check below, used to break BOTH the inner
+        # mini-batch loop and the outer epoch loop once the policy
+        # has drifted far enough that further updates are unsafe.
+        kl_early_stopped = False
+        # Count of mini-batches skipped after an early-stop trips;
+        # surfaced in the log so the operator can see how much
+        # compute was saved.
+        mini_batches_skipped = 0
 
         for epoch_idx in range(self.ppo_epochs):
             # Generate random mini-batch indices
@@ -2049,51 +2058,72 @@ class PPOTrainer:
                 fill_prob_losses.append(float(fill_prob_loss.item()))
                 risk_losses.append(float(risk_loss.item()))
 
-            # KL early-stop at PPO-epoch granularity
-            # (plans/naked-clip-and-stability, Session 02, 2026-04-18,
-            # hard_constraints.md §9). After each full epoch sweep of
-            # mini-batches, compute approximate KL across the whole
-            # rollout as evaluated by the current (post-this-epoch)
-            # policy: ``mean(old_logp - new_logp)``. If the threshold
-            # is exceeded, break out of the remaining epochs for this
-            # rollout — prevents runaway updates from continuing to
-            # push the policy further after a large KL swing.
-            # Literature standard (Andrychowicz et al. 2021, Engstrom
-            # et al. 2020); ships in stable-baselines3. Kept at epoch
-            # granularity rather than mini-batch (hard_constraints §9)
-            # because mid-epoch breaks leave mini-batches unevenly
-            # weighted.
+                # ppo-kl-fix Session 02 (2026-04-24): per-mini-batch
+                # KL check. Previously this check ran once per epoch
+                # on the FULL rollout's log-probs — too coarse for
+                # long rollouts. A 10k-transition rollout with
+                # mini_batch_size=64 takes ~156 gradient steps per
+                # epoch; a per-step KL drift of just 0.02 accumulates
+                # to mean_kl > 3 by epoch end even though each step
+                # is healthy. The per-epoch check therefore always
+                # tripped on the 0.03 threshold once the policy had
+                # any real gradient (see plans/ppo-kl-fix/
+                # lessons_learnt.md Session 02 for the measurement:
+                # median KL 12,740 pre-Session-01 fix; 3–20 after
+                # Session-01 but still > threshold for every update).
+                #
+                # The per-mini-batch check evaluates KL on THIS
+                # mini-batch's transitions against the rollout-time
+                # log-probs using the POST-step policy (the forward
+                # pass above has already happened; we reuse
+                # ``new_log_probs`` which is mid-tape but detached
+                # from gradient here). If the policy has drifted
+                # more than ``kl_early_stop_threshold`` from the
+                # rollout, stop taking further gradient steps.
+                # Literature standard — stable-baselines3 ships it;
+                # CleanRL uses the Schulman approximation. We use
+                # the simpler ``(old − new).mean()`` form consistent
+                # with the pre-Session-02 diagnostics.
+                with torch.no_grad():
+                    mb_approx_kl = float(
+                        (mb_old_log_probs - new_log_probs).mean().item()
+                    )
+                self._last_approx_kl = mb_approx_kl
+                if mb_approx_kl > self.kl_early_stop_threshold:
+                    self._last_kl_early_stop_epoch = epoch_idx
+                    kl_early_stopped = True
+                    # Tally remaining mini-batches in this epoch plus
+                    # full mini-batches in all skipped epochs so the
+                    # operator log is honest about compute saved.
+                    remaining_in_epoch = max(
+                        0,
+                        (n + self.mini_batch_size - 1)
+                        // self.mini_batch_size
+                        - ((start // self.mini_batch_size) + 1)
+                    )
+                    remaining_epochs = self.ppo_epochs - (epoch_idx + 1)
+                    mini_batches_per_epoch = (
+                        (n + self.mini_batch_size - 1)
+                        // self.mini_batch_size
+                    )
+                    mini_batches_skipped = (
+                        remaining_in_epoch
+                        + remaining_epochs * mini_batches_per_epoch
+                    )
+                    logger.info(
+                        "PPO KL early-stop mid-epoch %d: "
+                        "approx_kl=%.4f > threshold=%.4f "
+                        "(skipping %d remaining mini-batches "
+                        "across %d epoch(s))",
+                        epoch_idx, mb_approx_kl,
+                        self.kl_early_stop_threshold,
+                        mini_batches_skipped,
+                        1 + remaining_epochs,
+                    )
+                    break
+
             epochs_completed += 1
-            with torch.no_grad():
-                # ppo-kl-fix (2026-04-24): the diagnostics forward
-                # must also condition on the rollout-time hidden
-                # state (same rationale as the mini-batch forward
-                # above). Before this fix, ``approx_kl`` measured
-                # "stateful rollout vs stateless lobotomised policy"
-                # which is huge by construction and grew as the
-                # policy drifted from init (ρ(episode_idx, KL) =
-                # +0.435; see plans/ppo-stability-and-force-close-
-                # investigation/findings.md).
-                if packed_hidden is None:
-                    full_out = self.policy(obs_batch)
-                else:
-                    full_out = self.policy(obs_batch, packed_hidden)
-                full_std = full_out.action_log_std.exp()
-                full_dist = Normal(full_out.action_mean, full_std)
-                new_logp_full = full_dist.log_prob(action_batch).sum(dim=-1)
-                approx_kl = float(
-                    (old_log_probs - new_logp_full).mean().item()
-                )
-            self._last_approx_kl = approx_kl
-            if approx_kl > self.kl_early_stop_threshold:
-                self._last_kl_early_stop_epoch = epoch_idx
-                logger.info(
-                    "PPO KL early-stop after epoch %d: approx_kl=%.4f"
-                    " > threshold=%.4f (skipping %d remaining epochs)",
-                    epoch_idx, approx_kl,
-                    self.kl_early_stop_threshold,
-                    self.ppo_epochs - (epoch_idx + 1),
-                )
+            if kl_early_stopped:
                 break
 
         ppo_elapsed = time.perf_counter() - ppo_start
@@ -2158,6 +2188,14 @@ class PPOTrainer:
                 if self._last_kl_early_stop_epoch is not None
                 else -1
             ),
+            # ppo-kl-fix Session 02 (2026-04-24) — how many
+            # mini-batch gradient steps actually ran this update.
+            # Equals ``ppo_epochs * ceil(n / mini_batch_size)``
+            # when the KL check doesn't trip; less when it does.
+            # Surfacing this lets operators see in episodes.jsonl
+            # whether PPO is actually training (high) or starved
+            # (one mini-batch sweep — the pre-Session-02 regime).
+            "n_updates": len(policy_losses),
             "action_stats": action_stats,
         }
 
