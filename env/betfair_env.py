@@ -142,6 +142,40 @@ NAKED_WINNER_CLIP_FRACTION: float = 0.95
 CLOSE_SIGNAL_BONUS: float = 1.0
 
 
+def _covered_fraction(agg, close, commission: float) -> float:
+    """Fraction of the aggressive leg that is actually hedged by the
+    close leg's realised matched stake.
+
+    The close leg is sized to the equal-profit target at placement
+    (see ``env/scalping_math.py::equal_profit_lay_stake`` /
+    ``equal_profit_back_stake``); when the opposite-side book is
+    thin it may partial-fill, leaving a residual of the aggressive
+    leg naked. This helper is the algebraic inverse of the
+    equal-profit formula: given the close leg's *actual* matched
+    stake, what fraction of ``agg.matched_stake`` does it balance?
+
+    Return is clamped to ``[0, 1]``. A matched_stake of zero on agg
+    (shouldn't happen for a settled pair) yields 1.0 to fall back
+    to the pre-fix behaviour rather than divide by zero.
+    """
+    c = commission
+    if agg.matched_stake <= 0.0:
+        return 1.0
+    if agg.side is BetSide.BACK:
+        p_b, p_l = agg.average_price, close.average_price
+        denom = p_b * (1.0 - c) + c
+        if denom <= 0.0:
+            return 1.0
+        covered = close.matched_stake * (p_l - c) / denom
+    else:
+        p_l, p_b = agg.average_price, close.average_price
+        denom = p_l - c
+        if denom <= 0.0:
+            return 1.0
+        covered = close.matched_stake * (p_b * (1.0 - c) + c) / denom
+    return max(0.0, min(1.0, covered / agg.matched_stake))
+
+
 def _compute_scalping_reward_terms(
     race_pnl: float,
     naked_per_pair: list[float],
@@ -2585,22 +2619,34 @@ class BetfairEnv(gymnasium.Env):
                     back_bet = agg if agg.side is BetSide.BACK else pas
                     lay_bet = agg if agg.side is BetSide.LAY else pas
                     if is_closed:
-                        # realised_pnl ≈ min(win_pnl, lose_pnl) without
-                        # flooring at zero — this is the close's actual
-                        # cash cost (small negative for close-at-loss,
-                        # small positive for close-at-profit). Computed
-                        # here because get_paired_positions returns only
-                        # the floored locked_pnl; we want the signed
-                        # number for the activity log.
+                        # Reports the close's COVERED-portion P&L —
+                        # the realised cash on the fraction of the
+                        # aggressive leg that the close leg actually
+                        # hedged. A partial-fill close produces a
+                        # directional residual whose cash swing
+                        # belongs in the naked bucket, not in the
+                        # close event (see _covered_fraction and the
+                        # bucket-split accounting below).
                         b, l = back_bet, lay_bet
+                        close = agg if agg.close_leg else pas
+                        agg_open = pas if agg.close_leg else agg
+                        covered_frac = _covered_fraction(
+                            agg_open, close, self._commission,
+                        )
+                        if agg_open.side is BetSide.BACK:
+                            s_b_eff = covered_frac * b.matched_stake
+                            s_l_eff = l.matched_stake
+                        else:
+                            s_b_eff = b.matched_stake
+                            s_l_eff = covered_frac * l.matched_stake
                         win_pnl = (
-                            b.matched_stake * (b.average_price - 1.0)
+                            s_b_eff * (b.average_price - 1.0)
                             * (1.0 - self._commission)
-                            - l.matched_stake * (l.average_price - 1.0)
+                            - s_l_eff * (l.average_price - 1.0)
                         )
                         lose_pnl = (
-                            -b.matched_stake
-                            + l.matched_stake * (1.0 - self._commission)
+                            -s_b_eff
+                            + s_l_eff * (1.0 - self._commission)
                         )
                         if is_force_closed:
                             scalping_arbs_force_closed += 1
@@ -2611,6 +2657,7 @@ class BetfairEnv(gymnasium.Env):
                             "back_price": back_bet.average_price,
                             "lay_price": lay_bet.average_price,
                             "realised_pnl": min(win_pnl, lose_pnl),
+                            "covered_frac": float(covered_frac),
                             "race_idx": self._race_idx,
                             # Distinguishes env-initiated force-closes
                             # from agent-initiated closes in the
@@ -2879,24 +2926,44 @@ class BetfairEnv(gymnasium.Env):
         scalping_closed_pnl = 0.0
         scalping_force_closed_pnl = 0.0
         if self.scalping_mode:
-            closed_pair_ids: set[str] = set()
-            force_closed_pair_ids: set[str] = set()
+            # Group bets by pair_id so we can compute partial-fill
+            # coverage per close pair. A close leg's matched_stake may
+            # be less than the equal-profit target when the opposite-
+            # side book is thin at T−N; in that case only a fraction
+            # of the aggressive leg is actually hedged and the rest
+            # is residual directional exposure. Routing that residual
+            # into the naked bucket keeps the operator-log attribution
+            # honest (closed=£ reflects hedged cash only; directional
+            # losses from partial hedges land in naked=£).
+            pair_bets: dict[str, list] = {}
             for b in bm.bets:
                 if b.market_id != race.market_id or b.pair_id is None:
                     continue
-                if not b.close_leg:
-                    continue
-                if b.force_close:
-                    force_closed_pair_ids.add(b.pair_id)
+                pair_bets.setdefault(b.pair_id, []).append(b)
+
+            for pair_id, legs in pair_bets.items():
+                if len(legs) != 2:
+                    continue  # unmatched / mid-evict — not a close pair.
+                close_bets = [bt for bt in legs if bt.close_leg]
+                if not close_bets:
+                    continue  # naturally-matured pair — not closed.
+                is_force = any(bt.force_close for bt in close_bets)
+                agg = next(bt for bt in legs if not bt.close_leg)
+                close = close_bets[0]
+                covered_frac = _covered_fraction(
+                    agg, close, self._commission,
+                )
+
+                # Attribute: covered share of agg.pnl + all of close.pnl
+                # go to the closed/force_closed bucket. The residual
+                # (1 - covered_frac) × agg.pnl falls through to naked
+                # via the naked_pnl = race_pnl − locked − closed − force
+                # subtraction below.
+                covered_cash = covered_frac * agg.pnl + close.pnl
+                if is_force:
+                    scalping_force_closed_pnl += covered_cash
                 else:
-                    closed_pair_ids.add(b.pair_id)
-            for b in bm.bets:
-                if b.market_id != race.market_id or b.pair_id is None:
-                    continue
-                if b.pair_id in force_closed_pair_ids:
-                    scalping_force_closed_pnl += b.pnl
-                elif b.pair_id in closed_pair_ids:
-                    scalping_closed_pnl += b.pnl
+                    scalping_closed_pnl += covered_cash
 
         # Naked P&L = portion of race_pnl NOT explained by completed-arb
         # spreads NOR by agent-closed pairs. When scalping_mode is off
