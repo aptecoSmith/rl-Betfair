@@ -613,6 +613,18 @@ class TrainingOrchestrator:
                         logger.info("Skip-training event set — jumping to evaluation")
                         self._emit_info("Skipping remaining training — evaluating existing models...")
                     break
+                # Visual separator in worker.log so it's obvious where
+                # one agent's lines end and the next begins. Width
+                # matches the ≈70-char console width the rich console
+                # uses; the `━` glyph renders the same in plain-text
+                # log readers.
+                logger.info(
+                    "━" * 72,
+                )
+                logger.info(
+                    "▶ Agent %s (%s) — start",
+                    agent.model_id[:12], agent.architecture_name,
+                )
                 self._publish_progress(
                     "training", outer_tracker,
                     detail=f"Training agent {agent.model_id[:12]} ({agent.architecture_name})",

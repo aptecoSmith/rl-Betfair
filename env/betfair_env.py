@@ -465,6 +465,18 @@ class RaceRecord:
     arbs_force_closed: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
+    # Scalping-close-signal observability (2026-04-24): covered-portion
+    # cash P&L realised via agent-initiated close_signal events in this
+    # race. Distinct from ``locked_pnl`` (natural matures) and from
+    # ``force_closed_pnl`` (env T−N flats). Exposed so operators can
+    # compare the LOCK floor reported per-close-event
+    # (`close_events[i].realised_pnl`, symmetric min-of-outcomes) to
+    # the actual SETTLED cash routed through the close bucket. On
+    # partial fills these diverge by the directional residual (which
+    # lands in naked) — see CLAUDE.md "Partial-fill coverage
+    # accounting". Lands in ``race_pnl`` via the existing additive
+    # term; the attribution is the change, not the cash flow itself.
+    closed_pnl: float = 0.0
     # Arb-signal-cleanup Session 01 (2026-04-21): cash P&L realised via
     # env-initiated force-closes in this race. Distinct from
     # ``locked_pnl`` (natural matures + agent-closed worst-case floor)
@@ -1263,6 +1275,16 @@ class BetfairEnv(gymnasium.Env):
             "arbs_naked": sum(r.arbs_naked for r in self._race_records),
             "arbs_closed": sum(
                 r.arbs_closed for r in self._race_records
+            ),
+            # Scalping-close-signal observability (2026-04-24) — the
+            # SETTLED cash on covered portion of agent-initiated
+            # closes. Complements the LOCK floor that per-close events
+            # carry in ``close_events[i].realised_pnl``; on partial
+            # fills they diverge by the directional residual (naked
+            # bucket). Pre-change rollouts: 0.0 (new field, readers
+            # default-tolerant).
+            "scalping_closed_pnl": sum(
+                r.closed_pnl for r in self._race_records
             ),
             # Arb-signal-cleanup Session 01 (2026-04-21) — env-initiated
             # force-close telemetry. Pre-change rollouts: counter stays
@@ -3035,6 +3057,7 @@ class BetfairEnv(gymnasium.Env):
             arbs_force_closed=scalping_arbs_force_closed,
             locked_pnl=scalping_locked_pnl,
             naked_pnl=naked_pnl,
+            closed_pnl=scalping_closed_pnl,
             force_closed_pnl=scalping_force_closed_pnl,
         ))
 

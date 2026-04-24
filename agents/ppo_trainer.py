@@ -97,35 +97,71 @@ _BET_SIGNAL_THRESHOLD: float = 0.33
 #: Cap on how many per-arb activity-log events are emitted per episode.
 #: Scalping episodes can complete dozens of pairs; flooding the WS queue
 #: with all of them degrades the training monitor. The overflow is
-#: summarised in a single "… plus N more arb pair(s)" line.
-_MAX_ARB_EVENTS_PER_EP: int = 20
+#: summarised in a single "… plus N more" line.
+#:
+#: 2026-04-24: separate caps for each event kind. Matured arbs are
+#: summarised in the episode line (``matured=N``, ``matured=£+X``),
+#: so per-pair detail is nice-to-have, not essential — 5 is enough
+#: to spot-check the prices the market is pricing at. Agent-chosen
+#: close_signal events are the interesting decisions; 5 per episode
+#: gives the operator a sample without flooding. Env force-closes
+#: fire at O(100s) per race at T−N and are NOT decision-interesting
+#: (the env chose, not the agent) — the episode summary already
+#: surfaces ``force=N`` and ``force=£-X``, so the per-pair lines add
+#: noise without information.
+_MAX_MATURED_EVENTS_PER_EP: int = 5
+_MAX_CLOSE_EVENTS_PER_EP: int = 5
+_MAX_FORCE_EVENTS_PER_EP: int = 0
+
+# Kept for backwards compatibility with anything that imported it
+# (tests build synthetic data against this constant). Aliased to the
+# matured cap since that's the closest semantic match to the old
+# single-number cap.
+_MAX_ARB_EVENTS_PER_EP: int = _MAX_MATURED_EVENTS_PER_EP
 
 
 def _format_scalping_summary(ep) -> str:
-    """Per-episode pair breakdown suffix. Empty when no scalping activity.
+    """Per-episode pair breakdown — multi-line suffix to the Episode
+    header. Empty when there is no scalping activity.
 
-    Format (single line, two sections separated by ``|``):
-        ``| arbs detected=D opened=O (matured=M closed_profit=Cp
-         closed_loss=Cl naked=N force=F) | £: won=+X loss_closed=-Y
-         naked=±Z force=-W``
+    Format (three indented rows appended to the episode summary):
 
-    Counts:
-    - ``detected`` — oracle's count of profitable-arb moments across
-      the whole day (the ceiling; theoretical opportunities).
-    - ``opened`` — total pairs the agent actually opened =
-      matured + closed_profit + closed_loss + naked + force.
-    - ``matured`` — both legs filled naturally; always locked profit.
-    - ``closed_profit`` / ``closed_loss`` — agent chose to close via
-      close_signal; split by sign of realised_pnl (|p|<0.005 = profit).
-    - ``naked`` — settled with only one leg filled.
-    - ``force`` — env-initiated force-close at T−N.
+    ::
 
-    Money:
-    - ``won`` — total £ the agent locked as profit =
-      locked_pnl (matured) + closed_profit realised_pnl.
-    - ``loss_closed`` — total £ from voluntary close-at-loss events.
-    - ``naked`` — naked_pnl (can be + or -).
-    - ``force`` — scalping_force_closed_pnl (cost of env-forced flats).
+        Episode N/T [date] reward=… pnl=… bets=… loss=…
+          arbs detected=D opened=O: matured=M closed=C naked=N force=F
+          £: matured=+X closed=±Y (Cp profit / Cl loss) naked=±Z force=-W
+
+    TERMINOLOGY — ``matured`` and ``closed`` are DISTINCT categories:
+
+    - **matured** (``arbs_completed``) — agent opened a pair and BOTH
+      legs filled *naturally* (the passive lay got matched by the
+      market, no intervention). Always locked profit by construction
+      because opening gates on spread × commission feasibility. These
+      produce the ``Arb matured: Back @ X / Lay @ Y … → locked £+Z``
+      activity-log lines.
+    - **closed** (``arbs_closed``) — agent voluntarily fired the
+      ``close_signal`` action and the env crossed the spread to flat
+      the position. P&L depends on where the market was when the
+      agent chose to close; can be positive or negative.
+    - **naked** (``arbs_naked``) — only one leg of the pair filled;
+      the agent carried directional risk into settlement.
+    - **force** (``arbs_force_closed``) — env-initiated T−N flat;
+      distinct from agent-chosen closes (excluded from close-signal
+      shaped bonus per plans/arb-signal-cleanup/hard_constraints §7).
+
+    Cash columns — matches the opened-pair categories left to right:
+
+    - ``matured=+X`` — ``ep.locked_pnl``; natural matures only.
+    - ``closed=±Y`` — ``ep.scalping_closed_pnl``; SETTLED cash on the
+      covered portion of close_signal events. On full-match closes
+      this equals the sum of per-event ``realised_pnl`` (the LOCK
+      FLOOR); on partial fills the uncovered directional residual
+      lands in ``naked`` instead. The ``(Cp profit / Cl loss)`` split
+      reports how many of the closes locked a positive / negative
+      floor (threshold |p|<0.005 treated as profit).
+    - ``naked=±Z`` — ``ep.naked_pnl``; includes partial-fill residual.
+    - ``force=-W`` — ``ep.scalping_force_closed_pnl``.
     """
     if not (
         ep.arbs_completed
@@ -135,47 +171,52 @@ def _format_scalping_summary(ep) -> str:
     ):
         return ""
 
-    # Walk close_events once: split by agent-vs-force and profit-vs-loss.
-    # Threshold |pnl| < 0.005 treated as profit (rounding noise bucket
-    # into the "good" side rather than manufacturing a flat column).
-    closed_profit = closed_loss = 0
-    closed_profit_pnl = 0.0
-    closed_loss_pnl = 0.0
+    # Walk close_events to get the profit/loss SPLIT of agent-chosen
+    # closes. The ``closed=`` cash total uses the settled-cash
+    # aggregate ``ep.scalping_closed_pnl`` (which handles partial
+    # fills via covered_frac); this split is purely for operator
+    # colour — "did the agent close at the right moment?".
+    #
+    # ``realised_pnl`` on the event is the LOCK FLOOR — ``min(win_eff,
+    # lose_eff)`` with covered_frac effective stakes. Threshold
+    # |pnl| < 0.005 treated as profit (rounds zero-noise closes into
+    # the good column instead of manufacturing a flat third category).
+    close_lock_profit = close_lock_loss = 0
     for ev in ep.close_events:
         if ev.get("force_close"):
             continue
         pnl = ev.get("realised_pnl", 0.0)
         if pnl < -0.005:
-            closed_loss += 1
-            closed_loss_pnl += pnl
+            close_lock_loss += 1
         else:
-            closed_profit += 1
-            closed_profit_pnl += pnl
+            close_lock_profit += 1
 
     opened = (
         ep.arbs_completed + ep.arbs_closed
         + ep.arbs_naked + ep.arbs_force_closed
     )
-    won_pnl = ep.locked_pnl + closed_profit_pnl
 
-    parts = (
-        f" | arbs detected={ep.arbs_detected}"
-        f" opened={opened}"
-        f" (matured={ep.arbs_completed}"
-        f" closed_profit={closed_profit}"
-        f" closed_loss={closed_loss}"
+    counts = (
+        f"matured={ep.arbs_completed}"
+        f" closed={ep.arbs_closed}"
         f" naked={ep.arbs_naked}"
     )
     if ep.arbs_force_closed > 0:
-        parts += f" force={ep.arbs_force_closed}"
-    parts += (
-        f") | £: won=£{won_pnl:+.2f}"
-        f" loss_closed=£{closed_loss_pnl:+.2f}"
+        counts += f" force={ep.arbs_force_closed}"
+
+    cash = (
+        f"matured=£{ep.locked_pnl:+.2f}"
+        f" closed=£{ep.scalping_closed_pnl:+.2f}"
+        f" ({close_lock_profit} profit / {close_lock_loss} loss)"
         f" naked=£{ep.naked_pnl:+.2f}"
     )
     if ep.arbs_force_closed > 0 or ep.scalping_force_closed_pnl != 0.0:
-        parts += f" force=£{ep.scalping_force_closed_pnl:+.2f}"
-    return parts
+        cash += f" force=£{ep.scalping_force_closed_pnl:+.2f}"
+
+    return (
+        f"\n  arbs detected={ep.arbs_detected} opened={opened}: {counts}"
+        f"\n  £: {cash}"
+    )
 
 
 def _compute_arb_rate(arbs_completed: int, arbs_naked: int) -> float:
@@ -520,6 +561,17 @@ class EpisodeStats:
     # Arb-signal-cleanup Session 01 — £ cash P&L realised via force-
     # closes this episode. Separate from ``locked_pnl`` / ``naked_pnl``.
     scalping_force_closed_pnl: float = 0.0
+    # Scalping-close-signal observability (2026-04-24) — £ SETTLED cash
+    # routed through agent-initiated close_signal events this episode
+    # (covered portion only; directional residuals on partial fills
+    # land in naked_pnl). Per-close-event ``realised_pnl`` is a LOCK
+    # FLOOR (symmetric ``min(win_eff, lose_eff)``); this aggregate is
+    # the actual cash. Operator log reports both so "lock the agent
+    # achieved" vs "cash that settled" can be compared explicitly. See
+    # CLAUDE.md "Partial-fill coverage accounting". Default 0.0 is
+    # pre-change byte-identical on directional runs and on scalping
+    # runs with no close_signal events.
+    scalping_closed_pnl: float = 0.0
     # Arb-signal-cleanup Session 01 — the plan-level threshold the env
     # used this episode (0 = disabled). Recorded for telemetry so the
     # learning-curves panel can mark episodes where force-close fired.
@@ -1485,6 +1537,13 @@ class PPOTrainer:
             scalping_force_closed_pnl=float(
                 info.get("scalping_force_closed_pnl", 0.0) or 0.0
             ),
+            # Scalping-close-signal observability (2026-04-24).
+            # Defaulted to 0.0 so pre-change runs serialize byte-
+            # identically (new info key on the env → missing on older
+            # rollouts → 0.0 here).
+            scalping_closed_pnl=float(
+                info.get("scalping_closed_pnl", 0.0) or 0.0
+            ),
             force_close_before_off_seconds=int(
                 info.get("force_close_before_off_seconds", 0) or 0
             ),
@@ -2427,6 +2486,12 @@ class PPOTrainer:
             "scalping_force_closed_pnl": round(
                 ep.scalping_force_closed_pnl, 4,
             ),
+            # Scalping-close-signal observability (2026-04-24) —
+            # settled cash on covered portion of agent close_signal
+            # events. See EpisodeStats.scalping_closed_pnl.
+            "scalping_closed_pnl": round(
+                ep.scalping_closed_pnl, 4,
+            ),
             "force_close_before_off_seconds": (
                 ep.force_close_before_off_seconds
             ),
@@ -2583,13 +2648,13 @@ class PPOTrainer:
             # detail, not just the per-episode rollup appended above.
             # Capped to avoid flooding the WS queue on long episodes.
             if ep.arb_events:
-                for idx, ev in enumerate(ep.arb_events[:_MAX_ARB_EVENTS_PER_EP]):
+                for ev in ep.arb_events[:_MAX_MATURED_EVENTS_PER_EP]:
                     try:
                         self.progress_queue.put_nowait({
                             "event": "arb_completed",
                             "phase": "training",
                             "detail": (
-                                f"Arb completed: Back @ {ev['back_price']:.2f}"
+                                f"Arb matured: Back @ {ev['back_price']:.2f}"
                                 f" / Lay @ {ev['lay_price']:.2f}"
                                 f" on runner {ev['selection_id']}"
                                 f" → locked £{ev['locked_pnl']:+.2f}"
@@ -2598,24 +2663,39 @@ class PPOTrainer:
                         })
                     except Exception:
                         break
-                if len(ep.arb_events) > _MAX_ARB_EVENTS_PER_EP:
-                    overflow = len(ep.arb_events) - _MAX_ARB_EVENTS_PER_EP
+                if len(ep.arb_events) > _MAX_MATURED_EVENTS_PER_EP:
+                    overflow = len(ep.arb_events) - _MAX_MATURED_EVENTS_PER_EP
                     try:
                         self.progress_queue.put_nowait({
                             "event": "arb_completed",
                             "phase": "training",
                             "detail": (
-                                f"… plus {overflow} more arb pair(s) this episode"
+                                f"… plus {overflow} more matured pair(s) this episode"
                             ),
                         })
                     except Exception:
                         pass
 
-            # Scalping-close-signal session 01 — distinct "pair_closed"
-            # activity-log line per close event. Same cap and overflow
-            # handling as arb_completed; the two lists are independent.
+            # Scalping-close-signal events — split agent-chosen closes
+            # from env force-closes so the per-kind cap can differ.
+            # Agent closes are the interesting decisions (agent's
+            # choice to flat); force-closes fire at T−N for hundreds
+            # of pairs per race and are not decision-interesting
+            # (env chose, not the agent). The episode summary already
+            # surfaces both counts (close_lock±, force) and their
+            # cash totals (close_net, force), so per-pair force-close
+            # lines add WebSocket-queue pressure with no information
+            # the summary doesn't already cover.
             if ep.close_events:
-                for ev in ep.close_events[:_MAX_ARB_EVENTS_PER_EP]:
+                agent_closes = [
+                    ev for ev in ep.close_events
+                    if not ev.get('force_close')
+                ]
+                force_closes = [
+                    ev for ev in ep.close_events
+                    if ev.get('force_close')
+                ]
+                for ev in agent_closes[:_MAX_CLOSE_EVENTS_PER_EP]:
                     pnl = ev['realised_pnl']
                     if pnl > 0.005:
                         outcome = "at profit"
@@ -2623,13 +2703,12 @@ class PPOTrainer:
                         outcome = "at loss"
                     else:
                         outcome = "flat"
-                    kind = "Force-closed" if ev.get('force_close') else "Pair closed"
                     try:
                         self.progress_queue.put_nowait({
                             "event": "pair_closed",
                             "phase": "training",
                             "detail": (
-                                f"{kind} {outcome}: Back @ {ev['back_price']:.2f}"
+                                f"Pair closed {outcome}: Back @ {ev['back_price']:.2f}"
                                 f" / Lay @ {ev['lay_price']:.2f}"
                                 f" on runner {ev['selection_id']}"
                                 f" → realised £{pnl:+.2f}"
@@ -2638,8 +2717,8 @@ class PPOTrainer:
                         })
                     except Exception:
                         break
-                if len(ep.close_events) > _MAX_ARB_EVENTS_PER_EP:
-                    overflow = len(ep.close_events) - _MAX_ARB_EVENTS_PER_EP
+                if len(agent_closes) > _MAX_CLOSE_EVENTS_PER_EP:
+                    overflow = len(agent_closes) - _MAX_CLOSE_EVENTS_PER_EP
                     try:
                         self.progress_queue.put_nowait({
                             "event": "pair_closed",
@@ -2650,3 +2729,29 @@ class PPOTrainer:
                         })
                     except Exception:
                         pass
+                # Force-close per-pair detail is suppressed by default
+                # (``_MAX_FORCE_EVENTS_PER_EP = 0``). The episode
+                # summary's ``force=N`` count and ``force=£X`` total
+                # are the operator's signal; per-pair lines at 100s
+                # per race are pure noise. A single "... N force-
+                # closed pair(s)" breadcrumb fires only when the cap
+                # is zero AND force_closes are non-empty so operators
+                # know the events existed.
+                if force_closes:
+                    if _MAX_FORCE_EVENTS_PER_EP > 0:
+                        for ev in force_closes[:_MAX_FORCE_EVENTS_PER_EP]:
+                            pnl = ev['realised_pnl']
+                            try:
+                                self.progress_queue.put_nowait({
+                                    "event": "pair_closed",
+                                    "phase": "training",
+                                    "detail": (
+                                        f"Force-closed: Back @ {ev['back_price']:.2f}"
+                                        f" / Lay @ {ev['lay_price']:.2f}"
+                                        f" on runner {ev['selection_id']}"
+                                        f" → realised £{pnl:+.2f}"
+                                    ),
+                                    "close_event": ev,
+                                })
+                            except Exception:
+                                break
