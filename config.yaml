@@ -115,7 +115,7 @@ training:
     # 30. Plan files enable this on the probe cohorts via
     # constraints overrides; config-level stays disabled so
     # non-probe runs don't accidentally inherit it.
-    force_close_before_off_seconds: 0
+    force_close_before_off_seconds: 30
   retraining:
     min_days: 30
   # Forced-arbitrage (scalping) mode — Issue 05. When true, every
@@ -139,7 +139,7 @@ training:
   # the probe cohorts; config-level stays disabled so non-probe runs
   # don't accidentally inherit it. See
   # plans/arb-signal-cleanup/purpose.md.
-  shaped_penalty_warmup_eps: 0
+  shaped_penalty_warmup_eps: 10
 discard_policy:
   min_win_rate: 0.35
   min_mean_pnl: 0.0
