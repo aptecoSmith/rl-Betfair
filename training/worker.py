@@ -648,6 +648,9 @@ class TrainingWorker:
         def _run_in_thread() -> None:
             from training.run_training import TrainingOrchestrator
 
+            orch = None
+            train_days: list | None = None
+            test_days_loaded: list | None = None
             try:
                 console.print("[dim]Loading training data...[/dim]")
                 train_days = load_days(train_dates, data_dir=data_dir, progress_queue=self.progress_queue)
@@ -694,6 +697,48 @@ class TrainingWorker:
                     })
                 except thread_queue.Full:
                     pass
+            finally:
+                # Memory-leak fix (2026-04-24). Without explicit
+                # cleanup the worker process sat on full VRAM + large
+                # RSS between runs, because (a) Python's GC is
+                # generational and won't necessarily collect the
+                # orchestrator+agents graph on thread-exit, and (b)
+                # PyTorch's CUDA caching allocator never returns
+                # reserved blocks to the OS on its own. The three-
+                # step drop (locals→GC→empty_cache) is the textbook
+                # fix and the only sequence that works end-to-end.
+                #
+                # Drop local references first so ``gc.collect()`` can
+                # actually free the agent / policy / optimiser graph
+                # — otherwise the frame's locals dict keeps them
+                # alive until the thread object itself is GCed.
+                del orch
+                del train_days
+                del test_days_loaded
+                try:
+                    import gc
+                    import torch
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        cuda_alloc_mb = torch.cuda.memory_allocated() / 1024**2
+                        cuda_reserv_mb = torch.cuda.memory_reserved() / 1024**2
+                        torch.cuda.empty_cache()
+                        cuda_reserv_after_mb = (
+                            torch.cuda.memory_reserved() / 1024**2
+                        )
+                        logger.info(
+                            "Post-run GPU cleanup: allocated=%.0f MB, "
+                            "reserved %.0f -> %.0f MB after empty_cache()",
+                            cuda_alloc_mb, cuda_reserv_mb,
+                            cuda_reserv_after_mb,
+                        )
+                except Exception:
+                    # Cleanup is best-effort; a failure here should
+                    # never mask a real training error.
+                    logger.warning(
+                        "Post-run memory cleanup raised; "
+                        "continuing", exc_info=True,
+                    )
 
         self.training_thread = threading.Thread(
             target=_run_in_thread, daemon=True, name="training-run",

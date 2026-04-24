@@ -327,6 +327,46 @@ class BasePolicy(nn.Module, abc.ABC):
         """Return a zero-initialised hidden-state 2-tuple."""
         ...
 
+    # -- Recurrent-PPO hidden-state batching (ppo-kl-fix, 2026-04-24) -----
+    #
+    # These two methods let ``PPOTrainer._ppo_update`` pass the
+    # rollout-time hidden state back into the policy's forward pass
+    # rather than evaluating it statelessly. Each architecture
+    # knows which tensor dimension its hidden-state carries the
+    # batch on (LSTM family: dim 1, transformer: dim 0), so the
+    # trainer delegates the concat / slice to the policy subclass
+    # rather than hard-coding axes.
+    #
+    # Default implementations below use dim 0 — correct for the
+    # transformer; the LSTM subclasses override both methods.
+    def pack_hidden_states(
+        self,
+        hiddens: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Concatenate a list of single-batch hidden states into one
+        batched hidden state.
+
+        ``hiddens[i]`` is the 2-tuple the policy's forward expects at
+        batch=1. The returned tuple has batch=n, ready to feed back
+        into ``forward(obs, hidden)`` where ``obs`` is shape
+        ``(n, obs_dim)``.
+        """
+        h0 = torch.cat([h[0] for h in hiddens], dim=0)
+        h1 = torch.cat([h[1] for h in hiddens], dim=0)
+        return h0, h1
+
+    def slice_hidden_states(
+        self,
+        hidden: tuple[torch.Tensor, torch.Tensor],
+        indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Slice a batched hidden state by integer ``indices``.
+
+        Used by ``PPOTrainer._ppo_update`` to draw the mini-batch's
+        hidden states from the full-rollout packed tensor.
+        """
+        return hidden[0][indices], hidden[1][indices]
+
 
 # ── Session 3 (arb-improvements) — signal-bias warmup helper ───────────────
 
@@ -772,6 +812,31 @@ class PPOLSTMPolicy(BasePolicy):
         c = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
         return h, c
 
+    # -- ppo-kl-fix (2026-04-24) — LSTM-shaped hidden-state batching -----
+    #
+    # ``nn.LSTM`` lays the hidden state out as ``(num_layers, batch,
+    # hidden)`` with the batch axis at dim 1 (not dim 0 as the base
+    # protocol assumes). Override the pack / slice helpers so the
+    # PPO update can batch per-transition hidden states without
+    # mangling the layer axis.
+    def pack_hidden_states(
+        self,
+        hiddens: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        h0 = torch.cat([h[0] for h in hiddens], dim=1)
+        h1 = torch.cat([h[1] for h in hiddens], dim=1)
+        return h0, h1
+
+    def slice_hidden_states(
+        self,
+        hidden: tuple[torch.Tensor, torch.Tensor],
+        indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            hidden[0].index_select(1, indices),
+            hidden[1].index_select(1, indices),
+        )
+
     def get_action_distribution(
         self,
         obs: torch.Tensor,
@@ -1195,6 +1260,28 @@ class PPOTimeLSTMPolicy(BasePolicy):
         h = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
         c = torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_size)
         return h, c
+
+    # -- ppo-kl-fix (2026-04-24) — same LSTM-family hidden-state layout --
+    # ``(num_layers, batch, hidden)`` with the batch axis at dim 1.
+    # Mirror the ``PPOLSTMPolicy`` overrides so the TimeLSTM path sees
+    # the same batching semantics.
+    def pack_hidden_states(
+        self,
+        hiddens: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        h0 = torch.cat([h[0] for h in hiddens], dim=1)
+        h1 = torch.cat([h[1] for h in hiddens], dim=1)
+        return h0, h1
+
+    def slice_hidden_states(
+        self,
+        hidden: tuple[torch.Tensor, torch.Tensor],
+        indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            hidden[0].index_select(1, indices),
+            hidden[1].index_select(1, indices),
+        )
 
     def get_action_distribution(
         self,

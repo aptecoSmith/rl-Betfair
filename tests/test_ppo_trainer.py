@@ -1506,3 +1506,165 @@ class TestTargetEntropyController:
         assert row["alpha"] == pytest.approx(0.01, rel=1e-6)
         assert row["log_alpha"] == pytest.approx(math.log(0.01), abs=1e-4)
         assert row["target_entropy"] == pytest.approx(112.0)
+
+
+# ── ppo-kl-fix (2026-04-24): stateful rollout ↔ stateful update ────────────
+#
+# Regression guards for the fix documented in
+# ``plans/ppo-kl-fix/purpose.md``. Before this fix the PPO update
+# evaluated the policy statelessly (zero-init hidden) while the
+# rollout evaluated it statefully (carried hidden across ticks),
+# so ``new_log_probs`` and ``old_log_probs`` came from different
+# distributions and ``approx_kl`` blew up to 1e3–1e6 on epoch 0 of
+# every update — see
+# ``plans/ppo-stability-and-force-close-investigation/findings.md``.
+#
+# All three tests below are INTEGRATION-level (real trainer, real
+# policy, real rollout, no mocks on the forward pass) per the
+# 2026-04-18 units-mismatch lesson: a unit test that mocks the
+# forward away silently passes a broken implementation.
+
+
+class TestRecurrentStateThroughPpoUpdate:
+    """Verify the PPO update conditions on rollout-time hidden state."""
+
+    def test_collect_rollout_captures_hidden_state_in_on_every_transition(
+        self,
+    ):
+        """Rollout must stash the INCOMING hidden state on every
+        transition. The stored state is what the update feeds back
+        into the policy's forward pass to reproduce the rollout-time
+        distribution — missing it on any transition silently drops
+        that mini-batch back onto the stateless-lobotomised path.
+        """
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(policy, config)
+
+        day = _make_day(n_races=1, n_ticks=5, n_runners=3)
+        rollout, _ = trainer._collect_rollout(day)
+        transitions = list(rollout.transitions)
+
+        assert len(transitions) > 1
+        for i, tr in enumerate(transitions):
+            assert tr.hidden_state_in is not None, (
+                f"transition {i}: hidden_state_in is None — the "
+                f"rollout did not capture the pre-forward hidden "
+                f"state, so ``_ppo_update`` will drop back to the "
+                f"stateless path that ``plans/ppo-kl-fix/`` exists "
+                f"to remove."
+            )
+            h0, h1 = tr.hidden_state_in
+            # LSTM hidden shape is ``(num_layers, 1, hidden_size)``.
+            assert h0.shape == h1.shape
+            assert h0.ndim == 3 and h0.shape[1] == 1
+
+        # First transition's hidden state must be zero (init_hidden).
+        first = transitions[0].hidden_state_in
+        assert first is not None
+        assert np.all(first[0] == 0.0)
+        assert np.all(first[1] == 0.0)
+
+        # Any subsequent transition should have a NON-zero hidden
+        # state (the LSTM has processed at least one tick). A
+        # trivially zero state across all transitions would indicate
+        # the capture is happening AFTER the reassignment — wrong
+        # timing per ``plans/ppo-kl-fix/hard_constraints.md §7``.
+        any_nonzero = any(
+            not np.all(tr.hidden_state_in[0] == 0.0)  # type: ignore[index]
+            for tr in transitions[1:]
+        )
+        assert any_nonzero, (
+            "every stored hidden state was all-zero — likely the "
+            "capture is reading the POST-forward state. See "
+            "plans/ppo-kl-fix/hard_constraints.md §7."
+        )
+
+    def test_ppo_update_approx_kl_small_on_first_epoch_lstm(self):
+        """The REAL integration guard.
+
+        A fresh LSTM policy + one PPO update → ``approx_kl`` must
+        land in the literature-normal range. Before the fix this
+        value was 1e3–1e6 in observed probe runs; after the fix it
+        should be O(1e-2) to O(1). The 1.0 threshold is
+        deliberately loose: the test's purpose is to catch the
+        stateful/stateless mismatch recurring, not to regulate the
+        exact magnitude of healthy PPO drift.
+        """
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={"ppo_epochs": 1, "mini_batch_size": 4},
+        )
+
+        day = _make_day(n_races=1, n_ticks=5, n_runners=3)
+        rollout, _ = trainer._collect_rollout(day)
+        assert len(rollout.transitions) > 1
+
+        trainer._ppo_update(rollout)
+
+        assert trainer._last_approx_kl < 1.0, (
+            f"approx_kl={trainer._last_approx_kl:.4f} on epoch 0 "
+            f"of a fresh policy. If this is in the thousands, the "
+            f"rollout↔update state mismatch documented in "
+            f"plans/ppo-kl-fix/ has returned: ``_ppo_update`` is "
+            f"evaluating the policy statelessly while "
+            f"``_collect_rollout`` evaluates it statefully."
+        )
+        # And it should not have hit the early-stop on epoch 0
+        # (threshold 0.03 by default). A trained policy might; a
+        # fresh one on its first update should not.
+        assert trainer._last_kl_early_stop_epoch != 0, (
+            f"fresh policy hit the 0.03 KL early-stop on epoch 0 "
+            f"with approx_kl={trainer._last_approx_kl:.4f}."
+        )
+
+    def test_ppo_update_approx_kl_matches_old_logp_before_any_gradient_step(
+        self,
+    ):
+        """Tighter lock: if we monkey-patch out the optimiser step
+        (so weights don't move) then run ``_ppo_update``, the KL
+        between rollout-time ``old_log_probs`` and the update's
+        ``new_log_probs`` MUST be effectively zero — same weights,
+        same state, same obs → same log-prob. Before the fix this
+        was non-zero because the update used zero-init hidden
+        state instead of the rollout's carried state.
+
+        This is the most direct test of the fix: the KL is a
+        function of (policy, obs, state), and holding policy and
+        obs constant, the KL is exactly the signature of whether
+        state is being fed through correctly.
+        """
+        config = _make_config()
+        policy = _make_policy(config)
+        trainer = PPOTrainer(
+            policy, config,
+            hyperparams={"ppo_epochs": 1, "mini_batch_size": 4},
+        )
+
+        day = _make_day(n_races=1, n_ticks=5, n_runners=3)
+        rollout, _ = trainer._collect_rollout(day)
+        assert len(rollout.transitions) > 1
+
+        # Freeze the optimiser: zero gradient application so the
+        # network weights don't move during the update.
+        def _noop_step(closure=None):
+            return None
+
+        trainer.optimiser.step = _noop_step  # type: ignore[assignment]
+        trainer._alpha_optimizer.step = _noop_step  # type: ignore[assignment]
+
+        trainer._ppo_update(rollout)
+
+        # With weights frozen, KL should be near-machine-epsilon.
+        # Float32 precision + pin-memory/device hops allow a tiny
+        # drift; 1e-3 is generous but still 4 orders of magnitude
+        # below the 0.03 early-stop threshold and ~1e7× tighter
+        # than the pre-fix observed median of 12,740.
+        assert abs(trainer._last_approx_kl) < 1e-3, (
+            f"approx_kl={trainer._last_approx_kl} with weights "
+            f"frozen — the update is evaluating the policy under "
+            f"a different hidden state than the rollout did. See "
+            f"plans/ppo-kl-fix/."
+        )

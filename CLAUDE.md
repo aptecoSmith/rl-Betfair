@@ -536,6 +536,81 @@ this file mirror the aggregation in a spec helper, so a
 caller-only drift silently passes them. The integration test
 is the load-bearing regression guard.
 
+### Recurrent PPO: hidden-state protocol on update (2026-04-24)
+
+The PPO update must condition on the hidden state that the
+rollout saw when it produced each transition's log-prob —
+otherwise `old_log_probs` (stateful, carried across ticks during
+rollout) and `new_log_probs` (stateless, zero-init hidden during
+update) come from different distributions and `approx_kl` blows
+up on every update.
+
+`Transition` carries `hidden_state_in: tuple[np.ndarray, np.ndarray]`
+— the hidden state that was passed INTO the forward pass which
+produced this transition's action / log_prob / value. Stored as a
+2-tuple of CPU numpy arrays; per-architecture shapes:
+
+- **LSTM / TimeLSTM:** `(h, c)` each `(num_layers, 1, hidden)`.
+- **Transformer:** `(buffer (1, ctx_ticks, d_model), valid_count (1,))`.
+
+`_collect_rollout` captures the state BEFORE each forward pass
+(i.e. the state passed INTO `self.policy(obs_buffer, hidden_state)`,
+not the state returned by it). The first transition's captured
+state is zero (from `init_hidden`); subsequent transitions carry
+the accumulated state.
+
+`_ppo_update` packs the per-transition states into a batched
+tensor pair via `policy.pack_hidden_states(list_of_tuples)`,
+slices by `mb_idx` inside the mini-batch loop via
+`policy.slice_hidden_states(packed, indices)`, and passes the
+result to `self.policy(mb_obs, mb_hidden)` in both the surrogate-
+loss forward and the KL-diagnostics forward.
+
+**Architecture-specific batching axis.** LSTM / TimeLSTM use
+`(num_layers, batch, hidden)` so the batch axis is dim 1 — those
+two classes override `pack_hidden_states` / `slice_hidden_states`
+to concat along dim 1 and slice with `index_select(1, ...)`. The
+transformer's `(buffer, valid_count)` has batch on dim 0 and uses
+the `BasePolicy` default.
+
+**Action-clipping contract.** The action sampled from the Normal
+has `action ∈ R^d` before clipping. The env receives the clipped
+`np.clip(action, -1, 1)` because its action space is bounded, but
+the `Transition` stores the UN-clipped sample so that
+`dist.log_prob(stored_action)` at update time matches the
+`log_prob` captured at rollout time. A pre-2026-04-24 code path
+stored the clipped action alongside the un-clipped log-prob, which
+silently added ~13 nats of KL drift per update on top of the
+state-mismatch drift. If you refactor the clipping, keep these
+two reference values aligned.
+
+**Load-bearing regression guards** in `tests/test_ppo_trainer.py::
+TestRecurrentStateThroughPpoUpdate`:
+
+1. `test_collect_rollout_captures_hidden_state_in_on_every_transition`
+   — every transition has a non-None state; t=0's state is zero;
+   some later state is non-zero (catches post-forward capture).
+2. `test_ppo_update_approx_kl_small_on_first_epoch_lstm` — fresh
+   policy + one `_ppo_update` → `approx_kl < 1.0`. Before the fix
+   this value was in the thousands.
+3. `test_ppo_update_approx_kl_matches_old_logp_before_any_gradient_step`
+   — with the optimiser and alpha-optimiser `step()` methods
+   monkey-patched to no-ops, `approx_kl` is within `1e-3` of zero.
+   This is the strictest signature: same weights + same obs +
+   same state ⇒ same log-prob, so any non-zero KL is exactly the
+   signature of the state/action-clipping mismatch reappearing.
+
+See `plans/ppo-kl-fix/` for the fix rationale and
+`plans/ppo-stability-and-force-close-investigation/findings.md`
+for the evidence trail (median observed KL = 12,740 pre-fix;
+ρ(episode_idx, KL) = +0.435 confirming the drift pattern).
+
+Reward-scale: the fix does NOT change per-episode rewards — the
+gradient pathway is corrected but raw and shaped reward
+accumulators are unchanged. Scoreboard rows from before this
+commit remain comparable on `raw_pnl_reward`; post-fix runs will
+show `approx_kl` in the 0.01-0.5 range (was 1e3-1e6).
+
 ## Entropy control — target-entropy controller (2026-04-19)
 
 Entropy coefficient is a *learned variable*, not a fixed

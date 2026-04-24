@@ -765,6 +765,32 @@ class TrainingOrchestrator:
                     ),
                 )
 
+                # Memory-leak fix (2026-04-24). Each trainer
+                # allocates optimiser-state tensors (Adam moments,
+                # 2× the policy weight count on GPU), rollout
+                # tensors (obs / action / log_prob / hidden_state —
+                # the last of which is ~80 MB per 5000-tick rollout
+                # on ctx=256 transformer), and feature-encoder
+                # intermediates. Dropping the local ``trainer``
+                # reference lets Python release those blocks; the
+                # ``empty_cache()`` then returns the reserved VRAM
+                # to the PyTorch allocator pool so the NEXT agent's
+                # trainer doesn't inherit the high-water mark. The
+                # agent.policy itself stays alive via the ``agents``
+                # list — that's intentional (evaluator needs it).
+                del trainer
+                if self.device == "cuda":
+                    try:
+                        import gc
+                        import torch
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        logger.warning(
+                            "Between-agent GPU cleanup raised; "
+                            "continuing", exc_info=True,
+                        )
+
             self._emit_phase_complete("training", {
                 "generation": generation,
                 "agents_trained": len(agents),

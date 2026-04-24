@@ -101,6 +101,83 @@ _BET_SIGNAL_THRESHOLD: float = 0.33
 _MAX_ARB_EVENTS_PER_EP: int = 20
 
 
+def _format_scalping_summary(ep) -> str:
+    """Per-episode pair breakdown suffix. Empty when no scalping activity.
+
+    Format (single line, two sections separated by ``|``):
+        ``| arbs detected=D opened=O (matured=M closed_profit=Cp
+         closed_loss=Cl naked=N force=F) | £: won=+X loss_closed=-Y
+         naked=±Z force=-W``
+
+    Counts:
+    - ``detected`` — oracle's count of profitable-arb moments across
+      the whole day (the ceiling; theoretical opportunities).
+    - ``opened`` — total pairs the agent actually opened =
+      matured + closed_profit + closed_loss + naked + force.
+    - ``matured`` — both legs filled naturally; always locked profit.
+    - ``closed_profit`` / ``closed_loss`` — agent chose to close via
+      close_signal; split by sign of realised_pnl (|p|<0.005 = profit).
+    - ``naked`` — settled with only one leg filled.
+    - ``force`` — env-initiated force-close at T−N.
+
+    Money:
+    - ``won`` — total £ the agent locked as profit =
+      locked_pnl (matured) + closed_profit realised_pnl.
+    - ``loss_closed`` — total £ from voluntary close-at-loss events.
+    - ``naked`` — naked_pnl (can be + or -).
+    - ``force`` — scalping_force_closed_pnl (cost of env-forced flats).
+    """
+    if not (
+        ep.arbs_completed
+        or ep.arbs_naked
+        or ep.arbs_closed
+        or ep.arbs_force_closed
+    ):
+        return ""
+
+    # Walk close_events once: split by agent-vs-force and profit-vs-loss.
+    # Threshold |pnl| < 0.005 treated as profit (rounding noise bucket
+    # into the "good" side rather than manufacturing a flat column).
+    closed_profit = closed_loss = 0
+    closed_profit_pnl = 0.0
+    closed_loss_pnl = 0.0
+    for ev in ep.close_events:
+        if ev.get("force_close"):
+            continue
+        pnl = ev.get("realised_pnl", 0.0)
+        if pnl < -0.005:
+            closed_loss += 1
+            closed_loss_pnl += pnl
+        else:
+            closed_profit += 1
+            closed_profit_pnl += pnl
+
+    opened = (
+        ep.arbs_completed + ep.arbs_closed
+        + ep.arbs_naked + ep.arbs_force_closed
+    )
+    won_pnl = ep.locked_pnl + closed_profit_pnl
+
+    parts = (
+        f" | arbs detected={ep.arbs_detected}"
+        f" opened={opened}"
+        f" (matured={ep.arbs_completed}"
+        f" closed_profit={closed_profit}"
+        f" closed_loss={closed_loss}"
+        f" naked={ep.arbs_naked}"
+    )
+    if ep.arbs_force_closed > 0:
+        parts += f" force={ep.arbs_force_closed}"
+    parts += (
+        f") | £: won=£{won_pnl:+.2f}"
+        f" loss_closed=£{closed_loss_pnl:+.2f}"
+        f" naked=£{ep.naked_pnl:+.2f}"
+    )
+    if ep.arbs_force_closed > 0 or ep.scalping_force_closed_pnl != 0.0:
+        parts += f" force=£{ep.scalping_force_closed_pnl:+.2f}"
+    return parts
+
+
 def _compute_arb_rate(arbs_completed: int, arbs_naked: int) -> float:
     """Fraction of arb attempts that paired (``completed`` / total).
 
@@ -356,6 +433,25 @@ class Transition:
     risk_labels: np.ndarray = field(
         default_factory=lambda: np.array([np.nan], dtype=np.float32)
     )
+    # ppo-kl-fix (2026-04-24): hidden state that was passed INTO the
+    # forward pass which produced this transition's action / log_prob
+    # / value. Required for recurrent (LSTM / TimeLSTM / transformer)
+    # architectures so the PPO update can reproduce the rollout-time
+    # distribution rather than a stateless-lobotomised one.
+    #
+    # Stored as a 2-tuple of CPU numpy arrays. Converted to device
+    # tensors once per PPO update via the policy's
+    # ``pack_hidden_states`` helper. Per-architecture shapes:
+    #   * LSTM / TimeLSTM: (h, c) each ``(num_layers, 1, hidden)``.
+    #   * Transformer:     (buffer (1, ctx_ticks, d_model),
+    #                       valid_count (1,)).
+    #
+    # ``None`` is a legacy fallback — a trainer collecting
+    # transitions without capturing state (pre-fix checkpoints, test
+    # stubs constructing ``Transition`` directly) falls back to the
+    # pre-fix stateless path in ``_ppo_update``. Production rollouts
+    # always populate it.
+    hidden_state_in: tuple[np.ndarray, np.ndarray] | None = None
 
 
 @dataclass
@@ -409,6 +505,12 @@ class EpisodeStats:
     # deliberately closed via ``close_signal`` (distinct from
     # ``arbs_completed``, whose passive legs filled naturally).
     arbs_closed: int = 0
+    # Per-day arb-oracle sample count (total profitable-arb moments
+    # the offline scan detected across all pre-race ticks of the
+    # day). The "detected opportunities" operator metric — the
+    # ceiling on how many the policy could theoretically have
+    # opened. Zero when oracle cache is missing for the date.
+    arbs_detected: int = 0
     # Arb-signal-cleanup Session 01 (2026-04-21) — count of pairs the
     # env force-closed at T−N seconds before off. Distinct from
     # ``arbs_closed`` (agent-initiated). Excluded from matured-arb and
@@ -879,6 +981,23 @@ class PPOTrainer:
         # hard_constraints.md §16 makes this flag non-negotiable.
         self.smoke_test_tag: bool = False
 
+        # Lazy cache of oracle sample counts per day, keyed by date
+        # string. Populated on first lookup from
+        # data/oracle_cache/{date}/header.json via
+        # ``oracle_count_for_date``. Missing cache → 0. Used to surface
+        # the "arbs detected" ceiling in per-episode operator logs.
+        self._oracle_count_cache: dict[str, int] = {}
+
+    def _get_oracle_count(self, date: str) -> int:
+        """Cached oracle sample count for a date. 0 if cache missing."""
+        cached = self._oracle_count_cache.get(date)
+        if cached is not None:
+            return cached
+        from training.arb_oracle import oracle_count_for_date
+        count = oracle_count_for_date(date, Path("data/oracle_cache"))
+        self._oracle_count_cache[date] = count
+        return count
+
     # -- Public API -----------------------------------------------------------
 
     def train(
@@ -1048,6 +1167,22 @@ class PPOTrainer:
                 # Copy obs into pre-allocated GPU buffer (avoids tensor creation)
                 obs_buffer[0] = torch.as_tensor(obs, dtype=torch.float32)
 
+                # ppo-kl-fix (2026-04-24): capture the hidden state
+                # that is about to be passed INTO the forward. That
+                # is the state under which this transition's action /
+                # log_prob / value are produced, and the PPO update
+                # needs to pass the same state back into the policy
+                # to reproduce rollout-time distributions. Stored as
+                # CPU numpy copies so the rollout's GPU footprint
+                # doesn't balloon across long days. ``.clone()``
+                # before ``.cpu()`` is defensive against any future
+                # path where the device tensor is a view on a shared
+                # backing store we later mutate.
+                hidden_state_in_np = (
+                    hidden_state[0].detach().clone().cpu().numpy(),
+                    hidden_state[1].detach().clone().cpu().numpy(),
+                )
+
                 # Session 3: pass the current-epoch signal bias into the
                 # policy only when armed. Keeping the default-off path on
                 # the original two-arg signature means callers with
@@ -1074,10 +1209,22 @@ class PPOTrainer:
                 ).sum(dim=-1)
                 value = out.value.squeeze(-1)
 
+                # ppo-kl-fix (2026-04-24): keep the UN-clipped sample
+                # on the transition so the PPO update's
+                # ``dist.log_prob(stored_action)`` reproduces the
+                # ``log_prob`` stored at rollout time. The pre-fix
+                # code clipped in-place and stored the clipped action
+                # alongside the un-clipped log_prob, so the update
+                # computed log-prob on a different action than the
+                # policy had sampled — a silent contributor to KL
+                # drift on every update (~13 nats in the regression
+                # test; see plans/ppo-kl-fix/). The env still gets
+                # the clipped action, matching the previous
+                # action-space contract.
                 action_np = action.squeeze(0).cpu().numpy()
-                np.clip(action_np, -1.0, 1.0, out=action_np)
+                action_np_for_env = np.clip(action_np, -1.0, 1.0)
 
-                next_obs, reward, terminated, truncated, next_info = env.step(action_np)
+                next_obs, reward, terminated, truncated, next_info = env.step(action_np_for_env)
                 done = terminated or truncated
 
                 # Session 1: clip the TRAINING SIGNAL only. The raw
@@ -1167,6 +1314,7 @@ class PPOTrainer:
                     training_reward=training_reward,
                     fill_prob_labels=labels_arr,
                     risk_labels=risk_labels_arr,
+                    hidden_state_in=hidden_state_in_np,
                 ))
 
                 # Scalping-active-management §02/§03: stamp the decision-
@@ -1329,6 +1477,7 @@ class PPOTrainer:
             arbs_completed=int(info.get("arbs_completed", 0) or 0),
             arbs_naked=int(info.get("arbs_naked", 0) or 0),
             arbs_closed=int(info.get("arbs_closed", 0) or 0),
+            arbs_detected=self._get_oracle_count(day.date),
             # Arb-signal-cleanup Session 01 (2026-04-21).
             arbs_force_closed=int(
                 info.get("arbs_force_closed", 0) or 0
@@ -1578,6 +1727,34 @@ class PPOTrainer:
             fp_labels_batch = torch.from_numpy(fp_labels_np)
             risk_labels_batch = torch.from_numpy(risk_labels_np)
 
+        # ppo-kl-fix (2026-04-24): pack the per-transition hidden
+        # states captured at rollout time into a single batched pair
+        # of tensors the policy can consume. If any transition is
+        # missing its captured state (pre-fix checkpoints, test stubs
+        # that build ``Transition`` directly), fall back to ``None``
+        # and the forward pass will zero-init hidden state as before
+        # — the legacy stateless path. Production rollouts always
+        # populate ``hidden_state_in`` via ``_collect_rollout``.
+        packed_hidden: tuple[torch.Tensor, torch.Tensor] | None
+        if all(
+            t.hidden_state_in is not None for t in transitions
+        ):
+            hidden_tensors: list[tuple[torch.Tensor, torch.Tensor]] = [
+                (
+                    torch.from_numpy(t.hidden_state_in[0]),  # type: ignore[index]
+                    torch.from_numpy(t.hidden_state_in[1]),  # type: ignore[index]
+                )
+                for t in transitions
+            ]
+            packed_hidden = self.policy.pack_hidden_states(hidden_tensors)
+            if self.device != "cpu":
+                packed_hidden = (
+                    packed_hidden[0].to(self.device, non_blocking=True),
+                    packed_hidden[1].to(self.device, non_blocking=True),
+                )
+        else:
+            packed_hidden = None
+
         advantages, returns = self._compute_advantages(rollout)
         advantages = advantages.to(self.device)
         returns = returns.to(self.device)
@@ -1651,9 +1828,28 @@ class PPOTrainer:
                         self.advantage_clip,
                     )
 
-                # Forward pass (no LSTM state for mini-batch -- treat each
-                # transition independently during optimisation)
-                out = self.policy(mb_obs)
+                # ppo-kl-fix (2026-04-24): pass the hidden state that
+                # produced each rollout transition's action through to
+                # the update's forward pass so ``new_log_probs`` is
+                # drawn from the same distribution family as
+                # ``old_log_probs``. Prior to this fix the forward
+                # pass ran statelessly (zero-init hidden) while the
+                # rollout ran statefully — ``approx_kl`` measured the
+                # distance between two different policies rather than
+                # PPO drift and triggered the 0.03 early-stop on every
+                # update (median observed KL = 12,740; see
+                # plans/ppo-stability-and-force-close-investigation/
+                # findings.md). ``packed_hidden is None`` preserves
+                # the legacy stateless path for any caller that
+                # bypasses ``_collect_rollout`` (unit tests that build
+                # transitions manually).
+                if packed_hidden is None:
+                    out = self.policy(mb_obs)
+                else:
+                    mb_hidden = self.policy.slice_hidden_states(
+                        packed_hidden, mb_idx,
+                    )
+                    out = self.policy(mb_obs, mb_hidden)
                 std = out.action_log_std.exp()
                 dist = Normal(out.action_mean, std)
 
@@ -1810,7 +2006,19 @@ class PPOTrainer:
             # weighted.
             epochs_completed += 1
             with torch.no_grad():
-                full_out = self.policy(obs_batch)
+                # ppo-kl-fix (2026-04-24): the diagnostics forward
+                # must also condition on the rollout-time hidden
+                # state (same rationale as the mini-batch forward
+                # above). Before this fix, ``approx_kl`` measured
+                # "stateful rollout vs stateless lobotomised policy"
+                # which is huge by construction and grew as the
+                # policy drifted from init (ρ(episode_idx, KL) =
+                # +0.435; see plans/ppo-stability-and-force-close-
+                # investigation/findings.md).
+                if packed_hidden is None:
+                    full_out = self.policy(obs_batch)
+                else:
+                    full_out = self.policy(obs_batch, packed_hidden)
                 full_std = full_out.action_log_std.exp()
                 full_dist = Normal(full_out.action_mean, full_std)
                 new_logp_full = full_dist.log_prob(action_batch).sum(dim=-1)
@@ -2284,17 +2492,7 @@ class PPOTrainer:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
-        # Arb-signal-cleanup Session 03b (2026-04-21): surface force-
-        # close activity in the operator log so the cost of flattening
-        # at T−N is visible per episode. Omitted entirely when there
-        # was no force-close activity (either threshold == 0 or no
-        # pairs qualified) to keep directional-run lines clean.
-        force_close_detail = ""
-        if ep.arbs_force_closed > 0 or ep.scalping_force_closed_pnl != 0.0:
-            force_close_detail = (
-                f" force_closed={ep.arbs_force_closed}"
-                f" cost=£{ep.scalping_force_closed_pnl:+.2f}"
-            )
+        scalping_suffix = _format_scalping_summary(ep)
         logger.info(
             "Episode %d/%d [%s] reward=%.3f (raw=%.3f shaped=%+.3f) "
             "pnl=%.2f bets=%d loss=%.4f%s",
@@ -2307,7 +2505,7 @@ class PPOTrainer:
             ep.total_pnl,
             ep.bet_count,
             loss_info["policy_loss"],
-            force_close_detail,
+            scalping_suffix,
         )
 
     def _publish_progress(
@@ -2317,29 +2515,7 @@ class PPOTrainer:
         tracker: ProgressTracker,
     ) -> None:
         """Publish a progress event to the asyncio queue (if provided)."""
-        scalping_detail = ""
-        if ep.arbs_completed or ep.arbs_naked or ep.arbs_closed:
-            # Activity-log surface for scalping runs: "arb completed: 3
-            # arbs, £0.38 locked, naked=1 £-0.02" — issue 05 session 3.
-            # Scalping-close-signal session 01 adds a ``closed=N`` term
-            # so operators can see close activity at a glance.
-            total_pairs = (
-                ep.arbs_completed + ep.arbs_closed + ep.arbs_naked
-            )
-            scalping_detail = (
-                f" | arbs={ep.arbs_completed}/{total_pairs}"
-                f" closed={ep.arbs_closed}"
-                f" locked=£{ep.locked_pnl:+.2f}"
-                f" naked=£{ep.naked_pnl:+.2f}"
-            )
-            if (
-                ep.arbs_force_closed > 0
-                or ep.scalping_force_closed_pnl != 0.0
-            ):
-                scalping_detail += (
-                    f" force_closed={ep.arbs_force_closed}"
-                    f" cost=£{ep.scalping_force_closed_pnl:+.2f}"
-                )
+        scalping_detail = _format_scalping_summary(ep)
         progress = {
             "event": "progress",
             "phase": "training",
@@ -2440,15 +2616,23 @@ class PPOTrainer:
             # handling as arb_completed; the two lists are independent.
             if ep.close_events:
                 for ev in ep.close_events[:_MAX_ARB_EVENTS_PER_EP]:
+                    pnl = ev['realised_pnl']
+                    if pnl > 0.005:
+                        outcome = "at profit"
+                    elif pnl < -0.005:
+                        outcome = "at loss"
+                    else:
+                        outcome = "flat"
+                    kind = "Force-closed" if ev.get('force_close') else "Pair closed"
                     try:
                         self.progress_queue.put_nowait({
                             "event": "pair_closed",
                             "phase": "training",
                             "detail": (
-                                f"Pair closed at loss: Back @ {ev['back_price']:.2f}"
+                                f"{kind} {outcome}: Back @ {ev['back_price']:.2f}"
                                 f" / Lay @ {ev['lay_price']:.2f}"
                                 f" on runner {ev['selection_id']}"
-                                f" → realised £{ev['realised_pnl']:+.2f}"
+                                f" → realised £{pnl:+.2f}"
                             ),
                             "close_event": ev,
                         })
