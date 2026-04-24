@@ -288,6 +288,24 @@ def load_samples(
     ]
 
 
+def oracle_count_for_date(date: str, data_dir: Path) -> int:
+    """Return cached oracle sample count for a date.
+
+    Reads ``header.json`` only; does not load the full ``.npz``.
+    ``data_dir`` is the oracle_cache directory (e.g.
+    ``Path("data/oracle_cache")``). Missing or unreadable cache
+    returns 0 so callers can degrade gracefully.
+    """
+    p = data_dir / date / "header.json"
+    if not p.exists():
+        return 0
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return int(data.get("samples", 0))
+    except Exception:
+        return 0
+
+
 def density_for_date(date: str, data_dir: Path) -> float:
     """Return cached arb density for a date.
 
