@@ -191,6 +191,26 @@ class TrainingWorker:
         # Active plan tracking (for status updates on terminal events)
         self._active_plan_id: str | None = None
 
+        # Plan-status bookkeeping fix (2026-04-25). Set True by
+        # ``_handle_session_complete`` when an auto-continue is in
+        # flight (the previous session has emitted run_complete but
+        # the next session's training thread has not yet been
+        # started). Cleared by ``_start_training`` once the new
+        # thread is alive. ``_check_dead_thread`` skips its dead-
+        # thread detection while this flag is True so the inter-
+        # session gap (data loading for session N+1 can take 4+s
+        # while the session-N thread is dead) doesn't spuriously
+        # mark the plan as failed.
+        #
+        # Root cause: the post-kl-fix-reference run completed both
+        # generations cleanly per worker.log but the plan finalised
+        # at status="failed" because the dead-thread detector fired
+        # 3× during the inter-session gap, overwriting the eventual
+        # "completed" status. See worker.log around line 1195097
+        # ("Training thread exited unexpectedly" right after session
+        # 0's run_complete and before session 1's first rollout).
+        self._auto_continue_pending: bool = False
+
         # Latest state for catch-up on connect / status queries
         self.latest_event: dict | None = None
         self.latest_process: dict | None = None
@@ -548,7 +568,15 @@ class TrainingWorker:
         # Build run config with all per-run overrides applied
         run_config = self._apply_run_overrides(self.config, params)
 
-        # Mark plan as running
+        # Mark plan as running.
+        # Plan-status bookkeeping fix (2026-04-25). Pass
+        # ``completed_at=None`` explicitly so a stale completed_at
+        # from a prior failed run is cleared at the start of the
+        # new run. ``set_status``'s ``_SENTINEL`` default leaves
+        # whatever was there, which produced confusing displays
+        # like "completed_at = 2 seconds after started_at" when
+        # the prior run's failure set the field and the new run
+        # didn't reset it.
         if training_plan is not None:
             try:
                 from datetime import datetime, timezone
@@ -556,6 +584,7 @@ class TrainingWorker:
                     training_plan.plan_id,
                     "running",
                     started_at=datetime.now(timezone.utc).isoformat(),
+                    completed_at=None,
                     current_generation=start_generation,
                 )
             except Exception:
@@ -744,6 +773,10 @@ class TrainingWorker:
             target=_run_in_thread, daemon=True, name="training-run",
         )
         self.training_thread.start()
+        # Plan-status bookkeeping fix (2026-04-25). Inter-session
+        # gap closed; ``_check_dead_thread`` resumes normal
+        # detection from the next poll.
+        self._auto_continue_pending = False
 
     # ── Evaluation lifecycle ────────────────────────────────────────
 
@@ -1119,6 +1152,13 @@ class TrainingWorker:
                     f"[bold green]Auto-continuing to session {plan.current_session + 1}"
                     f"/{plan.total_sessions}[/bold green]"
                 )
+                # Plan-status bookkeeping fix (2026-04-25). Mark
+                # the inter-session gap as expected so
+                # ``_check_dead_thread`` doesn't fire while the
+                # next session loads its training data. Cleared
+                # by ``_start_training`` once the new thread is
+                # alive.
+                self._auto_continue_pending = True
                 self._launch_next_session(plan)
             else:
                 # Pause and wait for manual continue
@@ -1194,6 +1234,21 @@ class TrainingWorker:
         previously_dead = False
         while True:
             await asyncio.sleep(2.0)
+            # Plan-status bookkeeping fix (2026-04-25). Skip the
+            # dead-thread detection during the inter-session gap of
+            # an auto-continuing plan. ``_handle_session_complete``
+            # sets the flag when scheduling ``_launch_next_session``;
+            # the new session's ``_start_training`` clears it once
+            # the next training_thread is alive. Without this skip,
+            # the gap (which can take 4+s while session N+1 loads
+            # its training data) sees the session-N thread dead
+            # AND ``self.running`` may briefly be True between
+            # set_status("running") and the new thread starting,
+            # which falsely fired set_status("failed") in the
+            # 2026-04-25 post-kl-fix-reference run.
+            if self._auto_continue_pending:
+                previously_dead = False
+                continue
             is_dead_now = (
                 self.running
                 and self.training_thread
