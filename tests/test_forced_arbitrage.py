@@ -2913,17 +2913,40 @@ class TestSelectiveOpenShaping:
     """
 
     def _settle_with_bets(self, env, race, bets):
-        """Inject *bets* into the env's bet manager and settle the race.
+        """Drive the per-tick open-cost state machine + settle.
 
-        Returns the just-appended ``RaceRecord``.
+        Mimics what env.step() does in production for a synthetic
+        bet set: for each distinct pair_id we treat the agent as
+        having OPENED that pair (so ``_charge_open_cost`` fires),
+        then we let ``_resolve_open_cost_pairs`` walk bm.bets to
+        refund matured/agent-closed pairs and pop force-closed
+        ones without refund. Naked pairs (1 leg only) stay in the
+        pending dict until race-end where the per-race accumulator
+        carries the unrefunded charge into ``RaceRecord``.
+
+        2026-04-25 Session 02 revision: per-tick replaces the
+        original settle-time-only design. Tests must drive the
+        per-tick path to be valid against the production code.
         """
-        from env.bet_manager import BetOutcome
         bm = env.bet_manager
         assert bm is not None
         # Fresh state — replace bm.bets with exactly the test set.
         bm.bets.clear()
         for b in bets:
             bm.bets.append(b)
+        # Per-tick driver: charge each distinct pair_id once (the
+        # "open" event), then sweep for resolutions. The sweep
+        # reads bm.bets, which already has the resolution-state
+        # bets in place from the test setup.
+        seen: set = set()
+        for b in bets:
+            if b.pair_id is None:
+                continue
+            if b.pair_id in seen:
+                continue
+            seen.add(b.pair_id)
+            env._charge_open_cost(b.pair_id)
+        env._resolve_open_cost_pairs()
         env._settle_current_race(race)
         return env._race_records[-1]
 
@@ -3250,3 +3273,199 @@ class TestSelectiveOpenShaping:
         # 1 force-closed + 1 naked = 2 unrefunded, cost=1.5 → -3.0.
         assert rec_a.open_cost_shaped_pnl == pytest.approx(0.0)
         assert rec_b.open_cost_shaped_pnl == pytest.approx(-3.0, abs=1e-9)
+
+    # ── Per-tick delivery (Session 02 revision) ──────────────────────
+
+    def test_per_tick_charge_lands_on_open_step_not_settle(
+        self, scalping_config,
+    ):
+        """The whole point of the Session 02 revision: the charge
+        for opening a pair must land on the per-step ``reward``
+        AT THE TICK THE OPEN HAPPENS, not at settle.
+
+        Before Session 02, the contribution was rolled up at
+        ``_settle_current_race`` — PPO's GAE then smeared it back
+        across all ~5,000 ticks of the race, drowning the gradient
+        signal at the open decision in value-function noise. Per-
+        tick delivery puts the gradient at the right place.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=1.0)
+        race = env.day.races[0]
+        bm = env.bet_manager
+        assert bm is not None
+
+        # Empty starting state — no opens yet, no charges.
+        assert env._step_open_cost_pnl == 0.0
+        assert env._race_open_cost_shaped_pnl == 0.0
+
+        # Simulate the open tick: a bet matched with a pair_id, and
+        # _charge_open_cost fires. Step accumulator should reflect
+        # the charge IMMEDIATELY (not deferred to settle).
+        env._step_open_cost_pnl = 0.0  # what env.step() does each tick
+        env._charge_open_cost("PAIR_X")
+
+        assert env._step_open_cost_pnl == pytest.approx(-1.0), (
+            "Charge did not land on the per-step accumulator. The "
+            "per-tick design requires _charge_open_cost to push -1.0 "
+            "into _step_open_cost_pnl synchronously, not at settle."
+        )
+        assert env._race_open_cost_shaped_pnl == pytest.approx(-1.0)
+        assert "PAIR_X" in env._pending_pair_costs
+
+    def test_per_tick_refund_lands_on_resolution_step(
+        self, scalping_config,
+    ):
+        """Symmetric to the charge test: refunds for matured / agent-
+        closed pairs must land on the resolution tick, not at settle.
+        Force-closed pairs are popped without refund.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=1.0)
+        race = env.day.races[0]
+        bm = env.bet_manager
+        assert bm is not None
+
+        # Open three pairs.
+        env._step_open_cost_pnl = 0.0
+        env._charge_open_cost("MAT")
+        env._charge_open_cost("CLO")
+        env._charge_open_cost("FRC")
+        assert env._step_open_cost_pnl == pytest.approx(-3.0)
+        assert env._race_open_cost_shaped_pnl == pytest.approx(-3.0)
+        # Reset the per-step accumulator for the next "tick".
+        env._step_open_cost_pnl = 0.0
+
+        # Tick advances; resolutions happen this tick. Inject the
+        # resolution-state bets the BetManager would have produced.
+        bm.bets.clear()
+        # MAT pair: both legs naturally matched.
+        bm.bets.append(self._make_bet(
+            side=BetSide.BACK, pair_id="MAT",
+            market_id=race.market_id,
+        ))
+        bm.bets.append(self._make_bet(
+            side=BetSide.LAY, pair_id="MAT",
+            market_id=race.market_id,
+        ))
+        # CLO pair: agent close_signal — close_leg=True, no force.
+        bm.bets.append(self._make_bet(
+            side=BetSide.BACK, pair_id="CLO",
+            market_id=race.market_id,
+        ))
+        bm.bets.append(self._make_bet(
+            side=BetSide.LAY, pair_id="CLO",
+            market_id=race.market_id,
+            close_leg=True, force_close=False,
+        ))
+        # FRC pair: env force_close.
+        bm.bets.append(self._make_bet(
+            side=BetSide.BACK, pair_id="FRC",
+            market_id=race.market_id,
+        ))
+        bm.bets.append(self._make_bet(
+            side=BetSide.LAY, pair_id="FRC",
+            market_id=race.market_id,
+            close_leg=True, force_close=True,
+        ))
+
+        env._resolve_open_cost_pairs()
+
+        # Two refunds (MAT + CLO) = +2.0, FRC popped without refund.
+        assert env._step_open_cost_pnl == pytest.approx(2.0), (
+            f"Resolution sweep didn't refund correctly; "
+            f"_step_open_cost_pnl={env._step_open_cost_pnl}, "
+            f"expected +2.0 (refund MAT + CLO at 1.0 each)."
+        )
+        # Race-level total: -3.0 charges + 2.0 refunds = -1.0
+        # (the unrefunded FRC).
+        assert env._race_open_cost_shaped_pnl == pytest.approx(-1.0)
+        # All three pair_ids resolved this tick → pending dict empty.
+        assert env._pending_pair_costs == {}
+
+    def test_per_tick_total_matches_settle_time_formula(
+        self, scalping_config,
+    ):
+        """The mathematical equivalence guarantee: across an entire
+        race, the per-tick contributions sum to the same value the
+        original settle-time formula
+        ``open_cost × (refund_count − pairs_opened)`` produced.
+
+        This is the property that lets us claim the per-tick design
+        only changes the credit-assignment timing, not the magnitude
+        or sign of the gradient signal.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=0.5)
+        race = env.day.races[0]
+        bm = env.bet_manager
+        assert bm is not None
+
+        # 4 matured + 2 agent-closed + 5 force-closed + 3 naked.
+        # Expected total under either formulation:
+        # charge × n_opens − refund × n_refunded
+        # = 0.5 × 14 − 0.5 × 6 = 0.5 × (-8) = −4.0
+        n_matured, n_closed, n_force, n_naked = 4, 2, 5, 3
+        total_opens = n_matured + n_closed + n_force + n_naked
+        n_refund = n_matured + n_closed
+        expected_total = 0.5 * (n_refund - total_opens)
+        assert expected_total == -4.0  # sanity on the test fixture
+
+        # Open every pair (charge phase).
+        for prefix, n in [
+            ("M", n_matured), ("C", n_closed),
+            ("F", n_force), ("N", n_naked),
+        ]:
+            for i in range(n):
+                env._charge_open_cost(f"{prefix}{i}")
+
+        assert env._race_open_cost_shaped_pnl == pytest.approx(
+            -0.5 * total_opens,
+        )
+
+        # Inject resolution-state bets and sweep.
+        bm.bets.clear()
+        for i in range(n_matured):
+            bm.bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"M{i}",
+                market_id=race.market_id,
+            ))
+            bm.bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"M{i}",
+                market_id=race.market_id,
+            ))
+        for i in range(n_closed):
+            bm.bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"C{i}",
+                market_id=race.market_id,
+            ))
+            bm.bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"C{i}",
+                market_id=race.market_id,
+                close_leg=True,
+            ))
+        for i in range(n_force):
+            bm.bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"F{i}",
+                market_id=race.market_id,
+            ))
+            bm.bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"F{i}",
+                market_id=race.market_id,
+                close_leg=True, force_close=True,
+            ))
+        # Naked pairs have only the aggressive in bm.bets; they stay
+        # in pending_pair_costs and never refund.
+        for i in range(n_naked):
+            bm.bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"N{i}",
+                market_id=race.market_id,
+            ))
+
+        env._resolve_open_cost_pairs()
+
+        assert env._race_open_cost_shaped_pnl == pytest.approx(
+            expected_total, abs=1e-9,
+        )
+        # Naked pairs are still pending — they never resolve.
+        assert len(env._pending_pair_costs) == n_naked

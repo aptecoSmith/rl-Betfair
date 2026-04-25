@@ -431,10 +431,29 @@ Three properties make the term safe:
 1. **Zero-mean under "always mature or close" optimal policy.**
    A policy that opens only pairs it sees through pays net zero —
    no reward-hacking risk; no incentive to stop opening.
-2. **Computed at settle but credit-assigned through GAE.** Same
-   delivery shape as the matured bonus and naked-clip terms; PPO's
-   advantage propagator distributes the per-race shaped delta back
-   across the steps that produced it.
+2. **Per-tick credit assignment (Session 02 revision, 2026-04-25).**
+   The charge `-open_cost` lands on the OPEN tick (when
+   `bm.place_back/place_lay` returns a non-None bet) and the
+   refund `+open_cost` lands on the RESOLUTION tick (when both
+   legs of the pair resolve favourably). Force-closed and naked
+   outcomes leave the charge in place; they don't refund.
+
+   The original Session 01 design (commit `e919c34`) computed the
+   per-race contribution at settle and added it to `shaped` in
+   one chunk. The cohort-O probe (commit `3cfa0b4`, archive
+   `selective-open-shaping-probe-settle-time-design-…`) showed
+   agents at gene values from 0.06 to 0.83 had identical 76-77%
+   force-close rates — the gradient signal was reaching PPO but
+   GAE smeared the per-race delta back across 5,000 ticks,
+   drowning the per-tick gradient at the open decision in
+   value-function noise. Per-tick delivery puts the gradient at
+   the right place.
+
+   The per-tick total per race equals the original settle-time
+   formula `open_cost × (refund_count − pairs_opened)` exactly —
+   only WHEN the signal arrives changes, not its sum. Verified
+   by `test_per_tick_total_matches_settle_time_formula` in
+   `tests/test_forced_arbitrage.py`.
 3. **Gradient scales with force-close rate.** At the
    `post-kl-fix-reference` baseline of ~620 opens/race × 77 %
    force-close rate, an `open_cost = 0.5` pays −£239/race in

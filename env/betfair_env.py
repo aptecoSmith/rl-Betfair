@@ -814,6 +814,29 @@ class BetfairEnv(gymnasium.Env):
                 self._open_cost,
             )
             self._open_cost = float(np.clip(self._open_cost, 0.0, 2.0))
+        # Selective-open-shaping per-tick state (2026-04-25 Session 02
+        # revision). The per-tick design replaces the settle-time
+        # equivalent that landed in commit e919c34 — same total
+        # contribution per race, but the charge lands on the open
+        # tick (immediate gradient at the decision) rather than at
+        # settle (~5,000 ticks later through GAE smearing). The
+        # cohort-O probe (commit 3cfa0b4) showed agents at gene
+        # values 0.06–0.83 had identical 76–77 % force-close rates,
+        # which the per-tick design is meant to address.
+        #
+        # ``_pending_pair_costs`` maps each currently-open pair_id to
+        # the charge amount that will be refunded if (and only if)
+        # the pair resolves favourably (matured naturally or agent-
+        # closed via close_signal). Force-closed and naked outcomes
+        # leave the charge applied. Per-race state — cleared between
+        # races and on reset.
+        #
+        # ``_race_open_cost_shaped_pnl`` accumulates the per-step
+        # contributions across a race so RaceRecord can carry the
+        # rolled-up telemetry (same field name + same numeric value
+        # the settle-time computation produced pre-revision).
+        self._pending_pair_costs: dict[str, float] = {}
+        self._race_open_cost_shaped_pnl: float = 0.0
         # Arb-curriculum Session 02 (2026-04-19). Shaped contribution per
         # pair that matured (second leg filled — naturally or via
         # close_signal). Zero-mean corrected so random policies don't
@@ -1448,6 +1471,13 @@ class BetfairEnv(gymnasium.Env):
         # that don't affect real P&L). Summing both reproduces total_reward.
         self._cum_raw_reward = 0.0
         self._cum_shaped_reward = 0.0
+        # Selective-open-shaping per-tick state reset (2026-04-25
+        # Session 02). Race-level resets handled in env.step()'s
+        # race-transition branch; episode reset clears any cross-
+        # episode residue.
+        self._pending_pair_costs = {}
+        self._race_open_cost_shaped_pnl = 0.0
+        self._step_open_cost_pnl = 0.0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         # Shaped-penalty warmup scale used by the last settle step —
         # emitted via info/JSONL telemetry. Initialised here so
@@ -1513,6 +1543,13 @@ class BetfairEnv(gymnasium.Env):
         race = self.day.races[self._race_idx]
         tick = race.ticks[self._tick_idx]
 
+        # Selective-open-shaping per-tick contribution accumulator
+        # (2026-04-25 Session 02 revision). Reset to zero each step;
+        # ``_charge_open_cost`` decrements it on opens,
+        # ``_resolve_open_cost_pairs`` increments it on refunds.
+        # Added to ``reward`` near the end of step processing.
+        self._step_open_cost_pnl = 0.0
+
         # 0. Update runtime windowed history with the current tick so that
         #    _get_info() can serve windowed debug_features for this tick.
         #    Skipped when debug features are disabled (evaluation mode).
@@ -1547,6 +1584,15 @@ class BetfairEnv(gymnasium.Env):
         if not tick.in_play:
             self._process_action(action, tick, race)
 
+        # 1b. Selective-open-shaping resolution sweep — runs AFTER
+        # action processing so the post-action snapshot of bm.bets
+        # is what we walk. Refunds the open_cost charge for any
+        # pair that resolved favourably this tick (matured passive
+        # naturally filled, agent close_signal succeeded, or
+        # _force_close fired — the last category does NOT refund).
+        if self.scalping_mode:
+            self._resolve_open_cost_pairs()
+
         # 2. Advance to next tick
         self._tick_idx += 1
         reward = 0.0
@@ -1575,6 +1621,18 @@ class BetfairEnv(gymnasium.Env):
             self._paired_fill_skips_ltp_filter_day += (
                 pb._paired_fill_skips_ltp_filter
             )
+
+            # Selective-open-shaping per-tick state reset
+            # (2026-04-25 Session 02). Pending pairs at race-end
+            # are unrefunded by construction (their charge stays
+            # applied in the cumulative shaped reward). The dict
+            # is bookkeeping only — clearing it prevents stale
+            # pair_ids from leaking across races where they could
+            # match a (very unlikely) pair_id collision in the
+            # next race's BetManager. Per-race accumulator zeros
+            # so the next race's RaceRecord starts at 0.
+            self._pending_pair_costs.clear()
+            self._race_open_cost_shaped_pnl = 0.0
 
             # Reset BetManager and windowed history for the next race.
             if self._race_idx < self._total_races:
@@ -1616,6 +1674,18 @@ class BetfairEnv(gymnasium.Env):
         reward += mtm_shaped
         self._cum_shaped_reward += mtm_shaped
         self._cumulative_mtm_shaped += mtm_shaped
+
+        # Selective-open-shaping per-tick contribution. Lands on
+        # the OPEN tick (charge -open_cost) and the RESOLUTION tick
+        # (refund +open_cost iff matured/agent-closed). Both
+        # accumulate into ``self._step_open_cost_pnl`` over the
+        # course of this step. Adding here gives PPO an immediate
+        # gradient at the open decision rather than waiting for
+        # settle. Default ``open_cost == 0.0`` makes this term
+        # exactly zero (byte-identical to pre-plan).
+        if self._step_open_cost_pnl != 0.0:
+            reward += self._step_open_cost_pnl
+            self._cum_shaped_reward += self._step_open_cost_pnl
 
         obs = self._get_obs() if not terminated else self._terminal_obs()
         info = self._get_info()
@@ -1865,6 +1935,12 @@ class BetfairEnv(gymnasium.Env):
                             runner, bet, arb_ticks, race, pair_id,
                             time_to_off=time_to_off,
                         ) if self.scalping_mode else False
+                        # Selective-open-shaping per-tick charge.
+                        # Lands on the open tick (this tick) so the
+                        # PPO gradient credits the open decision
+                        # directly. Refund (or not) decided later
+                        # in env.step()'s resolution sweep.
+                        self._charge_open_cost(pair_id)
                         action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
                         action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_back_failed"}
@@ -1881,6 +1957,8 @@ class BetfairEnv(gymnasium.Env):
                             runner, bet, arb_ticks, race, pair_id,
                             time_to_off=time_to_off,
                         ) if self.scalping_mode else False
+                        # See above — symmetric charge for lay-aggressive.
+                        self._charge_open_cost(pair_id)
                         action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
                         action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_lay_failed"}
@@ -2561,6 +2639,83 @@ class BetfairEnv(gymnasium.Env):
                 pair_id_hint=pid,
             )
 
+    # ── Selective-open shaping per-tick (2026-04-25 Session 02) ──────────
+
+    def _charge_open_cost(self, pair_id: "str | None") -> float:
+        """Apply the open-time charge for a newly-opened pair.
+
+        Called from ``_process_action``'s aggressive-fill branch
+        immediately after ``bm.place_back`` / ``bm.place_lay``
+        returns a non-None bet. ``pair_id`` is the id assigned to
+        the aggressive leg moments earlier; the charge stamps it
+        into ``_pending_pair_costs`` so the resolution sweep can
+        refund (or not) when the pair settles.
+
+        Returns the per-step contribution (always non-positive),
+        which the caller is expected to add to the step's reward
+        and the per-race accumulator.
+
+        No-op when ``open_cost == 0.0`` or scalping_mode is off
+        (pair_id will be None in the latter case).
+        """
+        if pair_id is None or self._open_cost <= 0.0:
+            return 0.0
+        self._pending_pair_costs[pair_id] = self._open_cost
+        contribution = -self._open_cost
+        self._race_open_cost_shaped_pnl += contribution
+        # Cache so the step's reward computation can pick it up.
+        self._step_open_cost_pnl += contribution
+        return contribution
+
+    def _resolve_open_cost_pairs(self) -> float:
+        """Walk ``_pending_pair_costs`` and refund pairs that have
+        resolved favourably (matured naturally OR agent-closed via
+        close_signal). Force-closed pairs are popped without refund.
+        Pending pairs (only aggressive matched, passive resting or
+        evicted, no close_leg yet) stay in the dict for the next
+        sweep.
+
+        Called once per env step, AFTER the BetManager has processed
+        the tick's fills (passive fills, close placements, force-
+        close placements all visible in ``bm.bets``).
+
+        Returns the per-step refund total (non-negative). The caller
+        adds it to the step's reward and the per-race accumulator.
+
+        No-op when ``open_cost == 0.0`` or no pending pairs exist.
+        """
+        if self._open_cost <= 0.0 or not self._pending_pair_costs:
+            return 0.0
+        bm = self.bet_manager
+        if bm is None:
+            return 0.0
+
+        # Build a quick pair_id → list[Bet] index from bm.bets so the
+        # resolution check is O(n_bets) total, not O(n_pending × n_bets).
+        legs_by_pair: dict[str, list] = {}
+        for b in bm.bets:
+            if b.pair_id is not None:
+                legs_by_pair.setdefault(b.pair_id, []).append(b)
+
+        refund_total = 0.0
+        resolved_now: list[str] = []
+        for pid, charge in self._pending_pair_costs.items():
+            legs = legs_by_pair.get(pid, [])
+            if len(legs) < 2:
+                continue  # only aggressive leg matched; pair still open
+            is_force = any(getattr(b, "force_close", False) for b in legs)
+            if not is_force:
+                refund_total += charge  # mature OR agent-closed → refund
+            # Either way, the pair has resolved; remove from pending.
+            resolved_now.append(pid)
+        for pid in resolved_now:
+            del self._pending_pair_costs[pid]
+
+        if refund_total > 0.0:
+            self._race_open_cost_shaped_pnl += refund_total
+            self._step_open_cost_pnl += refund_total
+        return refund_total
+
     # ── Mark-to-market (reward-densification Session 01) ──────────────────
 
     def _compute_portfolio_mtm(
@@ -2997,17 +3152,15 @@ class BetfairEnv(gymnasium.Env):
         # closes distinct (hard_constraints §13, §14).
         scalping_closed_pnl = 0.0
         scalping_force_closed_pnl = 0.0
-        # Selective-open-shaping Session 01 (2026-04-25). Per-pair
-        # accounting for the open-cost shaping mechanism. ``pairs_opened``
-        # counts every distinct pair_id seen in this race's matched
-        # bets (= successful aggressive-leg matches that triggered a
-        # paired-passive placement). ``refund_pair_count`` counts
-        # pairs that resolved favourably (matured naturally or agent-
-        # closed via close_signal). Force-closed and naked outcomes
-        # do NOT refund. See plans/selective-open-shaping/
-        # hard_constraints.md §2.
+        # Selective-open-shaping (2026-04-25 Session 02 revision —
+        # per-tick). The per-race shaped contribution is now
+        # accumulated tick-by-tick into ``_race_open_cost_shaped_pnl``
+        # via ``_charge_open_cost`` (open) and
+        # ``_resolve_open_cost_pairs`` (refund). ``pairs_opened`` is
+        # still derived at settle from bm.bets for telemetry — it's
+        # the count of distinct pair_ids that matched at least the
+        # aggressive leg this race.
         pairs_opened = 0
-        refund_pair_count = 0
         if self.scalping_mode:
             # Group bets by pair_id so we can compute partial-fill
             # coverage per close pair. A close leg's matched_stake may
@@ -3036,11 +3189,7 @@ class BetfairEnv(gymnasium.Env):
                     continue  # unmatched / mid-evict — not a close pair.
                 close_bets = [bt for bt in legs if bt.close_leg]
                 if not close_bets:
-                    # Naturally-matured pair (both legs filled, no
-                    # close_leg flag). Refund the open-cost — agent
-                    # opened a pair that saw itself through.
-                    refund_pair_count += 1
-                    continue
+                    continue  # naturally-matured pair — not closed.
                 is_force = any(bt.force_close for bt in close_bets)
                 agg = next(bt for bt in legs if not bt.close_leg)
                 close = close_bets[0]
@@ -3058,27 +3207,17 @@ class BetfairEnv(gymnasium.Env):
                     scalping_force_closed_pnl += covered_cash
                 else:
                     scalping_closed_pnl += covered_cash
-                    # Agent-initiated close (close_signal) — refund
-                    # the open-cost. The agent exercised judgment by
-                    # closing voluntarily; the per-pair P&L impact
-                    # (positive or negative locked floor) is captured
-                    # separately via ``scalping_closed_pnl`` →
-                    # ``race_pnl`` (raw) and the per-event
-                    # ``realised_pnl`` lock floor reported in
-                    # close_events. Force-closes don't refund — the
-                    # agent didn't choose, the env did.
-                    refund_pair_count += 1
 
-        # Selective-open-shaping shaped contribution. Negative when
-        # there are unrefunded pairs (force-closed or naked); zero
-        # under the "always mature or close" optimal policy (see
-        # purpose.md §1, Hard_constraints §6 for the zero-mean
-        # invariant). Default ``open_cost = 0.0`` makes this term
-        # exactly zero so the shaped channel is byte-identical to
-        # the pre-plan path.
-        open_cost_shaped_pnl = self._open_cost * (
-            refund_pair_count - pairs_opened
-        )
+        # Selective-open-shaping shaped contribution. Per-tick design
+        # (2026-04-25 Session 02): accumulated tick-by-tick during
+        # the race via ``_charge_open_cost`` and
+        # ``_resolve_open_cost_pairs``. The per-race total is the
+        # snapshot for RaceRecord telemetry; per-tick is what PPO
+        # actually trains against. Mathematically equivalent to the
+        # pre-revision settle-time formula
+        # ``open_cost × (refund_count − pairs_opened)``, just delivered
+        # at the right tick instead of all at settle.
+        open_cost_shaped_pnl = self._race_open_cost_shaped_pnl
 
         # Naked P&L = portion of race_pnl NOT explained by completed-arb
         # spreads NOR by agent-closed pairs. When scalping_mode is off
@@ -3125,10 +3264,13 @@ class BetfairEnv(gymnasium.Env):
                 naked_loss_scale=self._naked_loss_scale,
             )
             shaped += race_shaping
-            # Selective-open-shaping (2026-04-25). Lands in the
-            # shaped channel only — never raw. Default open_cost=0
-            # makes this term zero, so byte-identical to pre-plan.
-            shaped += open_cost_shaped_pnl
+            # Selective-open-shaping per-tick (2026-04-25 Session 02
+            # revision). The per-tick contributions have ALREADY been
+            # added to ``self._cum_shaped_reward`` and to each step's
+            # ``reward`` via the ``_step_open_cost_pnl`` accumulator
+            # in env.step(). Adding ``open_cost_shaped_pnl`` again
+            # here would double-count. We keep the field on
+            # RaceRecord for telemetry (it carries the per-race sum).
         else:
             race_reward_pnl = race_pnl
         self._day_reward_pnl += race_reward_pnl
