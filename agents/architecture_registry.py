@@ -129,6 +129,15 @@ def infer_arch_hp_from_state_dict(
             n_layers += 1
         if n_layers > 0:
             inferred["lstm_num_layers"] = n_layers
+        # 2026-04-25 — lstm_layer_norm gene reflects in state_dict via
+        # lstm_output_norm.weight (a LayerNorm has weight+bias params;
+        # an Identity has none). Detecting this prevents the rebuild
+        # from constructing a LayerNorm that the checkpoint doesn't
+        # contain, which was the actual gen-1 crash root cause in the
+        # post-kl-fix-reference run (worker.log 2026-04-25T01:15).
+        inferred["lstm_layer_norm"] = (
+            "lstm_output_norm.weight" in state_dict
+        )
 
     elif name == "ppo_time_lstm_v1":
         # Custom TimeLSTM: per-layer ``linear_ih.weight`` shape
@@ -141,6 +150,10 @@ def infer_arch_hp_from_state_dict(
             n_layers += 1
         if n_layers > 0:
             inferred["lstm_num_layers"] = n_layers
+        # 2026-04-25 — same lstm_layer_norm detection as ppo_lstm_v1.
+        inferred["lstm_layer_norm"] = (
+            "lstm_output_norm.weight" in state_dict
+        )
 
     elif name == "ppo_transformer_v1":
         # Position embedding: [ctx_ticks, d_model]. Both dimensions

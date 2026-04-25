@@ -564,7 +564,26 @@ class PopulationManager:
                 max_runners=self.max_runners,
                 hyperparams=merged_hp,
             )
-            policy.load_state_dict(state_dict)
+            # 2026-04-25 — belt-and-braces. The shape-inference path
+            # above recovers the major architectural genes (hidden
+            # size, num layers, lstm_layer_norm), but a future gene
+            # could land that *also* changes state_dict structure
+            # without being inferable. ``strict=False`` lets the
+            # rebuild absorb any remaining missing keys (the
+            # corresponding modules stay at fresh-init values) rather
+            # than crash and skip the agent. Log the diagnostic so
+            # operators can see when this fires — a clean rebuild
+            # should produce empty missing/unexpected lists.
+            result = policy.load_state_dict(state_dict, strict=False)
+            missing = list(result.missing_keys)
+            unexpected = list(result.unexpected_keys)
+            if missing or unexpected:
+                logger.warning(
+                    "Model %s: rebuilt with strict=False — "
+                    "missing=%d unexpected=%d. Fresh-init for: %s",
+                    model_id[:8], len(missing), len(unexpected),
+                    sorted(missing + unexpected)[:6],
+                )
 
         return AgentRecord(
             model_id=model_id,

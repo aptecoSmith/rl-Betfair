@@ -877,15 +877,23 @@ class PPOTrainer:
 
         # KL early-stop threshold
         # (plans/naked-clip-and-stability, Session 02, 2026-04-18).
-        # After each full epoch sweep of mini-batches in ``_ppo_update``,
-        # approximate KL across the rollout is compared against this
-        # threshold; if exceeded, the remaining epochs for the current
-        # rollout are skipped. Default ``0.03`` is the literature
-        # standard (Andrychowicz et al. 2021, Engstrom et al. 2020) and
-        # ships in stable-baselines3 / CleanRL. Exposed here so the GA
+        # After each mini-batch in ``_ppo_update`` (Session 02 of
+        # plans/ppo-kl-fix), per-mini-batch approximate KL is
+        # compared against this threshold; if exceeded, the
+        # remaining mini-batches for the current epoch AND all
+        # subsequent epochs are skipped. Default ``0.15`` is set
+        # for the per-mini-batch granularity — natural per-batch
+        # drift on a healthy update sits in the 0.03–0.07 range
+        # (post-Session-02 ``post-kl-fix-reference`` measurement,
+        # 2026-04-25) so a 0.03 threshold trips after 1–2 batches
+        # and re-starves PPO. The 0.15 value matches CleanRL's
+        # ``target_kl × 1.5`` convention scaled for per-batch
+        # measurement; SB3's typical per-update target_kl of
+        # 0.015–0.03 measures end-of-update KL globally, which is
+        # not what our check does. Exposed via hp dict so the GA
         # gene system can mutate it later if useful.
         self.kl_early_stop_threshold = float(
-            hp.get("kl_early_stop_threshold", 0.03)
+            hp.get("kl_early_stop_threshold", 0.15)
         )
         # Set by ``_ppo_update`` when the threshold fires; diagnostic
         # only (surfaces in the returned loss_info dict).

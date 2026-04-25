@@ -440,6 +440,134 @@ class TestPopulationManagerWithStore:
             out_orig.action_mean, out_loaded.action_mean, atol=1e-6,
         )
 
+    def test_load_agent_survives_lstm_layer_norm_drift(
+        self, small_config: dict, store,
+    ):
+        """When the hp record claims ``lstm_layer_norm=True`` but the
+        saved weights were trained with ``lstm_layer_norm=False`` (or
+        vice-versa), load_agent must rebuild with the structurally-
+        correct value rather than crash on missing/unexpected
+        ``lstm_output_norm.weight`` keys.
+
+        Root cause of the 2026-04-25 ``post-kl-fix-reference`` gen-1
+        crash: ``backfill_hyperparameters`` set
+        ``lstm_layer_norm=True`` (midpoint default of an int_choice
+        spec) on every gen-0 record at gen-1 start. The gen-0 weights
+        had been trained with the spec absent or False → no LayerNorm
+        params in state_dict → "Missing key: lstm_output_norm.weight"
+        on rebuild. 8/12 agents skipped, gen-1 collapsed to 4 agents.
+
+        See worker.log around line 1170310 (run cc2bd0ba) for the
+        original trace.
+        """
+        from agents.architecture_registry import (
+            infer_arch_hp_from_state_dict,
+        )
+        pm = PopulationManager(small_config, model_store=store)
+        agents = pm.initialise_population(generation=0, seed=42)
+        # Pick an LSTM-family agent — the only ones with the
+        # lstm_output_norm gene.
+        original = next(
+            (a for a in agents if a.architecture_name in
+             ("ppo_lstm_v1", "ppo_time_lstm_v1")),
+            None,
+        )
+        if original is None:
+            pytest.skip("test config produced no LSTM-family agents")
+        original_hp = dict(original.hyperparameters)
+        # Force the original to be saved with NO LayerNorm (Identity).
+        # The state_dict will lack lstm_output_norm.weight.
+        from agents.architecture_registry import create_policy
+        clean_hp = {**original_hp, "lstm_layer_norm": False}
+        clean_policy = create_policy(
+            name=original.architecture_name,
+            obs_dim=pm.obs_dim,
+            action_dim=pm.action_dim,
+            max_runners=pm.max_runners,
+            hyperparams=clean_hp,
+        )
+        store.save_weights(
+            original.model_id, clean_policy.state_dict(),
+            obs_schema_version=pm._obs_schema_version,
+        )
+
+        # Inference should detect lstm_layer_norm=False from the
+        # absent lstm_output_norm.weight key.
+        sd = store.load_weights(
+            original.model_id,
+            expected_obs_schema_version=pm._obs_schema_version,
+        )
+        inferred = infer_arch_hp_from_state_dict(
+            original.architecture_name, sd,
+        )
+        assert inferred.get("lstm_layer_norm") is False, (
+            f"infer_arch_hp_from_state_dict failed to detect "
+            f"lstm_layer_norm=False from absent lstm_output_norm.weight; "
+            f"inferred={inferred}"
+        )
+
+        # Now forge the drift: hp record claims lstm_layer_norm=True
+        # (the failing backfill case). load_agent must rebuild.
+        drifted_hp = {**clean_hp, "lstm_layer_norm": True}
+        store.update_hyperparameters(original.model_id, drifted_hp)
+        loaded = pm.load_agent(original.model_id)
+
+        # Verify the rebuilt policy has Identity, not LayerNorm.
+        from torch import nn
+        norm_module = getattr(loaded.policy, "lstm_output_norm", None)
+        assert isinstance(norm_module, nn.Identity), (
+            f"Expected Identity after rebuild with inferred "
+            f"lstm_layer_norm=False; got {type(norm_module).__name__}"
+        )
+
+    def test_load_agent_inverse_layer_norm_drift(
+        self, small_config: dict, store,
+    ):
+        """Symmetric case: hp claims False but weights have LayerNorm.
+
+        The inverse of the gen-1 crash. Less likely in practice but
+        the inference must be symmetric: presence of
+        ``lstm_output_norm.weight`` → infer
+        ``lstm_layer_norm=True``.
+        """
+        from agents.architecture_registry import (
+            create_policy,
+            infer_arch_hp_from_state_dict,
+        )
+        pm = PopulationManager(small_config, model_store=store)
+        agents = pm.initialise_population(generation=0, seed=42)
+        original = next(
+            (a for a in agents if a.architecture_name in
+             ("ppo_lstm_v1", "ppo_time_lstm_v1")),
+            None,
+        )
+        if original is None:
+            pytest.skip("test config produced no LSTM-family agents")
+        original_hp = dict(original.hyperparameters)
+        norm_hp = {**original_hp, "lstm_layer_norm": True}
+        norm_policy = create_policy(
+            name=original.architecture_name,
+            obs_dim=pm.obs_dim,
+            action_dim=pm.action_dim,
+            max_runners=pm.max_runners,
+            hyperparams=norm_hp,
+        )
+        store.save_weights(
+            original.model_id, norm_policy.state_dict(),
+            obs_schema_version=pm._obs_schema_version,
+        )
+        sd = store.load_weights(
+            original.model_id,
+            expected_obs_schema_version=pm._obs_schema_version,
+        )
+        inferred = infer_arch_hp_from_state_dict(
+            original.architecture_name, sd,
+        )
+        assert inferred.get("lstm_layer_norm") is True, (
+            f"infer failed to detect lstm_layer_norm=True from "
+            f"present lstm_output_norm.weight; inferred={inferred}"
+        )
+
 
 # ── Edge cases ───────────────────────────────────────────────────────────────
 

@@ -621,14 +621,31 @@ reusing the mini-batch's own forward-pass log-probs. When the
 threshold trips, the log line reports "skipping X remaining
 mini-batches across Y epoch(s)" so compute savings are visible.
 
+**Threshold default 0.15** (was 0.03 pre-2026-04-25).
+The first post-Session-02 production run measured per-mini-batch
+`approx_kl` median = 0.043 with natural drift in the 0.03–0.07
+range — at 0.03 the check tripped after 1–2 mini-batches every
+update (3–13 mini-batches per rollout out of the ~600 budget).
+0.15 matches CleanRL's `target_kl × 1.5` convention scaled for
+per-batch measurement; SB3's typical end-of-update target_kl of
+0.015–0.03 measures global update KL, which is *not* what our
+per-batch check does. The threshold is `hp.get("kl_early_stop_
+threshold", 0.15)` so the GA can mutate it if useful and operators
+can tune per-plan.
+
 Pre-Session-02, post-Session-01 observed `approx_kl` at the per-
 epoch check point: **3.94 – 18.87** (100× threshold → early-stop
 on every update, PPO starved to one-epoch-worth of updates).
-Post-Session-02 the check is surgical — training runs the full
-budget when KL is healthy and exits cleanly when it isn't.
+Post-Session-02 with default 0.03: median 0.043, but PPO ran
+only 3–13 mini-batches per update (still starved). With default
+0.15: PPO is expected to take its full 4-epoch budget when drift
+is healthy.
+
 `loss_info` gains `n_updates` so episodes.jsonl surfaces how many
 gradient steps actually ran each update (full budget = healthy;
-low = KL tripped).
+low = KL tripped). On a healthy run this should be at or near
+`ppo_epochs × mini_batches_per_epoch` — for a 10k-transition
+rollout at `mini_batch_size=64` and `ppo_epochs=4`, ~600.
 
 See `plans/ppo-kl-fix/lessons_learnt.md` (Session 02 section + the
 five meta-lessons at the top) for the full diagnostic trail and
