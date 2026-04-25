@@ -408,6 +408,77 @@ outcome. Cap prevents a runaway race from dominating shaped reward.
 See `plans/arb-curriculum/purpose.md` for the credit-assignment
 motivation.
 
+### Selective-open shaping (2026-04-25)
+
+A symmetric per-pair shaped term that charges an open-time cost
+and refunds it iff the pair resolves favourably. Built to teach
+the agent to be selective at the moment of decision — the matured
+bonus rewards good outcomes but doesn't push back on speculative
+opens that go on to force-close.
+
+Per-race net contribution:
+
+    open_cost_shaped_pnl = open_cost * (refund_count - pairs_opened)
+
+Where `refund_count` = matured pairs + agent-closed pairs, and
+`pairs_opened` = every distinct `pair_id` in matched bets (the
+agent's successful opens, including naked-from-start when the
+passive failed to post). Force-closed and naked outcomes do NOT
+refund.
+
+Three properties make the term safe:
+
+1. **Zero-mean under "always mature or close" optimal policy.**
+   A policy that opens only pairs it sees through pays net zero —
+   no reward-hacking risk; no incentive to stop opening.
+2. **Computed at settle but credit-assigned through GAE.** Same
+   delivery shape as the matured bonus and naked-clip terms; PPO's
+   advantage propagator distributes the per-race shaped delta back
+   across the steps that produced it.
+3. **Gradient scales with force-close rate.** At the
+   `post-kl-fix-reference` baseline of ~620 opens/race × 77 %
+   force-close rate, an `open_cost = 0.5` pays −£239/race in
+   shaped pressure on the unrefunded pairs. The matured bonus
+   (gene 5–20 × ~58 mature/race) contributes +£290–£1160 of
+   positive shaped on the SAME race when the agent maintains
+   maturation rate, so net pressure is "be selective", not "stop
+   opening".
+
+Default `open_cost = 0.0` is byte-identical to pre-plan
+(charge × pairs_opened = 0, refund × n = 0; the accumulator
+collapses to zero before contributing to shaped). Hard-bound
+`[0.0, 2.0]` in env-init clamp; values above 2.0 push the agent
+toward `bet_count = 0` collapse (observed in cohort-A bottom-6
+under unrelated penalty genes, same failure shape).
+
+The mechanism lives ENTIRELY in the shaped channel — `race_pnl`,
+`scalping_locked_pnl`, `scalping_closed_pnl`,
+`scalping_force_closed_pnl`, and `naked_pnl` are unaffected. The
+"raw + shaped ≈ total_reward" invariant holds.
+
+Per-episode JSONL gains `open_cost_active`,
+`open_cost_shaped_pnl`, `pairs_opened`. Pre-plan rows
+default-tolerant (missing → 0).
+
+Regression guards in `tests/test_forced_arbitrage.py::
+TestSelectiveOpenShaping`:
+
+1. `test_open_cost_zero_is_byte_identical_on_shaped_term` — gene
+   0 → contribution 0 across all four outcome classes.
+2. `test_matured_pair_refunds_open_cost` — charge cancels.
+3. `test_closed_pair_refunds_open_cost` — same for agent-closed.
+4. `test_force_closed_pair_does_not_refund` — net = −open_cost.
+5. `test_naked_pair_does_not_refund` — same as force-closed.
+6. `test_zero_mean_invariant_across_mature_only_race` — N opens
+   that all mature/close → 0. Hard_constraints §6 guard.
+7. `test_mixed_race_sums_correctly` — arithmetic on a 16-pair
+   mixed race.
+8. `test_open_cost_does_not_touch_raw_pnl` — Hard_constraints §4
+   guard; raw cash buckets unchanged across gene values.
+
+See `plans/selective-open-shaping/{purpose,hard_constraints,
+master_todo,lessons_learnt}.md`.
+
 ### BC pretrain (2026-04-19)
 
 Per-agent behavioural cloning on arb oracle samples

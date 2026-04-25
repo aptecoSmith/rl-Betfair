@@ -1,7 +1,8 @@
 ---
 plan: selective-open-shaping
-status: draft
+status: session-01-complete (mechanism shipped at gene 0.0; awaiting probe)
 created: 2026-04-25
+landed: 2026-04-25
 motivated_by: plans/ppo-stability-and-force-close-investigation/findings.md (Problem 2 angle)
 related: plans/force-close-sizing-review/ (mitigation approach); this plan is the prevention angle
 ---

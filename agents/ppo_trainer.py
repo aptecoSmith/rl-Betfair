@@ -572,6 +572,18 @@ class EpisodeStats:
     # pre-change byte-identical on directional runs and on scalping
     # runs with no close_signal events.
     scalping_closed_pnl: float = 0.0
+    # Selective-open-shaping Session 01 (2026-04-25). Per-episode
+    # rollups for the open-cost shaping mechanism. ``pairs_opened``
+    # = total pairs the agent successfully opened across the episode
+    # (= every distinct pair_id that landed in matched bm.bets).
+    # ``open_cost_shaped_pnl`` = net £ shaped contribution
+    # (charges − refunds; ≤ 0 by construction). ``open_cost_active``
+    # = the gene value the env was constructed with this episode.
+    # All three default to 0 — pre-plan rollouts (and runs with
+    # gene=0.0) serialize byte-identically.
+    pairs_opened: int = 0
+    open_cost_shaped_pnl: float = 0.0
+    open_cost_active: float = 0.0
     # Arb-signal-cleanup Session 01 — the plan-level threshold the env
     # used this episode (0 = disabled). Recorded for telemetry so the
     # learning-curves panel can mark episodes where force-close fired.
@@ -1551,6 +1563,18 @@ class PPOTrainer:
             # rollouts → 0.0 here).
             scalping_closed_pnl=float(
                 info.get("scalping_closed_pnl", 0.0) or 0.0
+            ),
+            # Selective-open-shaping Session 01 (2026-04-25).
+            # Default 0 / 0.0 — pre-change rollouts that don't have
+            # the new info keys serialise byte-identically.
+            pairs_opened=int(
+                info.get("pairs_opened", 0) or 0
+            ),
+            open_cost_shaped_pnl=float(
+                info.get("open_cost_shaped_pnl", 0.0) or 0.0
+            ),
+            open_cost_active=float(
+                info.get("open_cost_active", 0.0) or 0.0
             ),
             force_close_before_off_seconds=int(
                 info.get("force_close_before_off_seconds", 0) or 0
@@ -2538,6 +2562,13 @@ class PPOTrainer:
             "scalping_closed_pnl": round(
                 ep.scalping_closed_pnl, 4,
             ),
+            # Selective-open-shaping Session 01 (2026-04-25) — gene
+            # value + per-episode shaped contribution + opened-pair
+            # count. The first two default to 0 / 0.0 on pre-plan
+            # rows so downstream readers default-tolerant.
+            "open_cost_active": round(ep.open_cost_active, 6),
+            "open_cost_shaped_pnl": round(ep.open_cost_shaped_pnl, 4),
+            "pairs_opened": ep.pairs_opened,
             "force_close_before_off_seconds": (
                 ep.force_close_before_off_seconds
             ),

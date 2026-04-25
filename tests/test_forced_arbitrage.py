@@ -2884,3 +2884,369 @@ class TestEqualProfitSizingEndToEnd:
         lose_pnl = -S_b + S_l * (1.0 - c)
         assert abs(win_pnl - lose_pnl) < 0.01  # equal-profit invariant
         assert min(win_pnl, lose_pnl) == pytest.approx(4.03, abs=0.01)
+
+
+# ── Selective-open-shaping (2026-04-25) ─────────────────────────────────────
+
+
+class TestSelectiveOpenShaping:
+    """Open-time-cost shaping with refund-on-favourable-resolution.
+
+    See ``plans/selective-open-shaping/{purpose,hard_constraints}.md``.
+    The mechanism's contract:
+
+        At successful pair open: shaped −= open_cost
+        At settle, per-pair:
+            matured  → shaped += open_cost  (refund)
+            closed   → shaped += open_cost  (refund)
+            force-closed → no refund
+            naked    → no refund
+
+    Implementation derives everything at settle from ``pair_bets``, so
+    the per-race ``open_cost_shaped_pnl`` collapses to:
+
+        ``open_cost × (refund_count − pairs_opened)``
+
+    Tests build synthetic Bet objects with the appropriate
+    ``pair_id`` / ``close_leg`` / ``force_close`` flags, settle, and
+    inspect the final ``RaceRecord`` and info dict.
+    """
+
+    def _settle_with_bets(self, env, race, bets):
+        """Inject *bets* into the env's bet manager and settle the race.
+
+        Returns the just-appended ``RaceRecord``.
+        """
+        from env.bet_manager import BetOutcome
+        bm = env.bet_manager
+        assert bm is not None
+        # Fresh state — replace bm.bets with exactly the test set.
+        bm.bets.clear()
+        for b in bets:
+            bm.bets.append(b)
+        env._settle_current_race(race)
+        return env._race_records[-1]
+
+    def _make_bet(
+        self,
+        *,
+        side,
+        pair_id,
+        market_id,
+        matched_stake=10.0,
+        average_price=4.0,
+        outcome="UNSETTLED",
+        pnl=0.0,
+        close_leg=False,
+        force_close=False,
+    ):
+        """Construct a synthetic Bet with sensible defaults."""
+        from env.bet_manager import Bet, BetOutcome
+        return Bet(
+            selection_id=1,
+            side=side,
+            requested_stake=matched_stake,
+            matched_stake=matched_stake,
+            average_price=average_price,
+            market_id=market_id,
+            outcome=getattr(BetOutcome, outcome),
+            pnl=pnl,
+            pair_id=pair_id,
+            close_leg=close_leg,
+            force_close=force_close,
+        )
+
+    def _setup_env(self, scalping_config, open_cost=0.0):
+        """Build a scalping env with the open_cost gene plumbed in.
+
+        ``open_cost`` is whitelisted in ``_REWARD_OVERRIDE_KEYS`` so the
+        per-agent gene flows through the ``reward_overrides`` channel
+        (same path PPOTrainer uses). Tests use that channel directly
+        rather than going through PPOTrainer.
+        """
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides={"open_cost": open_cost},
+        )
+        env.reset()
+        return env
+
+    # ── Test 1 ───────────────────────────────────────────────────────────
+
+    def test_open_cost_zero_is_byte_identical_on_shaped_term(
+        self, scalping_config,
+    ):
+        """``open_cost=0.0`` → ``open_cost_shaped_pnl == 0.0`` regardless
+        of pair outcomes. Pre-plan code path is byte-identical.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=0.0)
+        race = env.day.races[0]
+        # One of every outcome class.
+        bets = [
+            # Matured pair — both legs, no close_leg
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P1",
+                market_id=race.market_id, average_price=8.0, pnl=66.5,
+            ),
+            self._make_bet(
+                side=BetSide.LAY, pair_id="P1",
+                market_id=race.market_id, average_price=6.0, pnl=-64.3,
+            ),
+            # Force-closed pair — agg + close_leg with force_close=True
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P2",
+                market_id=race.market_id, average_price=8.0, pnl=66.5,
+            ),
+            self._make_bet(
+                side=BetSide.LAY, pair_id="P2",
+                market_id=race.market_id, average_price=6.0, pnl=-64.3,
+                close_leg=True, force_close=True,
+            ),
+            # Naked pair — only one leg in bm.bets
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P3",
+                market_id=race.market_id, average_price=8.0, pnl=-10.0,
+            ),
+        ]
+        record = self._settle_with_bets(env, race, bets)
+        assert record.open_cost_shaped_pnl == 0.0
+        assert record.pairs_opened == 3  # P1, P2, P3
+
+    # ── Test 2 ───────────────────────────────────────────────────────────
+
+    def test_matured_pair_refunds_open_cost(self, scalping_config):
+        """One matured pair under ``open_cost = 1.0`` → refund cancels
+        the charge. Net contribution 0.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=1.0)
+        race = env.day.races[0]
+        bets = [
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P1",
+                market_id=race.market_id, average_price=8.0, pnl=2.2,
+            ),
+            self._make_bet(
+                side=BetSide.LAY, pair_id="P1",
+                market_id=race.market_id, average_price=6.0, pnl=2.0,
+            ),
+        ]
+        record = self._settle_with_bets(env, race, bets)
+        assert record.pairs_opened == 1
+        # Charge -1.0 + refund +1.0 = 0
+        assert record.open_cost_shaped_pnl == pytest.approx(0.0, abs=1e-9)
+
+    # ── Test 3 ───────────────────────────────────────────────────────────
+
+    def test_closed_pair_refunds_open_cost(self, scalping_config):
+        """One agent-closed pair (close_leg=True, force_close=False) →
+        refund cancels the charge.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=1.0)
+        race = env.day.races[0]
+        bets = [
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P1",
+                market_id=race.market_id, average_price=8.0, pnl=2.2,
+            ),
+            self._make_bet(
+                side=BetSide.LAY, pair_id="P1",
+                market_id=race.market_id, average_price=6.0, pnl=2.0,
+                close_leg=True, force_close=False,
+            ),
+        ]
+        record = self._settle_with_bets(env, race, bets)
+        assert record.pairs_opened == 1
+        assert record.open_cost_shaped_pnl == pytest.approx(0.0, abs=1e-9)
+
+    # ── Test 4 ───────────────────────────────────────────────────────────
+
+    def test_force_closed_pair_does_not_refund(self, scalping_config):
+        """One force-closed pair (close_leg=True, force_close=True) →
+        no refund. Net contribution = -open_cost.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=1.0)
+        race = env.day.races[0]
+        bets = [
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P1",
+                market_id=race.market_id, average_price=8.0, pnl=66.5,
+            ),
+            self._make_bet(
+                side=BetSide.LAY, pair_id="P1",
+                market_id=race.market_id, average_price=6.0, pnl=-64.3,
+                close_leg=True, force_close=True,
+            ),
+        ]
+        record = self._settle_with_bets(env, race, bets)
+        assert record.pairs_opened == 1
+        assert record.open_cost_shaped_pnl == pytest.approx(-1.0, abs=1e-9)
+
+    # ── Test 5 ───────────────────────────────────────────────────────────
+
+    def test_naked_pair_does_not_refund(self, scalping_config):
+        """One naked pair (only one leg matched) → no refund.
+        Net contribution = -open_cost.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=1.0)
+        race = env.day.races[0]
+        bets = [
+            # Only the aggressive leg matched; passive never filled.
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P1",
+                market_id=race.market_id, average_price=8.0, pnl=-10.0,
+            ),
+        ]
+        record = self._settle_with_bets(env, race, bets)
+        assert record.pairs_opened == 1
+        assert record.open_cost_shaped_pnl == pytest.approx(-1.0, abs=1e-9)
+
+    # ── Test 6 ───────────────────────────────────────────────────────────
+
+    def test_zero_mean_invariant_across_mature_only_race(
+        self, scalping_config,
+    ):
+        """Hard_constraints §6 — if every opened pair matures or is
+        agent-closed, the net shaped contribution is exactly zero.
+        This is the mathematical contract that prevents the GA from
+        reward-hacking via this term.
+        """
+        from env.bet_manager import BetSide
+        env = self._setup_env(scalping_config, open_cost=0.5)
+        race = env.day.races[0]
+        bets = []
+        # 5 matured + 5 agent-closed pairs.
+        for i in range(5):
+            bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"M{i}",
+                market_id=race.market_id, average_price=8.0, pnl=2.0,
+            ))
+            bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"M{i}",
+                market_id=race.market_id, average_price=6.0, pnl=1.8,
+            ))
+        for i in range(5):
+            bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"C{i}",
+                market_id=race.market_id, average_price=8.0, pnl=2.0,
+            ))
+            bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"C{i}",
+                market_id=race.market_id, average_price=6.0, pnl=1.8,
+                close_leg=True,
+            ))
+        record = self._settle_with_bets(env, race, bets)
+        assert record.pairs_opened == 10
+        assert record.open_cost_shaped_pnl == pytest.approx(0.0, abs=1e-9)
+
+    # ── Test 7 ───────────────────────────────────────────────────────────
+
+    def test_mixed_race_sums_correctly(self, scalping_config):
+        """A race with all four outcomes: net = -open_cost × (n_force +
+        n_naked). Confirms arithmetic on a representative mix.
+        """
+        from env.bet_manager import BetSide
+        cost = 0.5
+        n_matured, n_closed, n_force, n_naked = 3, 2, 7, 4
+        env = self._setup_env(scalping_config, open_cost=cost)
+        race = env.day.races[0]
+        bets = []
+        for i in range(n_matured):
+            bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"M{i}",
+                market_id=race.market_id, average_price=8.0, pnl=2.0,
+            ))
+            bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"M{i}",
+                market_id=race.market_id, average_price=6.0, pnl=1.8,
+            ))
+        for i in range(n_closed):
+            bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"C{i}",
+                market_id=race.market_id, average_price=8.0, pnl=2.0,
+            ))
+            bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"C{i}",
+                market_id=race.market_id, average_price=6.0, pnl=1.8,
+                close_leg=True,
+            ))
+        for i in range(n_force):
+            bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"F{i}",
+                market_id=race.market_id, average_price=8.0, pnl=2.0,
+            ))
+            bets.append(self._make_bet(
+                side=BetSide.LAY, pair_id=f"F{i}",
+                market_id=race.market_id, average_price=6.0, pnl=1.8,
+                close_leg=True, force_close=True,
+            ))
+        for i in range(n_naked):
+            bets.append(self._make_bet(
+                side=BetSide.BACK, pair_id=f"N{i}",
+                market_id=race.market_id, average_price=8.0, pnl=-2.0,
+            ))
+        total_opened = n_matured + n_closed + n_force + n_naked
+        n_refund = n_matured + n_closed
+        expected_shaped = cost * (n_refund - total_opened)
+        record = self._settle_with_bets(env, race, bets)
+        assert record.pairs_opened == total_opened
+        assert record.open_cost_shaped_pnl == pytest.approx(
+            expected_shaped, abs=1e-9,
+        )
+        # And specifically: net = -cost × (force + naked) since
+        # mature+closed cancel.
+        assert record.open_cost_shaped_pnl == pytest.approx(
+            -cost * (n_force + n_naked), abs=1e-9,
+        )
+
+    # ── Test 8 ───────────────────────────────────────────────────────────
+
+    def test_open_cost_does_not_touch_raw_pnl(self, scalping_config):
+        """Hard_constraints §4 — the open-cost term lives ONLY in the
+        shaped channel. ``race_pnl`` (raw) is identical regardless of
+        the gene value.
+        """
+        from env.bet_manager import BetSide
+        race_template_bets = lambda mkt: [
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P1",
+                market_id=mkt, average_price=8.0, pnl=66.5,
+            ),
+            self._make_bet(
+                side=BetSide.LAY, pair_id="P1",
+                market_id=mkt, average_price=6.0, pnl=-64.3,
+                close_leg=True, force_close=True,
+            ),
+            self._make_bet(
+                side=BetSide.BACK, pair_id="P2",
+                market_id=mkt, average_price=8.0, pnl=-10.0,
+            ),
+        ]
+
+        env_a = self._setup_env(scalping_config, open_cost=0.0)
+        race_a = env_a.day.races[0]
+        rec_a = self._settle_with_bets(
+            env_a, race_a, race_template_bets(race_a.market_id),
+        )
+
+        env_b = self._setup_env(scalping_config, open_cost=1.5)
+        race_b = env_b.day.races[0]
+        rec_b = self._settle_with_bets(
+            env_b, race_b, race_template_bets(race_b.market_id),
+        )
+
+        # Raw cash buckets are identical between the two genes.
+        assert rec_a.pnl == pytest.approx(rec_b.pnl, abs=1e-9)
+        assert rec_a.locked_pnl == pytest.approx(rec_b.locked_pnl)
+        assert rec_a.closed_pnl == pytest.approx(rec_b.closed_pnl)
+        assert rec_a.force_closed_pnl == pytest.approx(rec_b.force_closed_pnl)
+        assert rec_a.naked_pnl == pytest.approx(rec_b.naked_pnl)
+        # But the shaped contribution differs by exactly cost × n_unrefunded.
+        # 1 force-closed + 1 naked = 2 unrefunded, cost=1.5 → -3.0.
+        assert rec_a.open_cost_shaped_pnl == pytest.approx(0.0)
+        assert rec_b.open_cost_shaped_pnl == pytest.approx(-3.0, abs=1e-9)

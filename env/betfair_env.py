@@ -482,6 +482,18 @@ class RaceRecord:
     # ``locked_pnl`` (natural matures + agent-closed worst-case floor)
     # and lands in ``race_pnl`` via the new additive term.
     force_closed_pnl: float = 0.0
+    # Selective-open-shaping Session 01 (2026-04-25). Diagnostics for
+    # the open-time-cost shaping mechanism that teaches the agent not
+    # to open pairs it can't mature. ``pairs_opened`` is the count of
+    # distinct ``pair_id`` values seen in this race's matched bets —
+    # i.e. successful aggressive-leg matches that triggered a paired-
+    # passive placement attempt. ``open_cost_shaped_pnl`` is the net
+    # shaped contribution from the mechanism (charges minus refunds).
+    # Both default 0; ``open_cost_shaped_pnl`` stays 0 when the gene
+    # ``open_cost`` is at default 0.0 (byte-identical pre-plan path).
+    # See plans/selective-open-shaping/purpose.md.
+    pairs_opened: int = 0
+    open_cost_shaped_pnl: float = 0.0
 
 
 # ── Environment ─────────────────────────────────────────────────────────────
@@ -577,6 +589,12 @@ class BetfairEnv(gymnasium.Env):
         # scalar on naked cash flows. Whitelisted so the generation-level
         # annealed effective scale flows through as a per-agent override.
         "naked_loss_scale",
+        # Selective-open-shaping Session 01 (2026-04-25): per-pair
+        # open-time cost (charged at successful pair open, refunded at
+        # settle iff the pair matured or was agent-closed). Default
+        # 0.0 = byte-identical pre-plan path. See
+        # plans/selective-open-shaping/purpose.md.
+        "open_cost",
     })
 
     def __init__(
@@ -778,6 +796,24 @@ class BetfairEnv(gymnasium.Env):
             self._naked_loss_scale = float(
                 np.clip(self._naked_loss_scale, 0.0, 1.0)
             )
+        # Selective-open-shaping Session 01 (2026-04-25). Per-pair
+        # open-time cost in £, charged at successful pair open and
+        # refunded at settle iff the pair matures or is agent-closed.
+        # Force-closed and naked outcomes keep the cost. Lives in the
+        # SHAPED reward channel only — never touches raw P&L.
+        # Default 0.0 = byte-identical pre-plan path. Hard cap at
+        # 2.0 (above which agents collapse to bet_count=0; see
+        # plans/selective-open-shaping/purpose.md §Risks). See
+        # hard_constraints.md §1, §4, §6.
+        self._open_cost: float = float(
+            reward_cfg.get("open_cost", 0.0)
+        )
+        if self._open_cost < 0.0 or self._open_cost > 2.0:
+            logger.warning(
+                "open_cost=%s out of [0.0, 2.0]; clamping",
+                self._open_cost,
+            )
+            self._open_cost = float(np.clip(self._open_cost, 0.0, 2.0))
         # Arb-curriculum Session 02 (2026-04-19). Shaped contribution per
         # pair that matured (second leg filled — naturally or via
         # close_signal). Zero-mean corrected so random policies don't
@@ -1296,6 +1332,20 @@ class BetfairEnv(gymnasium.Env):
             "scalping_force_closed_pnl": sum(
                 r.force_closed_pnl for r in self._race_records
             ),
+            # Selective-open-shaping Session 01 (2026-04-25). Per-
+            # episode rollups for the open-cost shaping mechanism.
+            # Both default 0.0 / 0 — pre-plan rollouts and runs with
+            # ``open_cost = 0`` see byte-identical values to before.
+            "pairs_opened": sum(
+                r.pairs_opened for r in self._race_records
+            ),
+            "open_cost_shaped_pnl": sum(
+                r.open_cost_shaped_pnl for r in self._race_records
+            ),
+            # The active gene value for diagnostics in
+            # episodes.jsonl. Stays a single scalar (not per-race)
+            # because the env is constructed once per episode.
+            "open_cost_active": float(self._open_cost),
             "force_close_before_off_seconds": (
                 self._force_close_before_off_seconds
             ),
@@ -2947,6 +2997,17 @@ class BetfairEnv(gymnasium.Env):
         # closes distinct (hard_constraints §13, §14).
         scalping_closed_pnl = 0.0
         scalping_force_closed_pnl = 0.0
+        # Selective-open-shaping Session 01 (2026-04-25). Per-pair
+        # accounting for the open-cost shaping mechanism. ``pairs_opened``
+        # counts every distinct pair_id seen in this race's matched
+        # bets (= successful aggressive-leg matches that triggered a
+        # paired-passive placement). ``refund_pair_count`` counts
+        # pairs that resolved favourably (matured naturally or agent-
+        # closed via close_signal). Force-closed and naked outcomes
+        # do NOT refund. See plans/selective-open-shaping/
+        # hard_constraints.md §2.
+        pairs_opened = 0
+        refund_pair_count = 0
         if self.scalping_mode:
             # Group bets by pair_id so we can compute partial-fill
             # coverage per close pair. A close leg's matched_stake may
@@ -2962,13 +3023,24 @@ class BetfairEnv(gymnasium.Env):
                 if b.market_id != race.market_id or b.pair_id is None:
                     continue
                 pair_bets.setdefault(b.pair_id, []).append(b)
+            # Selective-open-shaping: every distinct pair_id in
+            # bm.bets (i.e. with at least the aggressive leg matched)
+            # is a successful open. Naked-from-start (passive failed
+            # to post) pairs land here too — the agent's decision was
+            # to enter, the env's downstream paperwork failure is
+            # part of the open's risk profile, so it pays the cost.
+            pairs_opened = len(pair_bets)
 
             for pair_id, legs in pair_bets.items():
                 if len(legs) != 2:
                     continue  # unmatched / mid-evict — not a close pair.
                 close_bets = [bt for bt in legs if bt.close_leg]
                 if not close_bets:
-                    continue  # naturally-matured pair — not closed.
+                    # Naturally-matured pair (both legs filled, no
+                    # close_leg flag). Refund the open-cost — agent
+                    # opened a pair that saw itself through.
+                    refund_pair_count += 1
+                    continue
                 is_force = any(bt.force_close for bt in close_bets)
                 agg = next(bt for bt in legs if not bt.close_leg)
                 close = close_bets[0]
@@ -2986,6 +3058,27 @@ class BetfairEnv(gymnasium.Env):
                     scalping_force_closed_pnl += covered_cash
                 else:
                     scalping_closed_pnl += covered_cash
+                    # Agent-initiated close (close_signal) — refund
+                    # the open-cost. The agent exercised judgment by
+                    # closing voluntarily; the per-pair P&L impact
+                    # (positive or negative locked floor) is captured
+                    # separately via ``scalping_closed_pnl`` →
+                    # ``race_pnl`` (raw) and the per-event
+                    # ``realised_pnl`` lock floor reported in
+                    # close_events. Force-closes don't refund — the
+                    # agent didn't choose, the env did.
+                    refund_pair_count += 1
+
+        # Selective-open-shaping shaped contribution. Negative when
+        # there are unrefunded pairs (force-closed or naked); zero
+        # under the "always mature or close" optimal policy (see
+        # purpose.md §1, Hard_constraints §6 for the zero-mean
+        # invariant). Default ``open_cost = 0.0`` makes this term
+        # exactly zero so the shaped channel is byte-identical to
+        # the pre-plan path.
+        open_cost_shaped_pnl = self._open_cost * (
+            refund_pair_count - pairs_opened
+        )
 
         # Naked P&L = portion of race_pnl NOT explained by completed-arb
         # spreads NOR by agent-closed pairs. When scalping_mode is off
@@ -3032,6 +3125,10 @@ class BetfairEnv(gymnasium.Env):
                 naked_loss_scale=self._naked_loss_scale,
             )
             shaped += race_shaping
+            # Selective-open-shaping (2026-04-25). Lands in the
+            # shaped channel only — never raw. Default open_cost=0
+            # makes this term zero, so byte-identical to pre-plan.
+            shaped += open_cost_shaped_pnl
         else:
             race_reward_pnl = race_pnl
         self._day_reward_pnl += race_reward_pnl
@@ -3059,6 +3156,8 @@ class BetfairEnv(gymnasium.Env):
             naked_pnl=naked_pnl,
             closed_pnl=scalping_closed_pnl,
             force_closed_pnl=scalping_force_closed_pnl,
+            pairs_opened=pairs_opened,
+            open_cost_shaped_pnl=open_cost_shaped_pnl,
         ))
 
         return reward
