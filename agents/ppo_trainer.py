@@ -403,6 +403,16 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     "matured_arb_bonus_weight": ("matured_arb_bonus_weight",),
     # Arb-curriculum Session 03 (2026-04-19).
     "naked_loss_scale": ("naked_loss_scale",),
+    # Selective-open-shaping Session 01 (2026-04-25). Per-pair
+    # open-time cost / refund-on-favourable shaping. Without this
+    # entry, the gene gets sampled into agent.hyperparameters but
+    # ``_reward_overrides_from_hp`` strips it before passing to
+    # the env — so every agent silently uses ``open_cost=0.0``
+    # regardless of plan-level gene draw. Caught 2026-04-25 when
+    # the selective-open-shaping-probe's first agent showed
+    # ``open_cost_active=0.0`` despite the plan defining
+    # ``hp_ranges.open_cost: [0.0, 1.0]``.
+    "open_cost": ("open_cost",),
 }
 
 

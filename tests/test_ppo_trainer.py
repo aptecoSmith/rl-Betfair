@@ -1734,3 +1734,151 @@ class TestRecurrentStateThroughPpoUpdate:
             f"{mini_batches_per_epoch}. The KL check is running at "
             f"per-epoch granularity (Session 02 regression)."
         )
+
+
+# ── Reward gene plumbing (2026-04-25) ───────────────────────────────────────
+
+
+class TestRewardGenePlumbing:
+    """Structural guards on the trainer→env reward-gene passthrough.
+
+    The plumbing has two stages:
+
+    1. ``_reward_overrides_from_hp`` (trainer-side, this file)
+       extracts genes from the agent's hp dict and renames them to
+       env-side config-key names via ``_REWARD_GENE_MAP``.
+    2. ``BetfairEnv._REWARD_OVERRIDE_KEYS`` (env-side) whitelists
+       which keys the env will accept; unrecognised keys are
+       silently dropped after a one-time debug log.
+
+    A gene listed in the trainer-side map but missing from the
+    env-side whitelist is **silently dropped** — the agent's
+    hp dict contains the sampled value, the trainer formats the
+    overrides correctly, but the env throws the value away.
+    Caught 2026-04-25 when the selective-open-shaping-probe's
+    first agent ran with ``open_cost_active=0.0`` despite the
+    plan's ``hp_ranges`` defining ``open_cost: [0.0, 1.0]``.
+    The gene was sampled into the agent's hp but
+    ``_REWARD_GENE_MAP`` didn't have an entry for it, so
+    ``_reward_overrides_from_hp`` stripped it before the env
+    saw it. Result: 12 agents probed at the same effective
+    gene value (zero), invalidating the entire run.
+    """
+
+    def test_every_mapped_gene_is_whitelisted_in_env(self):
+        """For every gene in trainer-side ``_REWARD_GENE_MAP``,
+        every config-key it maps to MUST be in env-side
+        ``_REWARD_OVERRIDE_KEYS``. Otherwise the env silently
+        drops the override and the gene has no effect.
+        """
+        from agents.ppo_trainer import _REWARD_GENE_MAP
+        from env.betfair_env import BetfairEnv
+
+        env_whitelist = BetfairEnv._REWARD_OVERRIDE_KEYS
+        unmapped: dict[str, tuple[str, ...]] = {}
+        for gene_name, cfg_keys in _REWARD_GENE_MAP.items():
+            missing = tuple(k for k in cfg_keys if k not in env_whitelist)
+            if missing:
+                unmapped[gene_name] = missing
+        assert not unmapped, (
+            f"Genes mapped trainer-side but missing from env-side "
+            f"whitelist (env will silently drop these overrides): "
+            f"{unmapped}. Add the missing keys to "
+            f"BetfairEnv._REWARD_OVERRIDE_KEYS."
+        )
+
+    def test_open_cost_gene_reaches_env(self):
+        """End-to-end: a per-agent ``open_cost`` gene draw must
+        actually land on the env's ``self._open_cost`` field.
+
+        The 2026-04-25 selective-open-shaping-probe failure was a
+        gene-value=0.0 across all 12 agents despite the plan
+        defining a non-trivial range. This test exercises the
+        whole pipeline: hp dict → ``_reward_overrides_from_hp`` →
+        env constructor → ``self._open_cost``.
+        """
+        from agents.ppo_trainer import _reward_overrides_from_hp
+        from env.betfair_env import BetfairEnv
+        from data.episode_builder import Day
+
+        # Empty Day is fine — we never step the env. The constructor
+        # path is what we're validating.
+        day = Day(date="2026-04-01", races=[])
+
+        config = {
+            "training": {
+                "max_runners": 14,
+                "starting_budget": 100.0,
+                "max_bets_per_race": 20,
+                "scalping_mode": True,
+            },
+            "actions": {"force_aggressive": True},
+            "reward": {
+                "early_pick_bonus_min": 1.2,
+                "early_pick_bonus_max": 1.5,
+                "early_pick_min_seconds": 300,
+                "efficiency_penalty": 0.01,
+            },
+        }
+
+        # Simulate the population manager sampling open_cost=0.42
+        # into the agent's hp dict. The trainer extracts overrides
+        # via _reward_overrides_from_hp (the same call site
+        # PPOTrainer.__init__ uses), then passes those to the env.
+        agent_hp = {"open_cost": 0.42}
+        overrides = _reward_overrides_from_hp(agent_hp)
+        assert "open_cost" in overrides, (
+            f"_reward_overrides_from_hp dropped 'open_cost' from hp dict. "
+            f"Got overrides={overrides}. _REWARD_GENE_MAP probably missing "
+            f"the 'open_cost' entry."
+        )
+        assert overrides["open_cost"] == 0.42
+
+        env = BetfairEnv(day, config, reward_overrides=overrides)
+        assert env._open_cost == pytest.approx(0.42), (
+            f"env._open_cost = {env._open_cost} ; expected 0.42. The gene "
+            f"value was passed to the env constructor but didn't land on "
+            f"the field — the env's _REWARD_OVERRIDE_KEYS whitelist "
+            f"probably missing 'open_cost'."
+        )
+
+    def test_zero_open_cost_default_is_byte_identical(self):
+        """Defensive: a missing or zero open_cost gene must yield
+        env._open_cost == 0.0 (byte-identical pre-plan path).
+        """
+        from agents.ppo_trainer import _reward_overrides_from_hp
+        from env.betfair_env import BetfairEnv
+        from data.episode_builder import Day
+
+        day = Day(date="2026-04-01", races=[])
+        config = {
+            "training": {
+                "max_runners": 14,
+                "starting_budget": 100.0,
+                "max_bets_per_race": 20,
+                "scalping_mode": True,
+            },
+            "actions": {"force_aggressive": True},
+            "reward": {
+                "early_pick_bonus_min": 1.2,
+                "early_pick_bonus_max": 1.5,
+                "early_pick_min_seconds": 300,
+                "efficiency_penalty": 0.01,
+            },
+        }
+
+        # No gene set.
+        env_a = BetfairEnv(
+            day, config,
+            reward_overrides=_reward_overrides_from_hp({}),
+        )
+        # Gene set to 0.
+        env_b = BetfairEnv(
+            day, config,
+            reward_overrides=_reward_overrides_from_hp(
+                {"open_cost": 0.0},
+            ),
+        )
+        assert env_a._open_cost == 0.0
+        assert env_b._open_cost == 0.0
+
