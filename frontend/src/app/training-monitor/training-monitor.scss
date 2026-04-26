@@ -243,6 +243,12 @@
 .log-text {
   color: #a0a0b8;
   word-break: break-word;
+  // mature-prob-head (2026-04-26): per-episode progress events emit
+  // a multi-line ``detail`` string (Episode header + reward/loss row
+  // + arbs row + £ row + assistant readout). pre-wrap honours the
+  // backend's ``\n`` separators so the activity log renders one
+  // entry per episode as a stacked block, not a single wrapped line.
+  white-space: pre-wrap;
 }
 
 .detail-line {

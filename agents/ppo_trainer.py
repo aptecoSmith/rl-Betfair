@@ -94,30 +94,22 @@ _HEAD_NAMES: tuple[str, ...] = (
 #: the env's own threshold is authoritative for actual bet placement.
 _BET_SIGNAL_THRESHOLD: float = 0.33
 
-#: Cap on how many per-arb activity-log events are emitted per episode.
-#: Scalping episodes can complete dozens of pairs; flooding the WS queue
-#: with all of them degrades the training monitor. The overflow is
-#: summarised in a single "… plus N more" line.
-#:
-#: 2026-04-24: separate caps for each event kind. Matured arbs are
-#: summarised in the episode line (``matured=N``, ``matured=£+X``),
-#: so per-pair detail is nice-to-have, not essential — 5 is enough
-#: to spot-check the prices the market is pricing at. Agent-chosen
-#: close_signal events are the interesting decisions; 5 per episode
-#: gives the operator a sample without flooding. Env force-closes
-#: fire at O(100s) per race at T−N and are NOT decision-interesting
-#: (the env chose, not the agent) — the episode summary already
-#: surfaces ``force=N`` and ``force=£-X``, so the per-pair lines add
-#: noise without information.
-_MAX_MATURED_EVENTS_PER_EP: int = 5
-_MAX_CLOSE_EVENTS_PER_EP: int = 5
-_MAX_FORCE_EVENTS_PER_EP: int = 0
+# Per-pair WS events (``Arb matured: …`` / ``Pair closed at …`` /
+# ``Force-closed: …``) and their cap constants were removed
+# 2026-04-26 per operator instruction. The per-episode progress
+# block now carries matured/closed/naked/force counts AND cash
+# AND the close-split (P profit / L loss / F flat) inline, so
+# the per-pair stream was redundant noise on the WS queue.
 
-# Kept for backwards compatibility with anything that imported it
-# (tests build synthetic data against this constant). Aliased to the
-# matured cap since that's the closest semantic match to the old
-# single-number cap.
-_MAX_ARB_EVENTS_PER_EP: int = _MAX_MATURED_EVENTS_PER_EP
+# Separator emitted at the head of each per-episode log block so
+# successive episodes are visually distinct in stdout AND in the
+# UI activity feed (frontend ``.log-text`` carries
+# ``white-space: pre-wrap`` so the newlines render). Plain ASCII
+# rule rather than a unicode box-drawing character — works in
+# every terminal and font. Width chosen to span the typical
+# 76-char operator-log block without exceeding it on narrow
+# windows.
+_EPISODE_SEPARATOR = "\n" + ("-" * 60) + "\n"
 
 
 def _format_scalping_summary(ep) -> str:
@@ -176,11 +168,36 @@ def _format_scalping_summary(ep) -> str:
         f"  force={ep.arbs_force_closed} ({fc_pct:.1f}%)"
     )
 
+    # mature-prob-head (2026-04-26): close-split (profit / loss / flat)
+    # rolled inline next to ``closed=£X`` since the per-pair WS event
+    # stream that used to carry this detail was dropped. Walks
+    # ``ep.close_events`` filtered to agent-initiated closes
+    # (force-closes excluded — they're a separate event class with
+    # their own ``force=£X`` total). Threshold |pnl| < 0.005 is the
+    # flat band; everything else falls into profit / loss.
+    close_p = close_l = close_f = 0
+    for ev in ep.close_events:
+        if ev.get("force_close"):
+            continue
+        pnl = ev.get("realised_pnl", 0.0)
+        if pnl > 0.005:
+            close_p += 1
+        elif pnl < -0.005:
+            close_l += 1
+        else:
+            close_f += 1
+
     cash = (
         f"matured=£{ep.locked_pnl:+.2f}"
         f"  closed=£{ep.scalping_closed_pnl:+.2f}"
-        f"  naked=£{ep.naked_pnl:+.2f}"
     )
+    if (close_p + close_l + close_f) > 0:
+        cash += f" ({close_p}p/{close_l}L/{close_f}F)"
+    cash += f"  naked=£{ep.naked_pnl:+.2f}"
+    # Force-close cash IS load-bearing information (cost of every
+    # env-initiated bail-out lands here).
+    if ep.arbs_force_closed > 0 or ep.scalping_force_closed_pnl != 0.0:
+        cash += f"  force=£{ep.scalping_force_closed_pnl:+.2f}"
 
     return (
         f"\n  arbs: {counts}"
@@ -2908,16 +2925,19 @@ class PPOTrainer:
 
         scalping_suffix = _format_scalping_summary(ep)
         assistant_suffix = _format_assistant_summary(loss_info)
-        # Multi-line operator log (2026-04-26) — was a single ~200-char
-        # line; broken into header + indented rows so the eye can
-        # parse it. ``%s`` suffixes are pre-rendered with leading
-        # newlines so empty-suffix runs (directional / no-arb) still
-        # produce a clean single-line summary.
+        # Multi-line operator log (2026-04-26). Header is preceded by
+        # a separator row (blank line + horizontal rule) so successive
+        # episodes are visually distinct in the activity feed and the
+        # stdout log — both consume the same format. ``%s`` suffixes
+        # are pre-rendered with leading newlines so empty-suffix runs
+        # (directional / no-arb) still produce a clean block.
         logger.info(
+            "%s"
             "Episode %d/%d [%s]"
             "\n  reward=%+.3f  (raw=%+.3f  shaped=%+.3f)"
             "\n  pnl=£%+.2f  bets=%d  loss=%.4f"
             "%s%s",
+            _EPISODE_SEPARATOR,
             tracker.completed,
             tracker.total,
             ep.day_date,
@@ -2939,16 +2959,23 @@ class PPOTrainer:
     ) -> None:
         """Publish a progress event to the asyncio queue (if provided)."""
         scalping_detail = _format_scalping_summary(ep)
+        assistant_detail = _format_assistant_summary(loss_info)
+        # mature-prob-head (2026-04-26): WS detail string redesigned to
+        # multi-line, matching the stdout ``logger.info`` block. Frontend
+        # ``.log-text`` carries ``white-space: pre-wrap`` so the newlines
+        # render as line breaks in the activity feed. Earlier
+        # single-line ``|``-separated format collapsed under wrap and
+        # was illegible on the long episode lines.
         progress = {
             "event": "progress",
             "phase": "training",
             "item": tracker.to_dict(),
             "detail": (
-                f"Episode {tracker.completed} [{ep.day_date}] | "
-                f"reward={ep.total_reward:+.3f} | "
-                f"P&L={ep.total_pnl:+.2f} | "
-                f"loss={loss_info['policy_loss']:.4f}"
-                f"{scalping_detail}"
+                f"{_EPISODE_SEPARATOR}"
+                f"Episode {tracker.completed} [{ep.day_date}]"
+                f"\n  reward={ep.total_reward:+.3f}  pnl=£{ep.total_pnl:+.2f}"
+                f"  bets={ep.bet_count}  loss={loss_info['policy_loss']:.4f}"
+                f"{scalping_detail}{assistant_detail}"
             ),
             "episode": {
                 "day_date": ep.day_date,
@@ -3001,115 +3028,12 @@ class PPOTrainer:
             except Exception:
                 pass  # drop if consumer is behind
 
-            # Issue 05 — session 3: surface each completed arb pair as a
-            # separate activity-log line so scalping runs show per-pair
-            # detail, not just the per-episode rollup appended above.
-            # Capped to avoid flooding the WS queue on long episodes.
-            if ep.arb_events:
-                for ev in ep.arb_events[:_MAX_MATURED_EVENTS_PER_EP]:
-                    try:
-                        self.progress_queue.put_nowait({
-                            "event": "arb_completed",
-                            "phase": "training",
-                            "detail": (
-                                f"Arb matured: Back @ {ev['back_price']:.2f}"
-                                f" / Lay @ {ev['lay_price']:.2f}"
-                                f" on runner {ev['selection_id']}"
-                                f" → locked £{ev['locked_pnl']:+.2f}"
-                            ),
-                            "arb_event": ev,
-                        })
-                    except Exception:
-                        break
-                if len(ep.arb_events) > _MAX_MATURED_EVENTS_PER_EP:
-                    overflow = len(ep.arb_events) - _MAX_MATURED_EVENTS_PER_EP
-                    try:
-                        self.progress_queue.put_nowait({
-                            "event": "arb_completed",
-                            "phase": "training",
-                            "detail": (
-                                f"… plus {overflow} more matured pair(s) this episode"
-                            ),
-                        })
-                    except Exception:
-                        pass
-
-            # Scalping-close-signal events — split agent-chosen closes
-            # from env force-closes so the per-kind cap can differ.
-            # Agent closes are the interesting decisions (agent's
-            # choice to flat); force-closes fire at T−N for hundreds
-            # of pairs per race and are not decision-interesting
-            # (env chose, not the agent). The episode summary already
-            # surfaces both counts (close_lock±, force) and their
-            # cash totals (close_net, force), so per-pair force-close
-            # lines add WebSocket-queue pressure with no information
-            # the summary doesn't already cover.
-            if ep.close_events:
-                agent_closes = [
-                    ev for ev in ep.close_events
-                    if not ev.get('force_close')
-                ]
-                force_closes = [
-                    ev for ev in ep.close_events
-                    if ev.get('force_close')
-                ]
-                for ev in agent_closes[:_MAX_CLOSE_EVENTS_PER_EP]:
-                    pnl = ev['realised_pnl']
-                    if pnl > 0.005:
-                        outcome = "at profit"
-                    elif pnl < -0.005:
-                        outcome = "at loss"
-                    else:
-                        outcome = "flat"
-                    try:
-                        self.progress_queue.put_nowait({
-                            "event": "pair_closed",
-                            "phase": "training",
-                            "detail": (
-                                f"Pair closed {outcome}: Back @ {ev['back_price']:.2f}"
-                                f" / Lay @ {ev['lay_price']:.2f}"
-                                f" on runner {ev['selection_id']}"
-                                f" → realised £{pnl:+.2f}"
-                            ),
-                            "close_event": ev,
-                        })
-                    except Exception:
-                        break
-                if len(agent_closes) > _MAX_CLOSE_EVENTS_PER_EP:
-                    overflow = len(agent_closes) - _MAX_CLOSE_EVENTS_PER_EP
-                    try:
-                        self.progress_queue.put_nowait({
-                            "event": "pair_closed",
-                            "phase": "training",
-                            "detail": (
-                                f"… plus {overflow} more closed pair(s) this episode"
-                            ),
-                        })
-                    except Exception:
-                        pass
-                # Force-close per-pair detail is suppressed by default
-                # (``_MAX_FORCE_EVENTS_PER_EP = 0``). The episode
-                # summary's ``force=N`` count and ``force=£X`` total
-                # are the operator's signal; per-pair lines at 100s
-                # per race are pure noise. A single "... N force-
-                # closed pair(s)" breadcrumb fires only when the cap
-                # is zero AND force_closes are non-empty so operators
-                # know the events existed.
-                if force_closes:
-                    if _MAX_FORCE_EVENTS_PER_EP > 0:
-                        for ev in force_closes[:_MAX_FORCE_EVENTS_PER_EP]:
-                            pnl = ev['realised_pnl']
-                            try:
-                                self.progress_queue.put_nowait({
-                                    "event": "pair_closed",
-                                    "phase": "training",
-                                    "detail": (
-                                        f"Force-closed: Back @ {ev['back_price']:.2f}"
-                                        f" / Lay @ {ev['lay_price']:.2f}"
-                                        f" on runner {ev['selection_id']}"
-                                        f" → realised £{pnl:+.2f}"
-                                    ),
-                                    "close_event": ev,
-                                })
-                            except Exception:
-                                break
+            # Per-pair "Arb matured" / "Pair closed" / "Force-closed"
+            # WS events removed 2026-04-26 per operator instruction:
+            # roll those up into the per-episode ``progress["detail"]``
+            # block instead. The cash row in ``_format_scalping_summary``
+            # carries matured/closed/naked/force totals; the new close-
+            # split fragment adds the (P profit / L loss / F flat)
+            # breakdown that the per-pair stream used to surface. Keeps
+            # one event per episode on the WS queue regardless of how
+            # many pairs landed.
