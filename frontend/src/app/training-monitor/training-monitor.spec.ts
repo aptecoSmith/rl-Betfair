@@ -183,41 +183,14 @@ describe('TrainingMonitor', () => {
     expect(el?.textContent).toContain('Episode 312');
   });
 
-  it('shows empty chart message when no data', () => {
-    setup(runningStatus());
-    const empties = fixture.nativeElement.querySelectorAll('.chart-empty');
-    expect(empties.length).toBe(2);
-  });
+  // 'shows empty chart message when no data' was removed alongside
+  // the global reward/loss charts (2026-04-26). Per-agent empty-state
+  // rendering is now exercised by learning-curves.spec.ts.
 
-  it('builds reward path when data available', () => {
-    setup(runningStatus());
-    rewardSignal.set([
-      { step: 0, reward: 1.0 },
-      { step: 1, reward: 2.0 },
-      { step: 2, reward: 1.5 },
-    ]);
-    fixture.detectChanges();
-    expect(component.rewardPath()).toContain('M');
-    expect(component.rewardPath()).toContain('L');
-  });
-
-  it('builds loss path when data available', () => {
-    setup(runningStatus());
-    lossSignal.set([
-      { step: 0, loss: 0.5 },
-      { step: 1, loss: 0.3 },
-      { step: 2, loss: 0.2 },
-    ]);
-    fixture.detectChanges();
-    expect(component.lossPath()).toContain('M');
-  });
-
-  it('returns empty path for < 2 data points', () => {
-    setup(runningStatus());
-    rewardSignal.set([{ step: 0, reward: 1.0 }]);
-    fixture.detectChanges();
-    expect(component.rewardPath()).toBe('');
-  });
+  // Tests for the global reward/loss charts at the top of the
+  // training monitor were removed alongside the charts themselves
+  // (2026-04-26). Per-agent reward/loss data is now exercised by
+  // ``learning-curves.spec.ts``.
 
   it('agent grid initially empty', () => {
     setup(runningStatus());
@@ -258,19 +231,6 @@ describe('TrainingMonitor', () => {
     setup(runningStatus());
     const section = fixture.nativeElement.querySelector('.population-section');
     expect(section).toBeNull();
-  });
-
-  it('renders chart cards', () => {
-    setup(runningStatus());
-    const cards = fixture.nativeElement.querySelectorAll('.chart-card');
-    expect(cards.length).toBe(2);
-  });
-
-  it('chart titles are Reward and Loss', () => {
-    setup(runningStatus());
-    const titles = fixture.nativeElement.querySelectorAll('.chart-title');
-    expect(titles[0]?.textContent).toContain('Reward');
-    expect(titles[1]?.textContent).toContain('Loss');
   });
 
   it('timeSinceCompleted returns null when no completedAt', () => {

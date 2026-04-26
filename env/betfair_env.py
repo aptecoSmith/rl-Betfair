@@ -571,6 +571,11 @@ class BetfairEnv(gymnasium.Env):
         # it) so the gene passthrough path can forward it to the trainer
         # without the "unknown overrides" debug log firing.
         "fill_prob_loss_weight",
+        # mature-prob-head (2026-04-26): trainer-side BCE weight on
+        # the strict mature-prob head. Whitelisted here (env doesn't
+        # consume it) so a per-agent gene override flows through the
+        # passthrough path without tripping the unknown-key debug log.
+        "mature_prob_loss_weight",
         # Scalping-active-management session 03: auxiliary Gaussian-NLL
         # risk-head loss weight. Same pattern — trainer-only knob;
         # whitelisted here so the passthrough doesn't trip the env's

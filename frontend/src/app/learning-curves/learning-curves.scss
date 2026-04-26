@@ -250,13 +250,21 @@
     border-radius: 4px;
     background: rgba(0,0,0,0.3);
 
-    .zero-line     { stroke: #3a3a5c; stroke-width: 1; stroke-dasharray: 2 3; }
-    .chart-line    { fill: none; stroke-width: 1.5; }
-    .reward-line   { stroke: #64b5f6; }
-    .arb-line      { stroke: #81c784; }
-    .loss-line     { stroke: #ffb74d; }
-    .entropy-line  { stroke: #b39ddb; }
-    .spike-marker  { fill: #ef5350; stroke: #fff; stroke-width: 1; }
+    .zero-line         { stroke: #3a3a5c; stroke-width: 1; stroke-dasharray: 2 3; }
+    .chart-line        { fill: none; stroke-width: 1.5; }
+    .reward-line       { stroke: #64b5f6; }
+    .arb-line          { stroke: #81c784; }
+    .loss-line         { stroke: #ffb74d; }
+    .entropy-line      { stroke: #b39ddb; }
+    // mature-prob-head (2026-04-26): new series colours.
+    // Force-close uses a warm red (selectivity headline; should
+    // ideally trend down) so it visually contrasts with the green
+    // arb-line. The two assistant lines pair fill (warm) with
+    // mature (cool) so the legend swatches are unambiguous.
+    .force-close-line  { stroke: #e57373; }
+    .fill-line         { stroke: #ffb74d; }
+    .mature-line       { stroke: #4dd0e1; }
+    .spike-marker      { fill: #ef5350; stroke: #fff; stroke-width: 1; }
   }
 
   .chart-caption {
@@ -264,6 +272,52 @@
     color: #8a8aa0;
     margin: 0.3rem 0 0 0;
     line-height: 1.3;
+  }
+
+  // mature-prob-head (2026-04-26): assistant-accuracy chart's
+  // header carries an inline legend so the operator can tell which
+  // line is fill vs mature without hovering. The label-with-legend
+  // wrapper aligns the chart label to the left and the swatches to
+  // the right of the same row.
+  .chart-label-with-legend {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.2rem;
+  }
+
+  .chart-legend {
+    display: flex;
+    gap: 0.6rem;
+    font-size: 0.7rem;
+    color: #8a8aa0;
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .legend-swatch {
+      display: inline-block;
+      width: 12px;
+      height: 2px;
+      border-radius: 1px;
+    }
+    .legend-swatch.fill-line   { background: #ffb74d; }
+    .legend-swatch.mature-line { background: #4dd0e1; }
+  }
+
+  .chart-empty {
+    height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #5a5a72;
+    font-size: 0.8rem;
+    background: rgba(0,0,0,0.2);
+    border-radius: 4px;
   }
 }
 

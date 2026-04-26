@@ -420,6 +420,22 @@ class PolicyOutput:
     fill_prob_per_runner: torch.Tensor = field(
         default_factory=lambda: torch.full((1, 1), 0.5)
     )
+    # mature-prob-head (2026-04-26) — per-runner probability that the
+    # pair will resolve FAVOURABLY WITHOUT FORCE-CLOSE INTERVENTION.
+    # Same shape ``(batch, max_runners)`` and same [0, 1] contract as
+    # ``fill_prob_per_runner`` above; same "0.5 = unsure" default for
+    # stub policies / legacy callers.
+    #
+    # Distinct from ``fill_prob_per_runner``: fill_prob's BCE label is
+    # "≥2 legs in bm.bets by episode end" (which conflates natural
+    # maturations, agent-closes, AND env force-closes); mature_prob's
+    # BCE label is the strict "matured naturally OR closed by agent
+    # signal" — force-closed pairs land in the negative class. The
+    # diagnostic for the difference is in
+    # plans/per-runner-credit/findings.md.
+    mature_prob_per_runner: torch.Tensor = field(
+        default_factory=lambda: torch.full((1, 1), 0.5)
+    )
     # Scalping-active-management session 03 — per-runner risk head.
     # Two tensors shape ``(batch, max_runners)``: predicted mean of
     # locked_pnl and its (clamped) log-variance. The "stddev" exposed
@@ -558,13 +574,18 @@ class PPOLSTMPolicy(BasePolicy):
         )
 
         # ── Actor head (per-runner) ─────────────────────────────────────
-        # For each runner: concat(runner_emb, lstm_output, fill_prob_i) →
-        # action params. output_dim = action_dim // max_runners (signal +
-        # stake + aggression). fill-prob-in-actor (2026-04-26):
-        # actor_input_dim is bumped by +1 to accept the per-runner
-        # ``fill_prob`` scalar so the action distribution can condition
-        # on the policy's own per-runner fill forecast.
-        actor_input_dim = runner_embed_dim + lstm_hidden + 1
+        # For each runner: concat(runner_emb, lstm_output, fill_prob_i,
+        # mature_prob_i) → action params. output_dim = action_dim //
+        # max_runners (signal + stake + aggression).
+        # fill-prob-in-actor (2026-04-26): actor_input_dim was bumped
+        # by +1 to accept the per-runner ``fill_prob`` scalar.
+        # mature-prob-head (2026-04-26): bumped a further +1 to accept
+        # the per-runner ``mature_prob`` scalar — the strict
+        # "naturally-matured-or-agent-closed" forecast that excludes
+        # force-closed pairs, distinguishing "good open" from
+        # "open that will need a bail-out". See
+        # plans/per-runner-credit/findings.md.
+        actor_input_dim = runner_embed_dim + lstm_hidden + 2
         self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
@@ -596,6 +617,17 @@ class PPOLSTMPolicy(BasePolicy):
         # gain=0.01 so the pre-training output is ≈0.5 ("unsure") per
         # runner.
         self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
+
+        # ── Mature-probability head (mature-prob-head, 2026-04-26) ────
+        # Auxiliary supervised head — per-runner probability that the
+        # pair will MATURE NATURALLY OR BE CLOSED BY AGENT SIGNAL
+        # (force-closed pairs are the negative class). Same backbone,
+        # same shape, same init pattern as ``fill_prob_head``; the BCE
+        # label classifier in ``PPOTrainer._collect_rollout`` is what
+        # makes the labels different. Output is fed into ``actor_head``
+        # alongside ``fill_prob`` so the action distribution can
+        # condition on a forecast that EXCLUDES force-close.
+        self.mature_prob_head = nn.Linear(lstm_hidden, max_runners)
 
         # ── Risk head (scalping-active-management §03) ────────────────
         # Second auxiliary supervised head — per-runner predicted
@@ -631,6 +663,12 @@ class PPOLSTMPolicy(BasePolicy):
         # head outputs ≈0 logits → sigmoid ≈ 0.5 ("unsure") at init.
         nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
         nn.init.zeros_(self.fill_prob_head.bias)
+        # mature-prob-head (2026-04-26): same small init as fill-prob
+        # head. Pre-training output ≈ 0.5 ("unsure") so feeding the
+        # untrained head into actor_head is benign — the actor sees a
+        # near-constant column until BCE training pulls it apart.
+        nn.init.orthogonal_(self.mature_prob_head.weight, gain=0.01)
+        nn.init.zeros_(self.mature_prob_head.bias)
         # Session-03 risk head: small orthogonal weight + zero bias → at
         # init the raw mean output ≈ 0 and raw log-var ≈ 0 (i.e. stddev
         # ≈ £1 on a £100 budget — a reasonable "unsure" prior).
@@ -762,17 +800,31 @@ class PPOLSTMPolicy(BasePolicy):
         fill_prob_logits = self.fill_prob_head(lstm_last)
         fill_prob = torch.sigmoid(fill_prob_logits)  # (batch, max_runners)
 
+        # ── Mature-probability head (mature-prob-head, 2026-04-26) ───
+        # Conditions on the same backbone as ``fill_prob`` but trained
+        # on a STRICTER label (force-closed pairs → 0). Computed BEFORE
+        # actor_head so its per-runner scalar can be fed in alongside
+        # fill_prob; the surrogate-loss gradient flows back through
+        # this head identically to fill_prob (no detach).
+        mature_prob_logits = self.mature_prob_head(lstm_last)
+        mature_prob = torch.sigmoid(mature_prob_logits)  # (batch, max_runners)
+
         # Expand LSTM output to match each runner
         lstm_expanded = lstm_last.unsqueeze(1).expand(
             -1, self.max_runners, -1
         )  # (batch, max_runners, lstm_hidden)
 
         # Concat runner embedding with LSTM context and per-runner
-        # fill_prob scalar (fill-prob-in-actor, 2026-04-26).
+        # fill_prob + mature_prob scalars (mature-prob-head, 2026-04-26).
         actor_input = torch.cat(
-            [last_runner_embs, lstm_expanded, fill_prob.unsqueeze(-1)],
+            [
+                last_runner_embs,
+                lstm_expanded,
+                fill_prob.unsqueeze(-1),
+                mature_prob.unsqueeze(-1),
+            ],
             dim=-1,
-        )  # (batch, max_runners, embed + lstm_hidden + 1)
+        )  # (batch, max_runners, embed + lstm_hidden + 2)
 
         # Per-runner action params: (batch, max_runners, per_runner_action_dim)
         actor_out = self.actor_head(actor_input)
@@ -809,6 +861,7 @@ class PPOLSTMPolicy(BasePolicy):
             value=value,
             hidden_state=new_hidden,
             fill_prob_per_runner=fill_prob,
+            mature_prob_per_runner=mature_prob,
             predicted_locked_pnl_per_runner=risk_mean,
             predicted_locked_log_var_per_runner=risk_log_var,
         )
@@ -1042,10 +1095,12 @@ class PPOTimeLSTMPolicy(BasePolicy):
             nn.LayerNorm(lstm_hidden) if lstm_layer_norm else nn.Identity()
         )
 
-        # Actor head (per-runner). fill-prob-in-actor (2026-04-26):
-        # ``actor_input_dim`` is bumped by +1 to accept the per-runner
-        # fill_prob scalar. See PPOLSTMPolicy for rationale.
-        actor_input_dim = runner_embed_dim + lstm_hidden + 1
+        # Actor head (per-runner). fill-prob-in-actor (2026-04-26)
+        # bumped ``actor_input_dim`` by +1 for fill_prob; mature-prob-
+        # head (2026-04-26) bumped it a further +1 for mature_prob —
+        # the strict "naturally-matured-or-agent-closed" forecast that
+        # excludes force-closes. See PPOLSTMPolicy for rationale.
+        actor_input_dim = runner_embed_dim + lstm_hidden + 2
         self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
@@ -1067,6 +1122,11 @@ class PPOTimeLSTMPolicy(BasePolicy):
         # Fill-probability head — see PPOLSTMPolicy for rationale.
         # fill-prob-in-actor (2026-04-26): output also fed into actor_head.
         self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
+        # Mature-probability head — see PPOLSTMPolicy for rationale.
+        # mature-prob-head (2026-04-26): trained on the strict
+        # "naturally-matured-or-agent-closed" label; output fed into
+        # actor_head alongside fill_prob.
+        self.mature_prob_head = nn.Linear(lstm_hidden, max_runners)
         # Risk head — see PPOLSTMPolicy for rationale. Two outputs per
         # runner (mean + log-var), clamped at forward time.
         self.risk_head = nn.Linear(lstm_hidden, max_runners * 2)
@@ -1089,6 +1149,9 @@ class PPOTimeLSTMPolicy(BasePolicy):
         # Session-02 fill-prob head: small init → sigmoid ≈ 0.5 at start.
         nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
         nn.init.zeros_(self.fill_prob_head.bias)
+        # mature-prob-head (2026-04-26): same small init as fill-prob head.
+        nn.init.orthogonal_(self.mature_prob_head.weight, gain=0.01)
+        nn.init.zeros_(self.mature_prob_head.bias)
         # Session-03 risk head: small init → mean ≈ 0, log_var ≈ 0 at start.
         nn.init.orthogonal_(self.risk_head.weight, gain=0.01)
         nn.init.zeros_(self.risk_head.bias)
@@ -1232,11 +1295,22 @@ class PPOTimeLSTMPolicy(BasePolicy):
         fill_prob_logits = self.fill_prob_head(lstm_last)
         fill_prob = torch.sigmoid(fill_prob_logits)
 
+        # Mature-probability head — see PPOLSTMPolicy for rationale.
+        # mature-prob-head (2026-04-26): same backbone as fill_prob;
+        # strict label excludes force-closes.
+        mature_prob_logits = self.mature_prob_head(lstm_last)
+        mature_prob = torch.sigmoid(mature_prob_logits)
+
         lstm_expanded = lstm_last.unsqueeze(1).expand(
             -1, self.max_runners, -1,
         )
         actor_input = torch.cat(
-            [last_runner_embs, lstm_expanded, fill_prob.unsqueeze(-1)],
+            [
+                last_runner_embs,
+                lstm_expanded,
+                fill_prob.unsqueeze(-1),
+                mature_prob.unsqueeze(-1),
+            ],
             dim=-1,
         )
         actor_out = self.actor_head(actor_input)
@@ -1266,6 +1340,7 @@ class PPOTimeLSTMPolicy(BasePolicy):
             value=value,
             hidden_state=new_hidden,
             fill_prob_per_runner=fill_prob,
+            mature_prob_per_runner=mature_prob,
             predicted_locked_pnl_per_runner=risk_mean,
             predicted_locked_log_var_per_runner=risk_log_var,
         )
@@ -1477,9 +1552,11 @@ class PPOTransformerPolicy(BasePolicy):
 
         # ── Actor head (per-runner) ─────────────────────────────────────
         # fill-prob-in-actor (2026-04-26): ``actor_input_dim`` is bumped
-        # by +1 to accept the per-runner fill_prob scalar. See
-        # PPOLSTMPolicy for rationale.
-        actor_input_dim = runner_embed_dim + d_model + 1
+        # by +1 for fill_prob; mature-prob-head (2026-04-26) bumped a
+        # further +1 for mature_prob — the strict
+        # "naturally-matured-or-agent-closed" forecast that excludes
+        # force-closes. See PPOLSTMPolicy for rationale.
+        actor_input_dim = runner_embed_dim + d_model + 2
         self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
@@ -1502,6 +1579,10 @@ class PPOTransformerPolicy(BasePolicy):
         # the final transformer tick output (``out_last``) as backbone.
         # fill-prob-in-actor (2026-04-26): output also fed into actor_head.
         self.fill_prob_head = nn.Linear(d_model, max_runners)
+        # Mature-probability head — see PPOLSTMPolicy for rationale.
+        # mature-prob-head (2026-04-26): trained on the strict label;
+        # output fed into actor_head alongside fill_prob.
+        self.mature_prob_head = nn.Linear(d_model, max_runners)
         # Risk head — see PPOLSTMPolicy for rationale. Two outputs per
         # runner (mean + log-var); log-var clamped inside ``forward``.
         self.risk_head = nn.Linear(d_model, max_runners * 2)
@@ -1524,6 +1605,9 @@ class PPOTransformerPolicy(BasePolicy):
         # Session-02 fill-prob head: small init → sigmoid ≈ 0.5 at start.
         nn.init.orthogonal_(self.fill_prob_head.weight, gain=0.01)
         nn.init.zeros_(self.fill_prob_head.bias)
+        # mature-prob-head (2026-04-26): same small init as fill-prob head.
+        nn.init.orthogonal_(self.mature_prob_head.weight, gain=0.01)
+        nn.init.zeros_(self.mature_prob_head.bias)
         # Session-03 risk head: small init → mean ≈ 0, log_var ≈ 0 at start.
         nn.init.orthogonal_(self.risk_head.weight, gain=0.01)
         nn.init.zeros_(self.risk_head.bias)
@@ -1655,11 +1739,21 @@ class PPOTransformerPolicy(BasePolicy):
         fill_prob_logits = self.fill_prob_head(out_last)
         fill_prob = torch.sigmoid(fill_prob_logits)
 
+        # Mature-probability head — see PPOLSTMPolicy for rationale.
+        # mature-prob-head (2026-04-26): same backbone; strict label.
+        mature_prob_logits = self.mature_prob_head(out_last)
+        mature_prob = torch.sigmoid(mature_prob_logits)
+
         out_expanded = out_last.unsqueeze(1).expand(
             -1, self.max_runners, -1,
         )
         actor_input = torch.cat(
-            [last_runner_embs, out_expanded, fill_prob.unsqueeze(-1)],
+            [
+                last_runner_embs,
+                out_expanded,
+                fill_prob.unsqueeze(-1),
+                mature_prob.unsqueeze(-1),
+            ],
             dim=-1,
         )
         actor_out = self.actor_head(actor_input)
@@ -1688,6 +1782,7 @@ class PPOTransformerPolicy(BasePolicy):
             value=value,
             hidden_state=(buffer, valid_count),
             fill_prob_per_runner=fill_prob,
+            mature_prob_per_runner=mature_prob,
             predicted_locked_pnl_per_runner=risk_mean,
             predicted_locked_log_var_per_runner=risk_log_var,
         )

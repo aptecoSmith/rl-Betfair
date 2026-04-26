@@ -563,7 +563,9 @@ class TestFillProbInActor:
     def test_lstm_actor_input_includes_fill_prob(self):
         p = _build_lstm_policy()
         # actor_head is nn.Sequential — first Linear is index 0.
-        expected = p.runner_embed_dim + p.lstm_hidden_size + 1
+        # Width is runner_embed + backbone + 2 (one column each for
+        # fill_prob and mature_prob — see mature-prob-head 2026-04-26).
+        expected = p.runner_embed_dim + p.lstm_hidden_size + 2
         assert p.actor_head[0].weight.shape[1] == expected
         obs = torch.randn(2, OBS_DIM)
         out = p(obs)
@@ -572,7 +574,7 @@ class TestFillProbInActor:
 
     def test_time_lstm_actor_input_includes_fill_prob(self):
         p = _build_time_lstm_policy()
-        expected = p.runner_embed_dim + p.lstm_hidden_size + 1
+        expected = p.runner_embed_dim + p.lstm_hidden_size + 2
         assert p.actor_head[0].weight.shape[1] == expected
         obs = torch.randn(2, OBS_DIM)
         out = p(obs)
@@ -581,7 +583,7 @@ class TestFillProbInActor:
 
     def test_transformer_actor_input_includes_fill_prob(self):
         p = _build_transformer_policy()
-        expected = p.runner_embed_dim + p.d_model + 1
+        expected = p.runner_embed_dim + p.d_model + 2
         assert p.actor_head[0].weight.shape[1] == expected
         obs = torch.randn(2, OBS_DIM)
         out = p(obs)
@@ -678,19 +680,27 @@ class TestFillProbInActor:
     def _make_pre_plan_state_dict(policy, old_extra_dim: int) -> dict:
         """Build a state_dict matching ``policy``'s shapes EXCEPT for
         ``actor_head.0.weight`` / ``.bias``, which carry the pre-plan
-        input width (one column narrower).
+        input width.
+
+        ``old_extra_dim`` is how many post-plan columns to drop. After
+        mature-prob-head (2026-04-26) the new actor_head[0] is two
+        columns wider than pre-fill-prob (one for fill_prob, one for
+        mature_prob), so this test fixes ``old_extra_dim=2`` to mimic
+        the actual pre-fill-prob shape rather than the post-fill /
+        pre-mature shape (which is exercised separately by
+        ``TestMatureProbInActor``).
         """
         sd = {k: v.detach().clone() for k, v in policy.state_dict().items()}
         old_w = sd["actor_head.0.weight"]
-        new_in = old_w.shape[1]  # == runner_embed + backbone + 1
-        old_in = new_in - 1  # pre-plan width
+        new_in = old_w.shape[1]  # == runner_embed + backbone + 2
+        old_in = new_in - old_extra_dim  # pre-fill-prob width
         # Replace with a tensor matching the pre-plan shape.
         sd["actor_head.0.weight"] = torch.zeros(old_w.shape[0], old_in)
         # Bias shape is unchanged (output dim == hidden_dim) — kept as-is.
         return sd
 
     def _assert_pre_plan_load_fails(self, policy):
-        sd = self._make_pre_plan_state_dict(policy, old_extra_dim=1)
+        sd = self._make_pre_plan_state_dict(policy, old_extra_dim=2)
         with pytest.raises((RuntimeError, ValueError)) as excinfo:
             policy.load_state_dict(sd, strict=True)
         msg = str(excinfo.value).lower()
@@ -706,3 +716,170 @@ class TestFillProbInActor:
 
     def test_transformer_pre_plan_weights_fail_to_load(self):
         self._assert_pre_plan_load_fails(_build_transformer_policy())
+
+
+class TestMatureProbInActor:
+    """``mature_prob_per_runner`` is concatenated into actor_input.
+
+    Mirrors ``TestFillProbInActor`` for the new strict-label head added
+    by mature-prob-head (2026-04-26). The mature-prob head is wired
+    alongside fill-prob; ``actor_head[0].weight`` therefore widens by
+    one further column (runner_embed + backbone + 2). See
+    plans/per-runner-credit/findings.md for why this head exists.
+    """
+
+    # -- input-dim guards -------------------------------------------------
+
+    def test_lstm_actor_input_includes_mature_prob(self):
+        p = _build_lstm_policy()
+        expected = p.runner_embed_dim + p.lstm_hidden_size + 2
+        assert p.actor_head[0].weight.shape[1] == expected
+        obs = torch.randn(2, OBS_DIM)
+        out = p(obs)
+        assert out.action_mean.shape == (2, ACTION_DIM)
+        assert out.mature_prob_per_runner.shape == (2, MAX_RUNNERS)
+        # Sigmoid output bounded at construction time (init produces
+        # ≈0 logits → ≈0.5 probs); we only check the shape + range
+        # invariants here so the orthogonal-init randomness doesn't
+        # make this seed-fragile.
+        assert torch.all(out.mature_prob_per_runner >= 0.0)
+        assert torch.all(out.mature_prob_per_runner <= 1.0)
+
+    def test_time_lstm_actor_input_includes_mature_prob(self):
+        p = _build_time_lstm_policy()
+        expected = p.runner_embed_dim + p.lstm_hidden_size + 2
+        assert p.actor_head[0].weight.shape[1] == expected
+        obs = torch.randn(2, OBS_DIM)
+        out = p(obs)
+        assert out.action_mean.shape == (2, ACTION_DIM)
+        assert out.mature_prob_per_runner.shape == (2, MAX_RUNNERS)
+        assert torch.all(out.mature_prob_per_runner >= 0.0)
+        assert torch.all(out.mature_prob_per_runner <= 1.0)
+
+    def test_transformer_actor_input_includes_mature_prob(self):
+        p = _build_transformer_policy()
+        expected = p.runner_embed_dim + p.d_model + 2
+        assert p.actor_head[0].weight.shape[1] == expected
+        obs = torch.randn(2, OBS_DIM)
+        out = p(obs)
+        assert out.action_mean.shape == (2, ACTION_DIM)
+        assert out.mature_prob_per_runner.shape == (2, MAX_RUNNERS)
+        assert torch.all(out.mature_prob_per_runner >= 0.0)
+        assert torch.all(out.mature_prob_per_runner <= 1.0)
+
+    # -- gradient-through check (load-bearing) ---------------------------
+
+    @staticmethod
+    def _action_mean_depends_on_mature_prob_head(policy):
+        """Return True iff perturbing mature_prob_head.weight changes
+        ``action_mean`` for a fixed obs / hidden_state.
+
+        Mirror of ``TestFillProbInActor._action_mean_depends_on_fill_prob_head``
+        — the strict forward-only check. A detach in the actor-input
+        concat would let the head still receive gradient via its own
+        BCE auxiliary while silently severing the surrogate-loss
+        pathway; this check catches that.
+        """
+        torch.manual_seed(0)
+        obs = torch.randn(2, OBS_DIM)
+        baseline = policy(obs).action_mean.detach().clone()
+
+        with torch.no_grad():
+            policy.mature_prob_head.weight.add_(
+                torch.randn_like(policy.mature_prob_head.weight) * 0.5,
+            )
+
+        perturbed = policy(obs).action_mean.detach().clone()
+        return not torch.allclose(baseline, perturbed, atol=1e-7)
+
+    def test_lstm_action_mean_depends_on_mature_prob_head_weights(self):
+        p = _build_lstm_policy()
+        assert self._action_mean_depends_on_mature_prob_head(p), (
+            "Surrogate-loss path is detached: action_mean did not change "
+            "when mature_prob_head.weight was perturbed."
+        )
+
+    def test_time_lstm_action_mean_depends_on_mature_prob_head_weights(self):
+        p = _build_time_lstm_policy()
+        assert self._action_mean_depends_on_mature_prob_head(p), (
+            "Surrogate-loss path is detached: action_mean did not change "
+            "when mature_prob_head.weight was perturbed."
+        )
+
+    def test_transformer_action_mean_depends_on_mature_prob_head_weights(self):
+        p = _build_transformer_policy()
+        assert self._action_mean_depends_on_mature_prob_head(p), (
+            "Surrogate-loss path is detached: action_mean did not change "
+            "when mature_prob_head.weight was perturbed."
+        )
+
+    # Backward-side: an actor-only loss MUST send gradient through
+    # ``mature_prob_head``.
+
+    def _assert_actor_loss_grads_mature_prob_head(self, policy):
+        obs = torch.randn(2, OBS_DIM)
+        out = policy(obs)
+        loss = out.action_mean.sum()
+        loss.backward()
+        assert policy.mature_prob_head.weight.grad is not None, (
+            "mature_prob_head.weight has no gradient — surrogate path "
+            "appears detached."
+        )
+        assert policy.mature_prob_head.weight.grad.abs().max() > 0.0
+
+    def test_lstm_actor_loss_routes_grad_through_mature_prob_head(self):
+        self._assert_actor_loss_grads_mature_prob_head(_build_lstm_policy())
+
+    def test_time_lstm_actor_loss_routes_grad_through_mature_prob_head(self):
+        self._assert_actor_loss_grads_mature_prob_head(
+            _build_time_lstm_policy(),
+        )
+
+    def test_transformer_actor_loss_routes_grad_through_mature_prob_head(self):
+        self._assert_actor_loss_grads_mature_prob_head(
+            _build_transformer_policy(),
+        )
+
+    # -- cross-load failure (architecture-hash break) --------------------
+    #
+    # Pre-mature-prob-head checkpoints had ``actor_head[0].weight``
+    # shape ``(hidden, runner_embed + backbone + 1)`` (post-fill-prob
+    # but pre-mature). The new architecture expects
+    # ``(hidden, runner_embed + backbone + 2)``. Loading an old
+    # state_dict with strict=True must FAIL with a shape-mismatch.
+    #
+    # The variant identity is carried by the changed weight shape; we
+    # don't add a new explicit version field, we confirm PyTorch's
+    # state_dict checking observes it (same pattern as
+    # ``TestFillProbInActor._assert_pre_plan_load_fails``).
+
+    @staticmethod
+    def _make_pre_mature_state_dict(policy) -> dict:
+        """Build a state_dict matching ``policy``'s shapes EXCEPT for
+        ``actor_head.0.weight``, which carries the pre-mature-plan
+        input width (one column narrower; the post-fill-prob shape).
+        """
+        sd = {k: v.detach().clone() for k, v in policy.state_dict().items()}
+        old_w = sd["actor_head.0.weight"]
+        new_in = old_w.shape[1]  # == runner_embed + backbone + 2
+        old_in = new_in - 1  # pre-mature width (still has fill_prob)
+        sd["actor_head.0.weight"] = torch.zeros(old_w.shape[0], old_in)
+        return sd
+
+    def _assert_pre_mature_load_fails(self, policy):
+        sd = self._make_pre_mature_state_dict(policy)
+        with pytest.raises((RuntimeError, ValueError)) as excinfo:
+            policy.load_state_dict(sd, strict=True)
+        msg = str(excinfo.value).lower()
+        assert "actor_head" in msg or "size mismatch" in msg or "shape" in msg, (
+            f"Expected a shape-mismatch on actor_head, got: {excinfo.value}"
+        )
+
+    def test_lstm_pre_mature_weights_fail_to_load(self):
+        self._assert_pre_mature_load_fails(_build_lstm_policy())
+
+    def test_time_lstm_pre_mature_weights_fail_to_load(self):
+        self._assert_pre_mature_load_fails(_build_time_lstm_policy())
+
+    def test_transformer_pre_mature_weights_fail_to_load(self):
+        self._assert_pre_mature_load_fails(_build_transformer_policy())

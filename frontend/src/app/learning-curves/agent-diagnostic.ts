@@ -29,8 +29,24 @@ export interface EpisodeRecord {
   arbs_completed?: number;
   arbs_naked?: number;
   arbs_closed?: number;
+  /** mature-prob-head (2026-04-26) — env-initiated T−N flat count.
+   *  Pre-arb-signal-cleanup rows lack the field. The force-close %
+   *  chart and the new selectivity heuristics treat absence as 0. */
+  arbs_force_closed?: number;
   locked_pnl?: number;
   naked_pnl?: number;
+  /** mature-prob-head (2026-04-26) — auxiliary-head diagnostics.
+   *  All four are emitted on every JSONL row from this date onward
+   *  (zero when no resolved labels were seen this update). Pre-plan
+   *  rows lack them; readers must tolerate absence. */
+  fill_prob_loss?: number;
+  fill_prob_confidence?: number;
+  fill_prob_accuracy?: number;
+  fill_prob_n_resolved?: number;
+  mature_prob_loss?: number;
+  mature_prob_confidence?: number;
+  mature_prob_accuracy?: number;
+  mature_prob_n_resolved?: number;
   timestamp: string;
   /** Smoke-test probe tag (Session 04, naked-clip-and-stability).
    *  Absent on real training rows; `true` on the 2-agent × 3-episode
@@ -59,8 +75,31 @@ export interface AgentDiagnostic {
     arbRate: string | null;
     policyLoss: string | null;
     entropy: string | null;
+    /** mature-prob-head (2026-04-26) — caption under the new
+     *  force-close % chart. Null when there's no force-close data
+     *  for the agent (pre-arb-signal-cleanup rows). */
+    forceCloseRate: string | null;
+    /** mature-prob-head (2026-04-26) — caption under the new
+     *  assistant-accuracy chart. Null when neither head saw any
+     *  resolved labels. */
+    assistantAccuracy: string | null;
   };
-  /** Machine-readable flags for styling / other UI cues. */
+  /** Machine-readable flags for styling / other UI cues.
+   *
+   *  Established flags: ``learning`` / ``collapsed`` / ``unstable`` /
+   *  ``stagnant`` (mirrors the verdict). mature-prob-head (2026-04-26)
+   *  added two diagnostic flags that surface inside ``STAGNANT`` to
+   *  describe the failure shape:
+   *    * ``selectivity_stuck`` — force-close % stuck high AND mature
+   *      accuracy not climbing. Agent paying shaped cost without
+   *      behavioural response. Cohort-O / cohort-O2 shape.
+   *    * ``actor_ignoring_assistant`` — mature accuracy IS climbing
+   *      but force-close % flat. Cohort-F shape — assistant is
+   *      learning but the actor isn't using it.
+   *
+   *  These are diagnostic flags that surface in the headline only
+   *  (verdict stays STAGNANT to keep the population-summary chips
+   *  bounded to 5 categories). */
   flags: string[];
   /** Episode count consumed. */
   nEpisodes: number;
@@ -87,6 +126,37 @@ const INSTABILITY_WINDOW = 5;
 /** Fraction of recent episodes that must show an arb_rate increase
  *  before we call it "learning". */
 const LEARNING_ARB_RATE_MIN_DELTA_PCT = 5;
+/** Reward % delta (start-third → end-third) that triggers LEARNING
+ *  via the reward channel. mature-prob-head (2026-04-26). */
+const LEARNING_REWARD_MIN_DELTA_PCT = 5;
+/** Force-close % drop (in percentage points) that triggers LEARNING
+ *  via the selectivity channel. mature-prob-head (2026-04-26). */
+const LEARNING_FORCE_CLOSE_MIN_DROP_PP = 5;
+/** Mature-prob accuracy climb (in percentage points) that triggers
+ *  LEARNING via the assistant-correctness channel. */
+const LEARNING_MATURE_ACC_MIN_CLIMB_PP = 5;
+/** "Selectivity stuck" diagnostic threshold: force-close % at or
+ *  above this value across the run, with no meaningful drop, is the
+ *  cohort-O / cohort-O2 shape. */
+const STUCK_FORCE_CLOSE_HIGH_PCT = 70;
+/** Maximum |force-close drop| that still counts as "stuck" — anything
+ *  larger gets credit as movement and disqualifies the flag. */
+const STUCK_FORCE_CLOSE_FLAT_PP = 2;
+/** Mature-acc climb that disqualifies "selectivity stuck": the
+ *  assistant IS learning, just the actor isn't using it. Routes to
+ *  the ``actor_ignoring_assistant`` flag instead. */
+const STUCK_ASSISTANT_LEARNING_PP = 5;
+/** Saturation-collapse trigger: force-close % at or above this
+ *  level for the lookback window, reward flat, no spikes. Distinct
+ *  from the spike-driven COLLAPSED rule but operationally the same
+ *  outcome (GA should reject). */
+const SATURATED_COLLAPSE_FC_PCT = 75;
+/** Reward variance band that counts as "flat" for the saturation-
+ *  collapse rule (in absolute reward units). Reward swings smaller
+ *  than this across the lookback window are treated as no movement. */
+const SATURATED_COLLAPSE_REWARD_FLAT = 5;
+/** How many recent episodes the saturation-collapse rule looks at. */
+const SATURATED_COLLAPSE_WINDOW = 10;
 
 // -- Helpers ------------------------------------------------------------------
 
@@ -98,11 +168,39 @@ function median(values: number[]): number {
 }
 
 function arbRate(ep: EpisodeRecord): number | null {
+  // mature-prob-head (2026-04-26): denominator now includes ALL
+  // opened pairs (matured + closed + naked + force-closed) so the
+  // value reflects "fraction of opens that matured naturally"
+  // rather than the pre-force-close ratio that ignored ~75 % of
+  // opens once force-close existed. The original numerator
+  // (``arbs_completed`` = naturally matured) is kept — that's the
+  // signal worth tracking.
   const c = ep.arbs_completed ?? 0;
+  const cl = ep.arbs_closed ?? 0;
   const n = ep.arbs_naked ?? 0;
-  const total = c + n;
+  const f = ep.arbs_force_closed ?? 0;
+  const total = c + cl + n + f;
   if (total === 0) return null;
   return c / total;
+}
+
+/** Force-close fraction of opened pairs.
+ *
+ *  Numerator: ``arbs_force_closed`` (env-initiated T−N flat).
+ *  Denominator: every opened pair (matured + closed + naked +
+ *  force-closed). Returns null when the agent opened nothing.
+ *
+ *  Reads as "what fraction of this agent's opens needed an
+ *  env bail-out". Lower = more selective. The headline
+ *  selectivity number after mature-prob-head. */
+function forceCloseRate(ep: EpisodeRecord): number | null {
+  const c = ep.arbs_completed ?? 0;
+  const cl = ep.arbs_closed ?? 0;
+  const n = ep.arbs_naked ?? 0;
+  const f = ep.arbs_force_closed ?? 0;
+  const total = c + cl + n + f;
+  if (total === 0) return null;
+  return f / total;
 }
 
 function groupByDate(eps: EpisodeRecord[]): Map<string, EpisodeRecord[]> {
@@ -149,17 +247,120 @@ function arbRateTrend(eps: EpisodeRecord[]): {
   end: number | null;
   deltaPct: number | null;
 } {
-  const rates = eps.map(arbRate).filter((v): v is number => v != null);
-  if (rates.length < 4) return { start: null, end: null, deltaPct: null };
-  const third = Math.max(1, Math.floor(rates.length / 3));
-  const start = rates.slice(0, third).reduce((a, b) => a + b, 0) / third;
-  const endSlice = rates.slice(-third);
-  const end = endSlice.reduce((a, b) => a + b, 0) / endSlice.length;
+  return _trendOf(eps.map(arbRate).filter((v): v is number => v != null));
+}
+
+/** mature-prob-head (2026-04-26) — start-third → end-third trend on
+ *  the force-close fraction. ``deltaPP`` is in percentage points
+ *  (negative = improving). Null fields when fewer than 4 resolved
+ *  episodes contribute. */
+function forceCloseRateTrend(eps: EpisodeRecord[]): {
+  start: number | null;
+  end: number | null;
+  deltaPP: number | null;
+} {
+  const rates = eps.map(forceCloseRate).filter((v): v is number => v != null);
+  const t = _trendOf(rates);
   return {
-    start,
-    end,
-    deltaPct: (end - start) * 100,
+    start: t.start,
+    end: t.end,
+    // _trendOf reports a percentage delta; reuse the same start/end
+    // averages to compute a percentage-POINT delta directly.
+    deltaPP: (t.start != null && t.end != null) ? (t.end - t.start) * 100 : null,
   };
+}
+
+/** mature-prob-head (2026-04-26) — start-third → end-third trend on
+ *  the mature-prob head's accuracy. ``deltaPP`` in percentage points
+ *  (positive = head learning). Null fields when fewer than 4
+ *  episodes carry a resolved label count > 0. The head only emits
+ *  meaningful accuracy for updates with resolved labels — episodes
+ *  where ``mature_prob_n_resolved`` is 0 are dropped from the trend
+ *  (they would otherwise pin the mean at 0 and produce a misleading
+ *  drop). */
+function matureAccuracyTrend(eps: EpisodeRecord[]): {
+  start: number | null;
+  end: number | null;
+  deltaPP: number | null;
+} {
+  const accs: number[] = [];
+  for (const e of eps) {
+    if ((e.mature_prob_n_resolved ?? 0) <= 0) continue;
+    const a = e.mature_prob_accuracy;
+    if (a == null || !Number.isFinite(a)) continue;
+    accs.push(a);
+  }
+  const t = _trendOf(accs);
+  return {
+    start: t.start,
+    end: t.end,
+    deltaPP: (t.start != null && t.end != null) ? (t.end - t.start) * 100 : null,
+  };
+}
+
+/** mature-prob-head (2026-04-26) — same start-third / end-third
+ *  shape on the FILL-prob head. Surfaced under the assistant-
+ *  accuracy chart so the operator sees both heads' learning
+ *  trajectories. */
+function fillAccuracyTrend(eps: EpisodeRecord[]): {
+  start: number | null;
+  end: number | null;
+  deltaPP: number | null;
+} {
+  const accs: number[] = [];
+  for (const e of eps) {
+    if ((e.fill_prob_n_resolved ?? 0) <= 0) continue;
+    const a = e.fill_prob_accuracy;
+    if (a == null || !Number.isFinite(a)) continue;
+    accs.push(a);
+  }
+  const t = _trendOf(accs);
+  return {
+    start: t.start,
+    end: t.end,
+    deltaPP: (t.start != null && t.end != null) ? (t.end - t.start) * 100 : null,
+  };
+}
+
+/** mature-prob-head (2026-04-26) — start-third → end-third trend on
+ *  reward, expressed as a percentage of |start average|. Mirrors the
+ *  caption logic in ``rewardCaption`` so the LEARNING rule sees the
+ *  same number the operator does. */
+function rewardTrend(eps: EpisodeRecord[]): {
+  start: number | null;
+  end: number | null;
+  deltaPct: number | null;
+} {
+  const rewards = eps.map(e => e.total_reward).filter(v => Number.isFinite(v));
+  if (rewards.length < 4) return { start: null, end: null, deltaPct: null };
+  const third = Math.max(1, Math.floor(rewards.length / 3));
+  const start = rewards.slice(0, third).reduce((a, b) => a + b, 0) / third;
+  const endSlice = rewards.slice(-third);
+  const end = endSlice.reduce((a, b) => a + b, 0) / endSlice.length;
+  // Avoid div-by-zero: when the start mean is ~0, fall back to
+  // absolute delta scaled by 1 so a +5 swing reads as +5 % rather
+  // than infinite.
+  const denom = Math.abs(start) > 1e-6 ? Math.abs(start) : 1;
+  return { start, end, deltaPct: ((end - start) / denom) * 100 };
+}
+
+/** Shared trend-building primitive used by ``arbRateTrend`` and the
+ *  new force-close / accuracy trend helpers. Takes a series of
+ *  fraction-valued numbers, returns mean of the first third + last
+ *  third, plus a percentage delta on the same scale (multiplied by
+ *  100 because the inputs are fractions in [0, 1]). Null fields
+ *  when fewer than 4 points exist. */
+function _trendOf(values: number[]): {
+  start: number | null;
+  end: number | null;
+  deltaPct: number | null;
+} {
+  if (values.length < 4) return { start: null, end: null, deltaPct: null };
+  const third = Math.max(1, Math.floor(values.length / 3));
+  const start = values.slice(0, third).reduce((a, b) => a + b, 0) / third;
+  const endSlice = values.slice(-third);
+  const end = endSlice.reduce((a, b) => a + b, 0) / endSlice.length;
+  return { start, end, deltaPct: (end - start) * 100 };
 }
 
 // -- Captions -----------------------------------------------------------------
@@ -202,6 +403,35 @@ function policyLossCaption(eps: EpisodeRecord[]): string | null {
   return `${spikes.length} spike${spikes.length === 1 ? '' : 's'} (peak ${worst.toExponential(1)}), median ${med.toFixed(3)}.`;
 }
 
+function forceCloseRateCaption(eps: EpisodeRecord[]): string | null {
+  const trend = forceCloseRateTrend(eps);
+  if (trend.start == null || trend.end == null) return null;
+  const pct = (v: number) => `${(v * 100).toFixed(0)}%`;
+  const direction =
+    trend.deltaPP != null && trend.deltaPP <= -LEARNING_FORCE_CLOSE_MIN_DROP_PP
+      ? 'falling'
+      : trend.deltaPP != null && trend.deltaPP >= LEARNING_FORCE_CLOSE_MIN_DROP_PP
+        ? 'rising'
+        : 'flat';
+  return `Force-close ${pct(trend.start)} → ${pct(trend.end)} (${direction}).`;
+}
+
+function assistantAccuracyCaption(eps: EpisodeRecord[]): string | null {
+  const fill = fillAccuracyTrend(eps);
+  const mat = matureAccuracyTrend(eps);
+  if (fill.start == null && mat.start == null) return null;
+  const pct = (v: number | null) => v == null ? '—' : `${(v * 100).toFixed(0)}%`;
+  // Two short fragments. Mature first because it's the load-bearing
+  // assistant under the new architecture; fill second.
+  const matStr = mat.start != null
+    ? `mature ${pct(mat.start)} → ${pct(mat.end)}`
+    : 'mature: no data';
+  const fillStr = fill.start != null
+    ? `fill ${pct(fill.start)} → ${pct(fill.end)}`
+    : 'fill: no data';
+  return `${matStr}, ${fillStr}.`;
+}
+
 function entropyCaption(eps: EpisodeRecord[]): string | null {
   const entropies = eps
     .map(e => e.entropy)
@@ -225,6 +455,8 @@ export function diagnoseAgent(eps: EpisodeRecord[]): AgentDiagnostic {
     arbRate: arbRateCaption(sorted),
     policyLoss: policyLossCaption(sorted),
     entropy: entropyCaption(sorted),
+    forceCloseRate: forceCloseRateCaption(sorted),
+    assistantAccuracy: assistantAccuracyCaption(sorted),
   };
   const flags: string[] = [];
 
@@ -243,12 +475,14 @@ export function diagnoseAgent(eps: EpisodeRecord[]): AgentDiagnostic {
   const recentSpikes = spikes.filter(s => s.episode > sorted[sorted.length - 1].episode - INSTABILITY_WINDOW);
   const lockedDates = countLockedInDates(sorted);
   const totalDates = groupByDate(sorted).size;
-  const trend = arbRateTrend(sorted);
+  const arbTrend = arbRateTrend(sorted);
+  const fcTrend = forceCloseRateTrend(sorted);
+  const matAccTrend = matureAccuracyTrend(sorted);
+  const rwdTrend = rewardTrend(sorted);
 
-  // COLLAPSED: behaviour is identical on multiple dates AND we've seen
-  // at least one policy-loss explosion during training. The loss
-  // explosion explains *why* the policy saturated; the locked-in
-  // behaviour confirms it saturated rather than merely stabilised.
+  // COLLAPSED — variant 1: spike-driven. behaviour identical on
+  // multiple dates AND a policy-loss explosion. Existing rule
+  // pre-mature-prob-head; unchanged.
   if (lockedDates >= 2 && spikes.length >= 1) {
     flags.push('collapsed');
     const firstSpike = spikes[0];
@@ -274,6 +508,45 @@ export function diagnoseAgent(eps: EpisodeRecord[]): AgentDiagnostic {
     };
   }
 
+  // COLLAPSED — variant 2: saturation-collapse (mature-prob-head,
+  // 2026-04-26). force-close % at or above SATURATED_COLLAPSE_FC_PCT
+  // for the lookback window AND reward flat AND no policy-loss
+  // spikes. Distinct shape from variant 1 (no spike) but the same
+  // operational verdict — the agent is stuck at a wrong optimum and
+  // GA should reject. Catches the cohort-O / cohort-O2 / cohort-F
+  // failure modes.
+  if (sorted.length >= SATURATED_COLLAPSE_WINDOW && spikes.length === 0) {
+    const recent = sorted.slice(-SATURATED_COLLAPSE_WINDOW);
+    const recentFcs = recent
+      .map(forceCloseRate)
+      .filter((v): v is number => v != null);
+    const recentRewards = recent.map(e => e.total_reward);
+    const fcMin = recentFcs.length > 0 ? Math.min(...recentFcs) : 0;
+    const rewardSpan =
+      recentRewards.length > 0
+        ? Math.max(...recentRewards) - Math.min(...recentRewards)
+        : 0;
+    if (
+      recentFcs.length >= 4
+      && fcMin * 100 >= SATURATED_COLLAPSE_FC_PCT
+      && rewardSpan <= SATURATED_COLLAPSE_REWARD_FLAT
+    ) {
+      flags.push('collapsed', 'saturated');
+      return {
+        verdict: 'collapsed',
+        verdictLabel: 'COLLAPSED ⚠',
+        headline:
+          `Saturation collapse: force-close ≥${SATURATED_COLLAPSE_FC_PCT}% ` +
+          `for the last ${SATURATED_COLLAPSE_WINDOW} episodes, reward flat ` +
+          `(${recentRewards[0].toFixed(0)} → ${recentRewards[recentRewards.length - 1].toFixed(0)}). ` +
+          `No policy-loss spike — agent has settled at a non-selective optimum. GA will select against this one.`,
+        captions,
+        flags,
+        nEpisodes: sorted.length,
+      };
+    }
+  }
+
   // UNSTABLE: recent explosions without yet settling. Could still
   // recover or collapse; worth watching.
   if (recentSpikes.length > 0) {
@@ -292,32 +565,129 @@ export function diagnoseAgent(eps: EpisodeRecord[]): AgentDiagnostic {
     };
   }
 
-  // LEARNING: arb rate trending up meaningfully.
-  if (trend.deltaPct != null && trend.deltaPct >= LEARNING_ARB_RATE_MIN_DELTA_PCT) {
+  // LEARNING: ANY of four signals improving meaningfully. Each
+  // signal that triggers contributes a fragment to the headline so
+  // the operator sees which dimension(s) are moving. Uses ``any``
+  // semantics rather than ``all`` because most learning agents won't
+  // improve every channel uniformly — and any one of these is
+  // genuine progress.
+  const learningFragments: string[] = [];
+  if (
+    rwdTrend.deltaPct != null
+    && rwdTrend.deltaPct >= LEARNING_REWARD_MIN_DELTA_PCT
+  ) {
+    learningFragments.push(
+      `reward ${(rwdTrend.start as number).toFixed(0)} → ${(rwdTrend.end as number).toFixed(0)}` +
+      ` (${rwdTrend.deltaPct >= 0 ? '+' : ''}${rwdTrend.deltaPct.toFixed(0)}%)`,
+    );
+  }
+  if (
+    fcTrend.deltaPP != null
+    && fcTrend.deltaPP <= -LEARNING_FORCE_CLOSE_MIN_DROP_PP
+  ) {
+    learningFragments.push(
+      `force-close ${((fcTrend.start as number) * 100).toFixed(0)}% → ${((fcTrend.end as number) * 100).toFixed(0)}%` +
+      ` (${fcTrend.deltaPP.toFixed(0)}pp)`,
+    );
+  }
+  if (
+    matAccTrend.deltaPP != null
+    && matAccTrend.deltaPP >= LEARNING_MATURE_ACC_MIN_CLIMB_PP
+  ) {
+    learningFragments.push(
+      `mature-acc ${((matAccTrend.start as number) * 100).toFixed(0)}% → ${((matAccTrend.end as number) * 100).toFixed(0)}%` +
+      ` (+${matAccTrend.deltaPP.toFixed(0)}pp)`,
+    );
+  }
+  if (
+    arbTrend.deltaPct != null
+    && arbTrend.deltaPct >= LEARNING_ARB_RATE_MIN_DELTA_PCT
+  ) {
+    learningFragments.push(
+      `arb-completion ${((arbTrend.start as number) * 100).toFixed(0)}% → ${((arbTrend.end as number) * 100).toFixed(0)}%` +
+      ` (+${arbTrend.deltaPct.toFixed(0)}pp)`,
+    );
+  }
+  if (learningFragments.length > 0) {
     flags.push('learning');
+    // mature-prob-head (2026-04-26): cohort-F shape detection.
+    // If mature-acc climbing was the ONLY triggering channel and
+    // force-close % is also stuck high, the assistant is learning
+    // but the actor is ignoring it. Keep the verdict LEARNING (the
+    // policy IS learning *something*), but append a warning
+    // fragment to the headline + flag it for downstream styling.
+    const fcStuckHere =
+      fcTrend.start != null
+      && fcTrend.end != null
+      && fcTrend.end * 100 >= STUCK_FORCE_CLOSE_HIGH_PCT
+      && fcTrend.deltaPP != null
+      && Math.abs(fcTrend.deltaPP) <= STUCK_FORCE_CLOSE_FLAT_PP;
+    const matAccOnly =
+      matAccTrend.deltaPP != null
+      && matAccTrend.deltaPP >= LEARNING_MATURE_ACC_MIN_CLIMB_PP
+      && (rwdTrend.deltaPct == null
+          || rwdTrend.deltaPct < LEARNING_REWARD_MIN_DELTA_PCT)
+      && (fcTrend.deltaPP == null
+          || fcTrend.deltaPP > -LEARNING_FORCE_CLOSE_MIN_DROP_PP)
+      && (arbTrend.deltaPct == null
+          || arbTrend.deltaPct < LEARNING_ARB_RATE_MIN_DELTA_PCT);
+    let warning = '';
+    if (matAccOnly && fcStuckHere) {
+      flags.push('actor_ignoring_assistant');
+      warning =
+        ` Warning: force-close stuck near ${((fcTrend.end as number) * 100).toFixed(0)}%` +
+        ` — assistant is learning but the actor isn't using it (cohort-F shape).`;
+    }
     return {
       verdict: 'learning',
       verdictLabel: 'LEARNING',
       headline:
-        `Arb completion rising from ${((trend.start as number) * 100).toFixed(0)}% to ` +
-        `${((trend.end as number) * 100).toFixed(0)}% across ${sorted.length} episodes. ` +
-        `No recent policy-loss spikes — stable gradient flow.`,
+        `${learningFragments.join(', ')} across ${sorted.length} episodes. ` +
+        `No recent policy-loss spikes — stable gradient flow.${warning}`,
       captions,
       flags,
       nEpisodes: sorted.length,
     };
   }
 
-  // STAGNANT fallback: surviving (no collapse, no instability) but
-  // also not visibly improving.
+  // STAGNANT — fallback. Pick the headline that fits the failure
+  // shape: selectivity stuck (cohort-O/O2 shape) vs actor ignoring
+  // the assistant (cohort-F shape) vs generic stagnation.
   flags.push('stagnant');
+  let stagnantHeadline: string;
+  const fcStuck =
+    fcTrend.start != null
+    && fcTrend.end != null
+    && fcTrend.start * 100 >= STUCK_FORCE_CLOSE_HIGH_PCT
+    && fcTrend.end * 100 >= STUCK_FORCE_CLOSE_HIGH_PCT
+    && fcTrend.deltaPP != null
+    && Math.abs(fcTrend.deltaPP) <= STUCK_FORCE_CLOSE_FLAT_PP;
+  const matAccClimbing =
+    matAccTrend.deltaPP != null
+    && matAccTrend.deltaPP >= STUCK_ASSISTANT_LEARNING_PP;
+  if (fcStuck && matAccClimbing) {
+    flags.push('actor_ignoring_assistant');
+    stagnantHeadline =
+      `Mature accuracy climbing ${((matAccTrend.start as number) * 100).toFixed(0)}% → ${((matAccTrend.end as number) * 100).toFixed(0)}% ` +
+      `but force-close stuck near ${((fcTrend.end as number) * 100).toFixed(0)}%. ` +
+      `Assistant is learning; the actor isn't using it (cohort-F failure shape).`;
+  } else if (fcStuck) {
+    flags.push('selectivity_stuck');
+    stagnantHeadline =
+      `Force-close stuck near ${((fcTrend.end as number) * 100).toFixed(0)}% across the run, ` +
+      `mature accuracy ${matAccTrend.end != null ? `flat at ${((matAccTrend.end as number) * 100).toFixed(0)}%` : 'flat'}. ` +
+      `Agent paying shaped cost without behavioural response.`;
+  } else {
+    stagnantHeadline =
+      `No policy-loss spikes, but no signals trending. ` +
+      `Reward ${rwdTrend.deltaPct != null ? `${rwdTrend.deltaPct >= 0 ? '+' : ''}${rwdTrend.deltaPct.toFixed(0)}%` : 'flat'}, ` +
+      `arb-completion ${arbTrend.deltaPct != null ? `${arbTrend.deltaPct >= 0 ? '+' : ''}${arbTrend.deltaPct.toFixed(0)}%` : 'flat'}. ` +
+      `Policy is stable but not visibly improving.`;
+  }
   return {
     verdict: 'stagnant',
     verdictLabel: 'STAGNANT',
-    headline:
-      `No policy-loss spikes, but arb-completion trend is ` +
-      `${trend.deltaPct != null ? `${trend.deltaPct >= 0 ? '+' : ''}${trend.deltaPct.toFixed(0)}%` : 'undefined'}. ` +
-      `Policy is stable but not visibly improving.`,
+    headline: stagnantHeadline,
     captions,
     flags,
     nEpisodes: sorted.length,

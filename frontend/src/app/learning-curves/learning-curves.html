@@ -144,6 +144,7 @@
             {{ panel.diagnostic.headline }}
           </p>
 
+          <!-- Row 1: reward + force-close % -->
           <div class="chart-row">
             <div class="mini-chart">
               <div class="chart-label">Reward</div>
@@ -159,20 +160,21 @@
             </div>
 
             <div class="mini-chart">
-              <div class="chart-label">Arb completion rate</div>
+              <div class="chart-label">Force-close %</div>
               <svg
                 [attr.viewBox]="'0 0 ' + chartWidth + ' ' + chartHeight"
                 preserveAspectRatio="none"
                 class="chart-svg"
               >
-                <path [attr.d]="pathFor(panel, 'arbRate')" class="chart-line arb-line" />
+                <path [attr.d]="pathFor(panel, 'forceCloseRate')" class="chart-line force-close-line" />
               </svg>
               <p class="chart-caption">
-                {{ panel.diagnostic.captions.arbRate ?? 'No arb data yet.' }}
+                {{ panel.diagnostic.captions.forceCloseRate ?? 'No force-close data yet.' }}
               </p>
             </div>
           </div>
 
+          <!-- Row 2: policy loss + entropy -->
           <div class="chart-row">
             <div class="mini-chart">
               <div class="chart-label">Policy loss (log scale)</div>
@@ -202,6 +204,52 @@
               </svg>
               <p class="chart-caption">
                 {{ panel.diagnostic.captions.entropy ?? 'No entropy data yet.' }}
+              </p>
+            </div>
+          </div>
+
+          <!-- Row 3: arb completion + assistant accuracy (two-line) -->
+          <div class="chart-row">
+            <div class="mini-chart">
+              <div class="chart-label">Arb completion rate</div>
+              <svg
+                [attr.viewBox]="'0 0 ' + chartWidth + ' ' + chartHeight"
+                preserveAspectRatio="none"
+                class="chart-svg"
+              >
+                <path [attr.d]="pathFor(panel, 'arbRate')" class="chart-line arb-line" />
+              </svg>
+              <p class="chart-caption">
+                {{ panel.diagnostic.captions.arbRate ?? 'No arb data yet.' }}
+              </p>
+            </div>
+
+            <div class="mini-chart">
+              <div class="chart-label-with-legend">
+                <span class="chart-label">Assistant accuracy</span>
+                <span class="chart-legend" data-testid="assistant-legend">
+                  <span class="legend-item">
+                    <span class="legend-swatch fill-line"></span>fill
+                  </span>
+                  <span class="legend-item">
+                    <span class="legend-swatch mature-line"></span>mature
+                  </span>
+                </span>
+              </div>
+              @if (hasAssistantData(panel)) {
+                <svg
+                  [attr.viewBox]="'0 0 ' + chartWidth + ' ' + chartHeight"
+                  preserveAspectRatio="none"
+                  class="chart-svg"
+                >
+                  <path [attr.d]="assistantPath(panel, 'fillProbAcc')" class="chart-line fill-line" />
+                  <path [attr.d]="assistantPath(panel, 'matureProbAcc')" class="chart-line mature-line" />
+                </svg>
+              } @else {
+                <div class="chart-empty">No assistant data yet.</div>
+              }
+              <p class="chart-caption">
+                {{ panel.diagnostic.captions.assistantAccuracy ?? 'Assistants — fraction-correct on resolved labels. Higher is better.' }}
               </p>
             </div>
           </div>

@@ -8,7 +8,6 @@ import {
   OnInit,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { DecimalPipe } from '@angular/common';
 import { ApiService } from '../services/api.service';
 import {
   AgentDiagnostic,
@@ -19,7 +18,14 @@ import {
   summarisePopulation,
 } from './agent-diagnostic';
 
-type SeriesKey = 'reward' | 'arbRate' | 'policyLoss' | 'entropy';
+type SeriesKey =
+  | 'reward'
+  | 'arbRate'
+  | 'policyLoss'
+  | 'entropy'
+  | 'forceCloseRate'
+  | 'fillProbAcc'
+  | 'matureProbAcc';
 type VerdictFilter = 'all' | 'learning' | 'collapsed' | 'unstable' | 'stagnant' | 'warming_up';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -63,7 +69,7 @@ interface AgentPanel {
 @Component({
   selector: 'app-learning-curves',
   standalone: true,
-  imports: [FormsModule, DecimalPipe],
+  imports: [FormsModule],
   templateUrl: './learning-curves.html',
   styleUrl: './learning-curves.scss',
 })
@@ -300,10 +306,37 @@ export class LearningCurves implements OnInit, OnDestroy {
       let v: number | null | undefined = null;
       if (series === 'reward') v = ep.total_reward;
       else if (series === 'arbRate') {
+        // mature-prob-head (2026-04-26): denominator now includes
+        // closed + force-closed pairs. The pre-fix denominator
+        // ``c + n`` ignored ~75% of opens once force-close existed.
         const c = ep.arbs_completed ?? 0;
+        const cl = ep.arbs_closed ?? 0;
         const n = ep.arbs_naked ?? 0;
-        const t = c + n;
+        const f = ep.arbs_force_closed ?? 0;
+        const t = c + cl + n + f;
         v = t > 0 ? c / t : null;
+      }
+      else if (series === 'forceCloseRate') {
+        // mature-prob-head (2026-04-26) — fraction of opened pairs
+        // that the env force-closed at T−N. Headline selectivity
+        // number; lower is better.
+        const c = ep.arbs_completed ?? 0;
+        const cl = ep.arbs_closed ?? 0;
+        const n = ep.arbs_naked ?? 0;
+        const f = ep.arbs_force_closed ?? 0;
+        const t = c + cl + n + f;
+        v = t > 0 ? f / t : null;
+      }
+      else if (series === 'fillProbAcc') {
+        // Drop episodes where the head saw no resolved labels —
+        // the BCE / accuracy is a meaningless 0 in that case and
+        // would pull the line through false zeros.
+        if ((ep.fill_prob_n_resolved ?? 0) <= 0) return;
+        v = ep.fill_prob_accuracy ?? null;
+      }
+      else if (series === 'matureProbAcc') {
+        if ((ep.mature_prob_n_resolved ?? 0) <= 0) return;
+        v = ep.mature_prob_accuracy ?? null;
       }
       else if (series === 'policyLoss') {
         // Log scale for display — drop non-positive values.
@@ -314,6 +347,49 @@ export class LearningCurves implements OnInit, OnDestroy {
       pts.push({ index: i, value: v });
     });
     return pts;
+  }
+
+  /** mature-prob-head (2026-04-26) — y-axis bounds shared between
+   *  the fill-acc and mature-acc lines so both are projected onto
+   *  the same scale. Without this, the two lines render against
+   *  independent bounds and the visual comparison ("is mature
+   *  outperforming fill?") becomes meaningless.
+   *
+   *  Returns null when neither series has data — caller renders an
+   *  empty chart placeholder. */
+  assistantSharedBounds(panel: AgentPanel):
+    { minX: number; maxX: number; minY: number; maxY: number } | null {
+    const fill = this.seriesPoints(panel, 'fillProbAcc');
+    const mat = this.seriesPoints(panel, 'matureProbAcc');
+    const merged = [...fill, ...mat];
+    if (merged.length < 2) return null;
+    return this.bounds(merged);
+  }
+
+  /** Build an SVG path for one assistant line (fill or mature)
+   *  projected onto shared bounds. Returns empty string when the
+   *  series has fewer than 2 points OR the shared bounds are null
+   *  (no data overall). */
+  assistantPath(panel: AgentPanel, which: 'fillProbAcc' | 'matureProbAcc'): string {
+    const bounds = this.assistantSharedBounds(panel);
+    if (!bounds) return '';
+    const pts = this.seriesPoints(panel, which);
+    if (pts.length < 2) return '';
+    const { minX, maxX, minY, maxY } = bounds;
+    return pts
+      .map((p, i) => {
+        const x = this.project(p.index, minX, maxX, CHART_WIDTH);
+        const y = CHART_HEIGHT - this.project(p.value, minY, maxY, CHART_HEIGHT);
+        return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`;
+      })
+      .join(' ');
+  }
+
+  /** Whether the assistant chart has enough data to render at all
+   *  (either series has ≥2 points). The template uses this to gate
+   *  on "Waiting for data…" placeholder vs SVG. */
+  hasAssistantData(panel: AgentPanel): boolean {
+    return this.assistantSharedBounds(panel) !== null;
   }
 
   private bounds(pts: Array<{ index: number; value: number }>) {

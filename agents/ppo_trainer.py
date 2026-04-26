@@ -124,44 +124,31 @@ def _format_scalping_summary(ep) -> str:
     """Per-episode pair breakdown — multi-line suffix to the Episode
     header. Empty when there is no scalping activity.
 
-    Format (three indented rows appended to the episode summary):
+    Format (two indented rows appended to the episode summary):
 
     ::
 
-        Episode N/T [date] reward=… pnl=… bets=… loss=…
-          arbs detected=D opened=O: matured=M closed=C naked=N force=F
-          £: matured=+X closed=±Y (Cp profit / Cl loss) naked=±Z force=-W
+        Episode N/T [date]
+          ...
+          arbs: detected=D  opened=O  matured=M  closed=C  naked=N  force=F (P%)
+          £:    matured=+X  closed=±Y  naked=±Z
 
     TERMINOLOGY — ``matured`` and ``closed`` are DISTINCT categories:
 
     - **matured** (``arbs_completed``) — agent opened a pair and BOTH
       legs filled *naturally* (the passive lay got matched by the
-      market, no intervention). Always locked profit by construction
-      because opening gates on spread × commission feasibility. These
-      produce the ``Arb matured: Back @ X / Lay @ Y … → locked £+Z``
-      activity-log lines.
+      market, no intervention). Always locked profit by construction.
     - **closed** (``arbs_closed``) — agent voluntarily fired the
-      ``close_signal`` action and the env crossed the spread to flat
-      the position. P&L depends on where the market was when the
-      agent chose to close; can be positive or negative.
-    - **naked** (``arbs_naked``) — only one leg of the pair filled;
-      the agent carried directional risk into settlement.
+      ``close_signal`` action; can be positive or negative P&L.
+    - **naked** (``arbs_naked``) — only one leg of the pair filled.
     - **force** (``arbs_force_closed``) — env-initiated T−N flat;
-      distinct from agent-chosen closes (excluded from close-signal
-      shaped bonus per plans/arb-signal-cleanup/hard_constraints §7).
+      reported alongside the others as a percentage of opens.
 
-    Cash columns — matches the opened-pair categories left to right:
-
-    - ``matured=+X`` — ``ep.locked_pnl``; natural matures only.
-    - ``closed=±Y`` — ``ep.scalping_closed_pnl``; SETTLED cash on the
-      covered portion of close_signal events. On full-match closes
-      this equals the sum of per-event ``realised_pnl`` (the LOCK
-      FLOOR); on partial fills the uncovered directional residual
-      lands in ``naked`` instead. The ``(Cp profit / Cl loss)`` split
-      reports how many of the closes locked a positive / negative
-      floor (threshold |p|<0.005 treated as profit).
-    - ``naked=±Z`` — ``ep.naked_pnl``; includes partial-fill residual.
-    - ``force=-W`` — ``ep.scalping_force_closed_pnl``.
+    The 2026-04-26 redesign dropped the per-close profit/loss split
+    (``Cp profit / Cl loss``) and the ``force=£X`` cash item per the
+    operator's feedback that those two were not load-bearing. The
+    force-close PERCENTAGE replaces the cash detail — it's the headline
+    selectivity number (the lower it is, the more selective the agent).
     """
     if not (
         ep.arbs_completed
@@ -171,52 +158,80 @@ def _format_scalping_summary(ep) -> str:
     ):
         return ""
 
-    # Walk close_events to get the profit/loss SPLIT of agent-chosen
-    # closes. The ``closed=`` cash total uses the settled-cash
-    # aggregate ``ep.scalping_closed_pnl`` (which handles partial
-    # fills via covered_frac); this split is purely for operator
-    # colour — "did the agent close at the right moment?".
-    #
-    # ``realised_pnl`` on the event is the LOCK FLOOR — ``min(win_eff,
-    # lose_eff)`` with covered_frac effective stakes. Threshold
-    # |pnl| < 0.005 treated as profit (rounds zero-noise closes into
-    # the good column instead of manufacturing a flat third category).
-    close_lock_profit = close_lock_loss = 0
-    for ev in ep.close_events:
-        if ev.get("force_close"):
-            continue
-        pnl = ev.get("realised_pnl", 0.0)
-        if pnl < -0.005:
-            close_lock_loss += 1
-        else:
-            close_lock_profit += 1
-
     opened = (
         ep.arbs_completed + ep.arbs_closed
         + ep.arbs_naked + ep.arbs_force_closed
     )
 
-    counts = (
-        f"matured={ep.arbs_completed}"
-        f" closed={ep.arbs_closed}"
-        f" naked={ep.arbs_naked}"
+    fc_pct = (
+        100.0 * ep.arbs_force_closed / opened if opened > 0 else 0.0
     )
-    if ep.arbs_force_closed > 0:
-        counts += f" force={ep.arbs_force_closed}"
+
+    counts = (
+        f"detected={ep.arbs_detected}"
+        f"  opened={opened}"
+        f"  matured={ep.arbs_completed}"
+        f"  closed={ep.arbs_closed}"
+        f"  naked={ep.arbs_naked}"
+        f"  force={ep.arbs_force_closed} ({fc_pct:.1f}%)"
+    )
 
     cash = (
         f"matured=£{ep.locked_pnl:+.2f}"
-        f" closed=£{ep.scalping_closed_pnl:+.2f}"
-        f" ({close_lock_profit} profit / {close_lock_loss} loss)"
-        f" naked=£{ep.naked_pnl:+.2f}"
+        f"  closed=£{ep.scalping_closed_pnl:+.2f}"
+        f"  naked=£{ep.naked_pnl:+.2f}"
     )
-    if ep.arbs_force_closed > 0 or ep.scalping_force_closed_pnl != 0.0:
-        cash += f" force=£{ep.scalping_force_closed_pnl:+.2f}"
 
     return (
-        f"\n  arbs detected={ep.arbs_detected} opened={opened}: {counts}"
-        f"\n  £: {cash}"
+        f"\n  arbs: {counts}"
+        f"\n  £:    {cash}"
     )
+
+
+def _format_assistant_summary(loss_info: dict) -> str:
+    """Per-episode aux-head ("assistant") diagnostics line.
+
+    Reports two heads side by side — fill-prob and mature-prob.
+    Each shows confidence (decisiveness, 0-100%) and accuracy
+    (fraction-correct on resolved labels, 0-100%) plus the raw
+    BCE for monitoring. Skips entirely when no resolved labels
+    were seen this update (e.g. directional rollouts) — the
+    BCE-driven ``n_resolved=0`` branch.
+
+    The user-friendly read:
+    - ``conf=`` (confidence) climbs from 0 % (head outputs ≈0.5
+      everywhere) toward 100 % as the head learns to commit.
+    - ``acc=`` (accuracy / "correctness") climbs from ~50 %
+      (chance) toward 100 % as the head's predictions match
+      ground truth.
+    - ``BCE=`` is the raw cross-entropy: ~0.693 = uninformed,
+      → 0 = perfect. Useful for log-scale monitoring.
+    """
+    fp_n = int(loss_info.get("fill_prob_n_resolved", 0))
+    mp_n = int(loss_info.get("mature_prob_n_resolved", 0))
+    if fp_n == 0 and mp_n == 0:
+        return ""
+
+    lines: list[str] = []
+    if fp_n > 0:
+        lines.append(
+            f"  fill assist:   "
+            f"conf={loss_info['fill_prob_confidence'] * 100:5.1f}%"
+            f"  acc={loss_info['fill_prob_accuracy'] * 100:5.1f}%"
+            f"  BCE={loss_info['fill_prob_loss']:.3f}"
+            f"  (n={fp_n})"
+        )
+    if mp_n > 0:
+        lines.append(
+            f"  mature assist: "
+            f"conf={loss_info['mature_prob_confidence'] * 100:5.1f}%"
+            f"  acc={loss_info['mature_prob_accuracy'] * 100:5.1f}%"
+            f"  BCE={loss_info['mature_prob_loss']:.3f}"
+            f"  (n={mp_n})"
+        )
+    if not lines:
+        return ""
+    return "\n" + "\n".join(lines)
 
 
 def _compute_arb_rate(arbs_completed: int, arbs_naked: int) -> float:
@@ -275,6 +290,57 @@ def _compute_fill_prob_bce(
     )
     mask_f = mask.to(preds.dtype)
     return (per_elem_bce * mask_f).sum() / mask_f.sum()
+
+
+def _compute_aux_head_stats(
+    preds: torch.Tensor, labels: torch.Tensor,
+) -> tuple[float, float, int]:
+    """Diagnostics for an aux BCE head — confidence and accuracy.
+
+    Returns a 3-tuple ``(confidence, accuracy, n_resolved)`` of
+    Python floats / int (no autograd tape).
+
+    - **confidence** — mean of ``2 * |p - 0.5|`` across resolved
+      samples. Reads as "how decisive is the head?":
+      * 0.0 = head outputs ≈0.5 on every sample (uninformed prior).
+      * 1.0 = head outputs ≈0 or ≈1 on every sample (totally
+        committed). Untrained heads sit near 0; trained heads
+        climb as discrimination sharpens.
+    - **accuracy** — fraction of resolved samples where
+      ``(p >= 0.5) == (label == 1.0)``. Reads as "how often is
+      the head right?":
+      * 0.5 = chance.
+      * 1.0 = perfect.
+    - **n_resolved** — count of non-NaN labels (sample size for
+      the means above). When 0, both means are 0.0 and the
+      formatter must skip the diagnostic.
+
+    Independent of the BCE return path so the surrogate-loss
+    gradient is unaffected by these diagnostics. Computed under
+    ``no_grad`` and detached to a scalar before returning.
+    """
+    with torch.no_grad():
+        mask = ~torch.isnan(labels)
+        n = int(mask.sum().item())
+        if n == 0:
+            return (0.0, 0.0, 0)
+        mask_f = mask.to(preds.dtype)
+        # Confidence: mean |p - 0.5| × 2 across resolved samples.
+        conf = (
+            ((preds - 0.5).abs() * 2.0 * mask_f).sum() / mask_f.sum()
+        )
+        # Accuracy: ((p >= 0.5) == (label == 1.0)) on resolved samples.
+        pred_class = (preds >= 0.5).to(preds.dtype)
+        label_class = (labels >= 0.5).to(preds.dtype)
+        # Replace NaN labels with the same class as the prediction so
+        # the equality test never reports a spurious match — the mask
+        # discards them anyway, but this keeps the arithmetic clean.
+        label_class = torch.where(
+            mask, label_class, pred_class,
+        )
+        correct = (pred_class == label_class).to(preds.dtype) * mask_f
+        acc = correct.sum() / mask_f.sum()
+        return (float(conf.item()), float(acc.item()), n)
 
 
 def _compute_risk_nll(
@@ -384,6 +450,12 @@ _REWARD_GENE_MAP: dict[str, tuple[str, ...]] = {
     # aux loss is plumbed-off and reward scale is unchanged from
     # session 01.
     "fill_prob_loss_weight": ("fill_prob_loss_weight",),
+    # mature-prob-head (2026-04-26): trainer-side BCE weight on the
+    # strict mature-prob head. Same plumbing-off-by-default contract
+    # as ``fill_prob_loss_weight`` — env doesn't read it; whitelisted
+    # in BetfairEnv._REWARD_OVERRIDE_KEYS so the unknown-key debug log
+    # stays quiet, picked up by PPOTrainer at construction.
+    "mature_prob_loss_weight": ("mature_prob_loss_weight",),
     # Scalping-active-management session 03: weight on the Gaussian NLL
     # risk aux loss. Same plumbing-off-by-default contract as
     # ``fill_prob_loss_weight`` — the env doesn't read it, but the
@@ -471,6 +543,19 @@ class Transition:
     done: bool
     training_reward: float = 0.0
     fill_prob_labels: np.ndarray = field(
+        default_factory=lambda: np.array([np.nan], dtype=np.float32)
+    )
+    # mature-prob-head (2026-04-26) — per-slot binary outcome of each
+    # paired aggressive WITH FORCE-CLOSE EXCLUDED. ``1.0`` = matured
+    # naturally OR closed by agent ``close_signal``; ``0.0`` = naked
+    # OR force-closed by env at T-N. Same NaN-mask convention as
+    # ``fill_prob_labels`` — unresolved slots stay NaN and the masked
+    # BCE rejects them. The episode-end backfill walks the same
+    # ``pair_to_transition`` mapping as fill-prob; classification is
+    # via ``Bet.force_close`` (any leg) so the trainer never has to
+    # touch env internals beyond the bet objects already exposed.
+    # See plans/per-runner-credit/findings.md for the rationale.
+    mature_prob_labels: np.ndarray = field(
         default_factory=lambda: np.array([np.nan], dtype=np.float32)
     )
     # Scalping-active-management §03 — per-slot realised ``locked_pnl``
@@ -968,6 +1053,25 @@ class PPOTrainer:
             or 0.0
         )
 
+        # mature-prob-head (2026-04-26): aux-head BCE weight for the
+        # strict "naturally-matured-or-agent-closed" label. Default
+        # 0.0 → BCE term contributes nothing and the mature-prob head
+        # initialises near sigmoid(≈0) ≈ 0.5 so the actor's mature_prob
+        # input column is a near-constant — benign at default. Same
+        # precedence as ``fill_prob_loss_weight``: hp first (per-agent
+        # gene), then ``config["reward"]["mature_prob_loss_weight"]``,
+        # then 0.0. See plans/per-runner-credit/findings.md for why
+        # this head exists.
+        self.mature_prob_loss_weight = float(
+            hp.get(
+                "mature_prob_loss_weight",
+                config.get("reward", {}).get(
+                    "mature_prob_loss_weight", 0.0,
+                ),
+            )
+            or 0.0
+        )
+
         # Scalping-active-management session 03: Gaussian-NLL weight on
         # the risk head. Default 0.0 → aux term contributes nothing and
         # this session's total loss is byte-identical to session 02
@@ -1379,11 +1483,15 @@ class PPOTrainer:
                     labels_arr = np.full(
                         max_runners, np.nan, dtype=np.float32,
                     )
+                    mature_labels_arr = np.full(
+                        max_runners, np.nan, dtype=np.float32,
+                    )
                     risk_labels_arr = np.full(
                         max_runners, np.nan, dtype=np.float32,
                     )
                 else:
                     labels_arr = np.array([np.nan], dtype=np.float32)
+                    mature_labels_arr = np.array([np.nan], dtype=np.float32)
                     risk_labels_arr = np.array([np.nan], dtype=np.float32)
 
                 rollout.append(Transition(
@@ -1395,6 +1503,7 @@ class PPOTrainer:
                     done=done,
                     training_reward=training_reward,
                     fill_prob_labels=labels_arr,
+                    mature_prob_labels=mature_labels_arr,
                     risk_labels=risk_labels_arr,
                     hidden_state_in=hidden_state_in_np,
                 ))
@@ -1504,6 +1613,37 @@ class PPOTrainer:
                 tr = rollout.transitions[tr_idx]
                 if slot_idx < tr.fill_prob_labels.shape[0]:
                     tr.fill_prob_labels[slot_idx] = 1.0 if count >= 2 else 0.0
+                # mature-prob-head (2026-04-26): strict label that
+                # EXCLUDES force-closes from the positive class. The
+                # diagnostic in plans/per-runner-credit/findings.md
+                # showed cohort-F's ``ρ(fill_prob_loss_weight, fc_rate)
+                # = +0.469`` came from ``fill_prob_labels`` lumping
+                # force-closed pairs in with naturally-matured pairs;
+                # this label fixes that.
+                #
+                # Classification:
+                #   * count < 2 (only aggressive)        → 0.0  (naked)
+                #   * count >= 2, ANY leg force_close=True → 0.0
+                #     (env-initiated bail-out, NOT a "good open")
+                #   * count >= 2, no force_close legs   → 1.0
+                #     (matured naturally OR closed by agent signal)
+                #
+                # ``Bet.force_close`` is set by ``_attempt_close`` at
+                # placement time (env/betfair_env.py:2570). Naturally-
+                # matured passives never carry the flag. Agent-closes
+                # via ``close_signal`` carry ``close_leg=True`` but
+                # ``force_close=False`` — both sit in the positive
+                # class.
+                if slot_idx < tr.mature_prob_labels.shape[0]:
+                    if count < 2:
+                        tr.mature_prob_labels[slot_idx] = 0.0
+                    else:
+                        any_force = any(
+                            getattr(b, "force_close", False) for b in legs
+                        )
+                        tr.mature_prob_labels[slot_idx] = (
+                            0.0 if any_force else 1.0
+                        )
                 # Risk label: realised ``locked_pnl`` of the completed
                 # pair. Inline the same math
                 # ``BetManager.get_paired_positions`` uses so we don't
@@ -1790,6 +1930,10 @@ class PPOTrainer:
             fp_labels_np = np.stack(
                 [t.fill_prob_labels[:1] for t in transitions], axis=0,
             ).astype(np.float32)
+            # mature-prob-head (2026-04-26) — same width-1 fallback.
+            mature_labels_np = np.stack(
+                [t.mature_prob_labels[:1] for t in transitions], axis=0,
+            ).astype(np.float32)
             # Scalping-active-management §03 — same width-1 fallback for
             # the realised-locked-pnl labels that feed the risk NLL.
             risk_labels_np = np.stack(
@@ -1799,6 +1943,9 @@ class PPOTrainer:
             fp_labels_np = np.full(
                 (n, fp_max_runners), np.nan, dtype=np.float32,
             )
+            mature_labels_np = np.full(
+                (n, fp_max_runners), np.nan, dtype=np.float32,
+            )
             risk_labels_np = np.full(
                 (n, fp_max_runners), np.nan, dtype=np.float32,
             )
@@ -1806,6 +1953,9 @@ class PPOTrainer:
                 src = t.fill_prob_labels
                 w = min(src.shape[0], fp_max_runners)
                 fp_labels_np[i, :w] = src[:w]
+                m_src = t.mature_prob_labels
+                m_w = min(m_src.shape[0], fp_max_runners)
+                mature_labels_np[i, :m_w] = m_src[:m_w]
                 r_src = t.risk_labels
                 r_w = min(r_src.shape[0], fp_max_runners)
                 risk_labels_np[i, :r_w] = r_src[:r_w]
@@ -1815,17 +1965,20 @@ class PPOTrainer:
             action_pin = torch.from_numpy(action_np).pin_memory()
             lp_pin = torch.from_numpy(lp_np).pin_memory()
             fp_pin = torch.from_numpy(fp_labels_np).pin_memory()
+            mature_pin = torch.from_numpy(mature_labels_np).pin_memory()
             risk_pin = torch.from_numpy(risk_labels_np).pin_memory()
             obs_batch = obs_pin.to(self.device, non_blocking=True)
             action_batch = action_pin.to(self.device, non_blocking=True)
             old_log_probs = lp_pin.to(self.device, non_blocking=True)
             fp_labels_batch = fp_pin.to(self.device, non_blocking=True)
+            mature_labels_batch = mature_pin.to(self.device, non_blocking=True)
             risk_labels_batch = risk_pin.to(self.device, non_blocking=True)
         else:
             obs_batch = torch.from_numpy(obs_np)
             action_batch = torch.from_numpy(action_np)
             old_log_probs = torch.from_numpy(lp_np)
             fp_labels_batch = torch.from_numpy(fp_labels_np)
+            mature_labels_batch = torch.from_numpy(mature_labels_np)
             risk_labels_batch = torch.from_numpy(risk_labels_np)
 
         # ppo-kl-fix (2026-04-24): pack the per-transition hidden
@@ -1891,6 +2044,20 @@ class PPOTrainer:
         value_losses = []
         entropies = []
         fill_prob_losses: list[float] = []
+        mature_prob_losses: list[float] = []
+        # mature-prob-head (2026-04-26): "assistant" diagnostics —
+        # mean confidence (decisiveness) + accuracy (correctness)
+        # across resolved samples. Operator-facing metrics so we can
+        # see the heads getting smarter over time. Computed alongside
+        # the BCE losses inside the mini-batch loop and accumulated
+        # weighted by ``n_resolved`` so the per-update mean matches
+        # the BCE's pooled-mean semantics.
+        fp_conf_w_sum = 0.0
+        fp_acc_w_sum = 0.0
+        fp_n_total = 0
+        mp_conf_w_sum = 0.0
+        mp_acc_w_sum = 0.0
+        mp_n_total = 0
         risk_losses: list[float] = []
         # Session 2: accumulate per-head entropy contributions across the
         # mini-batch loop so we can push a single average-per-head sample
@@ -2044,10 +2211,36 @@ class PPOTrainer:
                     fill_prob_loss = _compute_fill_prob_bce(
                         fp_preds, mb_fp_labels,
                     )
+                    fp_conf_mb, fp_acc_mb, fp_n_mb = _compute_aux_head_stats(
+                        fp_preds, mb_fp_labels,
+                    )
                 else:
                     # Shape mismatch (e.g. stub policy with a 1-element
                     # default fill_prob_per_runner) — no aux loss.
                     fill_prob_loss = torch.zeros((), device=mb_obs.device)
+                    fp_conf_mb, fp_acc_mb, fp_n_mb = (0.0, 0.0, 0)
+
+                # mature-prob-head (2026-04-26): auxiliary BCE on the
+                # strict "naturally-matured-or-agent-closed" head.
+                # Same masked-BCE helper as fill-prob — only the LABEL
+                # differs. Stub policies with a 1-element default
+                # ``mature_prob_per_runner`` see the same zero-loss
+                # fallback as fill_prob.
+                mp_preds = getattr(out, "mature_prob_per_runner", None)
+                mb_mp_labels = mature_labels_batch[mb_idx]
+                if (
+                    mp_preds is not None
+                    and mp_preds.shape == mb_mp_labels.shape
+                ):
+                    mature_prob_loss = _compute_fill_prob_bce(
+                        mp_preds, mb_mp_labels,
+                    )
+                    mp_conf_mb, mp_acc_mb, mp_n_mb = _compute_aux_head_stats(
+                        mp_preds, mb_mp_labels,
+                    )
+                else:
+                    mature_prob_loss = torch.zeros((), device=mb_obs.device)
+                    mp_conf_mb, mp_acc_mb, mp_n_mb = (0.0, 0.0, 0)
 
                 # Scalping-active-management §03: auxiliary Gaussian NLL
                 # loss on the risk head. Same shape contract as the
@@ -2084,6 +2277,7 @@ class PPOTrainer:
                     + self.value_loss_coeff * value_loss
                     - self.entropy_coeff * entropy
                     + self.fill_prob_loss_weight * fill_prob_loss
+                    + self.mature_prob_loss_weight * mature_prob_loss
                     + self.risk_loss_weight * risk_loss
                 )
 
@@ -2098,6 +2292,18 @@ class PPOTrainer:
                 value_losses.append(float(value_loss.item()))
                 entropies.append(float(entropy.item()))
                 fill_prob_losses.append(float(fill_prob_loss.item()))
+                mature_prob_losses.append(float(mature_prob_loss.item()))
+                # Sample-weighted accumulation so the per-update mean
+                # reported below matches the BCE's pooled-mean (i.e.
+                # mini-batches with more resolved labels weigh more).
+                if fp_n_mb > 0:
+                    fp_conf_w_sum += fp_conf_mb * fp_n_mb
+                    fp_acc_w_sum += fp_acc_mb * fp_n_mb
+                    fp_n_total += fp_n_mb
+                if mp_n_mb > 0:
+                    mp_conf_w_sum += mp_conf_mb * mp_n_mb
+                    mp_acc_w_sum += mp_acc_mb * mp_n_mb
+                    mp_n_total += mp_n_mb
                 risk_losses.append(float(risk_loss.item()))
 
                 # ppo-kl-fix Session 02 (2026-04-24): per-mini-batch
@@ -2212,6 +2418,33 @@ class PPOTrainer:
                 float(np.mean(fill_prob_losses))
                 if fill_prob_losses else 0.0
             ),
+            # mature-prob-head (2026-04-26) diagnostic: pre-weight BCE
+            # on the strict mature-prob head. Always emitted so
+            # operators can see the head's behaviour even when
+            # ``mature_prob_loss_weight`` is 0 (plumbing-off mode).
+            "mature_prob_loss": (
+                float(np.mean(mature_prob_losses))
+                if mature_prob_losses else 0.0
+            ),
+            # mature-prob-head (2026-04-26) "assistant" diagnostics.
+            # All zero when no resolved labels were seen this update
+            # (either the policy is stub, or the rollout was directional
+            # / had no paired aggressives). Operator-facing — surfaces
+            # in the per-episode log + episodes.jsonl.
+            "fill_prob_confidence": (
+                fp_conf_w_sum / fp_n_total if fp_n_total > 0 else 0.0
+            ),
+            "fill_prob_accuracy": (
+                fp_acc_w_sum / fp_n_total if fp_n_total > 0 else 0.0
+            ),
+            "fill_prob_n_resolved": fp_n_total,
+            "mature_prob_confidence": (
+                mp_conf_w_sum / mp_n_total if mp_n_total > 0 else 0.0
+            ),
+            "mature_prob_accuracy": (
+                mp_acc_w_sum / mp_n_total if mp_n_total > 0 else 0.0
+            ),
+            "mature_prob_n_resolved": mp_n_total,
             # Scalping-active-management §03 diagnostic: same pattern —
             # pre-weight Gaussian NLL on the risk head, always emitted.
             "risk_loss": (
@@ -2532,6 +2765,35 @@ class PPOTrainer:
             "policy_loss": round(loss_info["policy_loss"], 6),
             "value_loss": round(loss_info["value_loss"], 6),
             "entropy": round(loss_info["entropy"], 6),
+            # Auxiliary "assistant" head diagnostics. All four are
+            # always emitted (zero when there were no resolved labels
+            # this update — same convention as the other diagnostics
+            # above). Pre-plan rows lack them; downstream readers
+            # must tolerate absence.
+            "fill_prob_loss": round(
+                float(loss_info.get("fill_prob_loss", 0.0)), 6,
+            ),
+            "fill_prob_confidence": round(
+                float(loss_info.get("fill_prob_confidence", 0.0)), 6,
+            ),
+            "fill_prob_accuracy": round(
+                float(loss_info.get("fill_prob_accuracy", 0.0)), 6,
+            ),
+            "fill_prob_n_resolved": int(
+                loss_info.get("fill_prob_n_resolved", 0),
+            ),
+            "mature_prob_loss": round(
+                float(loss_info.get("mature_prob_loss", 0.0)), 6,
+            ),
+            "mature_prob_confidence": round(
+                float(loss_info.get("mature_prob_confidence", 0.0)), 6,
+            ),
+            "mature_prob_accuracy": round(
+                float(loss_info.get("mature_prob_accuracy", 0.0)), 6,
+            ),
+            "mature_prob_n_resolved": int(
+                loss_info.get("mature_prob_n_resolved", 0),
+            ),
             # Target-entropy controller trajectory (entropy-control-v2).
             # Lets the learning-curves panel plot controller alpha
             # alongside entropy. Optional keys — pre-controller rows
@@ -2645,9 +2907,17 @@ class PPOTrainer:
             f.write(json.dumps(record) + "\n")
 
         scalping_suffix = _format_scalping_summary(ep)
+        assistant_suffix = _format_assistant_summary(loss_info)
+        # Multi-line operator log (2026-04-26) — was a single ~200-char
+        # line; broken into header + indented rows so the eye can
+        # parse it. ``%s`` suffixes are pre-rendered with leading
+        # newlines so empty-suffix runs (directional / no-arb) still
+        # produce a clean single-line summary.
         logger.info(
-            "Episode %d/%d [%s] reward=%.3f (raw=%.3f shaped=%+.3f) "
-            "pnl=%.2f bets=%d loss=%.4f%s",
+            "Episode %d/%d [%s]"
+            "\n  reward=%+.3f  (raw=%+.3f  shaped=%+.3f)"
+            "\n  pnl=£%+.2f  bets=%d  loss=%.4f"
+            "%s%s",
             tracker.completed,
             tracker.total,
             ep.day_date,
@@ -2658,6 +2928,7 @@ class PPOTrainer:
             ep.bet_count,
             loss_info["policy_loss"],
             scalping_suffix,
+            assistant_suffix,
         )
 
     def _publish_progress(

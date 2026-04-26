@@ -755,66 +755,12 @@
     </div>
   }
 
-  <!-- ── Charts ───────────────────────────────────────────── -->
-  <!--
-    These two top-level charts are a sliding feed of "whatever agent
-    last reported", not a per-agent line. Each point is the reward /
-    policy-loss scalar parsed out of the most recent progress event's
-    detail string (any agent, current run only — the buffer resets on
-    a new run via clearHistory()). For per-agent charts use the
-    Learning diagnostics panel below.
-  -->
-  <div class="charts">
-    <div class="chart-card">
-      <div class="chart-header">
-        <h3 class="chart-title">
-          Reward
-          <span class="chart-scope" title="Each point is the most-recent agent's episode reward. Not a per-agent line — open Learning diagnostics below for per-agent charts.">
-            latest episode · any agent · this run
-          </span>
-        </h3>
-        <span class="verdict-badge" [class]="rewardVerdict().cls">{{ rewardVerdict().label }}</span>
-      </div>
-      @if (rewardHistory().length >= 2) {
-        <svg viewBox="0 0 600 150" class="chart-svg" preserveAspectRatio="none">
-          <line x1="0" y1="75" x2="600" y2="75" class="zero-line" />
-          <path [attr.d]="rewardPath()" class="chart-line reward-line" />
-        </svg>
-      } @else {
-        <div class="chart-empty">Waiting for data…</div>
-      }
-      <p class="chart-explain">
-        Total reward per episode (P&amp;L + bonuses - penalties). Above the dashed zero line = the agent made money that day.
-        <strong>Good:</strong> trending upward over episodes, settling above zero.
-        <strong>Bad:</strong> flat at the bottom or wildly oscillating.
-      </p>
-    </div>
-    <div class="chart-card">
-      <div class="chart-header">
-        <h3 class="chart-title">
-          Loss
-          <span class="chart-scope" title="Each point is the most-recent agent's PPO policy loss. Not a per-agent line — open Learning diagnostics below for per-agent charts.">
-            latest episode · any agent · this run
-          </span>
-        </h3>
-        <span class="verdict-badge" [class]="lossVerdict().cls">{{ lossVerdict().label }}</span>
-      </div>
-      @if (lossHistory().length >= 2) {
-        <svg viewBox="0 0 600 150" class="chart-svg" preserveAspectRatio="none">
-          <path [attr.d]="lossPath()" class="chart-line loss-line" />
-        </svg>
-      } @else {
-        <div class="chart-empty">Waiting for data…</div>
-      }
-      <p class="chart-explain">
-        PPO policy loss — how much the agent's strategy changed this update.
-        <strong>Good:</strong> decreasing then stabilising near zero (agent has converged on a strategy).
-        <strong>Bad:</strong> spiking upward (unstable learning) or stuck high (not learning).
-      </p>
-    </div>
-  </div>
-
   <!-- ── Learning diagnostics ───────────────────────────── -->
+  <!--
+    Per-agent panel. Replaces the previous "two global charts at the
+    top" (dropped 2026-04-26 — they were a sliding feed of "whichever
+    agent reported last", duplicated by the per-agent panel below).
+  -->
   <app-learning-curves />
 
   <!-- ── Population Grid ──────────────────────────────────── -->

@@ -103,8 +103,73 @@ describe('diagnoseAgent', () => {
     }
     const d = diagnoseAgent(episodes);
     expect(d.verdict).toBe('learning');
-    expect(d.headline).toMatch(/rising/i);
+    // mature-prob-head (2026-04-26): new headline format cites
+    // moving signals + their percentage values rather than the
+    // word "rising". The arb-completion fragment is the one that
+    // triggers here.
+    expect(d.headline).toMatch(/arb-completion .*→.*%/);
     expect(d.captions.arbRate).toMatch(/%/);
+  });
+
+  it('flags LEARNING when force-close % is dropping (mature-prob-head 2026-04-26)', () => {
+    // 12 episodes, force-close % dropping from 60% to 30%.
+    // Need ≥4 forceCloseRate values for the trend to compute.
+    const episodes: EpisodeRecord[] = [];
+    for (let i = 1; i <= 12; i++) {
+      const frac = i / 12;
+      // Linear drop 60% → 30%.
+      const fcPct = 0.6 - frac * 0.3;
+      const total = 100;
+      const force = Math.round(fcPct * total);
+      episodes.push(ep(i, `2026-04-0${((i - 1) % 5) + 1}`, {
+        arbs_completed: 30,
+        arbs_naked: 10,
+        arbs_closed: 5,
+        arbs_force_closed: force,
+        policy_loss: 0.18,
+        total_reward: -100,
+      }));
+    }
+    const d = diagnoseAgent(episodes);
+    expect(d.verdict).toBe('learning');
+    expect(d.headline).toMatch(/force-close/);
+    expect(d.captions.forceCloseRate).toMatch(/falling/);
+  });
+
+  it('flags LEARNING when mature-prob accuracy is climbing', () => {
+    // 12 episodes, mature accuracy climbing 50% → 80%.
+    const episodes: EpisodeRecord[] = [];
+    for (let i = 1; i <= 12; i++) {
+      const frac = i / 12;
+      const acc = 0.5 + frac * 0.3;
+      episodes.push(ep(i, `2026-04-0${((i - 1) % 5) + 1}`, {
+        arbs_completed: 3,
+        arbs_naked: 7,
+        policy_loss: 0.18,
+        mature_prob_accuracy: acc,
+        mature_prob_n_resolved: 50,
+      }));
+    }
+    const d = diagnoseAgent(episodes);
+    expect(d.verdict).toBe('learning');
+    expect(d.headline).toMatch(/mature-acc/);
+  });
+
+  it('flags LEARNING when reward is rising', () => {
+    // 12 episodes, reward rising linearly. arbs and policy_loss
+    // held flat so no other channel triggers.
+    const episodes: EpisodeRecord[] = [];
+    for (let i = 1; i <= 12; i++) {
+      episodes.push(ep(i, `2026-04-0${((i - 1) % 5) + 1}`, {
+        arbs_completed: 3,
+        arbs_naked: 7,
+        policy_loss: 0.18,
+        total_reward: -200 + i * 20,
+      }));
+    }
+    const d = diagnoseAgent(episodes);
+    expect(d.verdict).toBe('learning');
+    expect(d.headline).toMatch(/reward/);
   });
 
   it('flags STAGNANT when stable but not improving', () => {
@@ -121,6 +186,99 @@ describe('diagnoseAgent', () => {
     const d = diagnoseAgent(episodes);
     expect(d.verdict).toBe('stagnant');
     expect(d.headline).toMatch(/not visibly improving/i);
+  });
+
+  it('STAGNANT headline flags selectivity_stuck when force-close stays high and flat', () => {
+    // 12 episodes, force-close ~76% throughout (stuck high), no
+    // assistant data, reward flat. Cohort-O / cohort-O2 shape.
+    // Episodes are spread across many dates so the locked-in-date
+    // rule doesn't trigger COLLAPSED. Reward must vary slightly so
+    // the saturation-collapse rule doesn't trigger COLLAPSED either
+    // (variance < SATURATED_COLLAPSE_REWARD_FLAT = 5).
+    const episodes: EpisodeRecord[] = [];
+    for (let i = 1; i <= 12; i++) {
+      // Force-close fraction: ~76% with ±0.5pp jitter so the trend
+      // is flat (deltaPP within ±2pp).
+      const force = 76 + ((i % 2) === 0 ? 0 : 1);
+      const completed = 12;
+      const naked = 8;
+      const closed = 4;
+      // total = c + cl + n + f = 12 + 4 + 8 + (76 or 77) = 100 or 101
+      // fc_rate ≈ 76/100 to 77/101 ≈ 0.760 to 0.762 — flat.
+      episodes.push(ep(i, `2026-04-${String(((i - 1) % 18) + 1).padStart(2, '0')}`, {
+        arbs_completed: completed,
+        arbs_naked: naked,
+        arbs_closed: closed,
+        arbs_force_closed: force,
+        policy_loss: 0.18,
+        // Vary reward slightly (variance > 5 so saturation-collapse
+        // skips this case but trend is still flat at the LEARNING
+        // threshold of ±5%).
+        total_reward: -100 + ((i % 3) - 1) * 6,
+      }));
+    }
+    const d = diagnoseAgent(episodes);
+    expect(d.verdict).toBe('stagnant');
+    expect(d.flags).toContain('selectivity_stuck');
+    expect(d.headline).toMatch(/force-close stuck/i);
+  });
+
+  it('flags actor_ignoring_assistant when mature-acc climbs but force-close stays stuck (cohort-F shape)', () => {
+    // 12 episodes: mature accuracy 50% → 75% (assistant learning),
+    // but force-close stays at ~76% (actor not using it). The
+    // cohort-F failure shape.
+    //
+    // Verdict stays LEARNING (the policy IS learning *something* —
+    // the auxiliary head). But the headline carries a warning
+    // fragment about the actor ignoring the assistant, and the
+    // ``actor_ignoring_assistant`` flag is set so downstream UI
+    // (chart styling, sort order) can highlight it.
+    const episodes: EpisodeRecord[] = [];
+    for (let i = 1; i <= 12; i++) {
+      const frac = i / 12;
+      const acc = 0.5 + frac * 0.25;
+      const force = 76 + ((i % 2) === 0 ? 0 : 1);
+      episodes.push(ep(i, `2026-04-${String(((i - 1) % 18) + 1).padStart(2, '0')}`, {
+        arbs_completed: 12,
+        arbs_naked: 8,
+        arbs_closed: 4,
+        arbs_force_closed: force,
+        policy_loss: 0.18,
+        // Reward varies ±6 around -100 so saturation-collapse
+        // (variance ≤ 5) doesn't trigger; reward TREND stays
+        // within ±5% so reward channel doesn't trigger LEARNING.
+        total_reward: -100 + ((i % 3) - 1) * 6,
+        mature_prob_accuracy: acc,
+        mature_prob_n_resolved: 50,
+      }));
+    }
+    const d = diagnoseAgent(episodes);
+    expect(d.verdict).toBe('learning');
+    expect(d.headline).toMatch(/mature-acc/);
+    expect(d.headline).toMatch(/actor isn't using it|cohort-F/i);
+    expect(d.flags).toContain('actor_ignoring_assistant');
+  });
+
+  it('flags COLLAPSED via saturation when force-close ≥75% and reward flat for 10+ episodes', () => {
+    // 12 episodes, all force-closing 78%, reward bit-identical.
+    // No policy spike — the new (mature-prob-head 2026-04-26)
+    // collapse trigger.
+    const episodes: EpisodeRecord[] = [];
+    for (let i = 1; i <= 12; i++) {
+      episodes.push(ep(i, `2026-04-${String(((i - 1) % 18) + 1).padStart(2, '0')}`, {
+        arbs_completed: 10,
+        arbs_naked: 7,
+        arbs_closed: 5,
+        arbs_force_closed: 78,
+        // 78 / (10+7+5+78) = 78/100 = 78%
+        policy_loss: 0.18,
+        total_reward: -250,
+      }));
+    }
+    const d = diagnoseAgent(episodes);
+    expect(d.verdict).toBe('collapsed');
+    expect(d.flags).toContain('saturated');
+    expect(d.headline).toMatch(/saturation collapse/i);
   });
 
   it('sorts episodes by episode number before analysing', () => {

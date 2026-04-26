@@ -1016,6 +1016,121 @@ master_todo,lessons_learnt}.md`.
 
 ---
 
+## mature_prob_head feeds actor_head (2026-04-26)
+
+A second auxiliary head, `mature_prob_head`, runs alongside
+`fill_prob_head` and feeds its sigmoid output into
+`actor_head` on the same per-runner column-wise pattern. Order
+of operations in each forward pass:
+
+1. Backbone (LSTM / TimeLSTM / Transformer) → `lstm_last` /
+   `out_last`.
+2. `fill_prob = sigmoid(fill_prob_head(backbone))`.
+3. `mature_prob = sigmoid(mature_prob_head(backbone))`.
+4. `actor_input = concat([runner_embs, backbone_expanded,
+   fill_prob.unsqueeze(-1), mature_prob.unsqueeze(-1)], dim=-1)`.
+5. `actor_out = actor_head(actor_input)`.
+
+`actor_head`'s input dim is now
+`runner_embed_dim + lstm_hidden + 2` (or `+ d_model + 2` for
+the transformer), bumped by exactly one beyond the
+fill-prob-in-actor (2026-04-26) plan to carry the per-runner
+mature-prob scalar. Applied unconditionally to all three
+policy classes — there is no gene-gating boolean.
+
+**The label is what matters.** `fill_prob_head`'s BCE label is
+`1.0 if count >= 2 else 0.0` where count is the number of
+matched legs in `bm.bets` for the pair. That conflates
+naturally-matured pairs, agent-closed pairs, AND env
+force-closed pairs (the close leg placed by `_attempt_close`
+appends to `bm.bets` via the same path as agent-placed close
+legs). `mature_prob_head`'s BCE label is **strictly stricter**:
+
+```python
+if count < 2:
+    label = 0.0  # naked
+elif any(getattr(b, "force_close", False) for b in legs):
+    label = 0.0  # env-initiated bail-out, NOT a "good open"
+else:
+    label = 1.0  # matured naturally OR closed by agent signal
+```
+
+Force-closed pairs land in the negative class. The
+classification reads `Bet.force_close` (set at placement time
+in `_attempt_close`) so the trainer never has to touch env
+internals beyond the bet objects already exposed.
+
+**Architecture-hash break.** The new `actor_head.0.weight`
+shape `(hidden, runner_embed + backbone + 2)` is one column
+wider than the fill-prob-in-actor shape and two columns wider
+than the pre-fill-prob shape. PyTorch's
+`load_state_dict(..., strict=True)` refuses pre-plan weights
+with a shape-mismatch on `actor_head.0.weight` — the variant
+identity is carried by the existing weight-shape check, no
+new explicit version field. Lessons from
+`plans/fill-prob-in-actor` apply directly.
+
+**Gradient.** The surrogate-loss path flows back through
+`mature_prob_head` because `action_mean` depends on its
+output. The BCE auxiliary on the strict label still trains
+the head as before (`mature_prob_loss_weight` gene; default
+`0.0` = aux loss term contributes nothing — the head still
+runs, but no supervised gradient pulls its outputs apart, so
+its `actor_head` column is a near-constant `0.5` and the
+contribution is benign). **Do not detach.**
+
+**Why.** The successor investigation in
+`plans/per-runner-credit/findings.md` traced cohort-F's
+`ρ(fill_prob_loss_weight, fc_rate) = +0.469` to the fill-prob
+label conflating force-closes with maturations. A
+better-trained `fill_prob_head` therefore steered the actor
+toward runners that statistically end up in env-initiated
+bail-outs — the opposite of what selectivity needs.
+`mature_prob_head` provides the discrimination signal that
+fill_prob structurally cannot, by construction.
+
+**`mature_prob_loss_weight = 0.0` agents.** An untrained
+`mature_prob_head` initialises near sigmoid(≈0) ≈ 0.5;
+feeding a near-constant 0.5 column into actor_head is benign
+(no signal, no harm). Probes that vary
+`mature_prob_loss_weight ∈ [0.0, 0.3]` get the contrast
+between trained-and-untrained mature-prob columns inside the
+cohort, mirroring the fill-prob-in-actor probe shape.
+
+**Load-bearing regression guards** in
+`tests/test_policy_network.py::TestMatureProbInActor`:
+
+- `test_{lstm,time_lstm,transformer}_actor_input_includes_mature_prob`
+  — `actor_head[0].weight.shape[1] == runner_embed + backbone + 2`.
+- `test_{lstm,time_lstm,transformer}_action_mean_depends_on_mature_prob_head_weights`
+  — perturbing `mature_prob_head.weight` changes `action_mean`
+  for fixed obs / hidden_state. The strict gradient-through
+  forward-side check.
+- `test_{lstm,time_lstm,transformer}_actor_loss_routes_grad_through_mature_prob_head`
+  — backward-side complement: `out.action_mean.sum().backward()`
+  produces non-None `mature_prob_head.weight.grad`.
+- `test_{lstm,time_lstm,transformer}_pre_mature_weights_fail_to_load`
+  — old state_dict (post-fill-prob, one-narrower
+  `actor_head[0].weight`) raises on `load_state_dict(...,
+  strict=True)`.
+
+The pre-existing `TestFillProbInActor` cross-load test was
+updated to use `old_extra_dim=2` so it tests the genuine
+pre-fill-prob shape rather than the (now equivalent)
+post-fill-prob shape that `TestMatureProbInActor` covers.
+
+Reward magnitudes in `episodes.jsonl` are UNCHANGED — the
+change is purely on the actor-input pathway and adds a new
+auxiliary BCE loss term whose weight defaults to 0.
+Scoreboard rows from pre-plan runs remain comparable on
+`raw_pnl_reward`. Pre-plan weights cannot cross-load into
+post-plan policies (by design).
+
+See `plans/per-runner-credit/findings.md` for the
+investigation that motivated this head.
+
+---
+
 ## `info["realised_pnl"]` is last-race-only
 
 **Use `info["day_pnl"]` for the episode's true day P&L.**

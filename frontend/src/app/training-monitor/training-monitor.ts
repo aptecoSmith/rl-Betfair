@@ -160,9 +160,6 @@ export class TrainingMonitor implements OnDestroy {
     return []; // immediate — can't escalate further
   });
 
-  readonly rewardHistory = this.training.rewardHistory;
-  readonly lossHistory = this.training.lossHistory;
-
   /** Population grid agents. */
   readonly agents = signal<AgentGridItem[]>([]);
 
@@ -272,54 +269,14 @@ export class TrainingMonitor implements OnDestroy {
     return PHASE_LABELS[phase] ?? phase;
   });
 
-  /** Reward health indicator. */
-  readonly rewardVerdict = computed(() => {
-    const data = this.rewardHistory();
-    if (data.length < 3) return { label: 'Warming up', cls: 'verdict-neutral' };
-    const recent = data.slice(-3);
-    const avgRecent = recent.reduce((s, d) => s + d.reward, 0) / recent.length;
-    const first = data.slice(0, Math.max(1, Math.floor(data.length / 3)));
-    const avgFirst = first.reduce((s, d) => s + d.reward, 0) / first.length;
-
-    if (avgRecent > 0 && avgRecent > avgFirst) return { label: 'Making money', cls: 'verdict-good' };
-    if (avgRecent > 0) return { label: 'Profitable', cls: 'verdict-good' };
-    if (avgRecent > avgFirst) return { label: 'Improving', cls: 'verdict-ok' };
-    if (avgRecent < avgFirst && avgRecent < 0) return { label: 'Losing money', cls: 'verdict-bad' };
-    return { label: 'Learning', cls: 'verdict-neutral' };
-  });
-
-  /** Loss health indicator. */
-  readonly lossVerdict = computed(() => {
-    const data = this.lossHistory();
-    if (data.length < 3) return { label: 'Warming up', cls: 'verdict-neutral' };
-    const recent = data.slice(-3);
-    const avgRecent = recent.reduce((s, d) => s + d.loss, 0) / recent.length;
-    const first = data.slice(0, Math.max(1, Math.floor(data.length / 3)));
-    const avgFirst = first.reduce((s, d) => s + d.loss, 0) / first.length;
-
-    if (avgRecent < avgFirst * 0.5 && avgRecent < 0.1) return { label: 'Converged', cls: 'verdict-good' };
-    if (avgRecent < avgFirst) return { label: 'Converging', cls: 'verdict-ok' };
-    if (avgRecent > avgFirst * 2) return { label: 'Unstable', cls: 'verdict-bad' };
-    return { label: 'Learning', cls: 'verdict-neutral' };
-  });
-
-  /** Max Y for reward chart. */
-  readonly rewardMax = computed(() => {
-    const data = this.rewardHistory();
-    if (data.length === 0) return 10;
-    return Math.max(...data.map((d) => Math.abs(d.reward))) * 1.2;
-  });
-
-  /** Max Y for loss chart. */
-  readonly lossMax = computed(() => {
-    const data = this.lossHistory();
-    if (data.length === 0) return 1;
-    return Math.max(...data.map((d) => d.loss)) * 1.2;
-  });
-
-  /** SVG path for reward chart. */
-  readonly rewardPath = computed(() => this.buildPath(this.rewardHistory(), 'reward'));
-  readonly lossPath = computed(() => this.buildPath(this.lossHistory(), 'loss'));
+  // -- Global reward/loss charts removed 2026-04-26.
+  // The two "any agent, latest episode" sliding charts that used to
+  // sit above the population grid were replaced by the per-agent
+  // panel below (each agent now gets a 2x3 mini-chart grid). The
+  // ``training.rewardHistory`` / ``lossHistory`` signals on the
+  // service layer remain harmless — kept in case a future top-level
+  // dashboard wants them — but the chart UI and its verdict /
+  // path-building helpers are gone.
 
   private agentEffect = effect(() => {
     const event = this.training.latestEvent();
@@ -765,27 +722,6 @@ export class TrainingMonitor implements OnDestroy {
         });
       });
     }
-  }
-
-  private buildPath(
-    data: { step: number; [key: string]: number }[],
-    key: string
-  ): string {
-    if (data.length < 2) return '';
-    const width = 600;
-    const height = 150;
-    const maxX = data.length - 1;
-    const maxY = key === 'reward' ? this.rewardMax() : this.lossMax();
-    const minY = key === 'reward' ? -maxY : 0;
-    const range = maxY - minY || 1;
-
-    return data
-      .map((d, i) => {
-        const x = (i / maxX) * width;
-        const y = height - ((d[key] - minY) / range) * height;
-        return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
-      })
-      .join(' ');
   }
 
   getAgentClass(agent: AgentGridItem): string {

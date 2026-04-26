@@ -395,6 +395,14 @@ class TestEvaluationBetsParquet:
             # ``TestRiskHead.test_risk_parquet_backcompat_missing_columns``).
             "predicted_locked_pnl_at_placement",
             "predicted_locked_stddev_at_placement",
+            # Arb-signal-cleanup (2026-04-21) — pair classification
+            # flags. ``close_leg=True`` for any leg placed by
+            # ``_attempt_close`` (agent ``close_signal`` OR env
+            # force-close); ``force_close=True`` for the env-initiated
+            # subset only. Read paths tolerate absence on pre-2026-04-21
+            # files (default False).
+            "close_leg",
+            "force_close",
         }
         assert set(df.columns) == expected_cols
 
