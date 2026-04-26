@@ -558,9 +558,13 @@ class PPOLSTMPolicy(BasePolicy):
         )
 
         # ── Actor head (per-runner) ─────────────────────────────────────
-        # For each runner: concat(runner_emb, lstm_output) → action params
-        # output_dim = action_dim // max_runners (signal + stake + aggression)
-        actor_input_dim = runner_embed_dim + lstm_hidden
+        # For each runner: concat(runner_emb, lstm_output, fill_prob_i) →
+        # action params. output_dim = action_dim // max_runners (signal +
+        # stake + aggression). fill-prob-in-actor (2026-04-26):
+        # actor_input_dim is bumped by +1 to accept the per-runner
+        # ``fill_prob`` scalar so the action distribution can condition
+        # on the policy's own per-runner fill forecast.
+        actor_input_dim = runner_embed_dim + lstm_hidden + 1
         self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
@@ -583,10 +587,14 @@ class PPOLSTMPolicy(BasePolicy):
         # ── Fill-probability head (scalping-active-management §02) ─────
         # Auxiliary supervised head — per-runner probability that a paired
         # passive will fill before race-off. Shares the LSTM backbone with
-        # policy + value; does NOT condition on the sampled action
-        # (hard_constraints.md §8). A single linear to logits, sigmoid
-        # applied in ``forward``. Initialised with orthogonal gain=0.01 so
-        # the pre-training output is ≈0.5 ("unsure") per runner.
+        # policy + value. fill-prob-in-actor (2026-04-26): the head's
+        # output is ALSO fed into ``actor_head`` (concat into actor_input
+        # alongside the runner embedding and LSTM context), so the
+        # surrogate-loss gradient now flows back through this head in
+        # addition to the BCE auxiliary. A single linear to logits,
+        # sigmoid applied in ``forward``. Initialised with orthogonal
+        # gain=0.01 so the pre-training output is ≈0.5 ("unsure") per
+        # runner.
         self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
 
         # ── Risk head (scalping-active-management §03) ────────────────
@@ -744,15 +752,27 @@ class PPOLSTMPolicy(BasePolicy):
                 batch, self.max_runners, self.runner_embed_dim
             )
 
+        # ── Fill-probability head (scalping-active-management §02) ────
+        # Conditions on the shared backbone (``lstm_last``), NOT the
+        # sampled action (hard_constraints.md §8). Sigmoid here so
+        # ``PolicyOutput`` carries a probability in [0, 1].
+        # fill-prob-in-actor (2026-04-26): computed BEFORE actor_head so
+        # the per-runner scalar can be fed into actor_input. Surrogate
+        # loss now flows back through this head.
+        fill_prob_logits = self.fill_prob_head(lstm_last)
+        fill_prob = torch.sigmoid(fill_prob_logits)  # (batch, max_runners)
+
         # Expand LSTM output to match each runner
         lstm_expanded = lstm_last.unsqueeze(1).expand(
             -1, self.max_runners, -1
         )  # (batch, max_runners, lstm_hidden)
 
-        # Concat runner embedding with LSTM context
+        # Concat runner embedding with LSTM context and per-runner
+        # fill_prob scalar (fill-prob-in-actor, 2026-04-26).
         actor_input = torch.cat(
-            [last_runner_embs, lstm_expanded], dim=-1
-        )  # (batch, max_runners, embed + lstm_hidden)
+            [last_runner_embs, lstm_expanded, fill_prob.unsqueeze(-1)],
+            dim=-1,
+        )  # (batch, max_runners, embed + lstm_hidden + 1)
 
         # Per-runner action params: (batch, max_runners, per_runner_action_dim)
         actor_out = self.actor_head(actor_input)
@@ -769,13 +789,6 @@ class PPOLSTMPolicy(BasePolicy):
 
         # ── Critic: scalar V(s) ────────────────────────────────────────
         value = self.critic_head(lstm_last)  # (batch, 1)
-
-        # ── Fill-probability head (scalping-active-management §02) ────
-        # Conditions on the shared backbone (``lstm_last``), NOT the
-        # sampled action (hard_constraints.md §8). Sigmoid here so
-        # ``PolicyOutput`` carries a probability in [0, 1].
-        fill_prob_logits = self.fill_prob_head(lstm_last)
-        fill_prob = torch.sigmoid(fill_prob_logits)  # (batch, max_runners)
 
         # ── Risk head (scalping-active-management §03) ────────────────
         # Two outputs per runner: mean + log-var. Clamp log-var here so
@@ -1029,8 +1042,10 @@ class PPOTimeLSTMPolicy(BasePolicy):
             nn.LayerNorm(lstm_hidden) if lstm_layer_norm else nn.Identity()
         )
 
-        # Actor head (per-runner)
-        actor_input_dim = runner_embed_dim + lstm_hidden
+        # Actor head (per-runner). fill-prob-in-actor (2026-04-26):
+        # ``actor_input_dim`` is bumped by +1 to accept the per-runner
+        # fill_prob scalar. See PPOLSTMPolicy for rationale.
+        actor_input_dim = runner_embed_dim + lstm_hidden + 1
         self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
@@ -1050,6 +1065,7 @@ class PPOTimeLSTMPolicy(BasePolicy):
         )
 
         # Fill-probability head — see PPOLSTMPolicy for rationale.
+        # fill-prob-in-actor (2026-04-26): output also fed into actor_head.
         self.fill_prob_head = nn.Linear(lstm_hidden, max_runners)
         # Risk head — see PPOLSTMPolicy for rationale. Two outputs per
         # runner (mean + log-var), clamped at forward time.
@@ -1210,10 +1226,19 @@ class PPOTimeLSTMPolicy(BasePolicy):
                 batch, self.max_runners, self.runner_embed_dim,
             )
 
+        # Fill-probability head — see PPOLSTMPolicy for rationale.
+        # fill-prob-in-actor (2026-04-26): computed BEFORE actor_head so
+        # the per-runner scalar can be fed into actor_input.
+        fill_prob_logits = self.fill_prob_head(lstm_last)
+        fill_prob = torch.sigmoid(fill_prob_logits)
+
         lstm_expanded = lstm_last.unsqueeze(1).expand(
             -1, self.max_runners, -1,
         )
-        actor_input = torch.cat([last_runner_embs, lstm_expanded], dim=-1)
+        actor_input = torch.cat(
+            [last_runner_embs, lstm_expanded, fill_prob.unsqueeze(-1)],
+            dim=-1,
+        )
         actor_out = self.actor_head(actor_input)
         # Session 3: optional warmup bias on the signal head (index 0).
         actor_out = _apply_signal_bias(
@@ -1224,10 +1249,6 @@ class PPOTimeLSTMPolicy(BasePolicy):
 
         # Critic
         value = self.critic_head(lstm_last)
-
-        # Fill-probability head — see PPOLSTMPolicy for rationale.
-        fill_prob_logits = self.fill_prob_head(lstm_last)
-        fill_prob = torch.sigmoid(fill_prob_logits)
 
         # Risk head — see PPOLSTMPolicy for rationale. Log-var clamp
         # lives at the forward-pass boundary so downstream consumers
@@ -1455,7 +1476,10 @@ class PPOTransformerPolicy(BasePolicy):
         self.register_buffer("causal_mask", causal_mask, persistent=False)
 
         # ── Actor head (per-runner) ─────────────────────────────────────
-        actor_input_dim = runner_embed_dim + d_model
+        # fill-prob-in-actor (2026-04-26): ``actor_input_dim`` is bumped
+        # by +1 to accept the per-runner fill_prob scalar. See
+        # PPOLSTMPolicy for rationale.
+        actor_input_dim = runner_embed_dim + d_model + 1
         self._per_runner_action_dim = action_dim // max_runners
         self.actor_head = _build_mlp(
             input_dim=actor_input_dim,
@@ -1476,6 +1500,7 @@ class PPOTransformerPolicy(BasePolicy):
 
         # Fill-probability head — see PPOLSTMPolicy for rationale. Takes
         # the final transformer tick output (``out_last``) as backbone.
+        # fill-prob-in-actor (2026-04-26): output also fed into actor_head.
         self.fill_prob_head = nn.Linear(d_model, max_runners)
         # Risk head — see PPOLSTMPolicy for rationale. Two outputs per
         # runner (mean + log-var); log-var clamped inside ``forward``.
@@ -1623,10 +1648,20 @@ class PPOTransformerPolicy(BasePolicy):
         last_obs = obs[:, -1, :]
         _, last_runner_embs = self._encode_ticks(last_obs)
 
+        # Fill-probability head — backbone is the final-tick transformer
+        # output (``out_last``). See PPOLSTMPolicy for rationale.
+        # fill-prob-in-actor (2026-04-26): computed BEFORE actor_head so
+        # the per-runner scalar can be fed into actor_input.
+        fill_prob_logits = self.fill_prob_head(out_last)
+        fill_prob = torch.sigmoid(fill_prob_logits)
+
         out_expanded = out_last.unsqueeze(1).expand(
             -1, self.max_runners, -1,
         )
-        actor_input = torch.cat([last_runner_embs, out_expanded], dim=-1)
+        actor_input = torch.cat(
+            [last_runner_embs, out_expanded, fill_prob.unsqueeze(-1)],
+            dim=-1,
+        )
         actor_out = self.actor_head(actor_input)
         # Session 3: optional warmup bias on the signal head (index 0).
         actor_out = _apply_signal_bias(
@@ -1637,11 +1672,6 @@ class PPOTransformerPolicy(BasePolicy):
 
         # ── Critic ────────────────────────────────────────────────────
         value = self.critic_head(out_last)
-
-        # Fill-probability head — backbone is the final-tick transformer
-        # output (``out_last``). See PPOLSTMPolicy for rationale.
-        fill_prob_logits = self.fill_prob_head(out_last)
-        fill_prob = torch.sigmoid(fill_prob_logits)
 
         # Risk head — same backbone, two outputs per runner, log-var
         # clamped at forward-pass boundary. See PPOLSTMPolicy for rationale.

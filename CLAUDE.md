@@ -930,6 +930,92 @@ plan pins transformer cohorts at 256 to remove a systematic handicap).
 
 ---
 
+## fill_prob feeds actor_head (2026-04-26)
+
+The auxiliary `fill_prob_head` (per-runner BCE-trained fill-
+probability forecast) now feeds its sigmoid output INTO
+`actor_head`. Order of operations in each forward pass:
+
+1. Backbone (LSTM / TimeLSTM / Transformer) → `lstm_last` /
+   `out_last`.
+2. `fill_prob = sigmoid(fill_prob_head(backbone))`.
+3. `actor_input = concat([runner_embs, backbone_expanded,
+   fill_prob.unsqueeze(-1)], dim=-1)`.
+4. `actor_out = actor_head(actor_input)`.
+
+`actor_head`'s input dim is now
+`runner_embed_dim + lstm_hidden + 1` (or `+ d_model + 1` for
+the transformer), bumped by exactly one to carry the per-runner
+fill-prob scalar. Applied unconditionally to all three policy
+classes (`PPOLSTMPolicy`, `PPOTimeLSTMPolicy`,
+`PPOTransformerPolicy`) — there is no gene-gating boolean.
+
+**Architecture-hash break.** The new `actor_head.0.weight`
+shape `(hidden, runner_embed + backbone + 1)` is one column
+wider than the pre-plan shape. PyTorch's `load_state_dict(...,
+strict=True)` refuses pre-plan weights with a shape-mismatch on
+`actor_head.0.weight` — the variant identity is carried by the
+existing weight-shape check, no new explicit version field. The
+load failure is the correct-by-default behaviour: the policy
+would otherwise truncate the runner embedding and produce
+silently-garbled actions. Lessons-learnt from
+`plans/transformer-ctx-ticks=256` apply directly.
+
+**Gradient.** The surrogate-loss path now flows back through
+`fill_prob_head` because `action_mean` depends on its output.
+The BCE auxiliary on oracle labels still trains the head as
+before (`fill_prob_loss_weight` gene unchanged). This is
+deliberate per `plans/fill-prob-in-actor/hard_constraints.md
+§5` — the policy can learn discriminative fill-prob features
+that help action selection, not just oracle-matched ones. **Do
+not detach.**
+
+**Why.** Sessions 03 + 04 of `plans/selective-open-shaping`
+(cohort-O ρ=+0.055, cohort-O2 ρ=+0.314 with matured-bonus
+pinned to 0) showed the open-cost shaping mechanism was
+delivering its gradient cleanly but the policy could not
+respond on the dimension we wanted (force-close rate stayed
+glued at 74–78 % across a 15× gene span). Root cause: the
+per-runner action params were being sampled from
+`(runner_emb_i, lstm_output)` — a backbone state with no
+per-runner forecast in the action's input. The policy had no
+representational pathway to express "this runner's open will
+likely fail to mature" in its action distribution. Feeding
+fill_prob into actor_head adds that pathway.
+
+**`fill_prob_loss_weight = 0.0` agents.** An untrained
+`fill_prob_head` initialises near sigmoid(≈0) ≈ 0.5; feeding a
+near-constant 0.5 column into actor_head is benign (no signal,
+no harm). The Session 02 probe sweeps `fill_prob_loss_weight ∈
+[0.0, 0.3]` so the contrast between trained-and-untrained
+fill-prob columns lands inside the cohort.
+
+**Load-bearing regression guards** in
+`tests/test_policy_network.py::TestFillProbInActor`:
+
+- `test_{lstm,time_lstm,transformer}_actor_input_includes_fill_prob`
+  — `actor_head[0].weight.shape[1] == runner_embed + backbone + 1`.
+- `test_{lstm,time_lstm,transformer}_action_mean_depends_on_fill_prob_head_weights`
+  — perturbing `fill_prob_head.weight` changes `action_mean` for
+  fixed obs / hidden_state. Catches accidental detach. This is
+  the §10 gradient-through guard.
+- `test_{lstm,time_lstm,transformer}_actor_loss_routes_grad_through_fill_prob_head`
+  — backward-side complement: `out.action_mean.sum().backward()`
+  produces non-None `fill_prob_head.weight.grad`.
+- `test_{lstm,time_lstm,transformer}_pre_plan_weights_fail_to_load`
+  — old state_dict (one-narrower `actor_head[0].weight`) raises
+  on `load_state_dict(..., strict=True)`.
+
+Reward magnitudes in `episodes.jsonl` are UNCHANGED — the change
+is purely on the actor-input pathway. Scoreboard rows from
+pre-plan runs remain comparable on `raw_pnl_reward`. Pre-plan
+weights cannot cross-load into post-plan policies (by design).
+
+See `plans/fill-prob-in-actor/{purpose,hard_constraints,
+master_todo,lessons_learnt}.md`.
+
+---
+
 ## `info["realised_pnl"]` is last-race-only
 
 **Use `info["day_pnl"]` for the episode's true day P&L.**
