@@ -179,6 +179,32 @@ class TestPolledRunnersToSnapJson:
         assert len(lays) == 2
         assert lays[0]["Price"] == 3.55
 
+    def test_traded_volume_ladder_mapped(self):
+        polled = json.dumps([
+            {
+                "selectionId": 12345,
+                "state": {"lastPriceTraded": 3.5, "totalMatched": 50000.0, "status": "ACTIVE"},
+                "exchange": {
+                    "availableToBack": [],
+                    "availableToLay": [],
+                    "tradedVolume": [
+                        {"price": 3.4, "size": 12000.0},
+                        {"price": 3.5, "size": 18500.5},
+                        {"price": 3.55, "size": 7200.0},
+                    ],
+                },
+            },
+        ])
+        r0 = json.loads(_polled_runners_to_snap_json(polled))["MarketRunners"][0]
+        ladder = r0["Prices"]["TradedVolumeLadder"]
+        assert len(ladder) == 3
+        assert ladder[0] == {"Price": 3.4, "Size": 12000.0}
+        assert ladder[1]["Size"] == 18500.5
+
+    def test_traded_volume_ladder_absent_yields_empty_list(self):
+        r0 = json.loads(_polled_runners_to_snap_json(_sample_polled_runners_json()))["MarketRunners"][0]
+        assert r0["Prices"]["TradedVolumeLadder"] == []
+
     def test_null_input(self):
         result = json.loads(_polled_runners_to_snap_json(None))
         assert result["MarketRunners"] == []

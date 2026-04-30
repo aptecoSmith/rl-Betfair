@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from data.episode_builder import PriceSize, RunnerSnap
 from env.exchange_matcher import DEFAULT_MATCHER, ExchangeMatcher, MatchResult
@@ -213,15 +213,32 @@ class PassiveOrderBook:
     action lands in session 29.
     """
 
-    def __init__(self, matcher: ExchangeMatcher = DEFAULT_MATCHER) -> None:
+    def __init__(
+        self,
+        matcher: ExchangeMatcher = DEFAULT_MATCHER,
+        fill_mode: Literal["volume", "pragmatic"] = "volume",
+    ) -> None:
         self._matcher = matcher
+        # Phase −1 env audit Session 03 (2026-04-26): which Phase-1
+        # accumulator on_tick should run. ``"volume"`` is spec-faithful
+        # per-runner ``total_matched`` deltas (requires F7-fixed data).
+        # ``"pragmatic"`` prorates market-level traded volume across
+        # runners by visible book size — fallback for historical days
+        # captured before the StreamRecorder per-runner volume fix.
+        # Set per-race from ``Day.fill_mode`` via ``BetManager``;
+        # default ``"volume"`` keeps stub / synthetic tests on the
+        # spec path. Phase 2 (fill check) is shared between modes.
+        self._fill_mode: Literal["volume", "pragmatic"] = fill_mode
         self._orders: list[PassiveOrder] = []
         # Index: selection_id → list of orders for O(1) lookup in on_tick.
         self._orders_by_sid: dict[int, list[PassiveOrder]] = {}
         # Per-runner last-seen total_matched value, for computing deltas.
         # Populated on first on_tick call; reset when the PassiveOrderBook
-        # is replaced (fresh BetManager per race).
+        # is replaced (fresh BetManager per race). Used in volume mode.
         self._last_total_matched: dict[int, float] = {}
+        # Pragmatic mode — last-seen market-level traded_volume scalar.
+        # Sentinel ``None`` = first tick (delta is zero by definition).
+        self._prev_market_tv: float | None = None
         # Back-reference to the owning BetManager, set by BetManager.__post_init__.
         # Used for budget reservation at placement and Bet creation at fill.
         self._bet_manager: "BetManager | None" = None
@@ -645,9 +662,12 @@ class PassiveOrderBook:
 
         Two-phase per tick:
 
-        1. **Volume accumulation** — for each runner with open passive orders,
-           compute the ``total_matched`` delta since the previous tick and add
-           it to every matching order's ``traded_volume_since_placement``.
+        1. **Volume accumulation** — Phase 1 dispatches by ``self._fill_mode``.
+           ``"volume"`` uses the spec-faithful per-runner ``total_matched``
+           delta; ``"pragmatic"`` prorates the market-level traded-volume
+           delta across runners by visible book size for historical days
+           where per-runner volume wasn't captured. Both feed the same
+           ``order.traded_volume_since_placement`` accumulator.
 
         2. **Fill check** — for each open order, skip if the resting price has
            drifted outside the LTP ±``max_price_deviation_pct`` junk filter
@@ -666,56 +686,10 @@ class PassiveOrderBook:
         runner_by_sid = {r.selection_id: r for r in tick.runners}
 
         # ── Phase 1: accumulate traded-volume deltas ──────────────────────
-        # Use the sid index to avoid scanning all orders per runner.
-        #
-        # Per-order crossability gate (2026-04-22 fix). Without this guard
-        # the cumulative-volume threshold a resting order needs to fill
-        # was advanced by ANY trade on the runner, regardless of price.
-        # A resting LAY at 1.29 would be filled from trades at 1.52 that
-        # couldn't possibly cross it — a backer getting 1.52 has no
-        # reason to drop to 1.29. That produced fictional "locked"
-        # pairs in the bet log (e.g. operator-flagged Wolverhampton
-        # 17:05 Rb Yas Sir A on 313cec8e, lay@1.29 and back@1.52 at
-        # the same tick_timestamp with back > lay — impossible in a
-        # real Betfair book).
-        #
-        # The crossability check: a LAY at price P fills only when a
-        # trade happens at or below P (a backer crosses the spread
-        # down to take the lay). A BACK at price P fills only when a
-        # trade happens at or above P. We proxy "trade price" with
-        # LTP, the last-traded-price on this tick — not perfect (LTP
-        # is a single value but many trades can happen between ticks
-        # at different prices) but strictly better than counting ALL
-        # volume at ALL prices.
-        for sid, sid_orders in self._orders_by_sid.items():
-            if not sid_orders:
-                continue
-            snap = runner_by_sid.get(sid)
-            if snap is None:
-                continue
-            prev = self._last_total_matched.get(sid)
-            delta = 0.0 if prev is None else max(0.0, snap.total_matched - prev)
-            self._last_total_matched[sid] = snap.total_matched
-
-            if delta > 0.0:
-                ltp = snap.last_traded_price
-                for order in sid_orders:
-                    if ltp is None or ltp <= 0.0:
-                        # No LTP on this tick — we can't tell whether
-                        # trades would have crossed. Skip accumulation
-                        # rather than wrongly advancing the queue.
-                        continue
-                    if order.side is BetSide.LAY and ltp > order.price:
-                        # Trades at a price strictly above this lay's
-                        # price — a backer taking higher prices has no
-                        # reason to cross down. Order stays in queue.
-                        continue
-                    if order.side is BetSide.BACK and ltp < order.price:
-                        # Trades at a price strictly below this back's
-                        # price — a layer taking lower prices has no
-                        # reason to cross up.
-                        continue
-                    order.traded_volume_since_placement += delta
+        if self._fill_mode == "volume":
+            self._volume_phase_1(tick, runner_by_sid)
+        else:
+            self._pragmatic_phase_1(tick, runner_by_sid)
 
         # ── Phase 2: fill check ───────────────────────────────────────────
         if self._bet_manager is None:
@@ -826,6 +800,139 @@ class PassiveOrderBook:
                     o for o in sid_orders if id(o) not in filled_set
                 ]
 
+    def _volume_phase_1(
+        self,
+        tick: "Tick",
+        runner_by_sid: dict[int, RunnerSnap],
+    ) -> None:
+        """Spec-faithful Phase 1 — per-runner ``total_matched`` deltas.
+
+        Use the sid index to avoid scanning all orders per runner.
+
+        Per-order crossability gate (2026-04-22 fix). Without this guard
+        the cumulative-volume threshold a resting order needs to fill
+        was advanced by ANY trade on the runner, regardless of price.
+        A resting LAY at 1.29 would be filled from trades at 1.52 that
+        couldn't possibly cross it — a backer getting 1.52 has no
+        reason to drop to 1.29. That produced fictional "locked"
+        pairs in the bet log (e.g. operator-flagged Wolverhampton
+        17:05 Rb Yas Sir A on 313cec8e, lay@1.29 and back@1.52 at
+        the same tick_timestamp with back > lay — impossible in a
+        real Betfair book).
+
+        The crossability check: a LAY at price P fills only when a
+        trade happens at or below P (a backer crosses the spread
+        down to take the lay). A BACK at price P fills only when a
+        trade happens at or above P. We proxy "trade price" with
+        LTP, the last-traded-price on this tick — not perfect (LTP
+        is a single value but many trades can happen between ticks
+        at different prices) but strictly better than counting ALL
+        volume at ALL prices.
+        """
+        for sid, sid_orders in self._orders_by_sid.items():
+            if not sid_orders:
+                continue
+            snap = runner_by_sid.get(sid)
+            if snap is None:
+                continue
+            prev = self._last_total_matched.get(sid)
+            delta = 0.0 if prev is None else max(0.0, snap.total_matched - prev)
+            self._last_total_matched[sid] = snap.total_matched
+
+            if delta > 0.0:
+                ltp = snap.last_traded_price
+                for order in sid_orders:
+                    if ltp is None or ltp <= 0.0:
+                        # No LTP on this tick — we can't tell whether
+                        # trades would have crossed. Skip accumulation
+                        # rather than wrongly advancing the queue.
+                        continue
+                    if order.side is BetSide.LAY and ltp > order.price:
+                        # Trades at a price strictly above this lay's
+                        # price — a backer taking higher prices has no
+                        # reason to cross down. Order stays in queue.
+                        continue
+                    if order.side is BetSide.BACK and ltp < order.price:
+                        # Trades at a price strictly below this back's
+                        # price — a layer taking lower prices has no
+                        # reason to cross up.
+                        continue
+                    order.traded_volume_since_placement += delta
+
+    def _pragmatic_phase_1(
+        self,
+        tick: "Tick",
+        runner_by_sid: dict[int, RunnerSnap],
+    ) -> None:
+        """Pragmatic Phase 1 — prorate market-level traded-volume delta.
+
+        Used on historical days where ``RunnerSnap.total_matched`` is
+        identically zero (F7: the upstream poller never captured per-
+        runner cumulative volume). Market-level ``tick.traded_volume``
+        IS populated on those days (£100k–£5M per race), so we sum
+        the per-tick delta and prorate it across runners by visible
+        book size weight (back + lay sizes summed, normalised). The
+        same per-order crossability gate as volume mode is applied
+        — a resting LAY at price P only counts trades whose proxied
+        trade-price (LTP) is at or below P. See the docstring on
+        ``_volume_phase_1`` for the rationale on the LTP proxy.
+
+        Phase 2 (fill check) is unchanged. Both modes feed the same
+        ``order.traded_volume_since_placement`` accumulator; only the
+        source of ``delta`` differs. Pragmatic mode is a documented
+        approximation; the active mode is surfaced via
+        ``info["fill_mode_active"]``, ``RaceRecord.fill_mode``, and
+        episode JSONL ``fill_mode``. See plans/rewrite/
+        phase-minus-1-env-audit/session_prompts/03_dual_mode_fill_env.md.
+        """
+        market_tv = tick.traded_volume
+        if self._prev_market_tv is None:
+            # First tick — seed the baseline so the first delta is zero
+            # by definition (matches volume mode's first-tick semantics).
+            self._prev_market_tv = market_tv
+            return
+        market_delta = max(0.0, market_tv - self._prev_market_tv)
+        self._prev_market_tv = market_tv
+        if market_delta <= 0.0:
+            return
+
+        # Build runner weights by total visible book size (back + lay).
+        # Runners with thicker books trade proportionally more.
+        runner_weights: dict[int, float] = {}
+        total_visible = 0.0
+        for r in tick.runners:
+            if r.status != "ACTIVE":
+                continue
+            size = (
+                sum(lv.size for lv in r.available_to_back)
+                + sum(lv.size for lv in r.available_to_lay)
+            )
+            runner_weights[r.selection_id] = size
+            total_visible += size
+        if total_visible <= 0.0:
+            return
+
+        for sid, sid_orders in self._orders_by_sid.items():
+            if not sid_orders:
+                continue
+            weight = runner_weights.get(sid, 0.0) / total_visible
+            synth_delta = market_delta * weight
+            if synth_delta <= 0.0:
+                continue
+            snap = runner_by_sid.get(sid)
+            if snap is None:
+                continue
+            ltp = snap.last_traded_price
+            for order in sid_orders:
+                # Crossability gate — same logic as volume mode.
+                if ltp is None or ltp <= 0.0:
+                    continue
+                if order.side is BetSide.LAY and ltp > order.price:
+                    continue
+                if order.side is BetSide.BACK and ltp < order.price:
+                    continue
+                order.traded_volume_since_placement += synth_delta
+
 
 @dataclass(slots=True)
 class BetManager:
@@ -846,6 +953,11 @@ class BetManager:
     bets: list[Bet] = field(default_factory=list)
     _open_liability: float = 0.0
     matcher: ExchangeMatcher = field(default=DEFAULT_MATCHER)
+    # Phase −1 env audit Session 03 (2026-04-26): passive-fill mode for
+    # this race's PassiveOrderBook. Set per-race by BetfairEnv from
+    # ``Day.fill_mode``. Default ``"volume"`` keeps existing stub /
+    # synthetic tests on the spec path.
+    fill_mode: Literal["volume", "pragmatic"] = "volume"
     # Aggressive self-depletion: tracks opposite-side stake already consumed at
     # each (selection_id, side, price) level in this race by aggressive bets.
     # Distinct from PassiveOrderBook._passive_matched_at_level, which tracks
@@ -857,7 +969,10 @@ class BetManager:
 
     def __post_init__(self) -> None:
         self.budget = self.starting_budget
-        self.passive_book = PassiveOrderBook(matcher=self.matcher)
+        self.passive_book = PassiveOrderBook(
+            matcher=self.matcher,
+            fill_mode=self.fill_mode,
+        )
         # Wire the back-reference so PassiveOrderBook can access budget fields
         # and the bets list for placement-time reservation and fill conversion.
         self.passive_book._bet_manager = self

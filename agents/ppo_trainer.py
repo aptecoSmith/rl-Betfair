@@ -777,6 +777,14 @@ class EpisodeStats:
     # Diagnostic for the ep1 warmup bug — removable after a clean run
     # confirms scale=0.0 is flowing through the JSONL path.
     episode_idx_at_settle: int = 0
+    # Phase −1 env audit Session 03 (2026-04-26): the passive-fill mode
+    # this episode ran in. ``"volume"`` = spec-faithful per-runner
+    # ``total_matched`` deltas (post-F7-fix data). ``"pragmatic"`` =
+    # market-level prorated fallback for historical days. Default
+    # ``"volume"`` keeps pre-plan / synthetic-test rows on the spec
+    # path. See plans/rewrite/phase-minus-1-env-audit/session_prompts/
+    # 03_dual_mode_fill_env.md.
+    fill_mode: str = "volume"
 
 
 @dataclass
@@ -1190,6 +1198,18 @@ class PPOTrainer:
         # ``oracle_count_for_date``. Missing cache → 0. Used to surface
         # the "arbs detected" ceiling in per-episode operator logs.
         self._oracle_count_cache: dict[str, int] = {}
+
+        # H2 diagnostic dump (plans/per-runner-credit/session_prompts/
+        # 02_h2_diagnostic.md). Read-only — emits per-transition
+        # advantage / return / value / TD-residual + per-pair outcome
+        # JSONL files when the env var is set, default-off and
+        # byte-identical when unset. The counter is only ever read /
+        # written when the env var is set; in default operation the
+        # attribute is unused. Kept here as a plain attribute (not
+        # gated on env-var read in __init__) so that an operator
+        # toggling the env var mid-process still sees coherent
+        # episode indices.
+        self._h2_dump_episode_idx: int = -1
 
     def _get_oracle_count(self, date: str) -> int:
         """Cached oracle sample count for a date. 0 if cache missing."""
@@ -1691,6 +1711,19 @@ class PPOTrainer:
                         locked = max(0.0, min(win_pnl, lose_pnl))
                         tr.risk_labels[slot_idx] = float(locked)
 
+        # H2 diagnostic dump (read-only). When the env var is set,
+        # advance the per-rollout episode index and dump per-pair
+        # outcome classifications keyed by transition index. The
+        # advantages dump in ``_compute_advantages`` joins on this
+        # episode index. See plans/per-runner-credit/session_prompts/
+        # 02_h2_diagnostic.md for the diagnostic protocol.
+        h2_dump_dir = os.environ.get("H2_DIAGNOSTIC_DUMP_PATH")
+        if h2_dump_dir:
+            self._h2_dump_episode_idx += 1
+            self._h2_dump_pair_outcomes(
+                h2_dump_dir, env, pair_to_transition,
+            )
+
         rollout_elapsed = time.perf_counter() - rollout_start
         logger.info(
             "Rollout %s: %d steps in %.2fs (%.0f steps/s)",
@@ -1814,6 +1847,8 @@ class PPOTrainer:
             episode_idx_at_settle=int(
                 info.get("episode_idx_at_settle", 0)
             ),
+            # Phase −1 env audit Session 03 (2026-04-26).
+            fill_mode=str(info.get("fill_mode_active", "volume")),
         )
 
         return rollout, ep_stats
@@ -1838,6 +1873,15 @@ class PPOTrainer:
         last_gae = 0.0
         last_value = 0.0  # terminal state value = 0
 
+        # Optional per-tick TD-residual capture for the H2 diagnostic
+        # (default ``None`` — adds nothing to hot-loop work). Only
+        # populated when the env var is set; the GAE math is unchanged
+        # either way.
+        h2_dump_dir = os.environ.get("H2_DIAGNOSTIC_DUMP_PATH")
+        td_residuals: list[float] | None = (
+            [0.0] * n if h2_dump_dir else None
+        )
+
         for t in reversed(range(n)):
             tr = transitions[t]
             if tr.done:
@@ -1861,8 +1905,114 @@ class PPOTrainer:
             last_gae = delta + self.gamma * self.gae_lambda * last_gae
             advantages[t] = last_gae
             returns[t] = last_gae + tr.value
+            if td_residuals is not None:
+                td_residuals[t] = float(delta)
+
+        if h2_dump_dir:
+            self._h2_dump_advantages(
+                h2_dump_dir, transitions, advantages, returns, td_residuals,
+            )
 
         return advantages, returns
+
+    # -- H2 diagnostic dump helpers (feature-flagged, read-only) -------------
+
+    def _h2_dump_pair_outcomes(
+        self,
+        dump_dir: str,
+        env: BetfairEnv,
+        pair_to_transition: dict[str, tuple[int, int]],
+    ) -> None:
+        """Write per-pair outcome classifications to a JSONL file.
+
+        For the H2 diagnostic only. Reads ``env.all_settled_bets`` for
+        the rollout that just completed and classifies each opened pair
+        into ``naked | matured | agent_closed | force_closed`` using the
+        same ``Bet.force_close`` / ``Bet.close_leg`` flags the env's own
+        settlement classifier uses (env/betfair_env.py::
+        _settle_current_race). Joined to the advantages dump on
+        ``transition_idx``.
+        """
+        from pathlib import Path as _Path
+        out_dir = _Path(dump_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"pair_outcomes_ep{self._h2_dump_episode_idx}.jsonl"
+
+        pair_bets: dict[str, list] = {}
+        for b in env.all_settled_bets:
+            if b.pair_id is not None:
+                pair_bets.setdefault(b.pair_id, []).append(b)
+
+        with path.open("w", encoding="utf-8") as f:
+            for pair_id, (tr_idx, slot_idx) in pair_to_transition.items():
+                legs = pair_bets.get(pair_id, [])
+                count = len(legs)
+                any_force = any(
+                    getattr(b, "force_close", False) for b in legs
+                )
+                any_close_leg = any(
+                    getattr(b, "close_leg", False) for b in legs
+                )
+                if count < 2:
+                    outcome = "naked"
+                elif any_force:
+                    outcome = "force_closed"
+                elif any_close_leg:
+                    outcome = "agent_closed"
+                else:
+                    outcome = "matured"
+                f.write(json.dumps({
+                    "pair_id": pair_id,
+                    "transition_idx": int(tr_idx),
+                    "slot_idx": int(slot_idx),
+                    "count_legs": int(count),
+                    "outcome": outcome,
+                }) + "\n")
+
+    def _h2_dump_advantages(
+        self,
+        dump_dir: str,
+        transitions: list,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+        td_residuals: list[float] | None,
+    ) -> None:
+        """Write per-transition GAE diagnostics to a JSONL file.
+
+        For the H2 diagnostic only. The dump is read-only with respect
+        to the gradient pathway — same advantages flow into the policy
+        update; only an extra disk write happens.
+        """
+        from pathlib import Path as _Path
+        out_dir = _Path(dump_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"advantages_ep{self._h2_dump_episode_idx}.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for t, tr in enumerate(transitions):
+                action_max_idx = (
+                    int(np.argmax(np.abs(tr.action)))
+                    if tr.action is not None and tr.action.size > 0
+                    else -1
+                )
+                action_max_val = (
+                    float(tr.action[action_max_idx])
+                    if action_max_idx >= 0
+                    else 0.0
+                )
+                f.write(json.dumps({
+                    "tick_idx": t,
+                    "value": float(tr.value),
+                    "advantage": float(advantages[t].item()),
+                    "return": float(returns[t].item()),
+                    "td_residual": float(
+                        td_residuals[t] if td_residuals is not None else 0.0
+                    ),
+                    "training_reward": float(tr.training_reward),
+                    "raw_reward": float(tr.reward),
+                    "done": bool(tr.done),
+                    "action_max_idx": action_max_idx,
+                    "action_max_val": action_max_val,
+                }) + "\n")
 
     # -- Reward-centering baseline --------------------------------------------
 
@@ -2918,6 +3068,10 @@ class PPOTrainer:
         )
         record["force_close_via_evicted"] = ep.force_close_via_evicted
         record["episode_idx_at_settle"] = ep.episode_idx_at_settle
+        # Phase −1 env audit Session 03 (2026-04-26): the passive-fill
+        # mode this episode ran in. Always emitted on post-plan rows so
+        # downstream cohort metrics never blend silently across modes.
+        record["fill_mode"] = ep.fill_mode
 
         log_file = self.log_dir / "episodes.jsonl"
         with open(log_file, "a", encoding="utf-8") as f:
@@ -2935,7 +3089,7 @@ class PPOTrainer:
             "%s"
             "Episode %d/%d [%s]"
             "\n  reward=%+.3f  (raw=%+.3f  shaped=%+.3f)"
-            "\n  pnl=£%+.2f  bets=%d  loss=%.4f"
+            "\n  pnl=£%+.2f  bets=%d  loss=%.4f  mode=%s"
             "%s%s",
             _EPISODE_SEPARATOR,
             tracker.completed,
@@ -2947,6 +3101,7 @@ class PPOTrainer:
             ep.total_pnl,
             ep.bet_count,
             loss_info["policy_loss"],
+            ep.fill_mode,
             scalping_suffix,
             assistant_suffix,
         )
@@ -2975,6 +3130,7 @@ class PPOTrainer:
                 f"Episode {tracker.completed} [{ep.day_date}]"
                 f"\n  reward={ep.total_reward:+.3f}  pnl=£{ep.total_pnl:+.2f}"
                 f"  bets={ep.bet_count}  loss={loss_info['policy_loss']:.4f}"
+                f"  mode={ep.fill_mode}"
                 f"{scalping_detail}{assistant_detail}"
             ),
             "episode": {

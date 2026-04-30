@@ -494,6 +494,14 @@ class RaceRecord:
     # See plans/selective-open-shaping/purpose.md.
     pairs_opened: int = 0
     open_cost_shaped_pnl: float = 0.0
+    # Phase −1 env audit Session 03 (2026-04-26): which passive-fill
+    # mechanic this race ran. ``"volume"`` = spec-faithful per-runner
+    # ``total_matched`` deltas. ``"pragmatic"`` = market-level prorated
+    # fallback for historical days without per-runner volume. Set
+    # per-race from ``Day.fill_mode``. Default ``"volume"`` keeps stub
+    # / pre-plan rows on the spec path. See plans/rewrite/
+    # phase-minus-1-env-audit/session_prompts/03_dual_mode_fill_env.md.
+    fill_mode: str = "volume"
 
 
 # ── Environment ─────────────────────────────────────────────────────────────
@@ -1445,6 +1453,18 @@ class BetfairEnv(gymnasium.Env):
             # cross-check against ``_eps_since_bc``. Removable once
             # the bug is confirmed fixed.
             "episode_idx_at_settle": self._episode_idx,
+            # Phase −1 env audit Session 03 (2026-04-26): which Phase-1
+            # accumulator the active PassiveOrderBook is using this
+            # tick. ``"volume"`` (spec-faithful) when the loaded day
+            # carries non-zero per-runner ``total_matched``;
+            # ``"pragmatic"`` (market-level prorated fallback)
+            # otherwise. Set per-day at ``Day`` build time, fixed for
+            # the entire day. Pre-plan readers must tolerate absence;
+            # the field is ALWAYS populated on post-plan rollouts so
+            # cohort metrics never blend modes silently. See
+            # plans/rewrite/phase-minus-1-env-audit/session_prompts/
+            # 03_dual_mode_fill_env.md.
+            "fill_mode_active": self.day.fill_mode,
         }
 
     # ── Gymnasium interface ───────────────────────────────────────────────
@@ -1456,7 +1476,10 @@ class BetfairEnv(gymnasium.Env):
         options: dict | None = None,
     ) -> tuple[np.ndarray, dict]:
         super().reset(seed=seed)
-        self.bet_manager = BetManager(starting_budget=self.starting_budget)
+        self.bet_manager = BetManager(
+            starting_budget=self.starting_budget,
+            fill_mode=self.day.fill_mode,
+        )
         self._race_idx = 0
         self._tick_idx = 0
         self._races_completed = 0
@@ -1641,7 +1664,10 @@ class BetfairEnv(gymnasium.Env):
 
             # Reset BetManager and windowed history for the next race.
             if self._race_idx < self._total_races:
-                self.bet_manager = BetManager(starting_budget=self.starting_budget)
+                self.bet_manager = BetManager(
+                    starting_budget=self.starting_budget,
+                    fill_mode=self.day.fill_mode,
+                )
                 self._bet_times = {}
                 self._windowed_history = {}
                 self._prev_total_matched_rt = {}
@@ -2974,6 +3000,25 @@ class BetfairEnv(gymnasium.Env):
             # This prevents lay bets from being treated as winners when
             # the race result is simply missing from the data.
             race_pnl = bm.void_race(market_id=race.market_id)
+            # Phase-3-followups/no-betting-collapse Session 01
+            # (2026-04-30): when a race voids, all bets are refunded —
+            # no cash actually locks. The pre-settle
+            # ``scalping_locked_pnl`` accumulator (computed from
+            # matched_stake × price in get_paired_positions) is the
+            # would-have-been lock floor, not realised cash.  Leaving
+            # it positive while race_pnl == 0 produces the phantom
+            # ``locked + naked = 0`` cohort signature observed in
+            # registry/v2_first_cohort_1777499178/scoreboard.jsonl on
+            # eval-day 2026-04-29 (where the parquet had 0/2 markets
+            # with winners).  Zero the cash buckets so the residual
+            # ``naked_pnl = race_pnl − locked − closed − force_closed``
+            # collapses to 0 honestly.  The pair / arb COUNT
+            # accumulators are left intact — those record market
+            # events (a passive did fill, a close was placed) that
+            # really happened regardless of whether the result
+            # eventually settled.
+            scalping_locked_pnl = 0.0
+            scalping_early_lock_bonus = 0.0
         else:
             race_pnl = bm.settle_race(
                 winning_ids,
@@ -3305,6 +3350,7 @@ class BetfairEnv(gymnasium.Env):
             force_closed_pnl=scalping_force_closed_pnl,
             pairs_opened=pairs_opened,
             open_cost_shaped_pnl=open_cost_shaped_pnl,
+            fill_mode=self.day.fill_mode,
         ))
 
         return reward

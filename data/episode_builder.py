@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 try:
     import orjson
@@ -206,6 +207,19 @@ class Day:
 
     date: str  # "YYYY-MM-DD"
     races: list[Race]
+    # Phase −1 env audit Session 03 (2026-04-26): per-day passive-fill
+    # mechanic mode. ``"volume"`` = spec-faithful per-runner cumulative
+    # ``total_matched`` delta (requires F7-fixed data).
+    # ``"pragmatic"`` = market-level traded-volume prorated across
+    # runners by visible book size — fallback for historical data
+    # captured before the StreamRecorder per-runner volume fix landed.
+    # Auto-detected at load time in ``_build_day``; once set, fixed
+    # for the entire day (no mid-race / mid-tick switching). Default
+    # ``"volume"`` keeps synthetic / stub-built ``Day`` objects on the
+    # spec path so existing tests don't regress. See
+    # plans/rewrite/phase-minus-1-env-audit/session_prompts/
+    # 03_dual_mode_fill_env.md.
+    fill_mode: Literal["volume", "pragmatic"] = "volume"
 
 
 # ── snap_json parsing ────────────────────────────────────────────────────────
@@ -671,7 +685,27 @@ def _build_day(
     # Sort races by market_start_time
     races.sort(key=lambda r: r.market_start_time)
 
-    return Day(date=date_str, races=races)
+    # Phase −1 env audit Session 03 (2026-04-26): auto-detect the
+    # passive-fill mechanic mode for this day. ``"volume"`` iff any
+    # active runner on any tick of any race has a non-zero
+    # ``total_matched`` (i.e. the upstream poller captured per-runner
+    # cumulative volume). Otherwise fall back to ``"pragmatic"`` which
+    # prorates market-level traded volume across runners by visible
+    # book size. Computed once here; ``Day.fill_mode`` is fixed for
+    # the entire day. See env/bet_manager.py::PassiveOrderBook.on_tick.
+    fill_mode: Literal["volume", "pragmatic"] = "pragmatic"
+    for race in races:
+        for tick in race.ticks:
+            for runner in tick.runners:
+                if runner.status == "ACTIVE" and runner.total_matched > 0.0:
+                    fill_mode = "volume"
+                    break
+            if fill_mode == "volume":
+                break
+        if fill_mode == "volume":
+            break
+
+    return Day(date=date_str, races=races, fill_mode=fill_mode)
 
 
 def load_days(

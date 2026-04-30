@@ -1206,7 +1206,8 @@ def _polled_runners_to_snap_json(runners_json_str: str | None) -> str:
           },
           "exchange": {
             "availableToBack": [{"price": 3.4, "size": 100.0}],
-            "availableToLay":  [{"price": 3.55, "size": 50.0}]
+            "availableToLay":  [{"price": 3.55, "size": 50.0}],
+            "tradedVolume":    [{"price": 3.5, "size": 12000.0}]
           }
         }
 
@@ -1239,6 +1240,10 @@ def _polled_runners_to_snap_json(runners_json_str: str | None) -> str:
             {"Price": p.get("price", 0.0), "Size": p.get("size", 0.0)}
             for p in (exchange.get("availableToLay") or [])
         ]
+        tvl = [
+            {"Price": p.get("price", 0.0), "Size": p.get("size", 0.0)}
+            for p in (exchange.get("tradedVolume") or [])
+        ]
 
         runner = {
             "RunnerId": {"SelectionId": r.get("selectionId", 0)},
@@ -1250,6 +1255,7 @@ def _polled_runners_to_snap_json(runners_json_str: str | None) -> str:
             "Prices": {
                 "LastTradedPrice": state.get("lastPriceTraded", 0.0),
                 "TradedVolume": state.get("totalMatched", 0.0),
+                "TradedVolumeLadder": tvl,
                 "StartingPriceNear": 0.0,
                 "StartingPriceFar": 0.0,
                 "AvailableToBack": atb,

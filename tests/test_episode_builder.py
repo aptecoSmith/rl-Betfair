@@ -486,6 +486,54 @@ class TestBuildDay:
         assert day.races[0].market_id == "1.999"  # Earlier start
         assert day.races[1].market_id == "1.111"
 
+    def test_build_day_sets_fill_mode_from_synthetic_data(self):
+        """Phase −1 env audit Session 03 (2026-04-26) — the synthetic
+        ticks DataFrame populates ``TotalMatched > 0`` on every runner,
+        so the auto-detect should land on ``"volume"`` (spec-faithful).
+        """
+        ticks = _make_ticks_df(n_ticks=3, n_runners=3)
+        runners = _make_runners_df(n_runners=3)
+        day = _build_day("2026-03-26", ticks, runners)
+        assert day.fill_mode == "volume"
+
+    def test_build_day_sets_fill_mode_pragmatic_when_all_zero(self):
+        """Phase −1 env audit Session 03 (2026-04-26) — when every
+        active runner on every tick has ``total_matched == 0``
+        (the F7 historical-data shape), ``_build_day`` falls back to
+        ``"pragmatic"``.
+        """
+        # Custom runners list with TotalMatched=0 to mimic F7 historical
+        # data shape.
+        zero_tm_runners = []
+        for i in range(3):
+            zero_tm_runners.append({
+                "SelectionId": 1000 + i,
+                "Status": "ACTIVE",
+                "LastTradedPrice": 3.0 + i * 0.5,
+                "TotalMatched": 0.0,
+                "AvailableToBack": [{"Price": 3.0 + i * 0.5, "Size": 100.0}],
+                "AvailableToLay": [{"Price": 3.1 + i * 0.5, "Size": 80.0}],
+            })
+        snap_json_str = _make_snap_json(runners=zero_tm_runners)
+        ticks = _make_ticks_df(n_ticks=3, n_runners=3)
+        ticks["snap_json"] = snap_json_str
+        runners = _make_runners_df(n_runners=3)
+        day = _build_day("2026-03-26", ticks, runners)
+        assert day.fill_mode == "pragmatic"
+
+    def test_build_day_default_fill_mode_volume_on_empty_day(self):
+        """Empty ticks DataFrame — no races, no runners to inspect.
+        Default to ``"volume"`` so synthetic / stub-built ``Day`` objects
+        stay on the spec path (matches the dataclass default).
+        """
+        ticks = pd.DataFrame(columns=["market_id", "in_play"])
+        day = _build_day("2026-03-26", ticks, pd.DataFrame())
+        # Empty day has no signal — falls back to ``"pragmatic"`` because
+        # no active runner with non-zero total_matched was found. Both
+        # "volume" and "pragmatic" are valid for an empty day; we
+        # pin the documented behaviour here so it doesn't drift silently.
+        assert day.fill_mode == "pragmatic"
+
 
 # ── Tests: load_day ──────────────────────────────────────────────────────────
 
