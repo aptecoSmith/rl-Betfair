@@ -40,7 +40,7 @@ import torch
 
 from agents_v2.discrete_policy import BaseDiscretePolicy
 from agents_v2.env_shim import DiscreteActionShim
-from env.bet_manager import MIN_BET_STAKE
+from env.bet_manager import MIN_BET_STAKE, BetOutcome
 from training_v2.discrete_ppo.transition import Transition, action_uses_stake
 
 if TYPE_CHECKING:
@@ -54,6 +54,59 @@ __all__ = ["RolloutCollector"]
 
 
 _ATTRIBUTION_TOLERANCE = 1e-4
+
+
+class _AttributionState:
+    """Per-episode bookkeeping for incremental per-runner attribution.
+
+    Phase 4 Session 01 (2026-05-02): replaces the previous O(n²)-per-
+    episode walk over ``all_settled_bets + bm.bets`` with an O(open-
+    pending-bets) per-tick walk over a "pending pnl" set.
+
+    A bet enters ``pending_bets`` the tick it first appears in either
+    ``env._settled_bets`` (race-end extends) or the current
+    ``bm.bets``, and leaves once ``bet.outcome != BetOutcome.UNSETTLED``
+    (after which ``bet.pnl`` is immutable; verified by audit of
+    ``env/bet_manager.py`` — only ``settle_race`` and ``void_race``
+    write ``bet.pnl``, and both transition outcome out of UNSETTLED in
+    the same call).
+
+    Iteration order matches the legacy walk for bit-identity:
+    ``_settled_bets`` is scanned before ``bm.bets`` each tick, so a bet
+    that lands in ``_settled_bets`` at race-end (after being placed at
+    the same tick the race settled) is added in the same position the
+    legacy ``list(env.all_settled_bets) + list(bm.bets)`` order would
+    have iterated it. Re-inserting an existing key into a Python dict
+    does not move it, so a bet first added via ``bm.bets`` keeps its
+    original placement-order slot.
+    """
+
+    __slots__ = (
+        "pending_bets",
+        "prev_pnl_by_id",
+        "settled_count",
+        "live_count",
+        "bm_id",
+        "iter_history",
+    )
+
+    def __init__(self) -> None:
+        # Insertion-ordered. Keyed by id(bet) → bet.
+        self.pending_bets: dict[int, object] = {}
+        self.prev_pnl_by_id: dict[int, float] = {}
+        # Suffix-scan watermarks: how much of each list we've already
+        # ingested. Avoids re-walking the prefix every tick.
+        self.settled_count: int = 0
+        self.live_count: int = 0
+        # Identity (not equality) of the BetManager whose bets list
+        # ``live_count`` indexes into. The env replaces ``bet_manager``
+        # at every race transition; the new instance starts with
+        # ``bets == []`` so we reset ``live_count`` on identity change.
+        self.bm_id: int | None = None
+        # Per-tick iteration count over ``pending_bets``. Recorded for
+        # the bounded-size and zero-scan-on-no-bet-tick regression
+        # guards. Cheap (one int append per tick); off the hot path.
+        self.iter_history: list[int] = []
 
 
 class RolloutCollector:
@@ -130,11 +183,14 @@ class RolloutCollector:
         hidden_state = policy.init_hidden(batch=1)
         hidden_state = tuple(t.to(self.device) for t in hidden_state)
 
-        # Snapshot of cumulative pnl per bet object (keyed by
-        # ``id(bet)``) — used to compute per-step pnl deltas. Bets
-        # only appear and have their pnl mutated; they aren't
-        # removed, so the keys monotonically grow across the episode.
-        prev_pnl_by_id: dict[int, float] = {}
+        # Phase 4 Session 01: incremental per-runner attribution.
+        # Replaces the previous "walk every bet ever placed every
+        # tick" loop with a pending-pnl set whose membership is
+        # bounded by the open-position count (typically 0–50, vs
+        # cumulative bets-this-episode in the hundreds-to-thousands
+        # by tick 11k of a 12k-tick day). See ``_AttributionState``
+        # docstring + ``_attribute_step_reward`` for ENTRY/EXIT rules.
+        attribution_state = _AttributionState()
 
         # Phase 3 Session 01: pre-allocated per-step transfer buffers.
         # Mirrors v1's ``agents/ppo_trainer.py:1384-1390`` pattern.
@@ -274,7 +330,7 @@ class RolloutCollector:
                 per_runner_reward = self._attribute_step_reward(
                     env=env,
                     step_reward=float(reward),
-                    prev_pnl_by_id=prev_pnl_by_id,
+                    state=attribution_state,
                     market_to_runner_map=market_to_runner_map,
                 )
 
@@ -334,6 +390,12 @@ class RolloutCollector:
         ]
 
         self.last_info = last_info
+        # Stashed for tests / debug. The pending set should be empty
+        # at end-of-episode (every bet has settled), but we keep the
+        # whole state so ``test_pending_set_size_bounded_across_
+        # episode`` can assert on the trajectory of the iteration
+        # bound, not just the terminal state.
+        self.last_attribution_state = attribution_state
 
         logger.info(
             "RolloutCollector: collected %d transitions (terminated)",
@@ -347,60 +409,122 @@ class RolloutCollector:
         self,
         env,
         step_reward: float,
-        prev_pnl_by_id: dict[int, float],
+        state: _AttributionState,
         market_to_runner_map: dict[str, dict[int, int]],
     ) -> np.ndarray:
         """Split a scalar step reward across runner slots.
 
+        Phase 4 Session 01 (2026-05-02): incremental tracking via a
+        pending-pnl set. Same algebra as the pre-Phase-4 walk; same
+        invariant assert; same numbers. Bit-identical on CPU at fixed
+        seed (regression guard:
+        ``tests/test_v2_rollout_per_runner_attribution.py``).
+
         Strategy:
-        1. Walk every bet ever placed this episode (settled +
-           current race's live ``bm.bets``). Compute per-bet pnl
-           delta vs. last step's snapshot.
-        2. Map each delta to a runner slot via the bet's
-           ``(market_id, selection_id)`` pair → that race's
-           ``runner_map``.
-        3. Sum per slot — this is the runner-attributable share.
-        4. Distribute the residual ``step_reward - attributed_total``
-           equally across all ``max_runners`` slots. The residual
-           covers MTM shaping, terminal-bonus, and per-race shaped
-           terms (efficiency_cost / precision / drawdown / matured-
-           arb / open-cost) that aren't tied to a single runner.
+        1. ENTRY — scan the suffix of ``env._settled_bets`` and
+           ``env.bet_manager.bets`` for new bet objects since last
+           tick. Add to ``state.pending_bets``. Reset the
+           ``bm.bets`` watermark on race transition (BetManager
+           identity change). Typical per-tick add count: 0–3.
+        2. For each bet in ``state.pending_bets`` (insertion order
+           — matches the legacy ``all_settled_bets + bm.bets``
+           walk's bit-identity-relevant ordering): compute
+           ``delta = bet.pnl - state.prev_pnl_by_id[id(bet)]`` and
+           credit to the bet's runner slot.
+        3. EXIT — once ``bet.outcome != BetOutcome.UNSETTLED``,
+           ``bet.pnl`` is final (verified by audit of
+           ``env/bet_manager.py`` — only ``settle_race`` and
+           ``void_race`` write ``bet.pnl``, both transition outcome
+           out of UNSETTLED in the same call). Mark for removal
+           after the iteration; remove post-loop so dict mutation
+           during iteration is avoided.
+        4. Distribute the residual ``step_reward - attributed_
+           total`` equally across all ``max_runners`` slots. The
+           residual covers MTM shaping, terminal-bonus, and per-race
+           shaped terms (efficiency_cost / precision / drawdown /
+           matured-arb / open-cost) that aren't tied to a single
+           runner.
 
         Returns ``per_runner_reward`` of shape ``(max_runners,)``.
         Asserts ``per_runner_reward.sum() ≈ step_reward`` — drift
         here would silently corrupt the PPO update.
         """
+        pending_bets = state.pending_bets
+        prev_pnl_by_id = state.prev_pnl_by_id
+
+        # ENTRY: bets newly extended into ``_settled_bets`` (race-end
+        # moves bm.bets → _settled_bets in one shot, so on a settle
+        # tick this catches any bets placed at that very tick that
+        # were never seen via the bm.bets scan path because bm has
+        # since been replaced).
+        settled_list = env._settled_bets
+        new_settled_n = len(settled_list)
+        if new_settled_n > state.settled_count:
+            for i in range(state.settled_count, new_settled_n):
+                bet = settled_list[i]
+                bid = id(bet)
+                # Re-inserting an existing key into a Python dict
+                # preserves its original position, so a bet first
+                # added via the bm.bets path keeps its placement-
+                # order slot. We still skip the assignment to avoid
+                # the dict's reference rebind cost.
+                if bid not in pending_bets:
+                    pending_bets[bid] = bet
+            state.settled_count = new_settled_n
+
+        # ENTRY: bets newly placed in the current race's BetManager.
+        bm = env.bet_manager
+        if bm is not None:
+            bm_id = id(bm)
+            if bm_id != state.bm_id:
+                # New BetManager (race transition). The previous bm's
+                # bets are already in ``_settled_bets`` (extended in
+                # env.step before bm replacement) and so are already
+                # captured by the suffix scan above. Reset the
+                # watermark for the fresh empty list.
+                state.bm_id = bm_id
+                state.live_count = 0
+            live_list = bm.bets
+            new_live_n = len(live_list)
+            if new_live_n > state.live_count:
+                for i in range(state.live_count, new_live_n):
+                    bet = live_list[i]
+                    bid = id(bet)
+                    if bid not in pending_bets:
+                        pending_bets[bid] = bet
+                state.live_count = new_live_n
+
+        # Per-tick iteration count for the regression guards (off the
+        # arithmetic path; cheap one-int append per tick).
+        state.iter_history.append(len(pending_bets))
+
         per_runner = np.zeros(self.max_runners, dtype=np.float64)
-
-        # Iterate over the full episode's bets. ``all_settled_bets``
-        # accumulates as races settle (per CLAUDE.md "info[
-        # realised_pnl] is last-race-only"); the live ``bm.bets``
-        # carries the current race's bets that haven't settled yet.
-        live_bets = (
-            env.bet_manager.bets if env.bet_manager is not None else []
-        )
-        all_bets = list(env.all_settled_bets) + list(live_bets)
-
         attributed_total = 0.0
-        for bet in all_bets:
-            bet_id = id(bet)
-            prev_pnl = prev_pnl_by_id.get(bet_id, 0.0)
+        to_remove: list[int] = []
+
+        for bid, bet in pending_bets.items():
+            prev_pnl = prev_pnl_by_id.get(bid, 0.0)
             cur_pnl = float(bet.pnl)
             delta = cur_pnl - prev_pnl
-            if delta == 0.0:
-                # Update snapshot defensively — a bet that just
-                # appeared with pnl=0 needs an entry so a future
-                # delta is computed against 0 not "missing".
-                prev_pnl_by_id[bet_id] = cur_pnl
-                continue
+            if delta != 0.0:
+                runner_map = market_to_runner_map.get(bet.market_id)
+                if runner_map is not None:
+                    slot = runner_map.get(bet.selection_id)
+                    if slot is not None and slot < self.max_runners:
+                        per_runner[slot] += delta
+                        attributed_total += delta
+            prev_pnl_by_id[bid] = cur_pnl
+            # EXIT: a finalised bet leaves the pending set after this
+            # tick's delta is captured. ``bet.outcome != UNSETTLED``
+            # implies ``bet.pnl`` is immutable (audit: only
+            # settle_race and void_race write pnl, both in the same
+            # call that transitions outcome). Subsequent ticks would
+            # add zero — skipping them is the whole point.
+            if bet.outcome is not BetOutcome.UNSETTLED:
+                to_remove.append(bid)
 
-            runner_map = market_to_runner_map.get(bet.market_id)
-            if runner_map is not None:
-                slot = runner_map.get(bet.selection_id)
-                if slot is not None and slot < self.max_runners:
-                    per_runner[slot] += delta
-                    attributed_total += delta
-            prev_pnl_by_id[bet_id] = cur_pnl
+        for bid in to_remove:
+            del pending_bets[bid]
 
         residual = step_reward - attributed_total
         per_runner += residual / self.max_runners
