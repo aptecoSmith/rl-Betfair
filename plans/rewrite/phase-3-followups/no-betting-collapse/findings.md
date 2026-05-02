@@ -1,7 +1,8 @@
 ---
 plan: rewrite/phase-3-followups/no-betting-collapse
-status: session-01-complete
+status: green; complete
 opened: 2026-04-30
+closed: 2026-05-01
 ---
 
 # No-betting-collapse — findings
@@ -173,3 +174,226 @@ accounting fix; no protocol changes). They are inputs to Session 02.
 
 Plan status after Session 01: **session-01-complete; session-02
 blocked on eval-day data fix.**
+
+## Session 02 — AMBER v2 baseline re-run
+
+### Pre-flight (2026-04-30)
+
+Original AMBER baseline (`registry/v2_first_cohort_1777499178/`) is
+discarded as the comparison floor — its eval day 2026-04-29 was
+contaminated by void_race telemetry bug (Session 01 fix) AND missing
+winner data (every market voided regardless of policy).
+
+Post-fix `select_days(seed=42, n_days=8)` over `data/processed/`
+returns a different day window because:
+
+1. `2026-04-29.parquet` is absent (deleted Session 01 because all 0/2
+   markets had no winner data).
+2. `_enumerate_day_files` filters any future re-emergence of
+   winner-empty days.
+
+**New day window:**
+
+| Role | Date(s) |
+|---|---|
+| Train (7) | 2026-04-20, 2026-04-21, 2026-04-22, 2026-04-23, 2026-04-24, 2026-04-25, 2026-04-26 |
+| Eval (1) | **2026-04-28** |
+
+Eval-day winner coverage on 2026-04-28: **69/69 markets** (full).
+
+Compared to original AMBER:
+- Original train: 2026-04-21, 22, 23, 24, 25, 26, 28 / Eval: 2026-04-29.
+- New: 2026-04-20 added, 2026-04-28 promoted to eval.
+
+The window shifted by one day, exactly as the prompt anticipated.
+This is consistent with `select_days(seed=42)` determinism plus the
+filter excluding 2026-04-29.
+
+### AMBER v2 cohort launch
+
+Same protocol: 12 agents / 1 generation / `--seed 42` / 7+1 day
+split / no shaping. Output dir
+`registry/v2_amber_v2_baseline_1777577990/`.
+
+Wall: 12683.7s = 3.5h on cuda (3090). 12/12 agents completed
+without crashes; KL early-stop tripped on a few mid-rollout
+mini-batches as expected (threshold 0.15) and recovered.
+
+### AMBER v2 results
+
+**Bar 6 verdict trio:**
+
+| Bar | Threshold | AMBER v1 (discarded) | AMBER v2 | Status |
+|---|---|---|---|---|
+| 6a mean fc_rate | < 0.50 | 0.308 | **0.809** | FAIL |
+| 6b ρ(entropy_coeff, fc_rate) | ≤ −0.5 | −0.517 | **−0.532** | PASS |
+| 6c ≥ 1/12 positive on raw P&L | ≥ 1 | 0/12 | **2/12** | **PASS** |
+
+The two positive-eval-P&L agents:
+
+| agent | eval_day_pnl | eval_locked_pnl | eval_naked_pnl | bets |
+|---|---|---|---|---|
+| 8f834f55-5a5 | **+£525.42** | +£115.54 | +£424.37 | 290 |
+| 303066f9-b57 | **+£190.51** | +£112.46 | +£102.41 | 271 |
+
+The other 10 agents had positive locked P&L (range +£122 to +£179)
+overwhelmed by negative naked P&L (range −£300 to −£838).
+
+### Void-fix verification (production)
+
+Per-agent eval P&L pattern check on the new scoreboard:
+**0/12 rows match the void-pattern signature** (`|locked + naked| <
+1e-6 AND |day_pnl| < 1e-6`). Every agent reports honest non-zero
+locked AND naked accumulators. The Session 01 fix took in
+production exactly as
+`test_matured_pair_on_void_race_reports_zero_cash_buckets` predicted.
+
+Compare to AMBER v1 where ALL 12 agents matched the void-pattern
+(every market voided due to missing winner data; phantom locked
+cancelled by residual naked).
+
+### Bar 6a regression — the rewrite did NOT reduce force-close
+
+AMBER v1's mean fc=0.308 was measured over agents that had
+collapsed to 6–9 bets on the eval day — a near-NOOP regime where
+the few opens that happened rarely reached T−N. The 0.308 was
+"low fc because agents barely bet", not "low fc because the
+architecture works".
+
+AMBER v2 agents trade at v1-comparable volume (259–313 bets/eval,
+187–215 pairs opened per agent) — exactly what the rewrite
+wanted — and force-close at **0.809 mean**. That is *higher* than
+the v1 baseline (~0.75) the rewrite was supposed to improve on.
+
+**The rewrite's central architectural claim — that per-runner
+credit + entropy-controller + the new training stack would reduce
+force-close rate vs v1 — is not supported by this data, and
+arguably refuted.** Bar 6a as a metric is partially uninformative
+across NOOP-vs-trading regimes, but the trading-regime numbers
+themselves are conclusive: the architecture force-closes at v1
+levels once agents actually trade.
+
+Two further observations that complicate the standard "low fc =
+good" intuition:
+
+1. The two positive-P&L agents have force-close rates 0.850
+   (8f834f55) and 0.862 (303066f9) — **the highest fc rates in
+   the cohort, not the lowest**. Within AMBER v2, fc rate is
+   positively correlated with eval P&L, not negatively.
+2. Every agent's `eval_locked_pnl` is positive (+£112 to +£179).
+   The matured-arb cash flow works. What kills 10/12 agents is
+   the negative naked term — pairs whose passive never filled and
+   were either force-closed or settled naked at a directional loss.
+
+This re-frames the open question: it isn't "why is fc rate too
+high" — it's "why are 80 % of the policy's pair openings priced
+such that their passive leg fails to match naturally before the
+race ends." The auto-pair places the passive at
+`back_price - arb_spread_ticks`, where `arb_spread_ticks` comes
+from the agent's per-runner action. If the agent is picking
+spreads that are too tight (in either ticks or implicit £-target),
+the passive sits inside the noise floor of price movement and
+fails to match.
+
+### Operator review (2026-05-01) — force-close is a crutch
+
+Operator framing of the result:
+
+> Force close is a serious fail. A human scalper does all they
+> can to close trades that are not going the way they want. This
+> force close is a crutch we put in because the models weren't
+> closing trades. Perhaps that itself points to an architectural
+> issue?
+>
+> If I were opening a trade, I'd have some idea of how much money
+> I wanted to make, and how much I thought I would make. In
+> general, I'm looking to make a single £1 of profit per trade.
+> If I can make more — great. I might 'ride the wave' of a price
+> coming in if I think it would come in more, but I'd likely
+> 'take profit' by laying where I could.
+>
+> I believe at the moment we open a trade and put on the close
+> trade at the same time. Perhaps we are being too aggressive
+> with this? If we put on the close trade to make a £1 it would
+> stand more chance of closing. Also, if we look like we would
+> lose £1 because the price has not gone the way we were
+> expecting, we close and take the loss.
+>
+> What we definitely don't do is 'leave it' unless the only bets
+> we had on were lay bets for long odds runners. We wouldn't
+> leave a back bet on — it's just too risky. Better to lose in a
+> close trade than leave on many more pounds in a naked back
+> bet. That's not trading — it's gambling.
+
+Three architectural concerns drop out:
+
+1. **No first-class "target P&L per pair" concept.** The auto-pair
+   spread is in *ticks*, picked by the agent. The lay price falls
+   out as `tick_offset(back_price, arb_ticks, -1)`. The agent has
+   to learn the implicit mapping
+   `(stake, back_price, arb_ticks) → expected_£_profit` itself,
+   from delayed cash signal. A human scalper aims at £1 and works
+   backwards to a lay price; the policy has no such anchor.
+
+2. **No stop-loss mechanism.** `close_signal` is an
+   always-available action, but reward shaping doesn't push the
+   policy to fire when projected naked loss would exceed some
+   £ threshold. The MTM shaping (`mark_to_market_weight`) gives
+   per-tick gradient on open exposure but isn't asymmetric
+   between "small acceptable loss to flatten" and "large
+   unacceptable loss from leaving the position open".
+
+3. **Force-close as a crutch.** The env's T−N safety net
+   (`force_close_before_off_seconds`) was added because policies
+   weren't learning closes. The current cohort's 0.809 mean fc
+   rate is the smell: 80 % of pair lifecycles end via env-
+   initiated bail-out, not policy-initiated close. A policy that
+   can't close on its own is a gambling policy; the safety net
+   masks that failure rather than fixing it.
+
+These concerns are bigger than coefficient tuning on the existing
+shaping terms. The original `purpose.md` §"Ablation order is
+locked" (matured_arb_bonus → naked_loss_anneal → mark_to_market)
+treats fc rate as a tuning problem on the current mechanics.
+After the operator review, that framing is wrong: the *mechanics
+themselves* may need to change before any shaping ablation is
+informative.
+
+The follow-on plan
+[`force-close-architecture/`](../force-close-architecture/) carries
+this work forward.
+
+## Verdict — GREEN-with-caveat
+
+Per session prompt §4a: Bar 6c PASS → plan ships GREEN. But the
+GREEN is narrower than the rewrite originally promised:
+
+| Claim | Result |
+|---|---|
+| Architecture can produce positive-cash agents under no shaping | **CONFIRMED** (2/12 on eval P&L) |
+| Architecture reduces force-close rate vs v1 (~0.75) | **NOT CONFIRMED**; AMBER v2 = 0.809 |
+| `locked_pnl + naked_pnl == 0` cohort signature is a bug | **CONFIRMED** (Session 01 fix verified in production) |
+
+| Item | Status |
+|---|---|
+| AMBER v2 baseline | ✓ done (`registry/v2_amber_v2_baseline_1777577990/`) |
+| Bar 6c | **PASS** (2/12 positive on raw P&L) |
+| Bar 6a | **FAIL** (mean fc=0.809 vs threshold 0.50; vs v1 ~0.75) |
+| Bar 6b | **PASS** (ρ(entropy_coeff, fc_rate) = −0.532) |
+| Verdict | **GREEN-with-caveat** — Bar 6c gates the prompt's GREEN;<br>fc-rate concern handed off to follow-on plan |
+| Original 3-ablation tree | **deferred** — operator review concluded mechanics-not-coefficients (see operator review above) |
+| Void-fix in production | ✓ verified (0/12 void-pattern rows) |
+
+The original AMBER FAIL (0/12 positive) was a data + telemetry
+artefact (missing winner data on eval-day 2026-04-29 + phantom
+locked_pnl on void races), not an architectural failure. Once
+the env accounting was fixed (Session 01) and the day-selection
+filter excluded the bad-data day, 2/12 agents produced positive
+eval P&L on the same protocol with no shaping changes.
+
+Plan status: **green-with-caveat; complete.** Force-close work
+forks to
+[`plans/rewrite/phase-3-followups/force-close-architecture/`](../force-close-architecture/).
+Phase-4 scale-up should NOT proceed until that follow-on lands;
+scaling a 0.809-fc-rate cohort to 66 agents reproduces the same
+pattern at 5× cost.

@@ -81,6 +81,7 @@ def run_cohort(
     mutation_rate: float = 0.1,
     train_one_agent_fn: Callable[..., AgentResult] = train_one_agent,
     event_emitter: Callable[[dict], None] | None = None,
+    reward_overrides: dict | None = None,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -207,6 +208,7 @@ def run_cohort(
                     event_emitter=event_emitter,
                     agent_idx=int(idx),
                     n_agents=int(n_agents),
+                    reward_overrides=reward_overrides,
                 )
                 results.append(result)
                 total_agents_trained += 1
@@ -440,8 +442,16 @@ def _agent_result_to_scoreboard_row(
         "eval_action_histogram": result.eval.action_histogram,
         "eval_arbs_completed": result.eval.arbs_completed,
         "eval_arbs_naked": result.eval.arbs_naked,
+        "eval_arbs_closed": result.eval.arbs_closed,
+        "eval_arbs_force_closed": result.eval.arbs_force_closed,
+        "eval_arbs_stop_closed": result.eval.arbs_stop_closed,
+        "eval_arbs_target_pnl_refused": result.eval.arbs_target_pnl_refused,
+        "eval_pairs_opened": result.eval.pairs_opened,
         "eval_locked_pnl": result.eval.locked_pnl,
         "eval_naked_pnl": result.eval.naked_pnl,
+        "eval_closed_pnl": result.eval.closed_pnl,
+        "eval_force_closed_pnl": result.eval.force_closed_pnl,
+        "eval_stop_closed_pnl": result.eval.stop_closed_pnl,
         "eval_wall_time_sec": result.eval.wall_time_sec,
         # Composite — same as v1: a single scalar the UI sorts by.
         "composite_score": result.eval.total_reward,
@@ -449,6 +459,37 @@ def _agent_result_to_scoreboard_row(
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
+
+
+def _parse_reward_overrides(items: list[str]) -> dict:
+    """Parse a list of ``key=value`` strings into a dict.
+
+    Values are parsed as bool (``true``/``false``/``1``/``0``), then
+    float, then fall back to string. The env's
+    ``_REWARD_OVERRIDE_KEYS`` whitelist is the authoritative typecheck
+    — passing an unknown key produces a one-time debug log inside
+    ``BetfairEnv.__init__`` and is otherwise ignored.
+    """
+    out: dict = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError(
+                f"--reward-overrides expects key=value, got {item!r}"
+            )
+        key, _, raw = item.partition("=")
+        key = key.strip()
+        raw = raw.strip()
+        lo = raw.lower()
+        if lo in ("true", "1"):
+            out[key] = True
+        elif lo in ("false", "0"):
+            out[key] = False
+        else:
+            try:
+                out[key] = float(raw)
+            except ValueError:
+                out[key] = raw
+    return out
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -513,6 +554,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Bind host for --emit-websocket. Default localhost.",
     )
     p.add_argument(
+        "--reward-overrides", action="append", default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Plan-level reward override (key=value). Repeatable. "
+            "Values parse as bool ('true'/'false'/'1'/'0'), float, "
+            "or string in that order. Whitelisted keys live in "
+            "BetfairEnv._REWARD_OVERRIDE_KEYS. Example: "
+            "--reward-overrides target_pnl_pair_sizing_enabled=true"
+        ),
+    )
+    p.add_argument(
         "--ws-port", type=int, default=8002,
         help=(
             "Bind port for --emit-websocket. Default 8002 (matches the v1 "
@@ -534,6 +586,10 @@ def main(argv: list[str] | None = None) -> int:
         server.start()
         emitter = server
 
+    reward_overrides = _parse_reward_overrides(args.reward_overrides)
+    if reward_overrides:
+        logger.info("reward_overrides: %s", reward_overrides)
+
     try:
         run_cohort(
             n_agents=args.n_agents,
@@ -545,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=Path(args.output_dir),
             mutation_rate=args.mutation_rate,
             event_emitter=emitter,
+            reward_overrides=reward_overrides or None,
         )
     finally:
         if server is not None:

@@ -293,3 +293,118 @@ class TestMarkToMarketShaping:
             reward_overrides={"mark_to_market_weight": 0.1},
         )
         assert env._mark_to_market_weight == 0.1
+
+
+class TestPerPairMtm:
+    """Per-pair MTM extension (force-close-architecture Session 02).
+
+    The portfolio-level MTM walker also rebuilds ``self._per_pair_mtm``
+    so the stop-close trigger has its check value without re-walking
+    ``bm.bets``. The per-pair map mirrors the portfolio sum's resolved-
+    bet drop-out and telescope-to-zero invariant. See
+    ``plans/rewrite/phase-3-followups/force-close-architecture/
+    session_prompts/02_projected_loss_stop_close.md``.
+    """
+
+    def test_per_pair_mtm_sums_to_portfolio_mtm(self, legacy_config):
+        """Σ per_pair_mtm.values() == portfolio MTM within float tol.
+
+        Bets without a ``pair_id`` (directional / non-scalping) DO
+        contribute to the portfolio total but not to the per-pair map,
+        so the equality holds only when every open bet has a pair_id.
+        That's the scalping-mode invariant the trigger needs.
+        """
+        env = BetfairEnv(_make_day(n_races=1), legacy_config)
+        env.reset()
+        # Two pairs, each with one open back leg (the aggressive leg
+        # of an unmatured pair). Different sids so LTPs differ.
+        env.bet_manager.bets.append(Bet(
+            selection_id=101, side=BetSide.BACK,
+            requested_stake=10.0, matched_stake=10.0,
+            average_price=8.0, market_id="m1", pair_id="P1",
+        ))
+        env.bet_manager.bets.append(Bet(
+            selection_id=102, side=BetSide.LAY,
+            requested_stake=20.0, matched_stake=20.0,
+            average_price=4.0, market_id="m1", pair_id="P2",
+        ))
+        ltps = {101: 6.0, 102: 5.0}
+        portfolio = env._compute_portfolio_mtm(ltps)
+        assert sum(env._per_pair_mtm.values()) == pytest.approx(
+            portfolio, abs=1e-9,
+        )
+        # And the keys are exactly the pair_ids, not anything stale.
+        assert set(env._per_pair_mtm.keys()) == {"P1", "P2"}
+
+    def test_per_pair_mtm_drops_to_zero_on_close(self, legacy_config):
+        """A pair's bucket disappears immediately after its close tick.
+
+        Mirrors the portfolio drop-out behaviour: once both legs are
+        UNSETTLED but offsetting, MTM is small; once they resolve to
+        WON/LOST/VOID, both drop out and the bucket is removed
+        entirely (zero by absence)."""
+        env = BetfairEnv(_make_day(n_races=1), legacy_config)
+        env.reset()
+        env.bet_manager.bets.append(Bet(
+            selection_id=101, side=BetSide.BACK,
+            requested_stake=10.0, matched_stake=10.0,
+            average_price=8.0, market_id="m1", pair_id="P1",
+            outcome=BetOutcome.UNSETTLED,
+        ))
+        env._compute_portfolio_mtm({101: 6.0})
+        assert "P1" in env._per_pair_mtm
+        # Resolve the bet — drop-out kicks in.
+        env.bet_manager.bets[0].outcome = BetOutcome.WON
+        env._compute_portfolio_mtm({101: 6.0})
+        assert "P1" not in env._per_pair_mtm
+        # And the per-pair sum is zero.
+        assert sum(env._per_pair_mtm.values()) == pytest.approx(0.0, abs=1e-9)
+
+    def test_per_pair_mtm_telescope_invariant_holds_per_pair(
+        self, scalping_config,
+    ):
+        """Cumulative MTM-delta on a single pair is zero from open to
+        settle.
+
+        Construct an open + close pattern by hand: plant an aggressive
+        BACK at 8.0 and an offsetting LAY at 8.0 on the same pair_id.
+        Their MTM is exactly 0 at every LTP — the per-pair telescope
+        is trivially zero. Then resolve them; the per-pair bucket
+        disappears, mirroring the portfolio invariant.
+
+        The portfolio-wide test
+        ``test_mtm_telescopes_to_zero_at_settle`` already exercises
+        the across-many-bets case via a real rollout. This test
+        targets the per-pair contract specifically.
+        """
+        env = BetfairEnv(_make_day(n_races=1), scalping_config)
+        env.reset()
+        # Two offsetting legs on the same pair. Net MTM is zero at any
+        # LTP because (P_back - LTP)/LTP × 10 + (LTP - P_lay)/LTP × 10 = 0
+        # when P_back == P_lay.
+        env.bet_manager.bets.append(Bet(
+            selection_id=101, side=BetSide.BACK,
+            requested_stake=10.0, matched_stake=10.0,
+            average_price=8.0, market_id="m1", pair_id="P1",
+        ))
+        env.bet_manager.bets.append(Bet(
+            selection_id=101, side=BetSide.LAY,
+            requested_stake=10.0, matched_stake=10.0,
+            average_price=8.0, market_id="m1", pair_id="P1",
+        ))
+        # Cumulative delta across two ticks — must be exactly zero
+        # since net MTM is zero at every tick.
+        cum_delta = 0.0
+        prev = 0.0
+        for ltp in (6.0, 5.0, 9.0, 7.0):
+            env._compute_portfolio_mtm({101: ltp})
+            now = env._per_pair_mtm.get("P1", 0.0)
+            cum_delta += now - prev
+            prev = now
+        # Resolve both legs — bucket goes empty.
+        for b in env.bet_manager.bets:
+            b.outcome = BetOutcome.WON
+        env._compute_portfolio_mtm({101: 7.0})
+        cum_delta += 0.0 - prev  # final unwind to zero
+        assert cum_delta == pytest.approx(0.0, abs=1e-9)
+        assert "P1" not in env._per_pair_mtm

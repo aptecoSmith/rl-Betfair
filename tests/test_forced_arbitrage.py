@@ -3469,3 +3469,627 @@ class TestSelectiveOpenShaping:
         )
         # Naked pairs are still pending — they never resolve.
         assert len(env._pending_pair_costs) == n_naked
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Force-close-architecture Session 01 — target-£-pair sizing
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestTargetPnlPairSizing:
+    """Plan-level flag ``target_pnl_pair_sizing_enabled``.
+
+    When True, the agent's per-runner ``arb_spread`` action dim is
+    reinterpreted as a £-target ∈ [£0.20, £5.00] and the env solves
+    for the passive price that locks that target via the equal-profit
+    identity. Default False = byte-identical to pre-plan.
+
+    See plans/rewrite/phase-3-followups/force-close-architecture/.
+    """
+
+    def _build_action(self, signal: float, stake: float, arb_raw: float):
+        """Build a 7-dim per-runner aggressive action for slot 0."""
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = signal             # signal
+        a[14] = stake             # stake
+        a[28] = 1.0               # aggression = aggressive
+        a[42] = 0.0               # cancel off
+        a[56] = arb_raw           # arb_spread (raw [-1, 1])
+        return a
+
+    # ── Test 1: byte-identity when flag is off ──────────────────────────
+
+    def test_flag_off_is_byte_identical_to_legacy(self, scalping_config):
+        """Same seed, same race, gene off vs gene unset: scalping_arbs_*
+        counters and per-pair passive prices match exactly."""
+        # Without the flag.
+        env_off = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3), scalping_config,
+        )
+        env_off.reset()
+        a = self._build_action(signal=1.0, stake=-0.8, arb_raw=-0.5)
+        env_off.step(a)
+        prices_off = sorted(
+            o.price for o in env_off.bet_manager.passive_book.orders
+            if o.pair_id is not None
+        )
+
+        # With flag explicitly off (False).
+        env_flag_off = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3), scalping_config,
+            reward_overrides={"target_pnl_pair_sizing_enabled": False},
+        )
+        env_flag_off.reset()
+        env_flag_off.step(a)
+        prices_flag_off = sorted(
+            o.price for o in env_flag_off.bet_manager.passive_book.orders
+            if o.pair_id is not None
+        )
+
+        assert prices_off == prices_flag_off
+        # And no refusals on either path.
+        info_off = env_off._get_info()
+        info_flag = env_flag_off._get_info()
+        assert info_off.get("arbs_target_pnl_refused", 0) == 0
+        assert info_flag.get("arbs_target_pnl_refused", 0) == 0
+
+    # ── Test 2: solver drives passive price ─────────────────────────────
+
+    def test_flag_on_solver_drives_passive_price_from_action(
+        self, scalping_config,
+    ):
+        """``arb_raw`` mapped to ``arb_frac=0`` → target £0.20 produces a
+        TIGHTER passive lay (closer to back price) than ``arb_frac=1`` →
+        target £5.00.
+
+        Also: the realised passive price is at least as wide as the
+        solved price (quantise rounds DOWN for lay → price ≤ solved).
+        """
+        from env.scalping_math import (
+            quantise_to_betfair_tick,
+            solve_lay_price_for_target_pnl,
+        )
+
+        # Low target: arb_raw=-1 → arb_frac=0 → target £0.20.
+        env_low = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3), scalping_config,
+            reward_overrides={"target_pnl_pair_sizing_enabled": True},
+        )
+        env_low.reset()
+        env_low.step(self._build_action(signal=1.0, stake=-0.8, arb_raw=-1.0))
+        agg_low = [
+            b for b in env_low.bet_manager.bets if b.pair_id is not None
+        ][0]
+        passive_low = [
+            o for o in env_low.bet_manager.passive_book.orders
+            if o.pair_id == agg_low.pair_id
+        ]
+        # The £0.20 target is tight; expect the passive to land.
+        assert len(passive_low) == 1, (
+            f"expected passive at low target, got {passive_low}; "
+            f"refused={env_low._scalping_arbs_target_pnl_refused}"
+        )
+        passive_low_order = passive_low[0]
+
+        # High target: arb_raw=+1 → arb_frac=1 → target £5.00.
+        env_high = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3), scalping_config,
+            reward_overrides={"target_pnl_pair_sizing_enabled": True},
+        )
+        env_high.reset()
+        env_high.step(self._build_action(signal=1.0, stake=-0.8, arb_raw=+1.0))
+        agg_high_list = [
+            b for b in env_high.bet_manager.bets if b.pair_id is not None
+        ]
+        # High target may or may not be reachable at the synthetic
+        # fixture's prices/stake; only check the tight branch.
+        if not agg_high_list:
+            return
+
+        # The low-target lay should be CLOSER to the back price than the
+        # high-target lay (smaller spread for £0.20 than for £5.00).
+        passive_high = [
+            o for o in env_high.bet_manager.passive_book.orders
+            if o.pair_id == agg_high_list[0].pair_id
+        ]
+        if passive_high:
+            spread_low = agg_low.average_price - passive_low_order.price
+            spread_high = (
+                agg_high_list[0].average_price - passive_high[0].price
+            )
+            assert spread_low < spread_high
+
+        # The realised low-target passive price equals the
+        # quantise-of-solved value (sanity on the solver→quantise path).
+        commission = scalping_config["reward"].get("commission", 0.05)
+        target_low = 0.20  # arb_frac=0 → £0.20
+        solved = solve_lay_price_for_target_pnl(
+            back_stake=agg_low.matched_stake,
+            back_price=agg_low.average_price,
+            target_pnl=target_low,
+            commission=commission,
+        )
+        assert solved is not None
+        expected_passive = quantise_to_betfair_tick(solved, side="lay")
+        assert passive_low_order.price == pytest.approx(expected_passive)
+
+    # ── Test 3: refusal on infeasible target ────────────────────────────
+
+    def test_flag_on_refuses_open_when_solved_price_unreachable(self):
+        """Direct call to ``_maybe_place_paired`` with an infeasible
+        target increments the refusal counter and returns False."""
+        from types import SimpleNamespace
+
+        from env.bet_manager import BetSide
+
+        cfg = {
+            "training": {
+                "max_runners": 14, "starting_budget": 100.0,
+                "max_bets_per_race": 20, "scalping_mode": True,
+            },
+            "actions": {"force_aggressive": True},
+            "reward": {
+                "early_pick_bonus_min": 1.2, "early_pick_bonus_max": 1.5,
+                "early_pick_min_seconds": 300, "efficiency_penalty": 0.01,
+            },
+        }
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3), cfg,
+            reward_overrides={"target_pnl_pair_sizing_enabled": True},
+        )
+        env.reset()
+        race = env.day.races[0]
+        runner = race.ticks[0].runners[0]
+
+        # Construct an aggressive bet with a tiny stake so a £5 target
+        # is unreachable (lose-side max ≈ £0.95).
+        agg = SimpleNamespace(
+            side=BetSide.BACK,
+            matched_stake=1.0,
+            average_price=4.0,
+            pair_id="X1",
+        )
+
+        before = env._scalping_arbs_target_pnl_refused
+        ok = env._maybe_place_paired(
+            runner=runner, aggressive_bet=agg, arb_ticks=1, race=race,
+            pair_id="X1", time_to_off=120.0, arb_frac=1.0,  # £5 target
+        )
+        assert ok is False
+        assert env._scalping_arbs_target_pnl_refused == before + 1
+
+        # And the info dict surfaces the counter.
+        info = env._get_info()
+        assert info.get("arbs_target_pnl_refused", 0) == before + 1
+
+    # ── Test 4: force-close path unaffected ─────────────────────────────
+
+    def test_flag_on_force_close_path_unaffected(self, scalping_config):
+        """The new solver lives on the OPEN path. Env-initiated force-
+        close at T−N goes through ``_attempt_close`` with the relaxed
+        matcher and does NOT consult the target-£ solver — its passive
+        price is the matcher's pick_top_price, and it does not bump
+        ``arbs_target_pnl_refused``.
+        """
+        cfg = dict(scalping_config)
+        cfg["training"] = dict(cfg["training"])
+        cfg["training"]["betting_constraints"] = {
+            "force_close_before_off_seconds": 30,
+        }
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3), cfg,
+            reward_overrides={"target_pnl_pair_sizing_enabled": True},
+        )
+        env.reset()
+        # Sanity: the target-pnl flag is on but force-close logic is
+        # independent of it. Refusal counter starts at 0 and stays
+        # 0 for any pure force-close attempt (no open-path solver call).
+        assert env._scalping_arbs_target_pnl_refused == 0
+        assert env._target_pnl_pair_sizing_enabled is True
+        # Manually invoke the force-close pathway on an empty book —
+        # no open pairs ⇒ no attempts ⇒ refusal counter stays at 0.
+        race = env.day.races[0]
+        env._force_close_open_pairs(
+            race=race, tick=race.ticks[0], time_to_off=10.0,
+        )
+        assert env._scalping_arbs_target_pnl_refused == 0
+
+
+# ── Force-close-architecture Session 02: projected-loss stop-close ──────────
+
+
+class TestStopClose:
+    """Plan-level knob ``stop_loss_pnl_threshold``.
+
+    When > 0, the env auto-closes any open pair whose per-pair MTM
+    crosses ``-stop_loss_pnl_threshold``. The close routes through
+    ``_attempt_close`` with ``stop_close=True`` (strict matcher, NOT
+    the relaxed force-close path). The pair's outcome lands in
+    ``scalping_arbs_stop_closed`` rather than ``scalping_arbs_closed``
+    or ``scalping_arbs_force_closed``; the matured-arb / close_signal
+    shaped bonuses do NOT credit it.
+
+    Naked-lay carve-out: stop-close fires unconditionally on naked
+    BACK exposures, but for naked LAY exposures only fires when the
+    original back leg's matched price was below
+    ``lay_only_naked_price_threshold``.
+
+    See plans/rewrite/phase-3-followups/force-close-architecture/
+    session_prompts/02_projected_loss_stop_close.md.
+    """
+
+    @staticmethod
+    def _scripted_race_with_ltp_drop(
+        sid: int = 101,
+        back_price: float = 4.0,
+        lay_price: float = 4.2,
+        ltp_path: tuple[float, ...] = (4.0, 4.0, 4.0),
+        winner: int = 101,
+    ):
+        """Build a one-runner race with controllable per-tick LTP.
+
+        Each entry of ``ltp_path`` becomes the LTP / book centre for
+        the corresponding tick. Tick 0 is at T−60, tick 1 at T−45,
+        tick 2 at T−15. Available-to-back / available-to-lay scale
+        from the LTP so the matcher can always close.
+        """
+        from datetime import datetime, timedelta
+
+        from data.episode_builder import (
+            Day, PriceSize, Race, RunnerMeta, RunnerSnap, Tick,
+        )
+
+        market_start = datetime(2026, 5, 2, 14, 0, 0)
+        meta = RunnerMeta(
+            selection_id=sid, runner_name="Horse", sort_priority="1",
+            handicap="0", sire_name="S", dam_name="D", damsire_name="DS",
+            bred="GB", official_rating="85", adjusted_rating="85",
+            age="4", sex_type="GELDING", colour_type="BAY",
+            weight_value="140", weight_units="LB", jockey_name="J",
+            jockey_claim="0", trainer_name="T", owner_name="O",
+            stall_draw="3", cloth_number="1", form="1234",
+            days_since_last_run="14", wearing="",
+            forecastprice_numerator="3", forecastprice_denominator="1",
+        )
+        time_to_off_schedule = (60.0, 45.0, 15.0)
+        ticks = []
+        for i, (t, ltp) in enumerate(zip(time_to_off_schedule, ltp_path)):
+            # Tick 0 uses the configured back/lay; later ticks track
+            # the LTP path on both sides so the matcher can always
+            # close. Wider books than 1 unit so liability fits.
+            if i == 0:
+                snap = RunnerSnap(
+                    selection_id=sid, status="ACTIVE",
+                    last_traded_price=ltp,
+                    total_matched=500.0, starting_price_near=0.0,
+                    starting_price_far=0.0, adjustment_factor=None,
+                    bsp=None, sort_priority=1, removal_date=None,
+                    available_to_back=[
+                        PriceSize(price=back_price, size=200.0),
+                    ],
+                    available_to_lay=[
+                        PriceSize(price=lay_price, size=200.0),
+                    ],
+                )
+            else:
+                snap = RunnerSnap(
+                    selection_id=sid, status="ACTIVE",
+                    last_traded_price=ltp,
+                    total_matched=500.0, starting_price_near=0.0,
+                    starting_price_far=0.0, adjustment_factor=None,
+                    bsp=None, sort_priority=1, removal_date=None,
+                    available_to_back=[
+                        PriceSize(price=ltp - 0.05, size=200.0),
+                    ],
+                    available_to_lay=[
+                        PriceSize(price=ltp + 0.05, size=200.0),
+                    ],
+                )
+            ts = market_start - timedelta(seconds=t)
+            ticks.append(Tick(
+                market_id="1.999000002", timestamp=ts,
+                sequence_number=i, venue="Newmarket",
+                market_start_time=market_start,
+                number_of_active_runners=1, traded_volume=10000.0,
+                in_play=False, winner_selection_id=winner,
+                race_status=None, temperature=15.0, precipitation=0.0,
+                wind_speed=5.0, wind_direction=180.0, humidity=60.0,
+                weather_code=0, runners=[snap],
+            ))
+        race = Race(
+            market_id="1.999000002", venue="Newmarket",
+            market_start_time=market_start, winner_selection_id=winner,
+            ticks=ticks, runner_metadata={sid: meta},
+            winning_selection_ids={winner},
+        )
+        return Day(date="2026-05-02", races=[race])
+
+    @staticmethod
+    def _config(
+        stop_threshold: float = 0.0,
+        lay_floor: float = 4.0,
+        force_close_seconds: int = 0,
+    ) -> dict:
+        cfg = {
+            "training": {
+                "max_runners": 1,
+                "starting_budget": 100.0,
+                "max_bets_per_race": 20,
+                "scalping_mode": True,
+                "betting_constraints": {
+                    "max_back_price": 50.0,
+                    "max_lay_price": None,
+                    "force_close_before_off_seconds": force_close_seconds,
+                },
+            },
+            "actions": {"force_aggressive": True},
+            "reward": {
+                "early_pick_bonus_min": 1.2,
+                "early_pick_bonus_max": 1.5,
+                "early_pick_min_seconds": 300,
+                "efficiency_penalty": 0.01,
+                "commission": 0.05,
+                "stop_loss_pnl_threshold": stop_threshold,
+                "lay_only_naked_price_threshold": lay_floor,
+            },
+        }
+        return cfg
+
+    @staticmethod
+    def _open_back_pair(env: BetfairEnv, pair_id: str = "P1") -> None:
+        """Plant a single matched aggressive BACK leg with pair_id.
+
+        Bypasses the action pipeline so the test controls exactly what
+        ends up in ``bm.bets``. The paired passive is NOT placed —
+        we want the open exposure isolated for the MTM trigger to
+        flag.
+        """
+        from env.bet_manager import Bet
+        race = env.day.races[0]
+        bet = Bet(
+            selection_id=101, side=BetSide.BACK,
+            requested_stake=20.0, matched_stake=20.0,
+            average_price=4.0, market_id=race.market_id,
+            pair_id=pair_id,
+        )
+        env.bet_manager.bets.append(bet)
+        env.bet_manager.budget -= 20.0
+
+    @staticmethod
+    def _open_lay_pair(
+        env: BetfairEnv,
+        pair_id: str = "P1",
+        back_partner_price: float | None = None,
+    ) -> None:
+        """Plant a naked LAY leg, optionally with a settled BACK partner.
+
+        ``back_partner_price`` controls the carve-out check — when it's
+        set, an extra matched BACK at the given price gets dropped into
+        ``bm.bets`` with the same pair_id so
+        ``_is_naked_lay_long_odds`` finds it. The BACK is marked WON so
+        it's resolved (i.e. doesn't contribute MTM); the LAY is the
+        only open exposure, exactly the carve-out scenario.
+        """
+        from env.bet_manager import Bet, BetOutcome
+        race = env.day.races[0]
+        if back_partner_price is not None:
+            env.bet_manager.bets.append(Bet(
+                selection_id=101, side=BetSide.BACK,
+                requested_stake=10.0, matched_stake=10.0,
+                average_price=back_partner_price,
+                market_id=race.market_id, pair_id=pair_id,
+                outcome=BetOutcome.WON,  # resolved, doesn't add MTM
+            ))
+        # The naked LAY exposure that should (or shouldn't) trigger.
+        env.bet_manager.bets.append(Bet(
+            selection_id=101, side=BetSide.LAY,
+            requested_stake=20.0, matched_stake=20.0,
+            average_price=4.0, market_id=race.market_id,
+            pair_id=pair_id,
+        ))
+        # Reserve a chunky liability so place_back has room to overdraw.
+        env.bet_manager.budget = 100.0
+
+    # ── 1: byte-identity when threshold = 0 ────────────────────────────────
+
+    def test_threshold_zero_is_byte_identical_to_pre_plan(self):
+        """``stop_loss_pnl_threshold = 0`` ⇒ no stop-close fires on
+        ANY tick, even when MTM is heavily underwater. Counter stays
+        at 0; bm.bets stays at the planted-leg count."""
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 8.0, 8.0),  # huge MTM bleed
+        )
+        env = BetfairEnv(day, self._config(stop_threshold=0.0))
+        env.reset()
+        self._open_back_pair(env)
+        # Run the full episode.
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        info = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(noop)
+        assert info.get("arbs_stop_closed", 0) == 0
+        # The planted bet is still the only non-settled one in the
+        # day's records.
+        assert env._scalping_arbs_stop_closed == 0
+
+    # ── 2: stop-close fires when per-pair MTM dips below threshold ─────────
+
+    def test_stop_close_fires_when_pair_mtm_below_threshold(self):
+        """Synthetic race: agg-back at 4.0 with stake 20; LTP rises
+        to 8.0 → back position MTM = 20 × (4-8)/8 = −£10. With
+        threshold=£1 the stop-close trigger MUST fire.
+        """
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 8.0, 8.0),
+        )
+        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env.reset()
+        self._open_back_pair(env)
+        # Two steps: tick 0 has LTP=4 (matches placed price → MTM=0,
+        # no fire); tick 1 has LTP=8 (MTM = −£10 < −£1 → fire).
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        env.step(noop)
+        bm = env.bet_manager
+        close_legs = [
+            b for b in bm.bets if b.pair_id == "P1" and b.close_leg
+        ]
+        assert len(close_legs) == 1
+        assert close_legs[0].stop_close is True
+        assert close_legs[0].force_close is False  # strict matcher path
+
+    # ── 3: naked-lay carve-out at long odds skips stop-close ───────────────
+
+    def test_stop_close_does_not_fire_for_naked_lay_at_long_odds(self):
+        """Naked LAY with original BACK at 10.0, floor=4.0 → carve-out
+        applies, no close fires even at deep MTM loss."""
+        # LTP collapses 4.0 → 1.5 → naked lay loses heavily.
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 1.5, 1.5),
+        )
+        env = BetfairEnv(
+            day,
+            self._config(stop_threshold=1.0, lay_floor=4.0),
+        )
+        env.reset()
+        # Open lay-naked with original back at long odds (10.0 ≥ 4.0).
+        self._open_lay_pair(env, back_partner_price=10.0)
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        bm = env.bet_manager
+        # No stop-close placed.
+        assert not any(getattr(b, "stop_close", False) for b in bm.bets)
+        assert env._scalping_arbs_stop_closed == 0
+
+    # ── 4: short-odds lay closes (no carve-out) ────────────────────────────
+
+    def test_stop_close_fires_for_naked_lay_at_short_odds(self):
+        """Same shape as test 3 but back-partner at 2.5 (< floor=4.0).
+        Carve-out does NOT apply → stop-close fires."""
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 1.5, 1.5),
+        )
+        env = BetfairEnv(
+            day,
+            self._config(stop_threshold=1.0, lay_floor=4.0),
+        )
+        env.reset()
+        self._open_lay_pair(env, back_partner_price=2.5)
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        env.step(noop)
+        bm = env.bet_manager
+        close_legs = [
+            b for b in bm.bets if b.pair_id == "P1" and b.close_leg
+        ]
+        assert len(close_legs) == 1
+        assert close_legs[0].stop_close is True
+
+    # ── 5: naked back closes regardless of price ───────────────────────────
+
+    def test_stop_close_fires_for_naked_back_unconditionally(self):
+        """Naked BACK exposure stop-closes regardless of original back
+        price — naked-back carve-out doesn't exist (purpose.md §"leave
+        only long-odds lays naked")."""
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 8.0, 8.0),
+        )
+        # Lay floor at 4.0 — would gate a lay carve-out, but this is a
+        # back exposure so the carve-out path doesn't apply.
+        env = BetfairEnv(
+            day,
+            self._config(stop_threshold=1.0, lay_floor=4.0),
+        )
+        env.reset()
+        self._open_back_pair(env)
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        env.step(noop)
+        assert any(
+            getattr(b, "stop_close", False)
+            for b in env.bet_manager.bets
+        )
+
+    # ── 6: routing — stop-closed pair lands in arbs_stop_closed ────────────
+
+    def test_stop_closed_pair_not_counted_in_arbs_closed(self):
+        """The pair's outcome at settle goes into
+        ``scalping_arbs_stop_closed`` — NOT ``arbs_closed`` (agent-
+        initiated) NOR ``arbs_force_closed`` (T−N flat)."""
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 8.0, 8.0),
+        )
+        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env.reset()
+        self._open_back_pair(env)
+        # Run to completion.
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        info = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(noop)
+        assert info.get("arbs_stop_closed", 0) == 1
+        assert info.get("arbs_closed", 0) == 0
+        assert info.get("arbs_force_closed", 0) == 0
+
+    # ── 7: stop-close does NOT pay the close_signal +£1 bonus ──────────────
+
+    def test_stop_close_does_not_pay_close_signal_bonus(self):
+        """The close_signal shaped bonus uses
+        ``n_close_signal_successes = scalping_arbs_closed``. Stop-
+        closed pairs land in ``scalping_arbs_stop_closed`` so the
+        bonus stays zero (ignoring noise on the unrelated reward
+        terms)."""
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 8.0, 8.0),
+        )
+        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env.reset()
+        self._open_back_pair(env)
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        info = {}
+        while not terminated:
+            _, _, terminated, _, info = env.step(noop)
+        # 1 stop-close, 0 agent-closes, 0 force-closes.
+        assert info.get("arbs_closed", 0) == 0
+        assert info.get("arbs_stop_closed", 0) == 1
+        # Direct check via the helper used in _settle_current_race.
+        # ``n_close_signal_successes`` = arbs_closed only — would be 1
+        # if stop-close routing leaked, 0 with correct routing.
+        rep, shp = _compute_scalping_reward_terms(
+            race_pnl=0.0,
+            naked_per_pair=[],
+            n_close_signal_successes=info.get("arbs_closed", 0),
+            naked_loss_scale=1.0,
+        )
+        # Close bonus is +£1 × n_close_signal_successes; with 0 closes
+        # the shaped contribution from this term is 0.
+        assert shp == pytest.approx(0.0, abs=1e-9)
+
+    # ── 8: strict matcher — force_close stays False on the close leg ───────
+
+    def test_stop_close_uses_strict_matcher(self):
+        """The placed close leg carries ``force_close=False``: stop-
+        close is mid-race / targeted / strict matcher (LTP required,
+        ±50 % junk filter). The relaxed-matcher path is reserved for
+        T−N blanket flatten only."""
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 8.0, 8.0),
+        )
+        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env.reset()
+        self._open_back_pair(env)
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        env.step(noop)
+        close_legs = [
+            b for b in env.bet_manager.bets
+            if b.pair_id == "P1" and b.close_leg
+        ]
+        assert len(close_legs) == 1
+        assert close_legs[0].stop_close is True
+        # The critical assertion: stop-close does NOT carry force_close
+        # into the matcher.
+        assert close_legs[0].force_close is False

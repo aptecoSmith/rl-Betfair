@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from env.tick_ladder import tick_offset
+from env.tick_ladder import (
+    MAX_PRICE,
+    MIN_PRICE,
+    snap_to_tick,
+    tick_offset,
+)
 
 AggressiveSide = Literal["back", "lay"]
 
@@ -200,6 +205,124 @@ def equal_profit_back_stake(
         )
     numerator = lay_price - commission
     return lay_stake * numerator / denom
+
+
+def solve_lay_price_for_target_pnl(
+    back_stake: float,
+    back_price: float,
+    target_pnl: float,
+    commission: float,
+) -> float | None:
+    """Lay-price that, with equal-profit lay-stake sizing, locks
+    ``target_pnl`` net of commission on both race outcomes.
+
+    Used by ``env.betfair_env._maybe_place_paired`` when
+    ``reward.target_pnl_pair_sizing_enabled`` is on:
+    the agent's per-runner ``arb_spread`` action dim is reinterpreted
+    as a £-target rather than a tick distance, and the env solves
+    for the corresponding passive-lay price.
+
+    Derivation: from ``lose_pnl = -S_back + S_lay × (1 - c) = target``
+    we get ``S_lay = (target + S_back) / (1 - c)``. Substituting into
+    the equal-profit identity ``S_lay × (P_lay - c) =
+    S_back × [P_back × (1 - c) + c]`` and solving for ``P_lay``:
+
+        P_lay = c + S_back × (1 - c) × [P_back × (1 - c) + c]
+                  / (target + S_back)
+
+    Returns ``None`` if the algebra gives a non-physical result:
+    target above the maximum scalp the spread can support
+    (``P_lay >= P_back``), price at or below 1.0, or zero/negative
+    inputs. Caller should treat ``None`` as "refuse the open" rather
+    than fall back to the legacy tick-distance path.
+    """
+    if back_stake <= 0.0 or back_price <= 1.0:
+        return None
+    c = commission
+    denom = target_pnl + back_stake
+    if denom <= 0.0:
+        return None
+    p_lay = c + back_stake * (1.0 - c) * (back_price * (1.0 - c) + c) / denom
+    if p_lay <= 1.0:
+        return None
+    if p_lay >= back_price:
+        # Non-profitable spread — solver says you'd have to lay at or
+        # above the back price, which can't lock a positive target.
+        return None
+    return p_lay
+
+
+def solve_back_price_for_target_pnl(
+    lay_stake: float,
+    lay_price: float,
+    target_pnl: float,
+    commission: float,
+) -> float | None:
+    """Symmetric helper for lay-first scalps: returns the passive-back
+    price that locks ``target_pnl`` given an aggressive lay leg.
+
+    Derivation: ``lose_pnl = -S_back + S_lay × (1 - c) = target``
+    gives ``S_back = S_lay × (1 - c) - target``. Substituting into
+    the equal-profit identity and solving for ``P_back``:
+
+        K     = S_lay × (P_lay - c) / (S_lay × (1 - c) - target)
+        P_back = (K - c) / (1 - c)
+
+    Returns ``None`` for any non-physical result: target ≥ lose-side
+    maximum (``S_lay × (1 - c)``), solved P_back at or below 1.0,
+    P_back at or below the aggressive lay price (no profitable
+    spread), or P_back above the ladder cap.
+    """
+    if lay_stake <= 0.0 or lay_price <= 1.0:
+        return None
+    c = commission
+    denom = lay_stake * (1.0 - c) - target_pnl
+    if denom <= 0.0:
+        return None
+    k = lay_stake * (lay_price - c) / denom
+    p_back = (k - c) / (1.0 - c)
+    if p_back <= 1.0:
+        return None
+    if p_back <= lay_price:
+        return None
+    if p_back >= MAX_PRICE:
+        return None
+    return p_back
+
+
+def quantise_to_betfair_tick(
+    price: float,
+    side: Literal["back", "lay"],
+) -> float:
+    """Quantise *price* to a valid Betfair tick rounded in the
+    direction that PRESERVES (or improves) the agent's £-target
+    when fed into the equal-profit pair sizer.
+
+    For a back-first scalp the passive lay price is the LOWER leg —
+    quantising DOWN widens the spread and so produces a lock
+    ≥ target (the agent's £-target becomes a floor). For a lay-first
+    scalp the passive back price is the HIGHER leg — quantising UP
+    has the symmetric effect.
+
+    ``side`` refers to the PASSIVE leg's side: ``"lay"`` rounds
+    DOWN, ``"back"`` rounds UP. Returns the tick-snapped price.
+    """
+    if side not in ("back", "lay"):
+        raise ValueError(f"side must be 'back' or 'lay', got {side!r}")
+    if price <= MIN_PRICE:
+        return MIN_PRICE
+    if price >= MAX_PRICE:
+        return MAX_PRICE
+    nearest = snap_to_tick(price)
+    if side == "lay":
+        # Round DOWN (towards smaller lay price = wider spread).
+        if nearest > price + 1e-12:
+            return tick_offset(nearest, 1, -1)
+        return nearest
+    # Round UP for back (towards larger back price = wider spread).
+    if nearest < price - 1e-12:
+        return tick_offset(nearest, 1, +1)
+    return nearest
 
 
 def min_arb_ticks_for_profit(

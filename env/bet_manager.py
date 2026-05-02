@@ -131,6 +131,18 @@ class Bet:
     # (the agent didn't choose these closes). See
     # plans/arb-signal-cleanup/hard_constraints.md §7, §12, §14.
     force_close: bool = False
+    # Force-close-architecture Session 02 (2026-05-02) — distinguishes
+    # env-initiated mid-race stop-closes (fired when per-pair MTM
+    # crosses -stop_loss_pnl_threshold) from agent-initiated and T−N
+    # force-closes. ``stop_close=True`` implies ``close_leg=True``;
+    # ``force_close`` and ``stop_close`` are mutually exclusive
+    # (stop-close goes through the strict matcher, not the relaxed
+    # force-close path). A pair with any ``stop_close=True`` leg is
+    # classified as ``arbs_stop_closed`` at settlement — excluded
+    # from the matured-arb bonus and the ``+£1 per close_signal``
+    # shaped bonus (the agent didn't choose these closes either).
+    # See plans/rewrite/phase-3-followups/force-close-architecture/.
+    stop_close: bool = False
 
     @property
     def liability(self) -> float:

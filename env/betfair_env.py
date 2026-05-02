@@ -53,6 +53,9 @@ from env.scalping_math import (
     equal_profit_lay_stake,
     locked_pnl_per_unit_stake,
     min_arb_ticks_for_profit,
+    quantise_to_betfair_tick,
+    solve_back_price_for_target_pnl,
+    solve_lay_price_for_target_pnl,
 )
 from env.tick_ladder import tick_offset, ticks_between
 from training.perf_log import perf_log
@@ -463,6 +466,13 @@ class RaceRecord:
     # from agent-initiated ``arbs_closed``. Excluded from matured-arb
     # and close_signal bonuses (hard_constraints.md §7, §14).
     arbs_force_closed: int = 0
+    # Force-close-architecture Session 02 (2026-05-02): count of pairs
+    # whose second leg came from an env-initiated mid-race stop-close
+    # (per-pair MTM crossed -stop_loss_pnl_threshold). Distinct from
+    # ``arbs_closed`` (agent-initiated) and ``arbs_force_closed``
+    # (T−N blanket flatten). Excluded from matured-arb and close_signal
+    # bonuses (the agent didn't choose these closes either).
+    arbs_stop_closed: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
     # Scalping-close-signal observability (2026-04-24): covered-portion
@@ -482,6 +492,12 @@ class RaceRecord:
     # ``locked_pnl`` (natural matures + agent-closed worst-case floor)
     # and lands in ``race_pnl`` via the new additive term.
     force_closed_pnl: float = 0.0
+    # Force-close-architecture Session 02 (2026-05-02): cash P&L
+    # realised via env-initiated mid-race stop-closes (per-pair MTM
+    # crossed -stop_loss_pnl_threshold). Same accounting role as
+    # ``force_closed_pnl`` but distinct so the cohort scoreboard can
+    # compute stop-close fraction independently.
+    stop_closed_pnl: float = 0.0
     # Selective-open-shaping Session 01 (2026-04-25). Diagnostics for
     # the open-time-cost shaping mechanism that teaches the agent not
     # to open pairs it can't mature. ``pairs_opened`` is the count of
@@ -608,6 +624,32 @@ class BetfairEnv(gymnasium.Env):
         # 0.0 = byte-identical pre-plan path. See
         # plans/selective-open-shaping/purpose.md.
         "open_cost",
+        # Force-close-architecture Session 01 (2026-05-01): when
+        # truthy, the agent's per-runner ``arb_spread`` action dim
+        # reinterprets as a £-target ∈ [0.20, 5.00] and the env
+        # solves for the passive price that locks that target via
+        # the equal-profit identity. Plan-level flag — not a gene.
+        # Default False = byte-identical to pre-plan tick-distance
+        # behaviour. See plans/rewrite/phase-3-followups/
+        # force-close-architecture/.
+        "target_pnl_pair_sizing_enabled",
+        # Force-close-architecture Session 02 (2026-05-02): per-pair
+        # projected-loss stop-close threshold (£). When > 0, any open
+        # pair whose per-pair MTM crosses ``-stop_loss_pnl_threshold``
+        # is auto-closed via ``_attempt_close`` with ``stop_close=True``
+        # (strict matcher, NOT relaxed force-close). Plan-level flag —
+        # not a gene. Default 0.0 = no-op = byte-identical pre-plan.
+        # See plans/rewrite/phase-3-followups/force-close-architecture/
+        # session_prompts/02_projected_loss_stop_close.md.
+        "stop_loss_pnl_threshold",
+        # Force-close-architecture Session 02 (2026-05-02): naked-lay
+        # carve-out price floor. Stop-close fires unconditionally on
+        # naked-back exposures, but for naked-lay exposures only fires
+        # when the original back leg's matched price was BELOW this
+        # floor. Above the floor the lay carries through to settle
+        # ("leave only long-odds lays naked", per the operator review's
+        # 2026-05-01 framing). Default 4.0; range typically [2.0, 10.0].
+        "lay_only_naked_price_threshold",
     })
 
     def __init__(
@@ -673,6 +715,23 @@ class BetfairEnv(gymnasium.Env):
         }
         self._force_close_attempts: int = 0
         self._force_close_via_evicted: int = 0
+        # Force-close-architecture Session 01 (2026-05-01). Counts
+        # pair opens refused because the target-£ solver returned a
+        # non-physical price. Reset in ``reset()``; written in
+        # ``_maybe_place_paired`` only when target-pnl pair sizing is
+        # enabled. Default 0 = byte-identical to pre-plan.
+        self._scalping_arbs_target_pnl_refused: int = 0
+        # Force-close-architecture Session 02 (2026-05-02). Counts
+        # pairs the env stop-closed via the strict matcher when their
+        # per-pair MTM dipped past the configured threshold. Reset in
+        # ``reset()``; written in ``_attempt_close`` when
+        # ``stop_close=True``. Default 0 = byte-identical to pre-plan.
+        self._scalping_arbs_stop_closed: int = 0
+        # Per-pair MTM bucket {pair_id: £}. Rebuilt by
+        # ``_compute_portfolio_mtm`` every call; initialised here so
+        # first-access (e.g. in stub tests bypassing ``reset()``)
+        # finds an empty dict instead of AttributeError.
+        self._per_pair_mtm: dict[str, float] = {}
         self._force_close_before_off_seconds: int = int(
             constraints.get("force_close_before_off_seconds", 0)
         )
@@ -827,6 +886,35 @@ class BetfairEnv(gymnasium.Env):
                 self._open_cost,
             )
             self._open_cost = float(np.clip(self._open_cost, 0.0, 2.0))
+        # Force-close-architecture Session 01 (2026-05-01). Plan-level
+        # flag: when True, ``_maybe_place_paired`` reinterprets the
+        # agent's per-runner ``arb_spread`` action as a £-target and
+        # solves for the corresponding passive price. Default False =
+        # byte-identical to pre-plan path.
+        self._target_pnl_pair_sizing_enabled: bool = bool(
+            reward_cfg.get("target_pnl_pair_sizing_enabled", False),
+        )
+        # Force-close-architecture Session 02 (2026-05-02). Projected-
+        # loss stop-close threshold (£, positive). When > 0 the env
+        # auto-closes any open pair whose per-pair MTM dips below
+        # ``-stop_loss_pnl_threshold``. The close routes through
+        # ``_attempt_close`` with ``stop_close=True`` (strict matcher,
+        # NOT the relaxed force-close path) so the close lands at a
+        # real price; the pair is classified as ``arbs_stop_closed``
+        # at settle, distinct from agent-closed and force-closed.
+        # Default 0.0 = disabled = byte-identical to pre-plan.
+        self._stop_loss_pnl_threshold: float = float(
+            reward_cfg.get("stop_loss_pnl_threshold", 0.0),
+        )
+        # Naked-lay carve-out floor (£, price). Stop-close fires
+        # unconditionally on pairs whose only open leg is a back
+        # exposure. For pairs with only a naked LAY exposure, fires
+        # only when the original BACK leg's matched price was below
+        # this floor — above it, long-odds lays carry through to
+        # settle. Default 4.0 per purpose.md §"Session 02".
+        self._lay_only_naked_price_threshold: float = float(
+            reward_cfg.get("lay_only_naked_price_threshold", 4.0),
+        )
         # Selective-open-shaping per-tick state (2026-04-25 Session 02
         # revision). The per-tick design replaces the settle-time
         # equivalent that landed in commit e919c34 — same total
@@ -1368,6 +1456,25 @@ class BetfairEnv(gymnasium.Env):
             "scalping_force_closed_pnl": sum(
                 r.force_closed_pnl for r in self._race_records
             ),
+            # Force-close-architecture Session 02 (2026-05-02). Per-
+            # episode rollup for env-initiated mid-race stop-closes.
+            # Pre-plan rollouts: counter stays 0 and
+            # scalping_stop_closed_pnl stays 0.0; downstream consumers
+            # reading the defaults see no behaviour change.
+            "arbs_stop_closed": sum(
+                r.arbs_stop_closed for r in self._race_records
+            ),
+            "scalping_stop_closed_pnl": sum(
+                r.stop_closed_pnl for r in self._race_records
+            ),
+            # Active threshold for telemetry (£). 0.0 when feature
+            # disabled (default).
+            "stop_loss_pnl_threshold_active": float(
+                self._stop_loss_pnl_threshold
+            ),
+            "lay_only_naked_price_threshold_active": float(
+                self._lay_only_naked_price_threshold
+            ),
             # Selective-open-shaping Session 01 (2026-04-25). Per-
             # episode rollups for the open-cost shaping mechanism.
             # Both default 0.0 / 0 — pre-plan rollouts and runs with
@@ -1447,6 +1554,13 @@ class BetfairEnv(gymnasium.Env):
                 self._force_close_refusals["above_cap"]
             ),
             "force_close_via_evicted": self._force_close_via_evicted,
+            # Force-close-architecture Session 01 (2026-05-01).
+            # Per-episode count of pair opens refused because the
+            # solved target-£ passive price was non-physical
+            # (P_lay >= P_back, P_back <= P_lay, or below MIN_PRICE
+            # / above MAX_PRICE). Pre-plan rows lack this field;
+            # readers must default-tolerate.
+            "arbs_target_pnl_refused": self._scalping_arbs_target_pnl_refused,
             # Arb-signal-cleanup Session 03b (2026-04-21): diagnostic
             # for the ep1 warmup_scale=1.0 bug. Exposes the env-side
             # ``_episode_idx`` at _get_info time so the trainer can
@@ -1526,6 +1640,21 @@ class BetfairEnv(gymnasium.Env):
         }
         self._force_close_attempts = 0
         self._force_close_via_evicted = 0
+        # Force-close-architecture Session 01 (2026-05-01).
+        self._scalping_arbs_target_pnl_refused = 0
+        # Force-close-architecture Session 02 (2026-05-02). Per-episode
+        # count of pairs the env stop-closed because their per-pair
+        # MTM crossed -stop_loss_pnl_threshold. Distinct from
+        # ``arbs_closed`` (agent-initiated) and ``arbs_force_closed``
+        # (T−N blanket flatten); the matured-arb / close_signal shaped
+        # bonuses do NOT credit stop-closes.
+        self._scalping_arbs_stop_closed: int = 0
+        # Per-pair MTM bucket — mirrors the portfolio MTM sum per pair.
+        # Rebuilt every tick by ``_compute_portfolio_mtm``; stored so
+        # the stop-close trigger can read ``{pair_id: £}`` without
+        # re-walking ``bm.bets``. Reset on race-start mirrors the
+        # ``_mtm_prev`` reset.
+        self._per_pair_mtm: dict[str, float] = {}
         # Per-race running snapshot — last tick's portfolio MTM.
         # Reset on race-start so cumulative shaped MTM across a race
         # telescopes to zero at settle. See hard_constraints §8-§9.
@@ -1607,6 +1736,27 @@ class BetfairEnv(gymnasium.Env):
             ).total_seconds()
             if 0.0 <= time_to_off <= self._force_close_before_off_seconds:
                 self._force_close_open_pairs(race, tick, time_to_off)
+
+        # 0d. Projected-loss stop-close pass (force-close-architecture
+        #     Session 02, 2026-05-02). Runs BEFORE action handling so
+        #     a stop-closed leg is visible to downstream accounting the
+        #     same way an agent-initiated close_signal close would be.
+        #     Gated on scalping_mode + threshold > 0 + pre-off. Default
+        #     threshold 0 disables (rollouts byte-identical to pre-plan).
+        #     The trigger reads ``self._per_pair_mtm`` rebuilt by
+        #     ``_compute_portfolio_mtm`` here — a fresh call so the
+        #     map reflects this tick's LTPs, not the previous tick's
+        #     end-of-step snapshot. The end-of-step MTM compute (§6)
+        #     still runs and captures the post-action state for the
+        #     shaped contribution — the only cost is one extra walk
+        #     through ``bm.bets`` per tick.
+        if (
+            self.scalping_mode
+            and self._stop_loss_pnl_threshold > 0.0
+            and not tick.in_play
+        ):
+            self._compute_portfolio_mtm(self._current_ltps())
+            self._stop_close_open_pairs(race, tick)
 
         # 1. Process action (bets only on pre-race ticks)
         if not tick.in_play:
@@ -1965,6 +2115,7 @@ class BetfairEnv(gymnasium.Env):
                         passive_placed = self._maybe_place_paired(
                             runner, bet, arb_ticks, race, pair_id,
                             time_to_off=time_to_off,
+                            arb_frac=arb_frac,
                         ) if self.scalping_mode else False
                         # Selective-open-shaping per-tick charge.
                         # Lands on the open tick (this tick) so the
@@ -1987,6 +2138,7 @@ class BetfairEnv(gymnasium.Env):
                         passive_placed = self._maybe_place_paired(
                             runner, bet, arb_ticks, race, pair_id,
                             time_to_off=time_to_off,
+                            arb_frac=arb_frac,
                         ) if self.scalping_mode else False
                         # See above — symmetric charge for lay-aggressive.
                         self._charge_open_cost(pair_id)
@@ -2092,33 +2244,84 @@ class BetfairEnv(gymnasium.Env):
         race: Race,
         pair_id: str,
         time_to_off: float = 0.0,
+        arb_frac: float = 0.0,
     ) -> bool:
         """Auto-place the passive counter-order for *aggressive_bet*.
 
         Called from ``_process_action`` when scalping_mode is on and an
-        aggressive bet matched. The paired order rests on the opposite
-        side of the same runner at ``fill_price ± arb_ticks`` ticks away:
-        an aggressive back fills at a higher price, so its passive lay
-        sits ``arb_ticks`` below; conversely for aggressive lay.
+        aggressive bet matched. By default the paired order rests on
+        the opposite side of the same runner at
+        ``fill_price ± arb_ticks`` ticks away: an aggressive back
+        fills at a higher price, so its passive lay sits ``arb_ticks``
+        below; conversely for aggressive lay.
+
+        When ``reward.target_pnl_pair_sizing_enabled`` is True, the
+        ``arb_frac`` value (the agent's per-runner ``arb_spread``
+        action mapped to [0, 1]) is reinterpreted as a £-target ∈
+        [0.20, 5.00] and the env solves for the passive price that
+        locks that target via the equal-profit identity. See
+        plans/rewrite/phase-3-followups/force-close-architecture/.
 
         Returns True on successful placement. A failure (junk filter,
-        insufficient budget, empty opposite-side ladder at the computed
-        price) is silent — the aggressive leg remains naked.
+        insufficient budget, empty opposite-side ladder, or — under
+        target-pnl sizing — solver-infeasible target) is silent: the
+        aggressive leg remains naked. Target-pnl refusals additionally
+        increment ``_scalping_arbs_target_pnl_refused``.
         """
         bm = self.bet_manager
         assert bm is not None
-        if aggressive_bet.side is BetSide.BACK:
+        passive_side = (
+            BetSide.LAY if aggressive_bet.side is BetSide.BACK else BetSide.BACK
+        )
+
+        if self._target_pnl_pair_sizing_enabled:
+            # New mechanics: agent's arb_spread re-interprets as a
+            # £-target. Map [0, 1] → [£0.20, £5.00] linear.
+            target_pnl = 0.20 + 4.80 * float(np.clip(arb_frac, 0.0, 1.0))
+            if aggressive_bet.side is BetSide.BACK:
+                solved = solve_lay_price_for_target_pnl(
+                    back_stake=aggressive_bet.matched_stake,
+                    back_price=aggressive_bet.average_price,
+                    target_pnl=target_pnl,
+                    commission=self._commission,
+                )
+            else:
+                solved = solve_back_price_for_target_pnl(
+                    lay_stake=aggressive_bet.matched_stake,
+                    lay_price=aggressive_bet.average_price,
+                    target_pnl=target_pnl,
+                    commission=self._commission,
+                )
+            if solved is None:
+                # Refusal is the SIGNAL — don't fall back to the
+                # tick-distance path.
+                self._scalping_arbs_target_pnl_refused += 1
+                return False
+            passive_price = quantise_to_betfair_tick(
+                solved,
+                side="lay" if passive_side is BetSide.LAY else "back",
+            )
+            # Quantisation can collide with the aggressive price (e.g.
+            # if the solved price was within one tick of P_back). Refuse
+            # rather than silently producing a degenerate pair.
+            if aggressive_bet.side is BetSide.BACK:
+                if passive_price >= aggressive_bet.average_price:
+                    self._scalping_arbs_target_pnl_refused += 1
+                    return False
+            else:
+                if passive_price <= aggressive_bet.average_price:
+                    self._scalping_arbs_target_pnl_refused += 1
+                    return False
+        elif aggressive_bet.side is BetSide.BACK:
             # Back at high price → lay at lower price (profitable when
             # traded down). The ladder moves *down* from the fill price.
             passive_price = tick_offset(
                 aggressive_bet.average_price, arb_ticks, -1,
             )
-            passive_side = BetSide.LAY
         else:
             passive_price = tick_offset(
                 aggressive_bet.average_price, arb_ticks, +1,
             )
-            passive_side = BetSide.BACK
 
         # Asymmetric sizing — the passive stake must scale with the
         # price ratio to LOCK profit across both race outcomes. With
@@ -2358,6 +2561,7 @@ class BetfairEnv(gymnasium.Env):
         action_debug: dict,
         *,
         force_close: bool = False,
+        stop_close: bool = False,
         pair_id_hint: "str | None" = None,
     ) -> None:
         """Close the open paired position on *sid* by crossing the spread.
@@ -2433,17 +2637,19 @@ class BetfairEnv(gymnasium.Env):
         if target is None:
             # Agent-initiated close bails — without a resting passive
             # there's nothing to close against (hard_constraints §1).
-            # Force-close bails only if no pair_id_hint was supplied;
-            # with a hint it proceeds against the already-matched
-            # aggressive partner (the passive was evicted mid-race, e.g.
-            # by the junk-band requote path on line 2020, but the
-            # aggressive leg's open exposure still needs flattening).
-            if not force_close or pair_id_hint is None:
+            # Force-close and stop-close bail only if no pair_id_hint
+            # was supplied; with a hint they proceed against the
+            # already-matched aggressive partner (the passive was
+            # evicted mid-race, e.g. by the junk-band requote path on
+            # line 2020, but the aggressive leg's open exposure still
+            # needs flattening).
+            if (not force_close and not stop_close) or pair_id_hint is None:
                 _mark(close_attempted=True, close_placed=False,
                       close_reason="no_open_aggressive")
                 return
             pair_id = pair_id_hint
-            self._force_close_via_evicted += 1
+            if force_close:
+                self._force_close_via_evicted += 1
         else:
             pair_id = target.pair_id
         if force_close:
@@ -2597,10 +2803,17 @@ class BetfairEnv(gymnasium.Env):
         # cleanup Session 01: force_close also stamps the leg so
         # settlement can route it into arbs_force_closed (a subtype of
         # closed; hard_constraints §7, §12, §14).
+        # Force-close-architecture Session 02 (2026-05-02): stop_close
+        # also stamps the leg so settlement routes it into
+        # arbs_stop_closed (distinct from agent-closed and force-closed,
+        # excluded from matured-arb / close_signal bonuses).
         close_bet.close_leg = True
         close_bet.force_close = force_close
+        close_bet.stop_close = stop_close
         close_bet.tick_index = self._tick_idx
         self._bet_times[len(bm.bets) - 1] = time_to_off
+        if stop_close:
+            self._scalping_arbs_stop_closed += 1
 
         _mark(close_attempted=True, close_placed=True,
               close_reason=None,
@@ -2670,6 +2883,120 @@ class BetfairEnv(gymnasium.Env):
                 pair_id_hint=pid,
             )
 
+    # ── Projected-loss stop-close (force-close-architecture Session 02) ─
+
+    def _is_naked_lay_long_odds(
+        self, open_legs: list, long_odds_floor: float,
+    ) -> bool:
+        """Return True iff the carve-out applies to this pair.
+
+        The carve-out skips stop-close on pairs whose ONLY open leg(s)
+        are LAY-side AND the original BACK leg's matched price was
+        ``>= long_odds_floor``. Above the floor the lay carries through
+        to settle ("leave only long-odds lays naked", per the operator
+        review's 2026-05-01 framing). Pairs with any open BACK leg are
+        always closed unconditionally — naked-back exposure is unbounded
+        directional risk.
+
+        The original back leg is found via ``pair_id`` on already-
+        matched bets (``bm.bets`` carries every matched leg). When the
+        pair has matured legs on both sides this method shouldn't be
+        called (the pair has no naked exposure left), but if it is the
+        method conservatively returns False so the regular trigger
+        path runs.
+        """
+        # Any open BACK leg ⇒ no carve-out.
+        if any(leg.side is BetSide.BACK for leg in open_legs):
+            return False
+        # All open legs are LAY-side. Find the original BACK partner
+        # by pair_id; its matched price gates the carve-out.
+        bm = self.bet_manager
+        if bm is None:
+            return False
+        pair_id = open_legs[0].pair_id
+        if pair_id is None:
+            return False
+        for bet in bm.bets:
+            if bet.pair_id != pair_id:
+                continue
+            if bet.side is BetSide.BACK:
+                return bet.average_price >= long_odds_floor
+        # No back partner found in matched bets — the pair never had
+        # one matched (e.g. a lay-first naked from a passive that never
+        # filled). Conservatively keep the carve-out OFF so the
+        # stop-close still fires.
+        return False
+
+    def _stop_close_open_pairs(
+        self, race: Race, tick: Tick,
+    ) -> None:
+        """Stop-close every open pair whose per-pair MTM crosses the
+        configured threshold.
+
+        Called once per pre-off tick, AFTER ``_compute_portfolio_mtm``
+        has rebuilt ``self._per_pair_mtm``. Reads the per-pair bucket
+        directly so the trigger never re-walks ``bm.bets``.
+
+        Each triggered close routes through ``_attempt_close`` with
+        ``stop_close=True`` and ``force_close=False`` — this is the
+        STRICT matcher path (LTP required, ±50 % junk filter, hard
+        price cap) per purpose.md §"Session 02" hard constraint §8:
+        stop-close is a real trade at a real price, NOT the relaxed
+        end-of-race blanket flatten.
+
+        Naked-lay carve-out: pairs whose only open leg is LAY-side and
+        whose original back leg is at price ``>=
+        lay_only_naked_price_threshold`` are skipped — long-odds lays
+        carry through to settle.
+        """
+        bm = self.bet_manager
+        if bm is None:
+            return
+        threshold = self._stop_loss_pnl_threshold
+        if threshold <= 0.0:
+            return
+        long_odds_floor = self._lay_only_naked_price_threshold
+
+        runner_by_sid = {r.selection_id: r for r in tick.runners}
+        action_debug: dict = {}
+        # Snapshot the per-pair MTM map; ``_attempt_close`` mutates
+        # ``bm.bets`` (and on next tick ``_per_pair_mtm`` will rebuild),
+        # but iterating the snapshot keeps the loop stable within this
+        # tick's pass.
+        for pair_id, pair_mtm in list(self._per_pair_mtm.items()):
+            if pair_mtm > -threshold:
+                continue
+            # Find the open (UNSETTLED) legs on this pair so we can
+            # apply the naked-lay carve-out and pick a representative
+            # selection_id for the close.
+            open_legs = [
+                b for b in bm.bets
+                if b.pair_id == pair_id
+                and b.outcome is BetOutcome.UNSETTLED
+                and b.market_id == race.market_id
+            ]
+            if not open_legs:
+                continue
+            if self._is_naked_lay_long_odds(open_legs, long_odds_floor):
+                continue
+            sid = open_legs[0].selection_id
+            runner = runner_by_sid.get(sid)
+            if runner is None or runner.status != "ACTIVE":
+                continue
+            time_to_off = (
+                race.market_start_time - tick.timestamp
+            ).total_seconds() if tick.timestamp is not None else 0.0
+            self._attempt_close(
+                sid=sid,
+                runner=runner,
+                race=race,
+                time_to_off=time_to_off,
+                action_debug=action_debug,
+                force_close=False,
+                stop_close=True,
+                pair_id_hint=pair_id,
+            )
+
     # ── Selective-open shaping per-tick (2026-04-25 Session 02) ──────────
 
     def _charge_open_cost(self, pair_id: "str | None") -> float:
@@ -2735,7 +3062,12 @@ class BetfairEnv(gymnasium.Env):
             if len(legs) < 2:
                 continue  # only aggressive leg matched; pair still open
             is_force = any(getattr(b, "force_close", False) for b in legs)
-            if not is_force:
+            # Force-close-architecture Session 02 (2026-05-02): stop-
+            # closed pairs are env-initiated (same category as
+            # force-closed) and do NOT refund. Agent-initiated closes
+            # via close_signal, and naturally-matured pairs, refund.
+            is_stop = any(getattr(b, "stop_close", False) for b in legs)
+            if not is_force and not is_stop:
                 refund_total += charge  # mature OR agent-closed → refund
             # Either way, the pair has resolved; remove from pending.
             resolved_now.append(pid)
@@ -2767,9 +3099,26 @@ class BetfairEnv(gymnasium.Env):
         - Back: ``S * (P_matched - LTP) / LTP``
         - Lay:  ``S * (LTP - P_matched) / LTP``
 
+        Side effect (force-close-architecture Session 02, 2026-05-02):
+        also rebuilds ``self._per_pair_mtm`` — a ``{pair_id: £}`` map
+        with one entry per pair that has at least one open
+        (UNSETTLED) leg. Bets with no ``pair_id`` (directional /
+        non-scalping mode) contribute to the portfolio total but not
+        to the per-pair map. The per-pair map mirrors the portfolio
+        sum's drop-out behaviour: pairs whose every leg is resolved
+        disappear from the map at settle, preserving the per-pair
+        telescope-to-zero invariant by construction (a pair's
+        cumulative MTM delta from open through settle is zero,
+        identical to the portfolio invariant). See plans/rewrite/
+        phase-3-followups/force-close-architecture/session_prompts/
+        02_projected_loss_stop_close.md §"Per-pair MTM extension".
+
         Returns the portfolio-level sum (pounds).
         """
         bm = self.bet_manager
+        # Reset the per-pair bucket to mirror drop-out: any pair_id
+        # absent from the loop below is implicitly zero / removed.
+        self._per_pair_mtm = {}
         if bm is None:
             return 0.0
         total = 0.0
@@ -2782,13 +3131,19 @@ class BetfairEnv(gymnasium.Env):
             if ltp is None or ltp <= 1.0:
                 continue  # unpriceable
             if bet.side is BetSide.BACK:
-                total += bet.matched_stake * (
+                contrib = bet.matched_stake * (
                     bet.average_price - ltp
                 ) / ltp
             else:  # BetSide.LAY
-                total += bet.matched_stake * (
+                contrib = bet.matched_stake * (
                     ltp - bet.average_price
                 ) / ltp
+            total += contrib
+            pid = bet.pair_id
+            if pid is not None:
+                self._per_pair_mtm[pid] = (
+                    self._per_pair_mtm.get(pid, 0.0) + contrib
+                )
         return total
 
     def _current_ltps(self) -> dict[int, float]:
@@ -2842,6 +3197,12 @@ class BetfairEnv(gymnasium.Env):
         # accounted distinctly so matured-arb / close_signal bonuses
         # can stay agent-only (hard_constraints §7, §12, §14).
         scalping_arbs_force_closed = 0
+        # Force-close-architecture Session 02 (2026-05-02): separate
+        # counter for env-initiated mid-race stop-closes. Same role as
+        # arbs_force_closed (subtype of closed; excluded from
+        # matured-arb / close_signal bonuses) but distinct so the
+        # cohort scoreboard can compute per-agent stop-close fraction.
+        scalping_arbs_stop_closed = 0
         scalping_arbs_naked = 0
         scalping_naked_exposure = 0.0
         scalping_early_lock_bonus = 0.0
@@ -2873,6 +3234,16 @@ class BetfairEnv(gymnasium.Env):
                     is_force_closed = (
                         (agg is not None and agg.force_close)
                         or (pas is not None and pas.force_close)
+                    )
+                    # Force-close-architecture Session 02 (2026-05-02):
+                    # stop-closed pairs land in their own bucket so the
+                    # close_signal / matured-arb bonuses can stay
+                    # agent-only and the cohort scoreboard can compute
+                    # stop-close fraction independently of agent vs T−N
+                    # closes.
+                    is_stop_closed = (
+                        (agg is not None and getattr(agg, "stop_close", False))
+                        or (pas is not None and getattr(pas, "stop_close", False))
                     )
                     back_bet = agg if agg.side is BetSide.BACK else pas
                     lay_bet = agg if agg.side is BetSide.LAY else pas
@@ -2906,7 +3277,9 @@ class BetfairEnv(gymnasium.Env):
                             -s_b_eff
                             + s_l_eff * (1.0 - self._commission)
                         )
-                        if is_force_closed:
+                        if is_stop_closed:
+                            scalping_arbs_stop_closed += 1
+                        elif is_force_closed:
                             scalping_arbs_force_closed += 1
                         else:
                             scalping_arbs_closed += 1
@@ -2921,6 +3294,11 @@ class BetfairEnv(gymnasium.Env):
                             # from agent-initiated closes in the
                             # activity-log / replay UI.
                             "force_close": bool(is_force_closed),
+                            # Stop-close (Session 02). Mutually exclusive
+                            # with force_close — stop-close uses the
+                            # strict matcher mid-race, force-close uses
+                            # the relaxed matcher at T−N.
+                            "stop_close": bool(is_stop_closed),
                         })
                     else:
                         scalping_arbs_completed += 1
@@ -3202,6 +3580,13 @@ class BetfairEnv(gymnasium.Env):
         # closes distinct (hard_constraints §13, §14).
         scalping_closed_pnl = 0.0
         scalping_force_closed_pnl = 0.0
+        # Force-close-architecture Session 02 (2026-05-02): cash bucket
+        # for env-initiated mid-race stop-closes. Mutually exclusive
+        # with closed/force_closed_pnl on a per-pair basis (a leg
+        # carries at most one of close_leg+force_close, close_leg+
+        # stop_close, or close_leg alone). Subtracted from naked_pnl
+        # below so RaceRecord's naked field is the true residual.
+        scalping_stop_closed_pnl = 0.0
         # Selective-open-shaping (2026-04-25 Session 02 revision —
         # per-tick). The per-race shaped contribution is now
         # accumulated tick-by-tick into ``_race_open_cost_shaped_pnl``
@@ -3241,6 +3626,9 @@ class BetfairEnv(gymnasium.Env):
                 if not close_bets:
                     continue  # naturally-matured pair — not closed.
                 is_force = any(bt.force_close for bt in close_bets)
+                is_stop = any(
+                    getattr(bt, "stop_close", False) for bt in close_bets
+                )
                 agg = next(bt for bt in legs if not bt.close_leg)
                 close = close_bets[0]
                 covered_frac = _covered_fraction(
@@ -3248,12 +3636,15 @@ class BetfairEnv(gymnasium.Env):
                 )
 
                 # Attribute: covered share of agg.pnl + all of close.pnl
-                # go to the closed/force_closed bucket. The residual
-                # (1 - covered_frac) × agg.pnl falls through to naked
-                # via the naked_pnl = race_pnl − locked − closed − force
+                # go to the closed/force_closed/stop_closed bucket. The
+                # residual (1 - covered_frac) × agg.pnl falls through
+                # to naked via the
+                # naked_pnl = race_pnl − locked − closed − force − stop
                 # subtraction below.
                 covered_cash = covered_frac * agg.pnl + close.pnl
-                if is_force:
+                if is_stop:
+                    scalping_stop_closed_pnl += covered_cash
+                elif is_force:
                     scalping_force_closed_pnl += covered_cash
                 else:
                     scalping_closed_pnl += covered_cash
@@ -3285,6 +3676,7 @@ class BetfairEnv(gymnasium.Env):
             - scalping_locked_pnl
             - scalping_closed_pnl
             - scalping_force_closed_pnl
+            - scalping_stop_closed_pnl
         )
 
         # Scalping reward split across raw and shaped channels
@@ -3344,10 +3736,12 @@ class BetfairEnv(gymnasium.Env):
             arbs_naked=scalping_arbs_naked,
             arbs_closed=scalping_arbs_closed,
             arbs_force_closed=scalping_arbs_force_closed,
+            arbs_stop_closed=scalping_arbs_stop_closed,
             locked_pnl=scalping_locked_pnl,
             naked_pnl=naked_pnl,
             closed_pnl=scalping_closed_pnl,
             force_closed_pnl=scalping_force_closed_pnl,
+            stop_closed_pnl=scalping_stop_closed_pnl,
             pairs_opened=pairs_opened,
             open_cost_shaped_pnl=open_cost_shaped_pnl,
             fill_mode=self.day.fill_mode,

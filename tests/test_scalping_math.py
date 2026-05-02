@@ -14,6 +14,9 @@ from env.scalping_math import (
     equal_profit_lay_stake,
     locked_pnl_per_unit_stake,
     min_arb_ticks_for_profit,
+    quantise_to_betfair_tick,
+    solve_back_price_for_target_pnl,
+    solve_lay_price_for_target_pnl,
 )
 
 
@@ -250,3 +253,127 @@ class TestEqualProfitSizing:
             equal_profit_lay_stake(10.0, 4.0, 0.05, 0.05)
         with pytest.raises(ValueError):
             equal_profit_lay_stake(10.0, 4.0, 0.04, 0.05)
+
+
+# -- solve_lay_price_for_target_pnl / solve_back_price_for_target_pnl ----
+
+
+class TestSolveTargetPnl:
+    """Force-close-architecture Session 01: target-£-pair sizing."""
+
+    @pytest.mark.parametrize("c", [0.0, 0.05, 0.10])
+    @pytest.mark.parametrize(
+        "back_stake, back_price, target",
+        [
+            (10.0, 4.00, 0.50),
+            (10.0, 4.00, 1.00),
+            (16.0, 8.20, 2.00),
+            (5.0, 3.00, 0.20),
+            (25.0, 6.00, 5.00),
+        ],
+    )
+    def test_solve_lay_price_round_trip(self, back_stake, back_price, target, c):
+        """The solved lay-price, fed back into ``equal_profit_lay_stake``,
+        produces a stake whose pair P&L equals ``target_pnl`` on both
+        race outcomes (within £0.01)."""
+        p_lay = solve_lay_price_for_target_pnl(
+            back_stake=back_stake, back_price=back_price,
+            target_pnl=target, commission=c,
+        )
+        if p_lay is None:
+            pytest.skip("target unreachable at this (S, P, c) — see refusal test")
+        s_lay = equal_profit_lay_stake(
+            back_stake=back_stake, back_price=back_price,
+            lay_price=p_lay, commission=c,
+        )
+        win_pnl = back_stake * (back_price - 1.0) * (1.0 - c) - s_lay * (p_lay - 1.0)
+        lose_pnl = -back_stake + s_lay * (1.0 - c)
+        assert abs(win_pnl - target) < 0.01
+        assert abs(lose_pnl - target) < 0.01
+
+    def test_solve_lay_price_returns_none_when_target_unreachable(self):
+        """A target larger than the maximum lock the spread can support
+        (P_lay would have to be > P_back) → None."""
+        # £100 target on a £1 back-stake at 4.00 — impossible.
+        out = solve_lay_price_for_target_pnl(
+            back_stake=1.0, back_price=4.00, target_pnl=100.0, commission=0.05,
+        )
+        assert out is None
+
+    def test_solve_lay_price_returns_none_for_invalid_inputs(self):
+        # Zero stake.
+        assert solve_lay_price_for_target_pnl(0.0, 4.0, 0.5, 0.05) is None
+        # Back-price <= 1.0.
+        assert solve_lay_price_for_target_pnl(10.0, 1.0, 0.5, 0.05) is None
+        # Negative target driving target+stake non-positive.
+        assert solve_lay_price_for_target_pnl(1.0, 4.0, -2.0, 0.05) is None
+
+    @pytest.mark.parametrize("c", [0.0, 0.05, 0.10])
+    @pytest.mark.parametrize(
+        "lay_stake, lay_price, target",
+        [
+            (10.0, 3.00, 0.50),
+            (10.0, 3.00, 1.00),
+            (16.0, 5.00, 2.00),
+            (5.0, 4.00, 0.20),
+        ],
+    )
+    def test_solve_back_price_round_trip(self, lay_stake, lay_price, target, c):
+        """Symmetric round-trip on the lay-first solver."""
+        p_back = solve_back_price_for_target_pnl(
+            lay_stake=lay_stake, lay_price=lay_price,
+            target_pnl=target, commission=c,
+        )
+        if p_back is None:
+            pytest.skip("target unreachable at this (S, P, c)")
+        s_back = equal_profit_back_stake(
+            lay_stake=lay_stake, lay_price=lay_price,
+            back_price=p_back, commission=c,
+        )
+        win_pnl = s_back * (p_back - 1.0) * (1.0 - c) - lay_stake * (lay_price - 1.0)
+        lose_pnl = -s_back + lay_stake * (1.0 - c)
+        assert abs(win_pnl - target) < 0.01
+        assert abs(lose_pnl - target) < 0.01
+
+    def test_solve_back_price_returns_none_when_unreachable(self):
+        """Target above ``S_lay × (1 - c)`` → lose-side max is exceeded."""
+        # Target £20 on a £10 lay stake — lose-side max is £9.50 at c=5%.
+        out = solve_back_price_for_target_pnl(
+            lay_stake=10.0, lay_price=3.0, target_pnl=20.0, commission=0.05,
+        )
+        assert out is None
+
+    def test_solve_back_price_returns_none_for_invalid_inputs(self):
+        assert solve_back_price_for_target_pnl(0.0, 3.0, 0.5, 0.05) is None
+        assert solve_back_price_for_target_pnl(10.0, 1.0, 0.5, 0.05) is None
+
+
+# -- quantise_to_betfair_tick ---------------------------------------------
+
+
+class TestQuantiseToBetfairTick:
+    def test_lay_rounds_down(self):
+        """Lay quantises DOWN (smaller price = wider spread = locks
+        ≥ target on a back-first scalp)."""
+        # 4.07 lies between 4.00 and 4.10 in the 0.10-tick band.
+        assert quantise_to_betfair_tick(4.07, side="lay") == pytest.approx(4.00)
+
+    def test_back_rounds_up(self):
+        """Back quantises UP (larger price = wider spread)."""
+        assert quantise_to_betfair_tick(4.07, side="back") == pytest.approx(4.10)
+
+    def test_already_on_tick_unchanged(self):
+        assert quantise_to_betfair_tick(4.10, side="lay") == pytest.approx(4.10)
+        assert quantise_to_betfair_tick(4.10, side="back") == pytest.approx(4.10)
+
+    def test_min_price_clamped(self):
+        assert quantise_to_betfair_tick(0.5, side="lay") == pytest.approx(1.01)
+        assert quantise_to_betfair_tick(0.5, side="back") == pytest.approx(1.01)
+
+    def test_max_price_clamped(self):
+        assert quantise_to_betfair_tick(1500.0, side="lay") == pytest.approx(1000.0)
+        assert quantise_to_betfair_tick(1500.0, side="back") == pytest.approx(1000.0)
+
+    def test_invalid_side_raises(self):
+        with pytest.raises(ValueError):
+            quantise_to_betfair_tick(4.0, side="both")  # type: ignore[arg-type]

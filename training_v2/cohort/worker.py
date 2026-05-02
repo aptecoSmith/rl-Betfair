@@ -104,8 +104,16 @@ class EvalSummary:
     action_histogram: dict[str, int]
     arbs_completed: int = 0
     arbs_naked: int = 0
+    arbs_closed: int = 0
+    arbs_force_closed: int = 0
+    arbs_stop_closed: int = 0
+    arbs_target_pnl_refused: int = 0
+    pairs_opened: int = 0
     locked_pnl: float = 0.0
     naked_pnl: float = 0.0
+    closed_pnl: float = 0.0
+    force_closed_pnl: float = 0.0
+    stop_closed_pnl: float = 0.0
     wall_time_sec: float = 0.0
 
 
@@ -190,9 +198,10 @@ def _build_env_for_day(
     data_dir: Path,
     cfg: dict,
     scorer_dir: Path,
+    reward_overrides: dict | None = None,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     day = load_day(day_str, data_dir=data_dir)
-    env = BetfairEnv(day, cfg)
+    env = BetfairEnv(day, cfg, reward_overrides=reward_overrides)
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
 
@@ -243,8 +252,22 @@ def _eval_rollout_stats(
     ))
     arbs_completed = int(last_info.get("arbs_completed", 0))
     arbs_naked = int(last_info.get("arbs_naked", 0))
+    arbs_closed = int(last_info.get("arbs_closed", 0))
+    arbs_force_closed = int(last_info.get("arbs_force_closed", 0))
+    arbs_stop_closed = int(last_info.get("arbs_stop_closed", 0))
+    arbs_target_pnl_refused = int(
+        last_info.get("arbs_target_pnl_refused", 0)
+    )
+    pairs_opened = int(last_info.get("pairs_opened", 0))
     locked_pnl = float(last_info.get("locked_pnl", 0.0))
     naked_pnl = float(last_info.get("naked_pnl", 0.0))
+    closed_pnl = float(last_info.get("scalping_closed_pnl", 0.0))
+    force_closed_pnl = float(
+        last_info.get("scalping_force_closed_pnl", 0.0)
+    )
+    stop_closed_pnl = float(
+        last_info.get("scalping_stop_closed_pnl", 0.0)
+    )
 
     bet_precision = (
         float(winning_bets) / float(bet_count) if bet_count > 0 else 0.0
@@ -265,8 +288,16 @@ def _eval_rollout_stats(
         action_histogram=hist,
         arbs_completed=arbs_completed,
         arbs_naked=arbs_naked,
+        arbs_closed=arbs_closed,
+        arbs_force_closed=arbs_force_closed,
+        arbs_stop_closed=arbs_stop_closed,
+        arbs_target_pnl_refused=arbs_target_pnl_refused,
+        pairs_opened=pairs_opened,
         locked_pnl=locked_pnl,
         naked_pnl=naked_pnl,
+        closed_pnl=closed_pnl,
+        force_closed_pnl=force_closed_pnl,
+        stop_closed_pnl=stop_closed_pnl,
     )
 
 
@@ -291,6 +322,7 @@ def train_one_agent(
     event_emitter: Callable[[dict], None] | None = None,
     agent_idx: int = 0,
     n_agents: int = 1,
+    reward_overrides: dict | None = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_day``.
 
@@ -353,6 +385,7 @@ def train_one_agent(
     )
     env, shim = _build_env_for_day(
         day_str=first_day, data_dir=data_dir, cfg=cfg, scorer_dir=scorer_dir,
+        reward_overrides=reward_overrides,
     )
 
     policy = DiscreteLSTMPolicy(
@@ -420,6 +453,7 @@ def train_one_agent(
             _, new_shim = _build_env_for_day(
                 day_str=day_str, data_dir=data_dir, cfg=cfg,
                 scorer_dir=scorer_dir,
+                reward_overrides=reward_overrides,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -495,6 +529,7 @@ def train_one_agent(
     _, eval_shim = _build_env_for_day(
         day_str=eval_day, data_dir=data_dir, cfg=cfg,
         scorer_dir=scorer_dir,
+        reward_overrides=reward_overrides,
     )
     eval_collector = RolloutCollector(
         shim=eval_shim, policy=policy, device=device,
@@ -520,8 +555,16 @@ def train_one_agent(
         action_histogram=eval_summary_partial.action_histogram,
         arbs_completed=eval_summary_partial.arbs_completed,
         arbs_naked=eval_summary_partial.arbs_naked,
+        arbs_closed=eval_summary_partial.arbs_closed,
+        arbs_force_closed=eval_summary_partial.arbs_force_closed,
+        arbs_stop_closed=eval_summary_partial.arbs_stop_closed,
+        arbs_target_pnl_refused=eval_summary_partial.arbs_target_pnl_refused,
+        pairs_opened=eval_summary_partial.pairs_opened,
         locked_pnl=eval_summary_partial.locked_pnl,
         naked_pnl=eval_summary_partial.naked_pnl,
+        closed_pnl=eval_summary_partial.closed_pnl,
+        force_closed_pnl=eval_summary_partial.force_closed_pnl,
+        stop_closed_pnl=eval_summary_partial.stop_closed_pnl,
         wall_time_sec=eval_wall,
     )
     logger.info(

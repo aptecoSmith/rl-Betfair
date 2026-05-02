@@ -4,6 +4,9 @@ venv/
 
 # Processed data (large, regenerated from DB) — keep the directory marker
 data/processed/*.parquet
+# Curated subwindows of the processed data (e.g. AMBER v2 day window
+# locked for cross-cohort comparison; force-close-architecture S01).
+data/processed_*/*.parquet
 
 # Oracle sample cache (arb-curriculum Session 01) — gitignored, regenerated offline
 data/oracle_cache/
