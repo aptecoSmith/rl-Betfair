@@ -616,7 +616,72 @@ floor from this small sample is the working point.
 **Bar 6c (≥ 4/12 positive eval P&L):** TBD. 1/3 with very high
 variance.
 
-### Stacked Session 03 cohort — launching
+### 4-stack cohort — truncated at 5/12 (2026-05-02)
+
+Output: `registry/v2_force_close_arch_session03_stacked_1777735438/`.
+
+Mechanics enabled (all four):
+- `target_pnl_pair_sizing_enabled = true` (S01: £-target on opens)
+- `stop_loss_pnl_threshold = 0.10` (S02: stake-scaled stop-close)
+- `force_close_before_off_seconds = 60` (T−60 safety net re-enabled)
+- `min_seconds_before_off = 60` (no aggressive opens in close-out window)
+
+Per-agent eval (5 agents, all on AMBER v2 day 2026-04-28):
+
+| agent | day_pnl | bets | matured | closed | stop | forced | naked | fc_rate | locked | naked_pnl |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 70b40041 | -£204.49 | 423 | 36 | 6 | 25 | 142 | 5 | 0.023 | +£180.12 | -£87.57 |
+| 19036f88 | -£37.69 | 417 | 28 | 9 | 29 | 140 | 4 | 0.019 | +£150.25 | +£112.70 |
+| e7c89a86 | -£135.73 | 438 | 46 | 2 | 28 | 140 | 4 | 0.018 | +£210.95 | -£40.41 |
+| 50bdb282 | -£231.45 | 415 | 40 | 4 | 24 | 137 | 3 | 0.014 | +£187.26 | -£94.91 |
+| 0e3ce830 | +£15.73 | 426 | 34 | 12 | 21 | 142 | 7 | 0.032 | +£178.85 | +£52.69 |
+
+**Aggregate (5/12) verdict-bar tracking:**
+
+| Metric | AMBER v2 | S01 | S02 | S01+S02 | **4-stack (5/12)** |
+|---|---|---|---|---|---|
+| mean fc_rate | 0.809 | 0.821 | 0.660 | 0.661 | **0.021** |
+| Bar 6a (≤0.30) | FAIL | FAIL | FAIL | FAIL | **PASS** |
+| median scf | 0.000 | 0.000 | 0.126 | 0.135 | 0.117 |
+| median pcf | 0.000 | 0.255 | 0.015 | 0.037 | 0.028 |
+| positive eval P&L | 2/12 | 3/12 | 1/3 | 1/2 | 1/5 |
+
+**Bar 6a verdict — PASS by 14×.** fc_rate range across 5 agents:
+0.014–0.032. Tight band, structurally locked in. Naked count
+3–7 per agent (was 130–200 in prior cohorts). Operator stopped
+at 5/12 once the verdict was unambiguous — the remaining 7
+agents would have spent ~2 h GPU confirming 0.02 ± 0.01.
+
+**Bar 6c verdict — likely FAIL.** 1/5 positive eval P&L; at the
+1-in-5 rate the cohort would land 2-3/12, below the ≥4/12 bar.
+
+**Why most agents are negative despite naked-rate near zero:**
+
+The economic story per agent:
+- locked_pnl (matured profit): **+£150 to +£211**
+- naked_pnl (capped tail, small magnitude): **-£100 to +£113**
+- force-close friction (~140 closes × spread): **-£140 to -£280**
+- net day_pnl: **-£231 to +£16**
+
+The safety net is doing its job — naked tail is bounded — but
+the agent is opening 415–438 pairs/day to feed it. ~140 of those
+go to force-close at ~£1-2 each = £140-280 of pure friction.
+That friction is what's keeping day_pnl negative.
+
+**Behavioural lesson exposed:** with `open_cost=0`, opens are
+essentially free at the open decision (per-tick gradient too
+weak; cash signal at settle is GAE-smeared). The agent learned
+"trade more, env cleans up." Bet count went UP from S01+S02
+stacked's ~290 to ~425 (+47%). The agent is exploiting the
+safety net rather than learning selectivity.
+
+**Mechanism layer of the rewrite ships GREEN per the
+2026-05-02 verdict reframe** — fc_rate cleared cleanly, all
+four mechanics demonstrably moved their respective metrics.
+Bar 6c failure is a policy-shape problem (over-opening), not a
+mechanism problem.
+
+### 5-stack cohort — adding open_cost=1.0 to address over-opening
 
 Wall envelope ~3.5h GPU. Launch command (per session prompt §4
 with the curated AMBER v2 data window from Session 01):
