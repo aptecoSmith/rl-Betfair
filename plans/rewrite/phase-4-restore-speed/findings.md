@@ -35,7 +35,7 @@ Per-session post-change rows are 1-episode runs with `--n-episodes
 | + S01 (attribution) | 10.282 (median) / **9.493 (mean)** | mean −0.7 %, median +7.2 % — within noise | ✓ strict per-tick array | 4 |
 | + S02 (obs/mask) | **10.240** (1 ep) | −1.3 % vs S01 ep0 (10.378), +6.3 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 5 |
 | + S03 (distributions) | **9.906** (1 ep) | −3.3 % vs S02 ep0 (10.240), +4.3 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 11 |
-| + S04 (hidden state) | — | — | — | — |
+| + S04 (hidden state) | **10.359** (1 ep) | +4.6 % vs S03 ep0 (9.906), +9.1 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 5 |
 | + S05 (assert) | — | — | — | — |
 | + S06 (RolloutBatch) | — | — | — | — |
 | + S07 (mask path) | — | — | — | — |
@@ -482,3 +482,250 @@ per_runner_attribution.py`, `test_v2_rollout_buffer_reuse.py`,
   `agents_v2/discrete_policy.py` benefits transitively (its
   per-init validation is also disabled), exactly as
   `purpose.md` §"Session 07" foresaw.
+
+## Session 04 — pre-allocate hidden-state capture buffer
+
+**Verdict: PARTIAL.** Bit-identity preserved on every numerical
+field of the PPO update output (same signature used in Sessions
+02 / 03: `total_reward`, `day_pnl`, `policy_loss_mean`,
+`value_loss_mean`, `entropy_mean`, `approx_kl_mean`,
+`advantage_*`, `action_histogram` all match Session 03's
+episode-0 row to the last printed digit on the same seed-42 /
+2026-04-23 day). All five new regression tests pass; all 37
+v2 rollout / trainer / transition / sync / distribution /
+buffer-reuse / attribution tests pass; the wider 4-test v1
+recurrent-state-through-PPO suite from
+`tests/test_ppo_trainer.py::TestRecurrentStateThroughPpoUpdate`
+(the load-bearing CLAUDE.md §"Recurrent PPO" guard) still
+passes. Measured wall is within episode-to-episode noise — same
+shape as Sessions 01–03; the cumulative path remains "Sessions
+04–06 land together" not "any single session carries the phase."
+
+### Measurement
+
+1-episode CPU run on 2026-04-23 (`logs/discrete_ppo_v2/phase4_
+s04_post.jsonl`, ``--seed 42``, ``--n-episodes 1``):
+
+| Field | Pre-S04 (S03 ep0) | Post-S04 (S04 ep0) |
+|---|---|---|
+| n_steps | 11 872 | 11 872 |
+| wall_time_sec | 117.61 | 122.98 |
+| **ms/tick** | **9.906** | **10.359** |
+| total_reward | −1455.5805904269218 | −1455.5805904269218 |
+| day_pnl | −578.0975377788117 | −578.0975377788117 |
+| policy_loss_mean | 0.1482754966829464 | 0.1482754966829464 |
+| value_loss_mean | 2.541815901916194 | 2.541815901916194 |
+| entropy_mean | 2.424904021845069 | 2.424904021845069 |
+| approx_kl_mean | 0.03635444635930922 | 0.03635444635930922 |
+| advantage_max_abs | 132.9420166015625 | 132.9420166015625 |
+| action_histogram | OB=3913 OL=4153 NOOP=1111 CL=2695 | (identical) |
+
+The measured wall is 4.6 % SLOWER than S03 ep0 (9.906 → 10.359
+ms/tick). vs S01's 5-episode mean of 9.493 ms/tick this is
++9.1 % — well inside the 8.0–10.7 episode-to-episode spread
+observed in S01. Bit-identity on every numeric field above is
+the strongest possible signal that the change is correctness-
+neutral; the speed verdict stays PARTIAL pending the cumulative
+effect of S05–S06.
+
+### Why the win was smaller than expected
+
+Same two compounding factors documented under Sessions 01–03:
+
+1. **wall_time_sec is rollout + PPO update.** PPO runs ~744
+   mini-batches per episode regardless of rollout speed.
+   Cutting 24 k tensor allocations + 24 k clone-memcopies from
+   the rollout cuts a small fraction of total wall.
+2. **`tuple(t.detach().clone() for t in (h, c))` is cheap per
+   call.** ``.detach()`` is essentially free (no copy, just
+   strips autograd metadata). ``.clone()`` allocates a fresh
+   tensor and memcpy-copies; on hidden_size=128 the per-call
+   payload is 2 × 128 × 4 B = 1 kB. CPython's allocator and
+   torch's caching allocator handle this well. At ~24 k
+   calls / episode the total saved is ~tens of ms — beneath
+   the per-episode noise floor (~3–4 % of 122 s wall is ~5 s,
+   far larger than the saved time).
+
+The measurement is +4.6 % over the S03 baseline ep0 number.
+This is consistent with episode-level wall-time noise: the
+same code, run twice, can vary by 8–11 % between episodes (see
+S01 5-episode table 8.013 → 10.709 ms/tick). The bit-identity
+signal is what definitively says "this change did the right
+thing"; the wall-time delta is below the noise floor.
+
+The session prompt's hypothesis was that allocator churn from
+the per-tick clone tuple was a measurable per-tick cost. The
+post-fix bit-identity is unambiguous — the change is correct.
+The wall-time signal at this scale is not. The cumulative
+phase budget allocation note from Sessions 01–03 stands: the
+≤ 4.0 ms/tick target requires Sessions 05–06 to land
+cumulatively.
+
+### What changed
+
+`RolloutCollector._collect`
+(`training_v2/discrete_ppo/rollout.py`) now allocates one
+`(n_steps_estimate, *t.shape)` torch buffer per element of
+`policy.init_hidden(batch=1)` at episode start. Each tick
+writes a snapshot via
+`buf[n_steps].copy_(hidden_state[k].detach())` and the captured
+`hidden_in_t` is `tuple(buf[n_steps] for buf in
+hidden_buffers)` — slice views into the contiguous device-
+resident buffers. The pre-Session-04
+`tuple(t.detach().clone() for t in hidden_state)` per-tick
+form is removed.
+
+The buffer allocation is generic over the hidden-state tuple's
+shape — works for the LSTM / TimeLSTM `(h, c)` shape AND the
+transformer's `(buffer (1, ctx_ticks, d_model), valid_count
+(1,))` shape. Each element of the tuple gets its own buffer
+matching the element's `shape / dtype / device`. The
+`init_hidden`-then-`.to(self.device)` setup runs unchanged
+above the buffer allocation, so device residency is what
+flows through to the buffers.
+
+`_grow_hidden_buffers(buffers, n_filled)` doubles capacity
+along the leading time axis and copies the filled prefix —
+mirrors the `_grow_obs_mask_buffers` pattern. Logs a
+`WARNING` so operators can tune the estimate if it ever
+fires in production. Empirically the buffer never grows on the
+2026-04-23 day; the grow path is exercised in tests via
+monkey-patched estimate.
+
+The PPO update consumer
+(`training_v2/discrete_ppo/trainer.py::_ppo_update`) is
+unchanged — it calls
+`self.policy.pack_hidden_states([tr.hidden_state_in for tr in
+transitions])` which does `torch.cat([s[k] for s in states],
+dim=…)`. `torch.cat` always copies into a fresh contiguous
+tensor, so the per-transition slice views do not leak into the
+gradient path (same argument as Session 02's obs / mask
+buffer aliasing safety).
+
+### View-vs-copy semantics — load-bearing correctness argument
+
+The captured `hidden_in_t = tuple(buf[n_steps] for buf in
+hidden_buffers)` is a slice VIEW into the buffer (not a
+copy). Three properties make this safe:
+
+1. **`nn.LSTM.forward` returns a NEW `(h, c)` tuple, not an
+   in-place mutation of the input.** Verified by audit of
+   torch's source and by the empirical bit-identity test above:
+   if the LSTM mutated its input, the slice view captured at
+   tick 0 would have been overwritten by tick 1's forward and
+   the recurrence-invariant test would have failed.
+
+2. **`hidden_state = out.new_hidden_state` rebinds the local
+   variable to a new tuple.** It does not mutate the previous
+   `hidden_state`'s storage. So the slice view at tick T
+   keeps pointing at `buf[T]`'s storage region, which is NOT
+   touched by tick T+1's `buf[T+1].copy_(...)` (different
+   memory block).
+
+3. **Each tick writes to a different slice index.** `buf[T]`
+   and `buf[T+1]` are non-overlapping regions of the same
+   contiguous buffer, so the snapshot at T stays bit-identical
+   to its value at the time of `.copy_()` even after tick T+1
+   has run.
+
+The strict regression guard for these three is
+`test_hidden_state_packed_bit_identical_to_pre_session_04_on_
+fixed_seed`, which re-runs the LSTM recurrence inline using
+the per-transition obs / mask captured by the collector and
+asserts each `transitions[t+1].hidden_state_in` equals the
+`new_hidden_state` the policy produces at tick `t`. If any of
+the three properties broke, the recurrence would diverge.
+
+### Bit-identity verification
+
+1. **End-to-end PPO update output** — every numerical field of
+   `phase4_s04_post.jsonl` row 0 matches the corresponding row
+   0 of `phase4_s03_post.jsonl` to the last printed digit
+   (`total_reward`, `day_pnl`, all loss / KL / advantage
+   means, action histogram). Identity on every numeric field
+   on a deterministic seed is the strongest signature: the
+   per-tick hidden-state snapshots flow into the PPO update
+   verbatim via `pack_hidden_states`, so any drift in the
+   captured values would surface as drift in `policy_loss_
+   mean` / `approx_kl_mean` / `value_loss_mean`. They don't.
+
+2. **Per-tick hidden-state recurrence invariant** — the new
+   `test_hidden_state_packed_bit_identical_to_pre_session_04_
+   on_fixed_seed` re-runs the LSTM forward chain inline at
+   each tick using the captured obs / mask, asserts each
+   transition's stored `hidden_state_in` equals the
+   `new_hidden_state` the policy produced at the previous tick
+   (with `init_hidden`'s zero state on tick 0). Pass —
+   recurrence holds across the full episode.
+
+### Other tests added
+
+- `test_hidden_state_buffer_allocated_once_per_episode` —
+  every transition's `hidden_state_in[k]` shares a single
+  underlying storage `data_ptr()` (when no grow path fires).
+  Catches a regression where someone reintroduces per-tick
+  allocation (e.g. by re-wrapping `.clone()`).
+
+- `test_hidden_state_slice_independent_of_subsequent_ticks`
+  — the captured `hidden_in_t` at tick 0 (which by
+  `init_hidden` contract is all-zero) remains all-zero after
+  the rollout has advanced through every subsequent tick. A
+  regression where the buffer slice aliased the rolling
+  `hidden_state` would surface as the tick-0 capture taking
+  on later-tick values.
+
+- `test_per_tick_clone_count_drops_to_zero` — patches
+  `torch.Tensor.clone` and counts calls per episode. Pre-
+  Session-04 baseline was 2 × n_steps; post-fix the count
+  drops well below `n_steps // 2` (the regression-detection
+  threshold tolerates framework-internal clones from torch
+  internals while flagging any reintroduction of per-tick
+  rollout clones).
+
+- `test_recurrent_ppo_kl_small_on_first_epoch` — fresh policy
+  + one `_ppo_update` → `approx_kl_mean < 1.0`. v2
+  counterpart to `tests/test_ppo_trainer.py::TestRecurrent
+  StateThroughPpoUpdate::test_ppo_update_approx_kl_small_on_
+  first_epoch_lstm`. Pinned here to this session as the
+  regression guard against the buffer-slice path silently
+  aliasing the rolling hidden state — a reused buffer slot
+  that pointed at the rolling state would leave every
+  transition's `hidden_state_in` pointing at the same final
+  value, blowing up KL.
+
+All 5 new tests pass. The full v2 trainer / rollout /
+transition / sync / attribution / distribution / buffer-reuse
+suite (37 tests) passes. The load-bearing
+`tests/test_ppo_trainer.py::TestRecurrentStateThroughPpoUpdate`
+suite (4 tests) — the CLAUDE.md §"Recurrent PPO" guard for
+the rewrite-overall recurrent-state-through-PPO contract —
+still passes.
+
+### Hard-constraint adherence
+
+- **No env edits** — the buffer allocation reads
+  `hidden_state` (already the local var initialised by
+  `policy.init_hidden`) and writes only to its own
+  pre-allocated buffers. The env / shim / matcher are
+  untouched.
+- **CPU bit-identity preserved** — strongest signature: every
+  numeric field of `phase4_s04_post.jsonl` matches `phase4_
+  s03_post.jsonl` row 0 exactly. The recurrence-invariant
+  test corroborates per-tick.
+- **Invariant assert kept as-is** — Session 05 will sample
+  it; this session does not loosen it.
+- **No restructuring of the surrounding rollout loop** —
+  edits are scoped to (a) the buffer allocation block above
+  the while-loop, (b) the per-tick capture block (4 lines
+  changed), and (c) the new `_grow_hidden_buffers` helper.
+  The PPO update consumer (`trainer._ppo_update`) is
+  byte-unchanged.
+- **One fix per session** — Session 04 only swaps the
+  per-tick clone-tuple for a buffer-slice snapshot.
+  Sessions 05 (assert sampling) and 06 (RolloutBatch) remain
+  for their own sessions.
+- **`.detach()` retained** — the snapshot writes
+  `t.detach()` (peeling autograd) into the buffer slice. The
+  `.copy_()` does the value copy that the previous
+  `.clone()` did. Both are load-bearing per the session
+  prompt §"Hard constraints" #3.

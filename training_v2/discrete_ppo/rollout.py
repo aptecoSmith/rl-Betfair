@@ -250,6 +250,53 @@ class RolloutCollector:
         obs_arr = np.empty((n_steps_estimate, obs_dim), dtype=np.float32)
         mask_arr = np.empty((n_steps_estimate, action_n), dtype=bool)
 
+        # Phase 4 Session 04: pre-allocated hidden-state capture
+        # buffers. Pre-Session-04 each tick did
+        # ``tuple(t.detach().clone() for t in hidden_state)`` —
+        # 2 × ``(num_layers, 1, hidden_size)`` tensor allocations
+        # plus 2 ``.clone()`` memcopies per tick (LSTM family). At
+        # ~12 k ticks/episode that's 24 k unnecessary allocations
+        # churning the allocator.
+        #
+        # The clones are LOAD-BEARING — subsequent LSTM forwards
+        # mutate the rolling hidden state, so we can't store a
+        # view into ``hidden_state`` itself. But the per-tick
+        # allocation IS unnecessary: pre-allocate one
+        # ``(n_steps_estimate, *hidden_shape)`` buffer per element
+        # of the hidden-state tuple at episode start, ``.copy_()``
+        # each tick's snapshot into a slice view, and the captured
+        # ``hidden_in_t`` is the slice view (not a fresh tensor).
+        #
+        # View-vs-copy semantics: ``nn.LSTM.forward`` returns a NEW
+        # ``(h, c)`` tuple (a fresh allocation, not a mutation of
+        # the input), and ``hidden_state = out.new_hidden_state``
+        # rebinds the local variable to that new tuple. The
+        # buffer slice we snapshotted on tick T is a view into
+        # ``hidden_buffers[k][T]``; subsequent ticks write to
+        # ``[T+1]``, which is a different memory region. So
+        # earlier captures stay correct even after the rolling
+        # ``hidden_state`` keeps advancing.
+        #
+        # Generic over the hidden_state tuple's shape — works for
+        # the LSTM / TimeLSTM ``(h, c)`` shape AND the transformer's
+        # ``(buffer, valid_count)`` shape. Each element of the
+        # tuple gets its own buffer matching the element's
+        # ``shape / dtype / device``.
+        #
+        # PPO update consumer: ``policy.pack_hidden_states`` does
+        # ``torch.cat([s[k] for s in states], dim=...)`` which
+        # always copies into a fresh tensor, so view aliasing
+        # does NOT leak into the gradient path (same argument as
+        # Session 02's obs / mask buffer).
+        hidden_buffers: list[torch.Tensor] = [
+            torch.empty(
+                (n_steps_estimate, *t.shape),
+                dtype=t.dtype,
+                device=t.device,
+            )
+            for t in hidden_state
+        ]
+
         # Throughput-fix Session 01: defer the three deferrable
         # CUDA→CPU sync points (log_prob_action, log_prob_stake,
         # value_per_runner) by stashing 0-d / 1-d device tensors in
@@ -313,12 +360,18 @@ class RolloutCollector:
                 # — moving it to CPU here forced ~24 k CUDA→CPU sync
                 # barriers / episode (the dominant cost on the CUDA
                 # path; see findings.md "Session 01"). ``.detach()``
-                # peels off the autograd tape; ``.clone()`` is load-
-                # bearing because subsequent LSTM forwards mutate the
-                # rolling hidden state in place.
-                hidden_in_t = tuple(
-                    t.detach().clone() for t in hidden_state
-                )
+                # peels off the autograd tape; the snapshot into the
+                # pre-allocated buffer slice replaces the previous
+                # per-tick ``.clone()`` (Phase 4 Session 04). The
+                # snapshot is load-bearing because the rolling
+                # ``hidden_state`` keeps mutating across ticks.
+                if n_steps >= hidden_buffers[0].shape[0]:
+                    hidden_buffers = self._grow_hidden_buffers(
+                        hidden_buffers, n_steps,
+                    )
+                for buf, t in zip(hidden_buffers, hidden_state):
+                    buf[n_steps].copy_(t.detach())
+                hidden_in_t = tuple(buf[n_steps] for buf in hidden_buffers)
 
                 out = policy(obs_t, hidden_state=hidden_state, mask=mask_t)
                 hidden_state = out.new_hidden_state
@@ -526,6 +579,54 @@ class RolloutCollector:
             obs_arr.shape[0], new_n,
         )
         return new_obs, new_mask
+
+    def _grow_hidden_buffers(
+        self,
+        buffers: list[torch.Tensor],
+        n_filled: int,
+    ) -> list[torch.Tensor]:
+        """Double the hidden-state capture buffers, preserving filled rows.
+
+        Phase 4 Session 04: symmetric to ``_grow_obs_mask_buffers``
+        but on the device-resident torch buffers. Doubles capacity
+        along the leading time axis and copies the filled prefix
+        ``[0, n_filled)`` from each old buffer into the new one.
+
+        Why we copy the prefix even though existing
+        ``per_tick_hidden_in`` views into the OLD buffers stay
+        valid (their storage is held alive by the views): the
+        copy keeps every captured snapshot in ONE buffer per
+        tuple element, which makes the
+        ``test_hidden_state_buffer_allocated_once_per_episode``
+        regression guard a clean signal — under normal
+        operation the buffer never grows, and even when it
+        does, the post-grow buffer holds every snapshot. Without
+        the copy, a future grow would split snapshots across
+        old + new buffers, complicating the test for
+        re-introduction of per-tick allocation.
+
+        Returns the list of fresh torch buffers in the same
+        order as ``buffers``. Mirrors the obs/mask pattern's
+        once-per-episode (typically never) growth path.
+        """
+        new_buffers: list[torch.Tensor] = []
+        old_n = buffers[0].shape[0]
+        new_n = old_n * 2
+        for old in buffers:
+            new = torch.empty(
+                (new_n, *old.shape[1:]),
+                dtype=old.dtype,
+                device=old.device,
+            )
+            new[:n_filled].copy_(old[:n_filled])
+            new_buffers.append(new)
+        logger.warning(
+            "RolloutCollector: hidden-state buffer grow fired "
+            "(was %d, now %d) — _estimate_max_steps undercounted; "
+            "tune for this day shape if the warning recurs",
+            old_n, new_n,
+        )
+        return new_buffers
 
     # ── Per-step reward attribution ────────────────────────────────────────
 
