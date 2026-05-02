@@ -906,14 +906,21 @@ class BetfairEnv(gymnasium.Env):
         self._stop_loss_pnl_threshold: float = float(
             reward_cfg.get("stop_loss_pnl_threshold", 0.0),
         )
-        # Naked-lay carve-out floor (£, price). Stop-close fires
+        # Naked-lay carve-out floor (price, not £). Stop-close fires
         # unconditionally on pairs whose only open leg is a back
         # exposure. For pairs with only a naked LAY exposure, fires
-        # only when the original BACK leg's matched price was below
-        # this floor — above it, long-odds lays carry through to
-        # settle. Default 4.0 per purpose.md §"Session 02".
+        # only when the open LAY leg's matched price was below this
+        # floor — above it, long-odds lays carry through to settle.
+        # Operator's bands (2026-05-02 clarification): short =
+        # 1.0–5.0, mid = 5.1–15.0, long = >15.0. Default 15.0
+        # protects only the genuinely long-odds slice; short and
+        # mid-odds naked lays still get capped by stop-close.
+        # An earlier 4.0 default (purpose.md §"Session 02") was
+        # superseded once the carve-out semantics were clarified —
+        # at 4.0 the carve-out fired on virtually every pair, silently
+        # skipping stop-close on most naked lays.
         self._lay_only_naked_price_threshold: float = float(
-            reward_cfg.get("lay_only_naked_price_threshold", 4.0),
+            reward_cfg.get("lay_only_naked_price_threshold", 15.0),
         )
         # Selective-open-shaping per-tick state (2026-04-25 Session 02
         # revision). The per-tick design replaces the settle-time
@@ -2891,41 +2898,45 @@ class BetfairEnv(gymnasium.Env):
         """Return True iff the carve-out applies to this pair.
 
         The carve-out skips stop-close on pairs whose ONLY open leg(s)
-        are LAY-side AND the original BACK leg's matched price was
+        are LAY-side AND the open LAY leg's matched price was
         ``>= long_odds_floor``. Above the floor the lay carries through
-        to settle ("leave only long-odds lays naked", per the operator
-        review's 2026-05-01 framing). Pairs with any open BACK leg are
-        always closed unconditionally — naked-back exposure is unbounded
-        directional risk.
+        to settle: "we've laid a horse to NOT win, with relatively low
+        per-£ exposure — a vastly better proposition than backing one
+        to win" (operator clarification, 2026-05-02; see
+        plans/rewrite/phase-3-followups/force-close-architecture/
+        findings.md §"Carve-out semantics").
 
-        The original back leg is found via ``pair_id`` on already-
-        matched bets (``bm.bets`` carries every matched leg). When the
-        pair has matured legs on both sides this method shouldn't be
-        called (the pair has no naked exposure left), but if it is the
-        method conservatively returns False so the regular trigger
-        path runs.
+        Gating is on the **open exposure's** price, not on any back
+        partner's price. This handles all three structural cases:
+
+        1. Back-first scalp where the paired LAY matched and the
+           agg-BACK is the only open leg → naked BACK → carve-out
+           does NOT apply (always close).
+        2. Back-first scalp where both legs matched and one was
+           later closed → no open leg → caller shouldn't invoke us;
+           if it does, we return False conservatively.
+        3. Lay-first scalp where the agg-LAY matched and the paired
+           BACK never matched → naked LAY at the agg-LAY's matched
+           price → carve-out gated on that price. THIS is the case
+           the operator's "leave long-odds lays naked" applies to.
+
+        Operator's odds bands (2026-05-02): short = 1.0–5.0,
+        mid = 5.1–15.0, long = >15.0. Default ``long_odds_floor``
+        is 15.0; per-cohort overridable via reward_overrides.
         """
-        # Any open BACK leg ⇒ no carve-out.
+        # Any open BACK leg ⇒ no carve-out (naked back is unbounded
+        # directional risk; close it unconditionally).
         if any(leg.side is BetSide.BACK for leg in open_legs):
             return False
-        # All open legs are LAY-side. Find the original BACK partner
-        # by pair_id; its matched price gates the carve-out.
-        bm = self.bet_manager
-        if bm is None:
+        if not open_legs:
             return False
-        pair_id = open_legs[0].pair_id
-        if pair_id is None:
-            return False
-        for bet in bm.bets:
-            if bet.pair_id != pair_id:
-                continue
-            if bet.side is BetSide.BACK:
-                return bet.average_price >= long_odds_floor
-        # No back partner found in matched bets — the pair never had
-        # one matched (e.g. a lay-first naked from a passive that never
-        # filled). Conservatively keep the carve-out OFF so the
-        # stop-close still fires.
-        return False
+        # All open legs are LAY-side. Gate on the highest open-LAY
+        # matched price — if any open lay is at long odds, the
+        # carve-out applies to the pair (the structural-low-per-£
+        # argument is per-leg). In practice a pair has at most one
+        # open lay leg; ``max`` is just a defensive aggregator.
+        max_open_lay_price = max(leg.average_price for leg in open_legs)
+        return max_open_lay_price >= long_odds_floor
 
     def _stop_close_open_pairs(
         self, race: Race, tick: Tick,

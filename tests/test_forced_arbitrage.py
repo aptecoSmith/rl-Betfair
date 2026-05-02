@@ -3859,16 +3859,23 @@ class TestStopClose:
     def _open_lay_pair(
         env: BetfairEnv,
         pair_id: str = "P1",
+        lay_price: float = 4.0,
         back_partner_price: float | None = None,
     ) -> None:
-        """Plant a naked LAY leg, optionally with a settled BACK partner.
+        """Plant a naked LAY leg at ``lay_price``, optionally with a
+        settled BACK partner.
 
-        ``back_partner_price`` controls the carve-out check — when it's
-        set, an extra matched BACK at the given price gets dropped into
-        ``bm.bets`` with the same pair_id so
-        ``_is_naked_lay_long_odds`` finds it. The BACK is marked WON so
-        it's resolved (i.e. doesn't contribute MTM); the LAY is the
-        only open exposure, exactly the carve-out scenario.
+        Per the operator's 2026-05-02 carve-out clarification, the
+        carve-out is gated on the **open LAY leg's** matched price —
+        not the back partner's. ``lay_price`` is therefore the test's
+        primary control over whether the carve-out applies.
+
+        ``back_partner_price`` is retained as a defensive option (for
+        tests that want a back partner present in ``bm.bets`` for any
+        reason, e.g. to verify the gating logic ignores it). When
+        omitted, no back partner exists in ``bm.bets`` — this is the
+        "lay-first naked" case where the agent's aggressive LAY
+        matched but the paired passive BACK never filled.
         """
         from env.bet_manager import Bet, BetOutcome
         race = env.day.races[0]
@@ -3884,8 +3891,8 @@ class TestStopClose:
         env.bet_manager.bets.append(Bet(
             selection_id=101, side=BetSide.LAY,
             requested_stake=20.0, matched_stake=20.0,
-            average_price=4.0, market_id=race.market_id,
-            pair_id=pair_id,
+            average_price=float(lay_price),
+            market_id=race.market_id, pair_id=pair_id,
         ))
         # Reserve a chunky liability so place_back has room to overdraw.
         env.bet_manager.budget = 100.0
@@ -3942,40 +3949,67 @@ class TestStopClose:
     # ── 3: naked-lay carve-out at long odds skips stop-close ───────────────
 
     def test_stop_close_does_not_fire_for_naked_lay_at_long_odds(self):
-        """Naked LAY with original BACK at 10.0, floor=4.0 → carve-out
-        applies, no close fires even at deep MTM loss."""
-        # LTP collapses 4.0 → 1.5 → naked lay loses heavily.
+        """Open LAY at 18.0 (>= 15.0 floor) → carve-out applies → no
+        stop-close fires even at deep MTM loss.
+
+        Operator's 2026-05-02 clarification: the carve-out gates on
+        the **open LAY leg's** price, not the back partner's. Long
+        odds = >15.0; default floor for the stop-close mechanism.
+        At lay price 18, the horse losing is the more likely outcome,
+        so leaving it naked is a deliberately-accepted risk profile.
+
+        MTM convention reminder: a LAY benefits when LTP rises
+        (market thinks horse less likely to win). To make a LAY
+        lose, LTP must FALL — the market is suddenly more confident
+        the horse will win, increasing our liability.
+        """
+        # LTP falls 18 → 8 → 8. With LAY @ 18, MTM at LTP=8 is
+        # 20 × (8 - 18) / 8 = -£25 — well below -£1 threshold.
+        # Without the carve-out, stop-close would fire.
         day = self._scripted_race_with_ltp_drop(
-            ltp_path=(4.0, 1.5, 1.5),
+            ltp_path=(18.0, 8.0, 8.0),
+            back_price=18.0, lay_price=18.2,
         )
         env = BetfairEnv(
             day,
-            self._config(stop_threshold=1.0, lay_floor=4.0),
+            self._config(stop_threshold=1.0, lay_floor=15.0),
         )
         env.reset()
-        # Open lay-naked with original back at long odds (10.0 ≥ 4.0).
-        self._open_lay_pair(env, back_partner_price=10.0)
+        # Lay-first naked: aggressive LAY matched at 18, paired BACK
+        # never filled. No back partner in bm.bets.
+        self._open_lay_pair(env, lay_price=18.0)
         noop = np.zeros(env.action_space.shape, dtype=np.float32)
         env.step(noop)
+        env.step(noop)
         bm = env.bet_manager
-        # No stop-close placed.
+        # No stop-close placed — long-odds lay carries naked.
         assert not any(getattr(b, "stop_close", False) for b in bm.bets)
         assert env._scalping_arbs_stop_closed == 0
 
-    # ── 4: short-odds lay closes (no carve-out) ────────────────────────────
+    # ── 4: mid/short-odds lay closes (no carve-out) ────────────────────────
 
     def test_stop_close_fires_for_naked_lay_at_short_odds(self):
-        """Same shape as test 3 but back-partner at 2.5 (< floor=4.0).
-        Carve-out does NOT apply → stop-close fires."""
+        """Open LAY at 4.0 (< 15.0 floor) → carve-out does NOT apply
+        → stop-close fires under MTM threshold breach.
+
+        Per the operator's bands, 4.0 is short odds (1.0–5.0). Naked
+        lays at short odds have HIGH directional risk per £: the
+        favoured outcome is the horse winning, which means losing the
+        full liability. Stop-close caps that at the £1 threshold +
+        spread.
+        """
+        # LTP falls 4 → 2. With LAY @ 4, MTM at LTP=2 is
+        # 20 × (2 - 4) / 2 = -£20 — way below -£1.
         day = self._scripted_race_with_ltp_drop(
-            ltp_path=(4.0, 1.5, 1.5),
+            ltp_path=(4.0, 2.0, 2.0),
         )
         env = BetfairEnv(
             day,
-            self._config(stop_threshold=1.0, lay_floor=4.0),
+            self._config(stop_threshold=1.0, lay_floor=15.0),
         )
         env.reset()
-        self._open_lay_pair(env, back_partner_price=2.5)
+        # No back partner; open LAY at 4.0 is below the long-odds floor.
+        self._open_lay_pair(env, lay_price=4.0)
         noop = np.zeros(env.action_space.shape, dtype=np.float32)
         env.step(noop)
         env.step(noop)
@@ -4067,6 +4101,48 @@ class TestStopClose:
         # Close bonus is +£1 × n_close_signal_successes; with 0 closes
         # the shaped contribution from this term is 0.
         assert shp == pytest.approx(0.0, abs=1e-9)
+
+    # ── 8b: carve-out gates on OPEN-leg price, not back partner ────────────
+
+    def test_carve_out_ignores_back_partner_price(self):
+        """Operator clarification (2026-05-02): the carve-out gates on
+        the **open LAY leg's** matched price, not on any back partner.
+        Even with a back partner present at long odds (>= floor), if
+        the open LAY itself is at short odds the stop-close MUST fire.
+
+        Explicitly exercises the case the pre-clarification code got
+        wrong: a back partner at e.g. 20.0 used to silently flip the
+        carve-out on, leaving even short-odds naked lays alone. Post-
+        fix, the back partner's price is irrelevant — only the open
+        LAY's price matters.
+        """
+        # LTP falls 4 → 2 to make the LAY @ 4 lose: MTM = -£20.
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 2.0, 2.0),
+        )
+        env = BetfairEnv(
+            day,
+            self._config(stop_threshold=1.0, lay_floor=15.0),
+        )
+        env.reset()
+        # Open LAY at short odds (4.0) WITH a long-odds back partner.
+        # Pre-fix: back_partner=20 >= floor=4 → carve-out fired (BUG).
+        # Post-fix: open LAY=4 < floor=15 → carve-out does NOT fire.
+        self._open_lay_pair(
+            env, lay_price=4.0, back_partner_price=20.0,
+        )
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        env.step(noop)
+        bm = env.bet_manager
+        close_legs = [
+            b for b in bm.bets if b.pair_id == "P1" and b.close_leg
+        ]
+        assert len(close_legs) == 1, (
+            "stop-close must fire — open LAY at 4 is below the 15 floor "
+            "regardless of any matched back partner's price"
+        )
+        assert close_legs[0].stop_close is True
 
     # ── 8: strict matcher — force_close stays False on the close leg ───────
 

@@ -415,6 +415,53 @@ PASSES when run alone; a websocket timeout flake in
 `test_training_worker`. None touch stop-close, MTM, or
 scalping settle paths.)
 
+### Carve-out semantics clarified (2026-05-02 mid-cohort)
+
+The first launch of the Session 02 cohort was stopped at 4/12 agents
+after a peek run flagged a likely Bar-6a fail. Inspection of the
+partial results, combined with an operator clarification on the
+carve-out's intent, surfaced two real bugs in the original
+``_is_naked_lay_long_odds`` implementation:
+
+1. **Wrong price source.** The function gated on the BACK partner's
+   matched price. The operator's intent was always to gate on the
+   **open LAY leg's** matched price — the price the agent is
+   actually exposed to. With pair-bracketed prices typically within
+   a few ticks of each other on the same horse, the bug fired the
+   carve-out on virtually every paired pair (back partners cluster
+   ≥ 4.0 on most horses).
+
+2. **Wrong threshold.** Default was 4.0; operator's bands are
+   short = 1.0–5.0, mid = 5.1–15.0, long = >15.0. At 4.0 the
+   carve-out applied to pairs across all three bands. Bumped to
+   15.0 so only the genuinely long-odds slice is protected.
+
+3. **Lay-first-naked unreachable.** The original function returned
+   False ("don't carve out") when no matched BACK partner existed
+   in ``bm.bets``. But the lay-first-naked case (aggressive LAY
+   matched, paired BACK never filled) is **exactly** the scenario
+   the operator described as "okay" if at long odds. The fix gates
+   on the open LAY's price directly, no back-partner lookup
+   needed.
+
+Net effect of the fix: the corrected carve-out is **strictly more
+conservative** — it skips stop-close on a much smaller slice of
+pairs, so stop-close fires on more naked lays, not fewer. This
+should drive fc_rate down vs the original buggy run.
+
+Also bonus: the operator framing "if our models always lay first,
+our naked losses would go down" is logged as a follow-on idea
+but NOT implemented in this session — it's a substantial
+architectural shift (reward shaping or env-side side selection)
+that warrants its own plan once the corrected stop-close has been
+measured.
+
+Test coverage extended to 9 stop-close tests. New test
+``test_carve_out_ignores_back_partner_price`` is the regression
+guard for the bug-#1 fix; ``test_stop_close_does_not_fire_for_
+naked_lay_at_long_odds`` now exercises the lay-first-naked path
+directly.
+
 ### Cohort run — pending operator confirmation
 
 Wall envelope ~3.5h GPU. Launch command (per session prompt §4
