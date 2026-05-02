@@ -130,8 +130,6 @@ class RolloutCollector:
         hidden_state = policy.init_hidden(batch=1)
         hidden_state = tuple(t.to(self.device) for t in hidden_state)
 
-        transitions: list[Transition] = []
-
         # Snapshot of cumulative pnl per bet object (keyed by
         # ``id(bet)``) — used to compute per-step pnl deltas. Bets
         # only appear and have their pnl mutated; they aren't
@@ -152,8 +150,35 @@ class RolloutCollector:
             (1, action_n), dtype=torch.bool, device=self.device,
         )
 
+        # Throughput-fix Session 01: defer the three deferrable
+        # CUDA→CPU sync points (log_prob_action, log_prob_stake,
+        # value_per_runner) by stashing 0-d / 1-d device tensors in
+        # sidecar buffers and doing one batched ``.cpu()`` per buffer
+        # at end-of-episode. Cuts ~3 syncs per tick × ~12 k ticks ≈
+        # 36 k syncs to 3 batched transfers.
+        #
+        # The two structural ``.item()`` calls (action_idx,
+        # stake_unit) STAY — the CPU env consumes ``int`` and
+        # ``float`` every tick.
+        pending_log_prob_action: list[torch.Tensor] = []
+        pending_log_prob_stake: list[torch.Tensor] = []
+        pending_value_per_runner: list[torch.Tensor] = []
+
+        # Per-tick CPU-side bookkeeping. Transition objects are built
+        # at end-of-episode so the deferred device tensors can be
+        # materialised in one batched transfer (Transition is a
+        # frozen dataclass; we can't backfill in-place).
+        per_tick_obs: list[np.ndarray] = []
+        per_tick_hidden_in: list[tuple[torch.Tensor, ...]] = []
+        per_tick_mask: list[np.ndarray] = []
+        per_tick_action_idx: list[int] = []
+        per_tick_stake_unit: list[float] = []
+        per_tick_per_runner_reward: list[np.ndarray] = []
+        per_tick_done: list[bool] = []
+
         done = False
         n_steps = 0
+        last_info: dict = {}
 
         with torch.no_grad():
             while not done:
@@ -188,10 +213,15 @@ class RolloutCollector:
 
                 # Sample action and stake.
                 action = out.action_dist.sample()              # (1,) long
+                # STRUCTURAL sync: env.step needs an int.
                 action_idx = int(action.item())
-                log_prob_action = float(
-                    out.action_dist.log_prob(action).item(),
+
+                # DEFERRED: stash the 0-d device tensor for the log
+                # prob; it gets materialised at end-of-episode.
+                log_prob_action_t = (
+                    out.action_dist.log_prob(action).detach().squeeze()
                 )
+                pending_log_prob_action.append(log_prob_action_t)
 
                 # Beta sample is in (0, 1). The shim takes a £ stake
                 # so we re-scale outside the policy (per Phase 1
@@ -201,28 +231,35 @@ class RolloutCollector:
                     out.stake_alpha, out.stake_beta,
                 )
                 stake_unit_t = stake_dist.sample()              # (1,)
+                # STRUCTURAL sync: env.step's stake_pounds needs a
+                # float (BetManager applies MIN_BET_STAKE clamp).
                 stake_unit = float(stake_unit_t.item())
 
                 bm = env.bet_manager
                 budget = bm.budget if bm is not None else 0.0
                 stake_pounds = max(stake_unit * budget, MIN_BET_STAKE)
 
-                # Stake log-prob is only meaningful for OPEN_* actions.
-                # Storing 0.0 for the rest is a placeholder — Session
-                # 02's PPO update masks via :func:`action_uses_stake`
-                # before the gradient flows, so the placeholder never
-                # contributes.
+                # DEFERRED: stake log-prob.  The mask
+                # ``action_uses_stake`` decides whether this slot
+                # carries a real value or a placeholder zero — the
+                # PPO update masks the placeholder out before the
+                # gradient flows, so any constant works. We keep the
+                # device tensor either way so the batched cpu()
+                # transfer at end-of-episode sees a uniform list.
                 if action_uses_stake(self.action_space, action_idx):
-                    log_prob_stake = float(
-                        stake_dist.log_prob(stake_unit_t).item(),
+                    log_prob_stake_t = (
+                        stake_dist.log_prob(stake_unit_t).detach().squeeze()
                     )
                 else:
-                    log_prob_stake = 0.0
+                    log_prob_stake_t = torch.zeros(
+                        (), dtype=stake_unit_t.dtype, device=self.device,
+                    )
+                pending_log_prob_stake.append(log_prob_stake_t)
 
-                value_per_runner = (
-                    out.value_per_runner.detach().squeeze(0).cpu().numpy()
-                    .astype(np.float32)
-                )
+                # DEFERRED: per-runner value head.  Keep on device;
+                # we'll do one batched stack/cpu/numpy at episode end.
+                value_per_runner_t = out.value_per_runner.detach().squeeze(0)
+                pending_value_per_runner.append(value_per_runner_t)
 
                 # Step the env. The shim's step returns the extended
                 # (with scorer features) obs and forwards the env's
@@ -241,23 +278,62 @@ class RolloutCollector:
                     market_to_runner_map=market_to_runner_map,
                 )
 
-                transitions.append(Transition(
-                    obs=np.asarray(obs, dtype=np.float32),
-                    hidden_state_in=hidden_in_t,
-                    mask=np.asarray(mask_np, dtype=bool),
-                    action_idx=action_idx,
-                    stake_unit=stake_unit,
-                    log_prob_action=log_prob_action,
-                    log_prob_stake=log_prob_stake,
-                    value_per_runner=value_per_runner,
-                    per_runner_reward=per_runner_reward,
-                    done=done,
-                ))
+                per_tick_obs.append(np.asarray(obs, dtype=np.float32))
+                per_tick_hidden_in.append(hidden_in_t)
+                per_tick_mask.append(np.asarray(mask_np, dtype=bool))
+                per_tick_action_idx.append(action_idx)
+                per_tick_stake_unit.append(stake_unit)
+                per_tick_per_runner_reward.append(per_runner_reward)
+                per_tick_done.append(done)
 
                 obs = next_obs
                 n_steps += 1
                 if done:
-                    self.last_info = info or {}
+                    last_info = info or {}
+
+        # End-of-episode batched materialisation. Three CUDA→CPU
+        # transfers total (was ~3 × n_steps). For a typical
+        # ~12 k-tick episode this collapses ~36 k per-tick syncs.
+        if n_steps > 0:
+            log_prob_action_arr = (
+                torch.stack(pending_log_prob_action).cpu().numpy()
+                .astype(np.float32)
+            )
+            log_prob_stake_arr = (
+                torch.stack(pending_log_prob_stake).cpu().numpy()
+                .astype(np.float32)
+            )
+            value_per_runner_arr = (
+                torch.stack(pending_value_per_runner).cpu().numpy()
+                .astype(np.float32)
+            )
+        else:
+            # Defensive: empty episode shouldn't happen but the env
+            # technically allows it. Keep shapes consistent with the
+            # n_steps>0 branch so downstream stacking doesn't break.
+            log_prob_action_arr = np.zeros((0,), dtype=np.float32)
+            log_prob_stake_arr = np.zeros((0,), dtype=np.float32)
+            value_per_runner_arr = np.zeros(
+                (0, self.max_runners), dtype=np.float32,
+            )
+
+        transitions: list[Transition] = [
+            Transition(
+                obs=per_tick_obs[i],
+                hidden_state_in=per_tick_hidden_in[i],
+                mask=per_tick_mask[i],
+                action_idx=per_tick_action_idx[i],
+                stake_unit=per_tick_stake_unit[i],
+                log_prob_action=float(log_prob_action_arr[i]),
+                log_prob_stake=float(log_prob_stake_arr[i]),
+                value_per_runner=value_per_runner_arr[i],
+                per_runner_reward=per_tick_per_runner_reward[i],
+                done=per_tick_done[i],
+            )
+            for i in range(n_steps)
+        ]
+
+        self.last_info = last_info
 
         logger.info(
             "RolloutCollector: collected %d transitions (terminated)",
