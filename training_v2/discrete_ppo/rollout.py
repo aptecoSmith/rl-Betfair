@@ -206,6 +206,22 @@ class RolloutCollector:
             (1, action_n), dtype=torch.bool, device=self.device,
         )
 
+        # Phase 4 Session 02: single-allocation obs / mask buffers.
+        # Pre-Session-02 each tick did TWO np.asarray casts + TWO
+        # buffer copies — once to fill the device buffer, once to
+        # append into per_tick_obs / per_tick_mask CPU lists. At
+        # ~12k ticks/episode that's 48k unnecessary allocations.
+        # Now: one contiguous float32 / bool buffer per episode,
+        # written once per tick at row n_steps. The device buffer
+        # copy reads from the same row (a view, not a copy). The
+        # Transition's obs / mask is a view into the row — the
+        # PPO update consumer (``trainer._ppo_update``) does
+        # ``np.stack([tr.obs ...])`` which copies into a new
+        # contiguous array, so view aliasing is safe.
+        n_steps_estimate = self._estimate_max_steps(env)
+        obs_arr = np.empty((n_steps_estimate, obs_dim), dtype=np.float32)
+        mask_arr = np.empty((n_steps_estimate, action_n), dtype=bool)
+
         # Throughput-fix Session 01: defer the three deferrable
         # CUDA→CPU sync points (log_prob_action, log_prob_stake,
         # value_per_runner) by stashing 0-d / 1-d device tensors in
@@ -224,9 +240,9 @@ class RolloutCollector:
         # at end-of-episode so the deferred device tensors can be
         # materialised in one batched transfer (Transition is a
         # frozen dataclass; we can't backfill in-place).
-        per_tick_obs: list[np.ndarray] = []
+        # Phase 4 Session 02: obs / mask now live in the shared
+        # contiguous buffers above — no per-tick list.
         per_tick_hidden_in: list[tuple[torch.Tensor, ...]] = []
-        per_tick_mask: list[np.ndarray] = []
         per_tick_action_idx: list[int] = []
         per_tick_stake_unit: list[float] = []
         per_tick_per_runner_reward: list[np.ndarray] = []
@@ -238,14 +254,26 @@ class RolloutCollector:
 
         with torch.no_grad():
             while not done:
-                obs_buffer.copy_(
-                    torch.from_numpy(np.asarray(obs, dtype=np.float32))
-                    .unsqueeze(0)
-                )
+                # Phase 4 Session 02: single materialisation per tick.
+                # Grow the contiguous buffers if the episode exceeds
+                # the upper-bound estimate. The grow path is once-per-
+                # episode at most in practice; the warning surfaces a
+                # bad estimate so it can be tuned.
+                if n_steps >= obs_arr.shape[0]:
+                    obs_arr, mask_arr = self._grow_obs_mask_buffers(
+                        obs_arr, mask_arr, n_steps,
+                    )
+
+                # Single write per tick into the contiguous row;
+                # the device buffer copy reads from the same row.
+                obs_arr[n_steps] = obs
                 mask_np = shim.get_action_mask()
+                mask_arr[n_steps] = mask_np
+                obs_buffer.copy_(
+                    torch.from_numpy(obs_arr[n_steps]).unsqueeze(0)
+                )
                 mask_buffer.copy_(
-                    torch.from_numpy(np.asarray(mask_np, dtype=bool))
-                    .unsqueeze(0)
+                    torch.from_numpy(mask_arr[n_steps]).unsqueeze(0)
                 )
                 obs_t = obs_buffer
                 mask_t = mask_buffer
@@ -334,9 +362,11 @@ class RolloutCollector:
                     market_to_runner_map=market_to_runner_map,
                 )
 
-                per_tick_obs.append(np.asarray(obs, dtype=np.float32))
+                # Phase 4 Session 02: obs / mask already in the
+                # contiguous buffers; the Transition reads from
+                # ``obs_arr[i]`` / ``mask_arr[i]`` (a view) at end-
+                # of-episode. No per-tick CPU-list copy.
                 per_tick_hidden_in.append(hidden_in_t)
-                per_tick_mask.append(np.asarray(mask_np, dtype=bool))
                 per_tick_action_idx.append(action_idx)
                 per_tick_stake_unit.append(stake_unit)
                 per_tick_per_runner_reward.append(per_runner_reward)
@@ -373,11 +403,20 @@ class RolloutCollector:
                 (0, self.max_runners), dtype=np.float32,
             )
 
+        # Phase 4 Session 02: ``obs_arr[i]`` / ``mask_arr[i]`` are
+        # views into the contiguous per-episode buffers. The PPO
+        # update consumer (``trainer._ppo_update``) does
+        # ``np.stack([tr.obs ...]).astype(np.float32)`` which copies
+        # into a new contiguous array, so view aliasing does NOT
+        # leak into the gradient path. Verified by audit of
+        # ``training_v2/discrete_ppo/trainer.py`` at the start of
+        # this session — no in-place mutation of ``Transition.obs``
+        # or ``Transition.mask`` anywhere.
         transitions: list[Transition] = [
             Transition(
-                obs=per_tick_obs[i],
+                obs=obs_arr[i],
                 hidden_state_in=per_tick_hidden_in[i],
-                mask=per_tick_mask[i],
+                mask=mask_arr[i],
                 action_idx=per_tick_action_idx[i],
                 stake_unit=per_tick_stake_unit[i],
                 log_prob_action=float(log_prob_action_arr[i]),
@@ -402,6 +441,63 @@ class RolloutCollector:
             n_steps,
         )
         return transitions
+
+    # ── Per-episode obs / mask buffer helpers (Phase 4 Session 02) ─────────
+
+    def _estimate_max_steps(self, env) -> int:
+        """Upper-bound the number of env.step calls in this episode.
+
+        Each ``env.step`` advances ``_tick_idx`` by one within the
+        active race or transitions to the next race. The total step
+        count is therefore bounded by ``sum_r len(race.ticks)`` plus
+        a small per-race margin to absorb any transition / settle
+        steps the env emits at race boundaries. Adding +1 per race
+        plus a final +1 keeps the estimate exact-or-loose so the
+        grow path is once-per-episode at most in practice (and
+        typically never).
+
+        If ``env.day.races`` is somehow unavailable (e.g. a test
+        harness with a stub env), fall back to a generous default
+        of 20 000 — matches the session prompt's recommendation.
+        """
+        races = getattr(getattr(env, "day", None), "races", None)
+        if races is None:
+            return 20_000
+        return sum(len(r.ticks) for r in races) + len(races) + 1
+
+    def _grow_obs_mask_buffers(
+        self,
+        obs_arr: np.ndarray,
+        mask_arr: np.ndarray,
+        n_filled: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Double the obs / mask buffer capacity, preserving filled rows.
+
+        Returns the (obs, mask) pair of fresh np arrays. Rows
+        ``[0, n_filled)`` are copied from the old buffers so any
+        Transition built later that reads from the new buffer sees
+        the same values for those rows. The OLD buffers are dropped
+        — their refcounts go to zero unless the caller still holds
+        references; in this collector they don't, so they're GCed.
+
+        ``np.empty`` (not ``np.zeros``) is fine here: only
+        ``[0, n_filled)`` is read after the copy and ``[n_filled,
+        new_n)`` is overwritten by future ticks before any read.
+        """
+        obs_dim = obs_arr.shape[1]
+        action_n = mask_arr.shape[1]
+        new_n = obs_arr.shape[0] * 2
+        new_obs = np.empty((new_n, obs_dim), dtype=np.float32)
+        new_obs[:n_filled] = obs_arr[:n_filled]
+        new_mask = np.empty((new_n, action_n), dtype=bool)
+        new_mask[:n_filled] = mask_arr[:n_filled]
+        logger.warning(
+            "RolloutCollector: obs/mask buffer grow fired (was %d, "
+            "now %d) — _estimate_max_steps undercounted; tune for "
+            "this day shape if the warning recurs",
+            obs_arr.shape[0], new_n,
+        )
+        return new_obs, new_mask
 
     # ── Per-step reward attribution ────────────────────────────────────────
 
