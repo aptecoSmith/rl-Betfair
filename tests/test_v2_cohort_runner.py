@@ -302,6 +302,63 @@ def test_breed_next_generation_keeps_top_half_elites_verbatim() -> None:
         assert pb in elite_ids
 
 
+def test_scoreboard_writes_per_agent_in_sequential_mode(
+    tmp_path: Path,
+) -> None:
+    """Cohort-visibility S01a: in sequential (non-batched) mode, the
+    scoreboard.jsonl row for agent N must be on disk before agent N+1
+    starts. Pre-plan code wrote all rows after the per-generation
+    loop, so mid-cohort visibility was zero. See
+    plans/rewrite/phase-3-followups/cohort-visibility/.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _populate_data_dir(data_dir, [
+        "2026-04-21", "2026-04-22", "2026-04-23",
+    ])
+    out_dir = tmp_path / "cohort_out"
+    scoreboard_path = out_dir / "scoreboard.jsonl"
+
+    seen_row_counts: list[int] = []
+
+    def _spying_stub(**kwargs):
+        # Read the scoreboard at the START of every agent's run. By
+        # the per-agent-write contract, row count here == number of
+        # agents that have already completed.
+        if scoreboard_path.exists():
+            seen_row_counts.append(
+                len(scoreboard_path.read_text().splitlines())
+            )
+        else:
+            seen_row_counts.append(0)
+        return _stub_train_one_agent(**kwargs)
+
+    runner_mod.run_cohort(
+        n_agents=3,
+        n_generations=1,
+        days=3,
+        data_dir=data_dir,
+        device="cpu",
+        seed=42,
+        output_dir=out_dir,
+        train_one_agent_fn=_spying_stub,
+    )
+
+    # Agent 1 starts: 0 rows on disk. Agent 2 starts: 1 row. Agent
+    # 3 starts: 2 rows. After all 3 finish: 3 rows on disk.
+    assert seen_row_counts == [0, 1, 2], (
+        f"expected per-agent live writes [0, 1, 2], got {seen_row_counts}"
+    )
+    final = scoreboard_path.read_text().splitlines()
+    assert len(final) == 3
+
+    # Each row is well-formed JSON with the expected schema.
+    for line in final:
+        row = json.loads(line)
+        assert row["schema"] == "v2_cohort_scoreboard"
+        assert row["generation"] == 0
+
+
 def test_run_cohort_rejects_invalid_args(tmp_path: Path) -> None:
     """Boundary checks: n_agents >= 2, n_generations >= 1, days >= 2."""
     data_dir = tmp_path / "data"

@@ -264,6 +264,182 @@ class TestEvaluationDays:
         assert len(days) == 2
         assert days[0].date == "2026-03-19"
 
+    def test_session_02_counters_round_trip(self, store: ModelStore):
+        """Cohort-visibility S01b: per-pair lifecycle counters persist
+        through write -> read. ``arbs_closed``, ``arbs_force_closed``,
+        ``arbs_stop_closed``, ``arbs_target_pnl_refused``,
+        ``pairs_opened``, ``closed_pnl``, ``force_closed_pnl``,
+        ``stop_closed_pnl`` all round-trip correctly."""
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-05-01", ["2026-05-02"])
+
+        store.record_evaluation_day(EvaluationDayRecord(
+            run_id=rid, date="2026-05-02",
+            day_pnl=12.34, bet_count=200, winning_bets=42,
+            bet_precision=0.21, pnl_per_bet=0.0617, early_picks=0,
+            profitable=True,
+            arbs_closed=15,
+            arbs_force_closed=7,
+            arbs_stop_closed=23,
+            arbs_target_pnl_refused=4,
+            pairs_opened=180,
+            closed_pnl=18.50,
+            force_closed_pnl=-3.25,
+            stop_closed_pnl=-9.40,
+        ))
+
+        days = store.get_evaluation_days(rid)
+        assert len(days) == 1
+        d = days[0]
+        assert d.arbs_closed == 15
+        assert d.arbs_force_closed == 7
+        assert d.arbs_stop_closed == 23
+        assert d.arbs_target_pnl_refused == 4
+        assert d.pairs_opened == 180
+        assert d.closed_pnl == pytest.approx(18.50)
+        assert d.force_closed_pnl == pytest.approx(-3.25)
+        assert d.stop_closed_pnl == pytest.approx(-9.40)
+
+    def test_session_02_counters_default_zero_when_omitted(
+        self, store: ModelStore,
+    ):
+        """A pre-plan-style record (omitting the new fields) writes
+        zeros for the new columns. Tests the dataclass defaults +
+        the writer's NOT NULL DEFAULT 0 columns."""
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-05-01", ["2026-05-02"])
+
+        # Only the pre-Session-01-and-02 fields supplied.
+        store.record_evaluation_day(EvaluationDayRecord(
+            run_id=rid, date="2026-05-02",
+            day_pnl=0.0, bet_count=0, winning_bets=0,
+            bet_precision=0.0, pnl_per_bet=0.0, early_picks=0,
+            profitable=False,
+        ))
+
+        days = store.get_evaluation_days(rid)
+        assert len(days) == 1
+        d = days[0]
+        assert d.arbs_closed == 0
+        assert d.arbs_force_closed == 0
+        assert d.arbs_stop_closed == 0
+        assert d.arbs_target_pnl_refused == 0
+        assert d.pairs_opened == 0
+        assert d.closed_pnl == pytest.approx(0.0)
+        assert d.force_closed_pnl == pytest.approx(0.0)
+        assert d.stop_closed_pnl == pytest.approx(0.0)
+
+
+class TestEvaluationDaysMigration:
+    """Cohort-visibility S01b — schema migration is idempotent and
+    forward-only. Existing dbs created by older code paths must
+    accept the new columns without error and without duplicate-add."""
+
+    def test_init_idempotent_on_post_plan_db(self, tmp_path):
+        """Running ``ModelStore.__init__`` twice over the same path
+        must not error or duplicate-add columns."""
+        db_path = tmp_path / "models.db"
+        weights_dir = tmp_path / "weights"
+        bet_logs_dir = tmp_path / "bet_logs"
+        # First init: fresh db; migrations apply.
+        ModelStore(
+            db_path=db_path, weights_dir=weights_dir,
+            bet_logs_dir=bet_logs_dir,
+        )
+        # Second init: schema already present; ALTER TABLE catches the
+        # OperationalError "duplicate column" and silently passes.
+        store = ModelStore(
+            db_path=db_path, weights_dir=weights_dir,
+            bet_logs_dir=bet_logs_dir,
+        )
+        # Sanity — we can still write a row.
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-05-01", ["2026-05-02"])
+        store.record_evaluation_day(EvaluationDayRecord(
+            run_id=rid, date="2026-05-02",
+            day_pnl=0.0, bet_count=0, winning_bets=0,
+            bet_precision=0.0, pnl_per_bet=0.0, early_picks=0,
+            profitable=False,
+            arbs_stop_closed=99,  # post-plan field on the new schema
+        ))
+        days = store.get_evaluation_days(rid)
+        assert days[0].arbs_stop_closed == 99
+
+    def test_legacy_db_gets_new_columns_added(self, tmp_path):
+        """Simulate a pre-plan db (only the pre-Session-01-and-02
+        evaluation_days schema) and assert ``ModelStore.__init__``
+        adds the new columns via ALTER TABLE. The migration is
+        the load-bearing forward-compatibility guard."""
+        import sqlite3
+        db_path = tmp_path / "legacy.db"
+        # Build a stripped-down evaluation_days table that mimics the
+        # schema as of the pre-S01b commit. Migration must add the
+        # 8 new columns.
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE models (
+                model_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL,
+                parent_a_id TEXT,
+                parent_b_id TEXT,
+                architecture_name TEXT NOT NULL,
+                architecture_description TEXT NOT NULL DEFAULT '',
+                hyperparameters TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                last_evaluated_at TEXT,
+                weights_path TEXT,
+                composite_score REAL
+            );
+            CREATE TABLE evaluation_runs (
+                run_id TEXT PRIMARY KEY,
+                model_id TEXT NOT NULL REFERENCES models(model_id),
+                evaluated_at TEXT NOT NULL,
+                train_cutoff_date TEXT NOT NULL,
+                test_days TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE evaluation_days (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES evaluation_runs(run_id),
+                date TEXT NOT NULL,
+                day_pnl REAL NOT NULL,
+                bet_count INTEGER NOT NULL,
+                winning_bets INTEGER NOT NULL DEFAULT 0,
+                bet_precision REAL NOT NULL DEFAULT 0.0,
+                pnl_per_bet REAL NOT NULL DEFAULT 0.0,
+                early_picks INTEGER NOT NULL DEFAULT 0,
+                profitable INTEGER NOT NULL DEFAULT 0,
+                arbs_completed INTEGER NOT NULL DEFAULT 0,
+                arbs_naked INTEGER NOT NULL DEFAULT 0,
+                locked_pnl REAL NOT NULL DEFAULT 0.0,
+                naked_pnl REAL NOT NULL DEFAULT 0.0
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        # Open via ModelStore — migrations should add the new columns.
+        store = ModelStore(
+            db_path=db_path,
+            weights_dir=tmp_path / "weights",
+            bet_logs_dir=tmp_path / "bet_logs",
+        )
+        # Now write a record using new fields.
+        mid = store.create_model(1, "arch", "d", {})
+        rid = store.create_evaluation_run(mid, "2026-05-01", ["2026-05-02"])
+        store.record_evaluation_day(EvaluationDayRecord(
+            run_id=rid, date="2026-05-02",
+            day_pnl=0.0, bet_count=0, winning_bets=0,
+            bet_precision=0.0, pnl_per_bet=0.0, early_picks=0,
+            profitable=False,
+            arbs_closed=5, arbs_stop_closed=10,
+            stop_closed_pnl=-2.5,
+        ))
+        days = store.get_evaluation_days(rid)
+        assert days[0].arbs_closed == 5
+        assert days[0].arbs_stop_closed == 10
+        assert days[0].stop_closed_pnl == pytest.approx(-2.5)
+
 
 # ── Evaluation bets (Parquet) ─────────────────────────────────────────────────
 

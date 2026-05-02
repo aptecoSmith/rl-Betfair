@@ -101,6 +101,24 @@ class EvaluationDayRecord:
     paired_rejects_budget_back: int = 0
     paired_rejects_budget_lay: int = 0
     paired_fill_skips: int = 0
+    # Cohort-visibility S01b (2026-05-02). Per-pair lifecycle counters
+    # added across `arb-signal-cleanup` (force_closed),
+    # `force-close-architecture` S01 (target_pnl_refused, pairs_opened,
+    # closed_pnl, force_closed_pnl), and `force-close-architecture`
+    # S02 (stop_closed, stop_closed_pnl). Stored here so `models.db`
+    # readers (peek tools, future v1 UI panels) see the full per-agent
+    # breakdown live as each agent finishes its eval. Pre-plan rows
+    # default to 0 / 0.0; post-plan rows carry honest values from
+    # ``EvalSummary``. See ``plans/rewrite/phase-3-followups/
+    # cohort-visibility/``.
+    arbs_closed: int = 0
+    arbs_force_closed: int = 0
+    arbs_stop_closed: int = 0
+    arbs_target_pnl_refused: int = 0
+    pairs_opened: int = 0
+    closed_pnl: float = 0.0
+    force_closed_pnl: float = 0.0
+    stop_closed_pnl: float = 0.0
 
 
 @dataclass
@@ -268,6 +286,9 @@ class ModelStore:
             except Exception:
                 pass  # column already exists
             # Migration: add forced-arbitrage (scalping) columns — Issue 05.
+            # Plus cohort-visibility S01b (2026-05-02): widen with the
+            # post-Session-01-and-02 per-pair lifecycle counters so the
+            # SQLite readout is the canonical per-agent live source.
             for col, sql_type, default in (
                 ("arbs_completed", "INTEGER", "0"),
                 ("arbs_naked", "INTEGER", "0"),
@@ -279,6 +300,22 @@ class ModelStore:
                 ("paired_rejects_budget_back", "INTEGER", "0"),
                 ("paired_rejects_budget_lay", "INTEGER", "0"),
                 ("paired_fill_skips", "INTEGER", "0"),
+                # Cohort-visibility S01b: per-pair lifecycle counters
+                # introduced by arb-signal-cleanup (force_closed),
+                # force-close-architecture S01 (target_pnl_refused,
+                # pairs_opened, closed_pnl, force_closed_pnl), and
+                # force-close-architecture S02 (stop_closed,
+                # stop_closed_pnl). Migrations are idempotent so re-
+                # running ModelStore.__init__ on a post-plan db is a
+                # no-op. Pre-plan rows default to 0 / 0.0.
+                ("arbs_closed", "INTEGER", "0"),
+                ("arbs_force_closed", "INTEGER", "0"),
+                ("arbs_stop_closed", "INTEGER", "0"),
+                ("arbs_target_pnl_refused", "INTEGER", "0"),
+                ("pairs_opened", "INTEGER", "0"),
+                ("closed_pnl", "REAL", "0.0"),
+                ("force_closed_pnl", "REAL", "0.0"),
+                ("stop_closed_pnl", "REAL", "0.0"),
             ):
                 try:
                     conn.execute(
@@ -675,9 +712,13 @@ class ModelStore:
                      arbs_completed, arbs_naked, locked_pnl, naked_pnl,
                      paired_rejects_no_ltp, paired_rejects_price_invalid,
                      paired_rejects_budget_back, paired_rejects_budget_lay,
-                     paired_fill_skips)
+                     paired_fill_skips,
+                     arbs_closed, arbs_force_closed, arbs_stop_closed,
+                     arbs_target_pnl_refused, pairs_opened,
+                     closed_pnl, force_closed_pnl, stop_closed_pnl)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.run_id,
@@ -701,6 +742,14 @@ class ModelStore:
                     record.paired_rejects_budget_back,
                     record.paired_rejects_budget_lay,
                     record.paired_fill_skips,
+                    record.arbs_closed,
+                    record.arbs_force_closed,
+                    record.arbs_stop_closed,
+                    record.arbs_target_pnl_refused,
+                    record.pairs_opened,
+                    record.closed_pnl,
+                    record.force_closed_pnl,
+                    record.stop_closed_pnl,
                 ),
             )
             conn.commit()
@@ -835,6 +884,41 @@ class ModelStore:
                     paired_fill_skips=(
                         r["paired_fill_skips"]
                         if "paired_fill_skips" in col_names else 0
+                    ),
+                    # Cohort-visibility S01b (2026-05-02). Default-tolerant
+                    # reads on legacy rows (NULL / missing column → 0 or
+                    # 0.0).
+                    arbs_closed=(
+                        (r["arbs_closed"] or 0)
+                        if "arbs_closed" in col_names else 0
+                    ),
+                    arbs_force_closed=(
+                        (r["arbs_force_closed"] or 0)
+                        if "arbs_force_closed" in col_names else 0
+                    ),
+                    arbs_stop_closed=(
+                        (r["arbs_stop_closed"] or 0)
+                        if "arbs_stop_closed" in col_names else 0
+                    ),
+                    arbs_target_pnl_refused=(
+                        (r["arbs_target_pnl_refused"] or 0)
+                        if "arbs_target_pnl_refused" in col_names else 0
+                    ),
+                    pairs_opened=(
+                        (r["pairs_opened"] or 0)
+                        if "pairs_opened" in col_names else 0
+                    ),
+                    closed_pnl=(
+                        (r["closed_pnl"] or 0.0)
+                        if "closed_pnl" in col_names else 0.0
+                    ),
+                    force_closed_pnl=(
+                        (r["force_closed_pnl"] or 0.0)
+                        if "force_closed_pnl" in col_names else 0.0
+                    ),
+                    stop_closed_pnl=(
+                        (r["stop_closed_pnl"] or 0.0)
+                        if "stop_closed_pnl" in col_names else 0.0
                     ),
                 )
                 for r in rows

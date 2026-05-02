@@ -607,6 +607,18 @@ def train_one_agent(
             arbs_naked=eval_summary.arbs_naked,
             locked_pnl=eval_summary.locked_pnl,
             naked_pnl=eval_summary.naked_pnl,
+            # Cohort-visibility S01b (2026-05-02): persist the post-
+            # arb-signal-cleanup / force-close-architecture per-pair
+            # lifecycle counters so SQLite readers (peek tools, future
+            # UI panels) see the full breakdown live.
+            arbs_closed=eval_summary.arbs_closed,
+            arbs_force_closed=eval_summary.arbs_force_closed,
+            arbs_stop_closed=eval_summary.arbs_stop_closed,
+            arbs_target_pnl_refused=eval_summary.arbs_target_pnl_refused,
+            pairs_opened=eval_summary.pairs_opened,
+            closed_pnl=eval_summary.closed_pnl,
+            force_closed_pnl=eval_summary.force_closed_pnl,
+            stop_closed_pnl=eval_summary.stop_closed_pnl,
         ))
         # Composite score = eval-day total_reward. Phase 3 keeps the
         # ranking simple; Session 04 may add a multi-component score.

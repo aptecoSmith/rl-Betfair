@@ -258,18 +258,42 @@ def run_cohort(
                     )
                     results[idx] = result
                     total_agents_trained += 1
+                    # Cohort-visibility S01a (2026-05-02): write the
+                    # scoreboard row IMMEDIATELY so an operator (or
+                    # tooling) reading scoreboard.jsonl mid-cohort sees
+                    # per-agent results land at agent-completion cadence
+                    # (~18 min on AMBER v2 wall) rather than at end-of-
+                    # generation. The batched branch keeps its post-
+                    # cluster write (agents in a batched cluster don't
+                    # finish independently). See plans/rewrite/phase-3-
+                    # followups/cohort-visibility/.
+                    row = _agent_result_to_scoreboard_row(
+                        result=result,
+                        generation=generation,
+                        agent_idx=idx,
+                        eval_day=eval_day,
+                        training_days=list(training_days),
+                    )
+                    sf.write(json.dumps(row) + "\n")
+                    sf.flush()
 
-            # ── Scoreboard write (after all agents in this gen done) ─
-            for idx, result in enumerate(results):
-                row = _agent_result_to_scoreboard_row(
-                    result=result,
-                    generation=generation,
-                    agent_idx=idx,
-                    eval_day=eval_day,
-                    training_days=list(training_days),
-                )
-                sf.write(json.dumps(row) + "\n")
-                sf.flush()
+            if batched:
+                # Batched branch: write scoreboard rows after the cluster
+                # loop above has populated ``results``. Per-agent live
+                # visibility within a batched cluster needs the batched-
+                # rollout collector to emit per-agent sub-events — out
+                # of scope for this plan; documented as a known
+                # limitation in cohort-visibility/purpose.md.
+                for idx, result in enumerate(results):
+                    row = _agent_result_to_scoreboard_row(
+                        result=result,
+                        generation=generation,
+                        agent_idx=idx,
+                        eval_day=eval_day,
+                        training_days=list(training_days),
+                    )
+                    sf.write(json.dumps(row) + "\n")
+                    sf.flush()
 
             # Sort by eval-day total_reward (descending). Ties are
             # broken by day_pnl (descending) so a higher cash-P&L
