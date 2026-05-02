@@ -555,7 +555,68 @@ match. Hard constraint §"One mechanics change per cohort" is
 unchanged but rephrased to clarify it's a per-cohort isolation
 rule, not a ban on shipping a stacked configuration.
 
-### Cohort run — pending operator confirmation
+### Session 02 standalone cohort — truncated at 3/12 (2026-05-02)
+
+Output: `registry/v2_force_close_arch_session02_stop_close_1777726954/`.
+
+Two prior launches were stopped early on the same day:
+- 1777718273: buggy carve-out (gated on back partner's price). 4/12
+  agents complete; data invalidated by carve-out bug.
+- 1777725672: corrected carve-out, absolute-£ threshold. 0/12 agents
+  complete; data invalidated by threshold-too-loose-on-small-bets
+  diagnosis.
+
+The third launch (1777726954) ran with the corrected carve-out
+(open-LAY-price gating, floor=15.0) AND the stake-scaled threshold
+(0.10 × open_stake). Operator stopped at 3/12 once the
+behavioural pattern was clear and stable — running the remaining
+9 agents would have spent ~2.5 h GPU confirming a reading that's
+already locked in.
+
+Per-agent eval (3 agents, all on AMBER v2 day 2026-04-28):
+
+| agent | day_pnl | matured | closed | stop | naked | fc_rate | scf | naked_pnl |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| a49d1aa6-58a | +£153.32 | 38 | 4 | 27 | 146 | 0.679 | 0.126 | +£83.14 |
+| 60157461-0d0 | -£706.26 | 46 | 3 | 23 | 133 | 0.649 | 0.112 | -£841.18 |
+| bd33b0a4-935 | -£109.74 | 45 | 1 | 28 | 138 | 0.651 | 0.132 | -£200.02 |
+
+**Behavioural attribution evidence (S02 alone):**
+
+| Metric | AMBER v2 | S01 alone | **S02 alone (3/12)** |
+|---|---|---|---|
+| mean fc_rate (TRUE) | 0.809 | 0.821 | **0.660** |
+| median scf | 0.000 | 0.000 | **0.126** |
+| median pcf | 0.000 | 0.255 | 0.015 |
+| positive eval P&L | 2/12 | 3/12 | 1/3 |
+
+**What the 3-agent sample tells us:**
+
+1. **Stop-close mechanism works.** scf consistently in the 0.11–
+   0.13 band (target range 0.10–0.30). All 3 agents fire it
+   meaningfully on real data.
+2. **fc_rate moves ~20 % relative** vs S01 (0.821 → 0.660). The
+   tightness of the per-agent fc_rate band (0.649–0.679) confirms
+   this isn't sampling noise — it's the new equilibrium under
+   stop-close.
+3. **Policy-close fraction collapses.** S01's 0.255 → S02's
+   0.015. The agent stops using `close_signal` because stop-close
+   fires first. Mechanism shifts the work env-side as designed.
+4. **Naked-pnl variance is still very high.** -£200 to -£841 on
+   two agents, +£83 on one. Stop-close caps each pair at ~10 %
+   of stake but two structural leaks remain: (a) pairs whose MTM
+   never crosses -10 % yet settle on the wrong race-outcome side,
+   (b) pairs alive into in-play (the trigger gates off when
+   `tick.in_play=True`).
+
+**Bar 6a (mean fc ≤ 0.30):** likely FAIL alone. Even if remaining
+9 agents averaged 0.20, cohort mean would land ~0.31. The 0.66
+floor from this small sample is the working point.
+
+**Bar 6c (≥ 4/12 positive eval P&L):** TBD. 1/3 with very high
+variance.
+
+### Stacked Session 03 cohort — launching
 
 Wall envelope ~3.5h GPU. Launch command (per session prompt §4
 with the curated AMBER v2 data window from Session 01):
