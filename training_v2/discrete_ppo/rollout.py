@@ -28,6 +28,26 @@ prompt §"Hard constraints"):
 - Per-runner reward attribution must SUM to the env's scalar reward
   to floating-point tolerance (per-step assertion below).
 - ``hidden_state_in`` captured BEFORE the forward pass, not after.
+
+Phase 4 Session 03 (2026-05-02): module-level disable of
+``torch.distributions.Distribution`` arg validation. The per-tick
+``Beta(out.stake_alpha, out.stake_beta)`` construction and the
+policy-side ``Categorical(logits=...)`` construction (in
+``agents_v2/discrete_policy.py``) each pay a parameter-validation
++ broadcasting cost on every ``__init__``. At ~12 k ticks/episode
+that compounds. The validations were never expected to fail (α/β
+come from softplus heads → strictly > 0; logits come from a linear
+head → finite); they are guards against malformed inputs, not
+load-bearing correctness checks. Disabling them is bit-identical:
+no RNG-consuming op runs inside the validation branch, only
+``constraints.check`` calls that raise on violation. Verified by
+``tests/test_v2_rollout_distributions.py`` — sample / log_prob
+outputs are byte-equal across the toggle at fixed seed.
+
+This toggle is process-wide (it sets a class attribute on
+``torch.distributions.Distribution``). Importing this module is
+the trigger; the trainer / batched_rollout paths inherit the
+disabled state without further action.
 """
 
 from __future__ import annotations
@@ -37,6 +57,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch.distributions
 
 from agents_v2.discrete_policy import BaseDiscretePolicy
 from agents_v2.env_shim import DiscreteActionShim
@@ -51,6 +72,13 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = ["RolloutCollector"]
+
+
+# Phase 4 Session 03: disable per-init parameter validation on every
+# torch.distributions.Distribution subclass globally. See the module
+# docstring for the bit-identity argument and the regression guard
+# in tests/test_v2_rollout_distributions.py.
+torch.distributions.Distribution.set_default_validate_args(False)
 
 
 _ATTRIBUTION_TOLERANCE = 1e-4

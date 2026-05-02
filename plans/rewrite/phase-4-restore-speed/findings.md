@@ -34,7 +34,7 @@ Per-session post-change rows are 1-episode runs with `--n-episodes
 | Pre-Phase-4 baseline | 9.595 (median) / 9.562 (mean) | — | — | — |
 | + S01 (attribution) | 10.282 (median) / **9.493 (mean)** | mean −0.7 %, median +7.2 % — within noise | ✓ strict per-tick array | 4 |
 | + S02 (obs/mask) | **10.240** (1 ep) | −1.3 % vs S01 ep0 (10.378), +6.3 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 5 |
-| + S03 (distributions) | — | — | — | — |
+| + S03 (distributions) | **9.906** (1 ep) | −3.3 % vs S02 ep0 (10.240), +4.3 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 11 |
 | + S04 (hidden state) | — | — | — | — |
 | + S05 (assert) | — | — | — | — |
 | + S06 (RolloutBatch) | — | — | — | — |
@@ -310,3 +310,175 @@ transition / sync / attribution suite passes (`pytest -m
   obs / mask copy pattern; the distribution wrapper, hidden-state
   buffer, invariant-assert sampling, and Transition restructure
   remain unchanged for their own sessions.
+
+## Session 03 — drop per-tick distribution wrapper construction
+
+**Verdict: PARTIAL.** Bit-identity preserved on every numerical
+field of the PPO update output (same signature used in Session 02:
+`total_reward`, `day_pnl`, `policy_loss_mean`, `value_loss_mean`,
+`entropy_mean`, `approx_kl_mean`, `advantage_*`, `action_histogram`
+all match Session 02's episode-0 row to the last printed digit on
+the same seed-42 / 2026-04-23 day). All 11 new regression tests
+pass; all 27 rollout / attribution / buffer-reuse / sync /
+distribution tests pass; the wider trainer / transition / policy
+suites pass. Measured speedup is at the noise floor — same shape
+as Sessions 01 and 02; the cumulative path remains "Sessions 03–06
+land together" not "any single session carries the phase."
+
+### Measurement
+
+1-episode CPU run on 2026-04-23 (`logs/discrete_ppo_v2/phase4_
+s03_post.jsonl`, ``--seed 42``, ``--n-episodes 1``):
+
+| Field | Pre-S03 (S02 ep0) | Post-S03 (S03 ep0) |
+|---|---|---|
+| n_steps | 11 872 | 11 872 |
+| wall_time_sec | 121.57 | 117.61 |
+| **ms/tick** | **10.240** | **9.906** |
+| total_reward | −1455.5805904269218 | −1455.5805904269218 |
+| day_pnl | −578.0975377788117 | −578.0975377788117 |
+| policy_loss_mean | 0.1482754966829464 | 0.1482754966829464 |
+| value_loss_mean | 2.541815901916194 | 2.541815901916194 |
+| entropy_mean | 2.424904021845069 | 2.424904021845069 |
+| approx_kl_mean | 0.03635444635930922 | 0.03635444635930922 |
+| advantage_max_abs | 132.9420166015625 | 132.9420166015625 |
+| action_histogram | OB=3913 OL=4153 NOOP=1111 CL=2695 | (identical) |
+
+The measured wall is 3.3 % faster than S02 ep0 (10.240 → 9.906
+ms/tick). vs S01's 5-episode mean of 9.493 ms/tick this is +4.3 %
+— well inside the 8.0–10.7 episode-to-episode spread observed in
+S01. Bit-identity on every numeric field is the strongest
+possible signal that the change is correctness-neutral; the speed
+verdict stays PARTIAL pending the cumulative effect of S04–S06.
+
+### Why the win was smaller than expected
+
+The session prompt's `Beta.__init__` overhead estimate (per-init
+parameter validation, broadcasting checks, internal Dirichlet +
+concentration1 / concentration0 tensor allocation at 12 k ticks /
+episode) was correct in principle but two factors damp the
+visible delta on this baseline:
+
+1. **The validation branch is cheap when it passes.** The
+   `constraints.positive` check on `concentration1` /
+   `concentration0` reduces to a `torch.all(value > 0).item()`
+   call — a tiny CUDA-or-CPU op that completes in microseconds
+   per Beta on this scale of input (`(1,)`). At ~12 k ticks /
+   episode the total saved is on the order of tens of ms — well
+   below the per-episode noise floor of the wall-time
+   measurement.
+
+2. **`Distribution.__init__`'s allocator churn is dominated by
+   the broadcasting and stack ops, which still run with
+   validation off.** Shape A only skips the `_validate_args`
+   branch; the Dirichlet construction (`torch.stack([α, β], -1)`,
+   the inner `Dirichlet.__init__`, the constraint registration)
+   still happens. Shape B (inline gamma-ratio sampling, skipping
+   the wrapper entirely) would have saved more, at the cost of
+   making the bit-identity argument depend on a PyTorch internal
+   that varies between minor versions. Per the session prompt
+   §"Hard constraints" #4 ("if in doubt, ship Shape A"), this
+   trade-off was made deliberately.
+
+The same allocator-churn observation applies to the
+`Categorical(logits=...)` construction in
+`agents_v2/discrete_policy.py::DiscreteLSTMPolicy.forward` — the
+global toggle disables that path's validation too, so Session 07's
+note about Categorical wrapper overhead is now redundant for the
+validation portion (the masked_fill cleanup remains).
+
+### What changed
+
+`training_v2/discrete_ppo/rollout.py` gained one module-level
+statement at import time:
+
+```python
+torch.distributions.Distribution.set_default_validate_args(False)
+```
+
+This sets the class attribute `_validate_args = False` on the
+`torch.distributions.Distribution` base class, which every
+distribution subclass (Beta, Categorical, Normal, …) consults in
+its `__init__` and per-call validation paths. The `Beta(α, β)`
+construction in `_collect` keeps its current form but no longer
+pays the per-init validation cost; the policy-side
+`Categorical(logits=...)` in `agents_v2/discrete_policy.py` and
+the PPO-update-side `Beta(stored_α, stored_β)` in
+`training_v2/discrete_ppo/trainer.py` inherit the same toggle
+without further edits.
+
+The module docstring now records the decision and the bit-identity
+argument so the global toggle isn't mysterious to a future
+reader.
+
+### Bit-identity verification
+
+1. **End-to-end PPO update output** — every numerical field of
+   `phase4_s03_post.jsonl` row 0 matches the corresponding row 0
+   of `phase4_s02_post.jsonl` to the last printed digit
+   (`total_reward`, `day_pnl`, all loss / KL / advantage means,
+   action histogram). On a deterministic seed, the only way these
+   match is if every per-tick `Beta.sample()` consumed the same
+   RNG sequence in the same order — which holds because the
+   validation toggle does not gate any RNG-consuming op.
+
+2. **Per-`Beta.sample()` byte-equality** — six parameterised
+   `(α, β)` cases — `(0.5, 0.5)`, `(1.0, 1.0)`, `(2.0, 5.0)`,
+   `(10.0, 1.0)`, `(0.1, 100.0)`, `(50.0, 50.0)` — all assert
+   `torch.equal(sample_validated, sample_unvalidated)` at fixed
+   `torch.manual_seed(42)`. This is the unit-level form of the
+   session prompt's #1 strictest guard.
+
+3. **Per-`Beta.log_prob()` byte-equality** — three parameterised
+   `(α, β)` cases assert `torch.equal(lp_validated,
+   lp_unvalidated)` for the same sampled value. The PPO update
+   reconstructs the wrapper from stored `α / β` and evaluates
+   `log_prob` at the stored sample; this is the bit-identity
+   guard for the consumer side.
+
+4. **Full-episode `stake_unit + log_prob_stake` byte-equality** —
+   running a synthetic 2-race episode at seed 42 under each
+   toggle setting produces byte-equal `[tr.stake_unit ...]` and
+   `[tr.log_prob_stake ...]` arrays. Belt-and-braces complement
+   to (1)-(3): even if `Beta.sample`'s internal path skipped a
+   validation-time tensor allocation that consumed RNG, the
+   full-episode signature would catch it.
+
+### Other tests added
+
+- `test_distribution_validation_disabled_globally` — pins the
+  toggle's effect at import time. Catches a future regression
+  where the `set_default_validate_args(False)` line is deleted,
+  moved into a conditional, or accidentally re-toggled by a
+  downstream import. Uses `importlib.reload` to make the test
+  robust against test-order (an earlier test may have flipped
+  the toggle back on).
+
+All 11 new tests pass (10 cheap unit tests plus 1 slow full-
+episode integration test that requires the scorer artefacts).
+Pre-existing `test_discrete_ppo_rollout.py`, `test_v2_rollout_
+per_runner_attribution.py`, `test_v2_rollout_buffer_reuse.py`,
+`test_v2_rollout_sync.py`, `test_discrete_ppo_trainer.py`,
+`test_discrete_ppo_transition.py`, and
+`test_agents_v2_discrete_policy.py` suites all pass.
+
+### Hard-constraint adherence
+
+- **No env edits** — the toggle is set on a torch class
+  attribute; the env / shim / matcher are untouched.
+- **CPU bit-identity preserved** — strongest signature: every
+  numeric field of `phase4_s03_post.jsonl` matches `phase4_s02_
+  post.jsonl` row 0 exactly. Six parameterised
+  `Beta.sample()` / three `Beta.log_prob()` byte-equality unit
+  tests + one full-episode `stake_unit + log_prob_stake` integration
+  test corroborate.
+- **Invariant assert kept as-is** — Session 05 will sample it;
+  this session does not loosen it.
+- **No restructuring of the surrounding rollout loop** — the only
+  edit is the module-level toggle line and an explanatory
+  docstring.
+- **One fix per session** — Session 03 only changes the
+  validation toggle. The Categorical wrapper construction in
+  `agents_v2/discrete_policy.py` benefits transitively (its
+  per-init validation is also disabled), exactly as
+  `purpose.md` §"Session 07" foresaw.
