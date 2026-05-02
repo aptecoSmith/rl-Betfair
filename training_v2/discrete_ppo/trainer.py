@@ -266,12 +266,44 @@ class DiscretePPOTrainer:
     def train_episode(self) -> EpisodeStats:
         """Run one episode → GAE → PPO update; return per-episode stats."""
         t0 = time.perf_counter()
-
         transitions = self._collector.collect_episode()
+        last_info = self._collector.last_info
+        return self._update_from_transitions(
+            transitions=transitions, last_info=last_info, t0=t0,
+        )
+
+    def update_from_rollout(
+        self,
+        transitions: list[Transition],
+        last_info: dict,
+    ) -> EpisodeStats:
+        """Run GAE + PPO update from an externally-collected rollout.
+
+        Used by the batched cohort runner
+        (``training_v2.discrete_ppo.batched_rollout.BatchedRolloutCollector``)
+        which produces per-agent transition lists in one shot. The
+        post-rollout pipeline (GAE → PPO update → stats) is identical
+        to :meth:`train_episode` — the only difference is who owns the
+        rollout phase.
+        """
+        return self._update_from_transitions(
+            transitions=transitions,
+            last_info=last_info,
+            t0=time.perf_counter(),
+        )
+
+    # ── Internal: post-rollout pipeline ────────────────────────────────────
+
+    def _update_from_transitions(
+        self,
+        transitions: list[Transition],
+        last_info: dict,
+        t0: float,
+    ) -> EpisodeStats:
         n_steps = len(transitions)
         if n_steps == 0:
             raise RuntimeError(
-                "RolloutCollector returned 0 transitions — the env did not "
+                "Rollout produced 0 transitions — the env did not "
                 "produce any steps before terminating.",
             )
 
@@ -322,7 +354,7 @@ class DiscretePPOTrainer:
 
         # Final-step day_pnl from the env (last transition was the
         # terminal step; the shim's info dict carries day_pnl).
-        day_pnl = float(self._collector.last_info.get("day_pnl", 0.0))
+        day_pnl = float((last_info or {}).get("day_pnl", 0.0))
 
         update_log = self._ppo_update(
             transitions=transitions,

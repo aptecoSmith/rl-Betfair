@@ -55,7 +55,9 @@ from training_v2.cohort.genes import (
     mutate,
     sample_genes,
 )
+from training_v2.cohort.batched_worker import train_cluster_batched
 from training_v2.cohort.worker import AgentResult, train_one_agent
+from training_v2.discrete_ppo.batched_rollout import cluster_agents_by_arch
 from training_v2.discrete_ppo.train import select_days
 
 
@@ -82,6 +84,7 @@ def run_cohort(
     train_one_agent_fn: Callable[..., AgentResult] = train_one_agent,
     event_emitter: Callable[[dict], None] | None = None,
     reward_overrides: dict | None = None,
+    batched: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -177,45 +180,87 @@ def run_cohort(
             logger.info(
                 "── Generation %d/%d ──", generation + 1, n_generations,
             )
-            results: list[AgentResult] = []
+            agent_ids_gen = [str(uuid.uuid4()) for _ in cohort]
+            per_agent_seeds = [
+                (int(seed) * 1_000_003 + generation * 10_000 + i) & 0x7FFFFFFF
+                for i in range(len(cohort))
+            ]
             for idx, genes in enumerate(cohort):
                 assert_in_range(genes)
-                agent_id = str(uuid.uuid4())
-                # Per-agent seed offsets the cohort seed deterministically.
-                per_agent_seed = (
-                    int(seed) * 1_000_003
-                    + generation * 10_000
-                    + idx
-                ) & 0x7FFFFFFF
                 logger.info(
                     "Generation %d agent %d/%d (id=%s) genes=%s",
                     generation + 1, idx + 1, n_agents,
-                    agent_id[:12], genes.to_dict(),
+                    agent_ids_gen[idx][:12], genes.to_dict(),
                 )
-                pa_id, pb_id = parent_ids[idx]
-                result = train_one_agent_fn(
-                    agent_id=agent_id,
-                    genes=genes,
-                    days_to_train=list(training_days),
-                    eval_day=eval_day,
-                    data_dir=data_dir,
-                    device=device,
-                    seed=per_agent_seed,
-                    model_store=model_store,
-                    generation=generation,
-                    parent_a_id=pa_id,
-                    parent_b_id=pb_id,
-                    event_emitter=event_emitter,
-                    agent_idx=int(idx),
-                    n_agents=int(n_agents),
-                    reward_overrides=reward_overrides,
-                )
-                results.append(result)
-                total_agents_trained += 1
-                # One scoreboard row per (generation × agent). Schema
-                # is a flat dict (matches v1's ``scoreboard.jsonl``
-                # convention — one JSON object per line, all primitive
-                # fields, no nested SQL rows).
+
+            results: list[AgentResult] = [None] * len(cohort)  # type: ignore[list-item]
+
+            if batched:
+                # Cluster by architecture, run each cluster batched.
+                # Cross-cluster scheduling is sequential (one cluster
+                # consumes the GPU at a time — Session 02 prompt §2
+                # "Cross-cluster scheduling. Sequential.").
+                #
+                # We dry-instantiate policies temporarily just to get
+                # the cluster key from each agent's hidden_size; full
+                # policy construction (under per-agent seed) happens
+                # inside ``train_cluster_batched``.
+                cluster_to_indices: dict[tuple, list[int]] = {}
+                for i, g in enumerate(cohort):
+                    key = (
+                        "DiscreteLSTMPolicy",
+                        int(g.hidden_size),
+                    )
+                    cluster_to_indices.setdefault(key, []).append(i)
+                for cluster_key, idxs in cluster_to_indices.items():
+                    logger.info(
+                        "── Cluster %s: %d agents (batched) ──",
+                        cluster_key, len(idxs),
+                    )
+                    cluster_results = train_cluster_batched(
+                        agent_ids=[agent_ids_gen[i] for i in idxs],
+                        genes_list=[cohort[i] for i in idxs],
+                        days_to_train=list(training_days),
+                        eval_day=eval_day,
+                        data_dir=data_dir,
+                        device=device,
+                        seeds=[per_agent_seeds[i] for i in idxs],
+                        model_store=model_store,
+                        generation=generation,
+                        parent_ids=[parent_ids[i] for i in idxs],
+                        event_emitter=event_emitter,
+                        agent_indices_in_cohort=[int(i) for i in idxs],
+                        n_agents_in_cohort=int(n_agents),
+                        reward_overrides=reward_overrides,
+                    )
+                    for k, i in enumerate(idxs):
+                        results[i] = cluster_results[k]
+                        total_agents_trained += 1
+            else:
+                for idx, genes in enumerate(cohort):
+                    pa_id, pb_id = parent_ids[idx]
+                    result = train_one_agent_fn(
+                        agent_id=agent_ids_gen[idx],
+                        genes=genes,
+                        days_to_train=list(training_days),
+                        eval_day=eval_day,
+                        data_dir=data_dir,
+                        device=device,
+                        seed=per_agent_seeds[idx],
+                        model_store=model_store,
+                        generation=generation,
+                        parent_a_id=pa_id,
+                        parent_b_id=pb_id,
+                        event_emitter=event_emitter,
+                        agent_idx=int(idx),
+                        n_agents=int(n_agents),
+                        reward_overrides=reward_overrides,
+                    )
+                    results[idx] = result
+                    total_agents_trained += 1
+
+            # ── Scoreboard write (after all agents in this gen done) ─
+            for idx, result in enumerate(results):
                 row = _agent_result_to_scoreboard_row(
                     result=result,
                     generation=generation,
@@ -572,6 +617,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "needed)."
         ),
     )
+    p.add_argument(
+        "--batched", action="store_true",
+        help=(
+            "Use the batched cohort path (throughput-fix Session 02). "
+            "Clusters agents by architecture (hidden_size) and shares "
+            "one BatchedRolloutCollector per cluster per training day. "
+            "Default OFF; the sequential per-agent path stays the "
+            "default until at least one cohort run validates the "
+            "batched path."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -602,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
             mutation_rate=args.mutation_rate,
             event_emitter=emitter,
             reward_overrides=reward_overrides or None,
+            batched=bool(args.batched),
         )
     finally:
         if server is not None:
