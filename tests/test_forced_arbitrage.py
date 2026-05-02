@@ -3924,17 +3924,19 @@ class TestStopClose:
 
     def test_stop_close_fires_when_pair_mtm_below_threshold(self):
         """Synthetic race: agg-back at 4.0 with stake 20; LTP rises
-        to 8.0 → back position MTM = 20 × (4-8)/8 = −£10. With
-        threshold=£1 the stop-close trigger MUST fire.
+        to 8.0 → back position MTM = 20 × (4-8)/8 = −£10.
+
+        Threshold = 0.10 (fraction of stake). Stake = £20, so
+        effective trigger at MTM = −£2. −£10 < −£2 → fires.
         """
         day = self._scripted_race_with_ltp_drop(
             ltp_path=(4.0, 8.0, 8.0),
         )
-        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env = BetfairEnv(day, self._config(stop_threshold=0.10))
         env.reset()
         self._open_back_pair(env)
         # Two steps: tick 0 has LTP=4 (matches placed price → MTM=0,
-        # no fire); tick 1 has LTP=8 (MTM = −£10 < −£1 → fire).
+        # no fire); tick 1 has LTP=8 (MTM = −£10 < −£2 → fire).
         noop = np.zeros(env.action_space.shape, dtype=np.float32)
         env.step(noop)
         env.step(noop)
@@ -3972,7 +3974,7 @@ class TestStopClose:
         )
         env = BetfairEnv(
             day,
-            self._config(stop_threshold=1.0, lay_floor=15.0),
+            self._config(stop_threshold=0.10, lay_floor=15.0),
         )
         env.reset()
         # Lay-first naked: aggressive LAY matched at 18, paired BACK
@@ -4005,7 +4007,7 @@ class TestStopClose:
         )
         env = BetfairEnv(
             day,
-            self._config(stop_threshold=1.0, lay_floor=15.0),
+            self._config(stop_threshold=0.10, lay_floor=15.0),
         )
         env.reset()
         # No back partner; open LAY at 4.0 is below the long-odds floor.
@@ -4033,7 +4035,7 @@ class TestStopClose:
         # back exposure so the carve-out path doesn't apply.
         env = BetfairEnv(
             day,
-            self._config(stop_threshold=1.0, lay_floor=4.0),
+            self._config(stop_threshold=0.10, lay_floor=4.0),
         )
         env.reset()
         self._open_back_pair(env)
@@ -4054,7 +4056,7 @@ class TestStopClose:
         day = self._scripted_race_with_ltp_drop(
             ltp_path=(4.0, 8.0, 8.0),
         )
-        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env = BetfairEnv(day, self._config(stop_threshold=0.10))
         env.reset()
         self._open_back_pair(env)
         # Run to completion.
@@ -4078,7 +4080,7 @@ class TestStopClose:
         day = self._scripted_race_with_ltp_drop(
             ltp_path=(4.0, 8.0, 8.0),
         )
-        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env = BetfairEnv(day, self._config(stop_threshold=0.10))
         env.reset()
         self._open_back_pair(env)
         noop = np.zeros(env.action_space.shape, dtype=np.float32)
@@ -4102,6 +4104,55 @@ class TestStopClose:
         # the shaped contribution from this term is 0.
         assert shp == pytest.approx(0.0, abs=1e-9)
 
+    # ── 9: threshold scales with stake (small-bet protection) ─────────────
+
+    def test_threshold_scales_with_open_leg_stake(self):
+        """Threshold is a fraction of open-leg stake, not absolute £.
+        Small bets get the same relative protection as large ones.
+
+        Operator clarification (2026-05-02): the original "£1 → close"
+        framing assumed typical stakes (£20+). At £5 stake an absolute
+        £1 trigger would need +25% adverse drift — making the
+        mechanism inert on micro-bets. The fraction-of-stake fix
+        protects micro-bets at the same relative drift.
+
+        Test plants a £5 BACK at 4.0; LTP rises to 5.0 → MTM
+        = 5 × (4-5)/5 = -£1.0. Under absolute £1 threshold this
+        wouldn't trigger (matched the threshold but didn't cross).
+        Under 0.10-fraction threshold = -£0.50 → -£1 < -£0.50 →
+        fires.
+        """
+        from env.bet_manager import Bet
+        day = self._scripted_race_with_ltp_drop(
+            ltp_path=(4.0, 5.0, 5.0),
+        )
+        env = BetfairEnv(day, self._config(stop_threshold=0.10))
+        env.reset()
+        # Plant a £5 BACK leg directly (smaller than _open_back_pair's
+        # default £20 to exercise the small-bet case).
+        race = env.day.races[0]
+        env.bet_manager.bets.append(Bet(
+            selection_id=101, side=BetSide.BACK,
+            requested_stake=5.0, matched_stake=5.0,
+            average_price=4.0, market_id=race.market_id,
+            pair_id="P1",
+        ))
+        env.bet_manager.budget -= 5.0
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        env.step(noop)
+        bm = env.bet_manager
+        close_legs = [
+            b for b in bm.bets if b.pair_id == "P1" and b.close_leg
+        ]
+        # MTM = -£1.0 at LTP=5; threshold = 0.10 × £5 = -£0.50.
+        # -£1 < -£0.50 → fires. Pre-fix (absolute £1) wouldn't fire.
+        assert len(close_legs) == 1, (
+            "small-bet protection: threshold must scale with stake, "
+            "so a £5 bet with £1 MTM loss (= 20% of stake) triggers"
+        )
+        assert close_legs[0].stop_close is True
+
     # ── 8b: carve-out gates on OPEN-leg price, not back partner ────────────
 
     def test_carve_out_ignores_back_partner_price(self):
@@ -4122,7 +4173,7 @@ class TestStopClose:
         )
         env = BetfairEnv(
             day,
-            self._config(stop_threshold=1.0, lay_floor=15.0),
+            self._config(stop_threshold=0.10, lay_floor=15.0),
         )
         env.reset()
         # Open LAY at short odds (4.0) WITH a long-odds back partner.
@@ -4154,7 +4205,7 @@ class TestStopClose:
         day = self._scripted_race_with_ltp_drop(
             ltp_path=(4.0, 8.0, 8.0),
         )
-        env = BetfairEnv(day, self._config(stop_threshold=1.0))
+        env = BetfairEnv(day, self._config(stop_threshold=0.10))
         env.reset()
         self._open_back_pair(env)
         noop = np.zeros(env.action_space.shape, dtype=np.float32)

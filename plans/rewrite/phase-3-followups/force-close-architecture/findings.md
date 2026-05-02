@@ -462,6 +462,54 @@ guard for the bug-#1 fix; ``test_stop_close_does_not_fire_for_
 naked_lay_at_long_odds`` now exercises the lay-first-naked path
 directly.
 
+### Threshold semantics (2026-05-02 operator clarification)
+
+After re-launching the cohort with the corrected carve-out, agent 1
+produced **bit-identical** training metrics to the previous run on
+days 1-3 — strongly implying the carve-out fix didn't change
+anything observable for that agent. Inspection surfaced a second,
+more fundamental issue: at the agent's typical stake size (£5-£15),
+the **£1 absolute threshold rarely fires**.
+
+Math: MTM = stake × (P_matched - LTP) / LTP. To reach -£1 MTM:
+
+| Stake | Adverse drift needed |
+|---|---|
+| £5 | +25 % |
+| £10 | +12.5 % |
+| £20 | +5.3 % |
+| £100 | +1.0 % |
+
+Real Betfair pre-race volatility is typically 5-15 % over the last
+10 minutes, so £20+ bets get ~half-coverage but £5 bets are
+essentially unprotected.
+
+The operator's original "£1 → close" framing was implicitly
+assuming typical stake sizes; with micro-bets common, the absolute
+£ figure produces inconsistent behaviour across stake sizes.
+
+**Fix:** reinterpret `stop_loss_pnl_threshold` as a **fraction of
+open-leg matched stake**. Trigger fires when MTM crosses
+`-threshold × open_stake`. Same relative drift fires at all stake
+sizes:
+
+- £5 stake × 0.10 → trigger at -£0.50 (~10 % drift)
+- £20 × 0.10 → trigger at -£2.00 (~10 % drift)
+- £100 × 0.10 → trigger at -£10.00 (~10 % drift)
+
+Default working point: 0.10 (10 % loss → close). Operator can
+tune to 0.05 (tighter) or 0.20 (looser) via reward_overrides.
+
+The `stop_loss_pnl_threshold` reward override KEY stays the same;
+only its UNITS change. Threshold = 0.0 still means "disabled,
+byte-identical to pre-plan." Per-pair MTM telescope and carve-out
+semantics are unchanged. The lay-first-naked / open-LAY-price
+carve-out from the 2026-05-02 fix continues to gate at the LAY
+leg's price ≥ 15.0.
+
+10th test added (`test_threshold_scales_with_open_leg_stake`)
+exercising the small-stake case that motivated the change.
+
 ### Cohort run — pending operator confirmation
 
 Wall envelope ~3.5h GPU. Launch command (per session prompt §4
@@ -475,14 +523,14 @@ python -m training_v2.cohort.runner \
     --n-agents 12 --generations 1 --days 8 \
     --device cuda --seed 42 \
     --data-dir data/processed_amber_v2_window \
-    --reward-overrides stop_loss_pnl_threshold=1.0 \
+    --reward-overrides stop_loss_pnl_threshold=0.10 \
     --output-dir "$OUT" 2>&1 | tee "$OUT/cohort.log"
 ```
 
-Default `lay_only_naked_price_threshold=4.0` is the
-purpose.md §"Session 02" first-probe value. Threshold £1 is
-the operator's named target ("we look like we would lose £1").
-One mechanics change, one threshold value, one cohort —
+Threshold 0.10 (post-2026-05-02 reinterpretation) means "close
+when MTM dips below 10 % of open-leg stake." Default
+`lay_only_naked_price_threshold=15.0` per the operator's odds
+bands. One mechanics change, one threshold value, one cohort —
 follow-on threshold sweeps are out of scope.
 
 ### Scoring (run after cohort completes)

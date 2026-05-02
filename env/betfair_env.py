@@ -634,13 +634,16 @@ class BetfairEnv(gymnasium.Env):
         # force-close-architecture/.
         "target_pnl_pair_sizing_enabled",
         # Force-close-architecture Session 02 (2026-05-02): per-pair
-        # projected-loss stop-close threshold (£). When > 0, any open
-        # pair whose per-pair MTM crosses ``-stop_loss_pnl_threshold``
-        # is auto-closed via ``_attempt_close`` with ``stop_close=True``
-        # (strict matcher, NOT relaxed force-close). Plan-level flag —
-        # not a gene. Default 0.0 = no-op = byte-identical pre-plan.
-        # See plans/rewrite/phase-3-followups/force-close-architecture/
-        # session_prompts/02_projected_loss_stop_close.md.
+        # projected-loss stop-close threshold, expressed as a
+        # **fraction of open-leg matched stake** (operator
+        # clarification 2026-05-02). When > 0, any open pair whose
+        # per-pair MTM crosses ``-threshold * open_stake`` is auto-
+        # closed via ``_attempt_close`` with ``stop_close=True``
+        # (strict matcher, NOT relaxed force-close). Plan-level flag
+        # — not a gene. Default 0.0 = no-op = byte-identical pre-plan.
+        # Typical operator-set values: 0.05 (5% loss → close), 0.10
+        # (10% loss → close, default working point), 0.20 (looser).
+        # See plans/rewrite/phase-3-followups/force-close-architecture/.
         "stop_loss_pnl_threshold",
         # Force-close-architecture Session 02 (2026-05-02): naked-lay
         # carve-out price floor. Stop-close fires unconditionally on
@@ -895,14 +898,20 @@ class BetfairEnv(gymnasium.Env):
             reward_cfg.get("target_pnl_pair_sizing_enabled", False),
         )
         # Force-close-architecture Session 02 (2026-05-02). Projected-
-        # loss stop-close threshold (£, positive). When > 0 the env
-        # auto-closes any open pair whose per-pair MTM dips below
-        # ``-stop_loss_pnl_threshold``. The close routes through
+        # loss stop-close threshold, expressed as a **fraction of open-
+        # leg matched stake** (operator clarification 2026-05-02 — see
+        # findings.md §"Threshold semantics"). When > 0 the env auto-
+        # closes any open pair whose per-pair MTM dips below
+        # ``-threshold * open_stake``. The close routes through
         # ``_attempt_close`` with ``stop_close=True`` (strict matcher,
         # NOT the relaxed force-close path) so the close lands at a
         # real price; the pair is classified as ``arbs_stop_closed``
         # at settle, distinct from agent-closed and force-closed.
         # Default 0.0 = disabled = byte-identical to pre-plan.
+        # Earlier semantics treated this as an absolute £ figure; the
+        # fix scales with stake so micro-bets (£5) get the same
+        # protection as larger ones (£100), at the same relative
+        # adverse drift.
         self._stop_loss_pnl_threshold: float = float(
             reward_cfg.get("stop_loss_pnl_threshold", 0.0),
         )
@@ -2942,7 +2951,8 @@ class BetfairEnv(gymnasium.Env):
         self, race: Race, tick: Tick,
     ) -> None:
         """Stop-close every open pair whose per-pair MTM crosses the
-        configured threshold.
+        configured threshold (interpreted as a fraction of open-leg
+        matched stake).
 
         Called once per pre-off tick, AFTER ``_compute_portfolio_mtm``
         has rebuilt ``self._per_pair_mtm``. Reads the per-pair bucket
@@ -2955,10 +2965,18 @@ class BetfairEnv(gymnasium.Env):
         stop-close is a real trade at a real price, NOT the relaxed
         end-of-race blanket flatten.
 
-        Naked-lay carve-out: pairs whose only open leg is LAY-side and
-        whose original back leg is at price ``>=
-        lay_only_naked_price_threshold`` are skipped — long-odds lays
-        carry through to settle.
+        Threshold semantics (2026-05-02 operator clarification): the
+        threshold is a fraction of the open-leg ``matched_stake`` sum,
+        NOT an absolute £ figure. So ``stop_loss_pnl_threshold = 0.10``
+        fires when the pair's MTM dips below 10 % of its open stake.
+        At £5 stake → trigger at -£0.50; at £100 → -£10. Earlier
+        absolute-£ semantics under-protected micro-bets (a £1
+        absolute trigger needed +25 % adverse drift on a £5 stake).
+
+        Naked-lay carve-out: pairs whose only open leg is LAY-side
+        AND whose open LAY leg's matched price is
+        ``>= lay_only_naked_price_threshold`` are skipped — long-odds
+        lays carry through to settle.
         """
         bm = self.bet_manager
         if bm is None:
@@ -2975,11 +2993,8 @@ class BetfairEnv(gymnasium.Env):
         # but iterating the snapshot keeps the loop stable within this
         # tick's pass.
         for pair_id, pair_mtm in list(self._per_pair_mtm.items()):
-            if pair_mtm > -threshold:
-                continue
-            # Find the open (UNSETTLED) legs on this pair so we can
-            # apply the naked-lay carve-out and pick a representative
-            # selection_id for the close.
+            # Find the open (UNSETTLED) legs FIRST so we have stake
+            # for the threshold scale below.
             open_legs = [
                 b for b in bm.bets
                 if b.pair_id == pair_id
@@ -2987,6 +3002,23 @@ class BetfairEnv(gymnasium.Env):
                 and b.market_id == race.market_id
             ]
             if not open_legs:
+                continue
+            # Operator clarification (2026-05-02): the threshold is now
+            # a **fraction of open-leg matched stake**, not an absolute
+            # £ amount. Earlier "£1 → close" framing was implicitly
+            # assuming typical stake sizes (£20+); at small stakes (£5)
+            # an absolute £1 trigger required a +25% adverse drift,
+            # which made the mechanism inert on micro-bets. Per-cent
+            # framing fires at consistent relative loss across sizes:
+            #   £5 stake × 0.10 → trigger at -£0.50
+            #   £20 stake × 0.10 → trigger at -£2.00
+            #   £100 stake × 0.10 → trigger at -£10.00
+            # See plans/rewrite/phase-3-followups/force-close-architecture/
+            # findings.md §"Threshold semantics (2026-05-02)".
+            open_stake = sum(b.matched_stake for b in open_legs)
+            if open_stake <= 0.0:
+                continue
+            if pair_mtm > -threshold * open_stake:
                 continue
             if self._is_naked_lay_long_odds(open_legs, long_odds_floor):
                 continue
