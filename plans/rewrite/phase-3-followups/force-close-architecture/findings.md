@@ -681,7 +681,99 @@ four mechanics demonstrably moved their respective metrics.
 Bar 6c failure is a policy-shape problem (over-opening), not a
 mechanism problem.
 
-### 5-stack cohort — adding open_cost=1.0 to address over-opening
+### 5-stack cohort — truncated at 9/12 (2026-05-02)
+
+Output: `registry/v2_force_close_arch_session03_5stack_1777741794/`.
+
+Mechanics enabled (all five):
+- `target_pnl_pair_sizing_enabled = true` (S01)
+- `stop_loss_pnl_threshold = 0.10` (S02)
+- `force_close_before_off_seconds = 60`
+- `min_seconds_before_off = 60`
+- `open_cost = 1.0` (NEW — selective-open shaping per-tick)
+
+Per-agent eval (9 agents, all on AMBER v2 day 2026-04-28):
+
+| agent | day_pnl | bets | matured | closed | stop | forced | naked | fc_rate | locked | naked_pnl |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| af58ae4e | -£93.18 | 404 | 41 | 5 | 27 | 125 | 7 | 0.034 | +£190.19 | -£42.22 |
+| 5d20907c | -£378.04 | 421 | 30 | 10 | 30 | 134 | 12 | 0.056 | +£153.21 | -£234.92 |
+| 2d0bc9a7 | -£200.25 | 437 | 45 | 3 | 27 | 141 | 3 | 0.014 | +£208.39 | -£112.24 |
+| a7f22b68 | -£243.20 | 356 | 24 | 5 | 26 | 119 | 5 | 0.028 | +£131.49 | -£135.28 |
+| 8e6ccb63 | -£69.32 | 413 | 38 | 2 | 24 | 139 | 4 | 0.019 | +£170.34 | +£17.17 |
+| 56abd9f8 | -£92.81 | 406 | 52 | 3 | 19 | 125 | 7 | 0.034 | +£236.02 | -£69.64 |
+| 3810f6d0 | -£242.25 | 382 | 34 | 3 | 23 | 131 | 0 | 0.000 | +£163.67 | -£121.02 |
+| b55578ba | -£67.17 | 459 | 30 | 7 | 19 | 169 | 4 | 0.017 | +£164.70 | +£67.87 |
+| a8322bd1 | -£132.85 | 415 | 32 | 5 | 25 | 141 | 8 | 0.038 | +£153.15 | +£37.36 |
+
+**Aggregate (9/12) verdict-bar tracking:**
+
+| Metric | AMBER v2 | S01 | S02 | S01+S02 | 4-stack | **5-stack (9/12)** |
+|---|---|---|---|---|---|---|
+| mean fc_rate | 0.809 | 0.821 | 0.660 | 0.661 | 0.021 | **0.027** |
+| Bar 6a (≤0.30) | FAIL | FAIL | FAIL | FAIL | PASS | **PASS** |
+| median scf | 0.000 | 0.000 | 0.126 | 0.135 | 0.117 | 0.120 |
+| median pcf | 0.000 | 0.255 | 0.015 | 0.037 | 0.028 | 0.024 |
+| positive eval P&L | 2/12 | 3/12 | 1/3 | 1/2 | 1/5 | **0/9** |
+
+**Bar 6a verdict — PASS by 11×.** fc_rate range 0.000–0.056 across
+9 agents. Tightly-clustered, structurally locked. Even with one
+outlier (5d20907c at 0.056), the cohort mean is well below 0.30.
+
+**Bar 6c verdict — almost certainly FAIL.** 0/9 positive eval P&L.
+Even if all 3 remaining agents land positive (extremely unlikely),
+3/12 < 4/12 bar. Operator stopped at 9/12 to address the
+over-opening dynamic before spending more GPU.
+
+**Open_cost=1.0 effect — minimal on bet count.**
+
+| | 4-stack mean | 5-stack mean |
+|---|---|---|
+| bet_count per agent | ~425 | ~410 (-4%) |
+| matured per agent | ~39 | ~36 |
+| force-closed per agent | ~140 | ~136 |
+| day_pnl per agent | -£140 | -£170 |
+
+The agent didn't learn to be more selective at the open decision.
+Bet count barely budged (4% drop). Hypothesised cause: 1
+generation × 7 training days × ~12k transitions × 4 PPO epochs
+gives limited update opportunity for a new shaping term. The
+agent has multiple knobs to comply with the open_cost gradient
+(cut bets, tighten targets, drop signal threshold); on this
+budget it didn't pick "cut bets."
+
+One agent achieved fc_rate = 0.000 (3810f6d0): every unmatured
+pair got force-closed, zero nakeds. Most efficient safety-net
+usage observed across any cohort. day_pnl still -£242 because
+force-close friction (~131 closes × ~£1-2 spread) dominates the
++£164 locked profit.
+
+**Mechanism layer ships GREEN per the 2026-05-02 verdict
+reframe** (Bar 6a cleared, all mechanics demonstrably moving
+their respective metrics). **Bar 6c failure is a policy-shape
+problem**, not a mechanism problem — the agent over-opens and
+the friction cost dominates day_pnl.
+
+### Operator pause — 2026-05-02
+
+After the 9/12 5-stack reading, operator paused to do further
+work before launching the next cohort iteration. Three lines of
+follow-up are open:
+
+1. **Stronger open_cost** (e.g. 2.0 — upper bound of safe range
+   per CLAUDE.md). Tests whether more pressure forces the agent
+   to cut bet count.
+2. **Multi-generation training** (2-4 generations vs the current
+   1). Lets the policy respond more fully to open_cost.
+3. **Different shaping (not open_cost-based).** E.g.
+   matured_arb_bonus to reward maturation positively rather than
+   penalising opens negatively.
+
+Neither (1) nor (3) is a new mechanic — both are existing knobs.
+(2) is a training-budget change, not a mechanism change.
+
+The mechanism layer of `force-close-architecture` is GREEN as of
+2026-05-02. Bar 6c is now a follow-on question on policy shape.
 
 Wall envelope ~3.5h GPU. Launch command (per session prompt §4
 with the curated AMBER v2 data window from Session 01):
