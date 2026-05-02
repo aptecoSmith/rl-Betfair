@@ -653,6 +653,18 @@ class BetfairEnv(gymnasium.Env):
         # ("leave only long-odds lays naked", per the operator review's
         # 2026-05-01 framing). Default 4.0; range typically [2.0, 10.0].
         "lay_only_naked_price_threshold",
+        # Force-close-architecture Session 03 (2026-05-02 operator
+        # decision): plumb the two betting_constraints knobs that
+        # control the close-out window through the reward_overrides
+        # CLI passthrough. They're not strictly "reward" parameters,
+        # but they're the only operator-tunable knobs cohort runners
+        # need to set per-experiment without editing worker.py
+        # defaults. The env reads from reward_overrides FIRST, falling
+        # back to ``training.betting_constraints`` for byte-identity
+        # with pre-plan configs. See findings.md §"Close-out window
+        # (2026-05-02)".
+        "force_close_before_off_seconds",
+        "min_seconds_before_off",
     })
 
     def __init__(
@@ -676,7 +688,19 @@ class BetfairEnv(gymnasium.Env):
         constraints = config["training"].get("betting_constraints", {})
         self._max_back_price: float | None = constraints.get("max_back_price")
         self._max_lay_price: float | None = constraints.get("max_lay_price")
-        self._min_seconds_before_off: int = constraints.get("min_seconds_before_off", 0)
+        # Close-out-window knobs (force-close-architecture S03, 2026-
+        # 05-02): ``min_seconds_before_off`` and (below)
+        # ``force_close_before_off_seconds`` accept a reward_overrides
+        # passthrough so the cohort runner CLI can set them per-cohort
+        # without modifying ``betting_constraints`` defaults in
+        # worker.py. Falls back to ``betting_constraints`` (and to 0)
+        # for byte-identity with pre-plan configs.
+        self._min_seconds_before_off: int = int(
+            (reward_overrides or {}).get(
+                "min_seconds_before_off",
+                constraints.get("min_seconds_before_off", 0),
+            )
+        )
         # Force-close at T−N (plans/arb-signal-cleanup, Session 01,
         # 2026-04-21). When > 0 and scalping_mode is on, any open pair
         # with an unfilled second leg is force-closed via
@@ -735,8 +759,14 @@ class BetfairEnv(gymnasium.Env):
         # first-access (e.g. in stub tests bypassing ``reset()``)
         # finds an empty dict instead of AttributeError.
         self._per_pair_mtm: dict[str, float] = {}
+        # Same passthrough rule as ``min_seconds_before_off`` above —
+        # cohort runners can set this from CLI via reward_overrides
+        # without touching betting_constraints defaults.
         self._force_close_before_off_seconds: int = int(
-            constraints.get("force_close_before_off_seconds", 0)
+            (reward_overrides or {}).get(
+                "force_close_before_off_seconds",
+                constraints.get("force_close_before_off_seconds", 0),
+            )
         )
         # Shaped-penalty warmup (plans/arb-signal-cleanup, Session 02,
         # 2026-04-21). Linearly scales efficiency_cost and

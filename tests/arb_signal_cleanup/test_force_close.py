@@ -1005,3 +1005,68 @@ class TestWarmupScaleReachesEpisodeStatsAsZero:
             ),
         )
         assert stats.shaped_penalty_warmup_scale == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Force-close-architecture S03 (2026-05-02): close-out-window CLI
+# passthrough. Both ``force_close_before_off_seconds`` and
+# ``min_seconds_before_off`` were betting_constraints-only; promoting
+# them to the reward_overrides CLI passthrough lets cohort runners set
+# the close-out window per-cohort without modifying worker.py defaults.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestCloseOutWindowOverrides:
+    def test_default_reads_from_betting_constraints(self):
+        """Without reward_overrides, env reads both knobs from
+        betting_constraints (byte-identity with pre-plan configs)."""
+        cfg = _scalping_config(force_close_before_off_seconds=30)
+        cfg["training"]["betting_constraints"]["min_seconds_before_off"] = 45
+        env = BetfairEnv(_scripted_day([60.0, 30.0, 15.0]), cfg)
+        assert env._force_close_before_off_seconds == 30
+        assert env._min_seconds_before_off == 45
+
+    def test_reward_overrides_take_precedence(self):
+        """When both are passed via reward_overrides, env uses those
+        values regardless of what's in betting_constraints."""
+        cfg = _scalping_config(force_close_before_off_seconds=10)
+        cfg["training"]["betting_constraints"]["min_seconds_before_off"] = 5
+        env = BetfairEnv(
+            _scripted_day([60.0, 30.0, 15.0]), cfg,
+            reward_overrides={
+                "force_close_before_off_seconds": 60,
+                "min_seconds_before_off": 60,
+            },
+        )
+        assert env._force_close_before_off_seconds == 60
+        assert env._min_seconds_before_off == 60
+
+    def test_reward_overrides_partial_override(self):
+        """Setting only one key via reward_overrides leaves the other
+        on its betting_constraints value."""
+        cfg = _scalping_config(force_close_before_off_seconds=10)
+        cfg["training"]["betting_constraints"]["min_seconds_before_off"] = 5
+        env = BetfairEnv(
+            _scripted_day([60.0, 30.0, 15.0]), cfg,
+            reward_overrides={"force_close_before_off_seconds": 60},
+        )
+        assert env._force_close_before_off_seconds == 60
+        # min_seconds stays on betting_constraints value.
+        assert env._min_seconds_before_off == 5
+
+    def test_keys_dont_trigger_unknown_override_warning(self, caplog):
+        """The two new keys are in ``_REWARD_OVERRIDE_KEYS``, so
+        passing them through reward_overrides doesn't fire the
+        unknown-key debug log."""
+        import logging
+        caplog.set_level(logging.DEBUG, logger="env.betfair_env")
+        cfg = _scalping_config()
+        BetfairEnv(
+            _scripted_day([60.0, 30.0, 15.0]), cfg,
+            reward_overrides={
+                "force_close_before_off_seconds": 60,
+                "min_seconds_before_off": 60,
+            },
+        )
+        for record in caplog.records:
+            assert "unknown reward_overrides keys" not in record.message
