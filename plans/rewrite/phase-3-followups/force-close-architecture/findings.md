@@ -510,6 +510,51 @@ leg's price ≥ 15.0.
 10th test added (`test_threshold_scales_with_open_leg_stake`)
 exercising the small-stake case that motivated the change.
 
+### Verdict-bar reframe (2026-05-02 mid-cohort)
+
+While the third Session 02 cohort was running (with the corrected
+carve-out and stake-scaled threshold), the operator flagged that
+the original "individual GREEN required" verdict structure
+conflicted with the structural reality of scalping:
+
+> "It sounds like 2 key tools in a scalper's locker. Why would
+> stacking be questionable?"
+
+The reframe (operator decision):
+
+- **Profit-taking and stop-loss are the minimum viable scalping
+  toolkit, not alternatives.** A real scalper always uses both;
+  neither alone is sustainable.
+- The original "individual GREEN required" rule was a
+  methodological choice (clean per-mechanics attribution), not a
+  fundamental principle. It was over-strict for a question whose
+  expected ship configuration always involved both pieces.
+- **Stacking is now treated as the expected ship configuration**,
+  not a degraded outcome.
+
+Updated verdict logic:
+
+1. Either S01 alone OR S02 alone clears Bar 6a → ship GREEN.
+2. **Stacked S01 + S02 clears Bar 6a → ship GREEN (no asterisk).**
+   Per-session attribution evidence (S01's pcf shift, S02's scf
+   shift) is recorded so the per-mechanics contribution stays
+   on the record.
+3. Neither alone nor stacked clears Bar 6a, but each
+   demonstrably moves a behavioural metric → ship AMBER with
+   explicit operator decision on next mechanics layer.
+4. Neither clears AND behavioural metrics don't move → RED.
+
+Methodological discipline preserved: each session's individual
+cohort still runs first to attribute per-mechanics behavioural
+shifts; stacked cohort runs Session 03. What changed is only
+the bar at which "stacked GREEN" is ship-worthy without
+asterisk.
+
+`purpose.md` §"Success bar" + §"Sessions/Session 03" updated to
+match. Hard constraint §"One mechanics change per cohort" is
+unchanged but rephrased to clarify it's a per-cohort isolation
+rule, not a ban on shipping a stacked configuration.
+
 ### Cohort run — pending operator confirmation
 
 Wall envelope ~3.5h GPU. Launch command (per session prompt §4

@@ -121,9 +121,14 @@ unrelated to the mechanics question.
 ### One mechanics change per cohort
 
 The original `no-betting-collapse` plan's hard constraint
-("one ablation at a time") survives. Sessions 01 and 02 each
-test one mechanics change; Session 03 stacks the two only if
-both individually move the needle.
+("one ablation at a time") survives **at the cohort level** —
+Sessions 01 and 02 each test one mechanics change in their own
+cohort, so the per-mechanics behavioural contribution is
+attributable. Session 03's stacked cohort then turns both flags
+on together; this is a **deliberate combination**, not a third
+new mechanic. See §"Stacking is a legitimate ship configuration"
+for the reframe (2026-05-02): stacking is the expected ship
+configuration, not a degraded outcome.
 
 ### No GA gene additions for as long as possible
 
@@ -142,7 +147,8 @@ day where the new mechanics fail.
 
 ## Success bar
 
-The plan ships GREEN iff at least one cohort produces:
+The plan ships GREEN iff **any** cohort — including a stacked
+Session 01 + Session 02 cohort — produces:
 
 1. **mean fc_rate ≤ 0.30** on eval day 2026-04-28, AND
 2. **≥ 4/12 agents with positive eval `day_pnl`** (vs AMBER v2's
@@ -154,11 +160,40 @@ If a cohort hits 1+2 but at higher wall, log it as
 **GREEN-with-throughput-caveat** and open a throughput-fix
 follow-on.
 
-If neither Session 01 nor Session 02 produces a cohort meeting
-1+2, ship **RED**: the mechanics hypothesis is refuted at the
-single-change level, and the rewrite premise is in serious
-trouble. Stop, write post-mortem, decide whether to step back
-to v1 or attempt a stacked Session 03.
+### Stacking is a legitimate ship configuration (2026-05-02 reframe)
+
+The original framing of this plan required EACH session to clear
+the bar individually, with stacked-only GREEN treated as a
+degraded outcome requiring an explicit operator decision. That
+constraint reflected scientific discipline (isolate per-mechanics
+contribution) but conflicted with the structural reality of
+scalping: **profit-taking and stop-loss are the minimum viable
+toolkit, not alternatives.** A real human scalper always uses
+both — neither alone is a sustainable strategy.
+
+The reframe (2026-05-02): if Session 01's £-target mechanism
+demonstrably moves a behavioural metric (e.g. policy-close
+fraction) AND Session 02's stop-close mechanism demonstrably
+moves a different metric (e.g. fc_rate / stop-close fraction)
+AND the stacked cohort clears the bar, the plan ships **GREEN
+without asterisk**. This is the expected outcome from real
+scalping mechanics: each tool does one job, you need both
+together to ship.
+
+The methodological discipline is preserved by the per-session
+attribution evidence: Session 01 alone documented its
+behavioural shift (median pcf 0 → 0.255); Session 02 alone
+documented its (fc_rate 0.82 → x, scf 0 → x). When stacked
+clears the bar, the writeup shows each piece pulling its own
+weight without requiring each to clear the macro bar in
+isolation.
+
+If both sessions individually have non-trivial behavioural
+effects but neither clears the bar alone, AND stacked still
+fails: ship **RED** — the rewrite's "no shaping" premise needs
+fundamental rework. The decision to step back to v1 vs attempt
+further architectural changes lives with the operator at that
+point.
 
 ## Sessions
 
@@ -261,18 +296,33 @@ metric) + a NEW metric:
 
 ### Session 03 — verdict + writeup
 
-If Session 01 OR Session 02 individually meets the success bar:
-ship GREEN, that single mechanics change is the answer, scale-up
-gate unblocks. Document; write the rewrite README update.
+Three outcomes per the 2026-05-02 reframe (see §"Success bar"):
 
-If Session 01 + Session 02 together meet it (i.e. neither alone
-does, but stacked they do): operator decides whether stacking
-is acceptable as a baseline going into Phase 4 scale-up, or
-whether stacking is a "two-mechanics" change requiring more
-scrutiny.
+1. **Session 01 OR Session 02 individually meets the bar** →
+   ship GREEN; the single mechanics change is the answer.
+   Scale-up gate unblocks.
 
-If neither alone nor stacked meets it: RED. Post-mortem,
-decision on v1 revert or further architectural rethink.
+2. **Stacked Session 01 + Session 02 meets the bar** → ship
+   GREEN. Profit-taking and stop-loss are the minimum scalping
+   toolkit; stacking IS the expected ship configuration. The
+   writeup documents per-session behavioural attribution
+   (S01's pcf shift, S02's scf shift) so the per-mechanics
+   contribution is on the record.
+
+3. **Neither alone nor stacked meets the bar, but each
+   demonstrably moves a behavioural metric** → ship AMBER
+   with explicit operator decision required. The mechanism
+   layer works but isn't enough; the next plan considers
+   additional structural mechanics (e.g. lay-first preference,
+   per-runner risk gating).
+
+4. **Neither alone nor stacked meets the bar AND behavioural
+   metrics don't move** → RED. Post-mortem, decision on v1
+   revert or further architectural rethink.
+
+A stacked cohort is run when needed (after individual S01 + S02
+verdicts are in). Output dir
+`registry/v2_force_close_arch_session03_stacked_<ts>/`.
 
 ## Hard constraints
 
