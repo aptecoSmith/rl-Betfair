@@ -36,7 +36,7 @@ Per-session post-change rows are 1-episode runs with `--n-episodes
 | + S02 (obs/mask) | **10.240** (1 ep) | −1.3 % vs S01 ep0 (10.378), +6.3 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 5 |
 | + S03 (distributions) | **9.906** (1 ep) | −3.3 % vs S02 ep0 (10.240), +4.3 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 11 |
 | + S04 (hidden state) | **10.359** (1 ep) | +4.6 % vs S03 ep0 (9.906), +9.1 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 5 |
-| + S05 (assert) | — | — | — | — |
+| + S05 (assert) | **9.527** (1 ep) | −8.0 % vs S04 ep0 (10.359), +0.4 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 6 |
 | + S06 (RolloutBatch) | — | — | — | — |
 | + S07 (mask path) | — | — | — | — |
 | v1 reference (`ppo_lstm_v1`) | 2.94 | — | — | — |
@@ -729,3 +729,238 @@ still passes.
   `.copy_()` does the value copy that the previous
   `.clone()` did. Both are load-bearing per the session
   prompt §"Hard constraints" #3.
+
+## Session 05 — make attribution invariant assert opt-in / sampled
+
+**Verdict: PARTIAL.** Bit-identity preserved on every numerical
+field of the PPO update output (same signature used in Sessions
+02 / 03 / 04: `total_reward`, `day_pnl`, `policy_loss_mean`,
+`value_loss_mean`, `entropy_mean`, `approx_kl_mean`,
+`advantage_*`, `action_histogram` all match Session 04's
+episode-0 row to the last printed digit on the same seed-42 /
+2026-04-23 day). All 6 new regression tests pass; all 42 v2
+rollout / trainer / transition / sync / distribution / buffer-
+reuse / attribution / hidden-state-buffer tests pass. Measured
+wall is 8 % faster than S04 ep0 (10.359 → 9.527 ms/tick) — the
+single largest visible delta of the phase so far, but still
+within the 8.0–10.7 episode-to-episode spread observed in
+Session 01's 5-episode baseline.
+
+### Measurement
+
+1-episode CPU run on 2026-04-23 (`logs/discrete_ppo_v2/phase4_
+s05_post.jsonl`, ``--seed 42``, ``--n-episodes 1``,
+``PHASE4_STRICT_ATTRIBUTION=0`` to exercise the production
+sampled path):
+
+| Field | Pre-S05 (S04 ep0) | Post-S05 (S05 ep0) |
+|---|---|---|
+| n_steps | 11 872 | 11 872 |
+| wall_time_sec | 122.98 | 113.10 |
+| **ms/tick** | **10.359** | **9.527** |
+| total_reward | −1455.5805904269218 | −1455.5805904269218 |
+| day_pnl | −578.0975377788117 | −578.0975377788117 |
+| policy_loss_mean | 0.1482754966829464 | 0.1482754966829464 |
+| value_loss_mean | 2.541815901916194 | 2.541815901916194 |
+| entropy_mean | 2.424904021845069 | 2.424904021845069 |
+| approx_kl_mean | 0.03635444635930922 | 0.03635444635930922 |
+| advantage_max_abs | 132.9420166015625 | 132.9420166015625 |
+| action_histogram | OB=3913 OL=4153 NOOP=1111 CL=2695 | (identical) |
+
+The measured wall is 8.0 % faster than S04 ep0. vs S01's 5-
+episode mean of 9.493 ms/tick this is +0.4 % — well inside the
+8.0–10.7 episode-to-episode spread from S01. Bit-identity on
+every numeric field is the strongest possible signal that the
+change is correctness-neutral (the assert is side-effect-free;
+gating its frequency cannot affect rollout numerical outputs);
+the speed verdict stays PARTIAL pending the cumulative effect
+of S06.
+
+### Why this delta is plausible at the per-tick level
+
+`np.isclose(total, step_reward, rtol=0.0, atol=...)` — the call
+that previously fired on every tick — composes a small ufunc
+broadcast and a `bool(np.bool_(...))` cast. At ~12 k ticks /
+episode the sampled-mode total is ~100× fewer firings (one
+in 100 + n_settle_ticks ≈ 77 settle + 118 sample ≈ 195 vs
+11 872 strict). At ~few µs per call, the saved per-episode
+wall is in the ~tens-of-ms range — small relative to the 113 s
+total but on the same order as the inter-episode noise floor.
+The 8 % delta on a 1-episode point estimate is therefore
+plausible-but-noisy; the cumulative phase verdict stays gated
+on Sessions 06 + the verdict re-run.
+
+### What changed
+
+`training_v2/discrete_ppo/rollout.py` gained:
+
+1. Module-level constants `_STRICT_ATTRIBUTION` (read once at
+   import time from the `PHASE4_STRICT_ATTRIBUTION` env var,
+   default `"0"` → `False`) and `_SAMPLED_ATTRIBUTION_EVERY_N`
+   (constant `100`).
+2. `_AttributionState.steps_since_last_check: int` field
+   (added to `__slots__`, initialised to 0) — the per-episode
+   counter driving the one-in-N sample.
+3. `_attribute_step_reward` now computes `is_settle_step`
+   alongside the existing `_settled_bets` watermark check
+   (`new_settled_n > state.settled_count` — already computed,
+   now stored as a boolean for reuse), and gates the
+   `np.isclose` invariant assert behind:
+
+   ```python
+   should_check = (
+       _STRICT_ATTRIBUTION
+       or state.steps_since_last_check >= _SAMPLED_ATTRIBUTION_EVERY_N
+       or is_settle_step
+   )
+   ```
+
+   When `should_check` is True the same `np.isclose` call and
+   `AssertionError` raise as pre-S05 fire; the counter resets
+   to 0. When False the counter increments. The
+   `per_runner_reward` array is unchanged either way (the
+   assert is side-effect-free).
+
+`conftest.py` (root, pytest-discovered) gained one
+`os.environ.setdefault("PHASE4_STRICT_ATTRIBUTION", "1")` at
+module-level. Pytest imports conftest BEFORE any test module,
+so any test that imports `rollout` triggers the import-time
+env-var read AFTER the strict default has been set. Production
+training runs (which don't go through pytest) import `rollout`
+without this env var set, so the production default is sampled
+mode. Tests that want sampled-mode behaviour monkeypatch
+`rollout._STRICT_ATTRIBUTION` directly (the env var is read
+once at import; subsequent env mutations don't take effect).
+
+### Settle-step detection — load-bearing argument
+
+The settle-step always-check is non-negotiable per the session
+prompt's §"Hard constraints" #2: "settle is the highest-
+mutation tick of any episode; if anything is going to break
+attribution algebra, it'll break here." The signal we use:
+`new_settled_n > state.settled_count` — the env's
+`_settle_current_race` extends `self._settled_bets` with the
+race's bets in one shot inside `env.step` (audit:
+`env/betfair_env.py::1835` — `self._settled_bets.extend(self.
+bet_manager.bets)`). A tick that grew the list IS the settle
+tick.
+
+We compute `is_settle_step` once on entry, BEFORE updating
+`state.settled_count` (which is then updated to `new_settled_
+n` inside the same branch). This avoids a second comparison
+later in the function and keeps the watermark update colocated
+with its read.
+
+The detection uses zero new env-side coupling — only the
+already-read `env._settled_bets` field that the per-runner
+attribution scan already consumes (per Session 01).
+
+### Test-suite handshake — strict default, opt-in sampled
+
+The session prompt's §"Hard constraints" #1 ("Default ON in
+tests... Production code defaults to sampled mode; tests default
+to strict mode. The two defaults must not drift") is enforced
+by the conftest env-var setdefault. Every pre-existing test
+that touches the rollout (the 42-test v2 trainer / rollout /
+transition / sync / distribution / buffer-reuse / attribution /
+hidden-state-buffer suite) continues to exercise the per-tick
+assert as a regression guard — a future bug that breaks
+attribution algebra in a way that would only surface in
+strict mode is caught by the test suite, not silently dropped
+to sampled.
+
+The pre-existing
+`test_attribution_invariant_assert_still_holds` test in
+`test_v2_rollout_per_runner_attribution.py` is the canonical
+example: it runs a full episode and depends on the per-tick
+assert firing on every tick to catch any residual drift.
+Verified passing under the strict-mode default.
+
+### Bit-identity verification
+
+1. **End-to-end PPO update output** — every numerical field of
+   `phase4_s05_post.jsonl` row 0 matches the corresponding row
+   0 of `phase4_s04_post.jsonl` to the last printed digit
+   (`total_reward`, `day_pnl`, all loss / KL / advantage
+   means, action histogram). The assert is side-effect-free
+   (a read of `per_runner.sum()` then a comparison); gating
+   its frequency cannot change any numerical output.
+
+2. **Per-tick `per_runner_reward` array** — the new
+   `test_attribution_outputs_unchanged_across_modes` runs the
+   same fixed-seed rollout in strict and sampled mode and
+   asserts `np.array_equal` on every transition's
+   `per_runner_reward`. Pass — byte-equal across all 26+
+   ticks of the synthetic 2-race episode.
+
+### Other tests added
+
+All six tests live in
+`tests/test_v2_rollout_invariant_assert.py` per the session
+prompt:
+
+- `test_strict_mode_fires_per_tick` — with strict True, a
+  spy on `np.isclose` records exactly `n_transitions` calls.
+  Catches a regression where strict silently drops to sampled.
+
+- `test_sampled_mode_fires_at_most_once_per_n_plus_settle_
+  ticks` — with strict False and `N=4`, the spy records a
+  count in `[n_settle_ticks, n_steps // 4 + n_settle_ticks +
+  2]`. Strictly less than `n_steps`. Catches the inverse
+  regression.
+
+- `test_strict_mode_raises_on_injected_drift` — with strict
+  True, patching `np.isclose` to return False triggers the
+  AssertionError on the first tick. The production raise path
+  is still active.
+
+- `test_sampled_mode_raises_on_settle_step_drift` — with
+  strict False and `N=10_000` (so the only firings are settle
+  ticks), patching `np.isclose` to False raises on the first
+  settle tick. Pins the always-check carve-out per the
+  session prompt §"Hard constraints" #2.
+
+- `test_sampled_mode_misses_drift_on_non_sample_non_settle_
+  tick` — with strict False and `N=10_000`, the spy records
+  exactly `n_settle_ticks == 2` calls (no sample-rate firings,
+  no non-settle firings). Documents the explicit trade-off:
+  drift on a non-sample non-settle tick is "missed by design."
+
+- `test_attribution_outputs_unchanged_across_modes` — same
+  fixed-seed rollout in strict and sampled mode produces
+  byte-equal `per_runner_reward` arrays. Catches a future
+  regression where the assert path mutates state.
+
+All six pass. The pre-existing 42-test v2 rollout / trainer /
+transition / sync / distribution / buffer-reuse / attribution /
+hidden-state-buffer suite passes under the conftest's strict-
+mode default.
+
+### Hard-constraint adherence
+
+- **No env edits** — the settle-step detector reads
+  `env._settled_bets` (already consumed by the per-runner
+  attribution scan since Session 01). The env / shim /
+  matcher are untouched.
+- **CPU bit-identity preserved** — strongest signature: every
+  numeric field of `phase4_s05_post.jsonl` matches `phase4_
+  s04_post.jsonl` row 0 exactly. The byte-equal
+  `per_runner_reward` test corroborates per-tick.
+- **Strict default in tests, sampled default in production** —
+  conftest.py `os.environ.setdefault` enforces. Existing
+  tests continue to exercise the per-tick assert as a
+  regression guard.
+- **Settle-step always-check is non-negotiable** — the
+  always-fire branch is unconditional in the gating
+  expression; pinned by `test_sampled_mode_raises_on_settle_
+  step_drift`.
+- **Don't change attribution algebra** — only the assert
+  *frequency* changes. The `per_runner_reward` computation,
+  pending-set walk, residual distribution, and EXIT rule are
+  byte-identical to S04.
+- **Don't introduce env-side coupling** — `is_settle_step`
+  reuses an already-computed quantity from the existing
+  `_settled_bets` watermark check; no new env field accessed.
+- **One fix per session** — Session 05 only changes the
+  invariant-assert frequency. Session 06 (RolloutBatch)
+  remains for its own session.

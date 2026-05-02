@@ -48,11 +48,44 @@ This toggle is process-wide (it sets a class attribute on
 ``torch.distributions.Distribution``). Importing this module is
 the trigger; the trainer / batched_rollout paths inherit the
 disabled state without further action.
+
+Phase 4 Session 05 (2026-05-02): make the per-tick attribution
+invariant assert opt-in / sampled. Pre-Session-05 every tick paid
+for an ``np.isclose(total, step_reward, ...)`` call on the
+per-runner sum — cheap individually but at ~12 k ticks/episode it
+compounds, and after Session 01's incremental tracking landed it
+became the dominant per-tick fixed cost in the attribution path.
+
+Production runs default to a one-in-N sample (``N=100``) plus an
+always-fire on settle-step ticks (where attribution is most
+likely to drift — race-end is the highest-mutation tick). The
+``PHASE4_STRICT_ATTRIBUTION=1`` env var restores per-tick checking
+for development / regression runs. The ``conftest.py`` autouse
+fixture sets the env var to ``"1"`` for the test suite by default,
+so every pre-existing test continues to exercise the per-tick
+assert as a regression guard. Tests that want to verify sampled-
+mode behaviour monkeypatch the module-level ``_STRICT_ATTRIBUTION``
+back to ``False`` for the duration of the test.
+
+Settle-step detection: a tick is "settle" iff it just extended
+``env._settled_bets`` (the env moves a race's bets from
+``bm.bets`` into ``_settled_bets`` exactly once, on the
+``_settle_current_race`` call inside ``env.step``). The pending-
+set entry scan already computes ``new_settled_n >
+state.settled_count`` so we read it once before the watermark
+update and reuse it for the always-fire decision.
+
+Per-runner output is unchanged — the assert frequency change
+does not touch the ``per_runner_reward`` array or the residual
+distribution. Bit-identity on attribution outputs is preserved
+across all three modes (strict, sampled non-firing tick, sampled
+firing tick).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -82,6 +115,19 @@ torch.distributions.Distribution.set_default_validate_args(False)
 
 
 _ATTRIBUTION_TOLERANCE = 1e-4
+
+# Phase 4 Session 05: strict / sampled invariant-assert toggle. See the
+# module docstring for the bit-identity argument and the regression
+# guards in ``tests/test_v2_rollout_invariant_assert.py``.
+#
+# Read at import time — fast (one os.environ.get); tests that want to
+# vary mode per-test monkeypatch the module attribute directly via
+# ``monkeypatch.setattr("training_v2.discrete_ppo.rollout._STRICT_ATTRIBUTION", ...)``
+# rather than re-importing.
+_STRICT_ATTRIBUTION = os.environ.get(
+    "PHASE4_STRICT_ATTRIBUTION", "0",
+).lower() in ("1", "true", "yes")
+_SAMPLED_ATTRIBUTION_EVERY_N = 100
 
 
 class _AttributionState:
@@ -116,6 +162,7 @@ class _AttributionState:
         "live_count",
         "bm_id",
         "iter_history",
+        "steps_since_last_check",
     )
 
     def __init__(self) -> None:
@@ -135,6 +182,12 @@ class _AttributionState:
         # the bounded-size and zero-scan-on-no-bet-tick regression
         # guards. Cheap (one int append per tick); off the hot path.
         self.iter_history: list[int] = []
+        # Phase 4 Session 05: ticks since the last invariant-assert
+        # firing. Drives the one-in-N sample in non-strict mode.
+        # Reset to 0 every time the assert fires (strict, every-N
+        # boundary, or settle-step always-check); incremented
+        # otherwise.
+        self.steps_since_last_check: int = 0
 
 
 class RolloutCollector:
@@ -671,8 +724,17 @@ class RolloutCollector:
            runner.
 
         Returns ``per_runner_reward`` of shape ``(max_runners,)``.
-        Asserts ``per_runner_reward.sum() ≈ step_reward`` — drift
-        here would silently corrupt the PPO update.
+
+        Phase 4 Session 05 (2026-05-02): the
+        ``per_runner_reward.sum() ≈ step_reward`` invariant assert is
+        SAMPLED in production (one tick in
+        ``_SAMPLED_ATTRIBUTION_EVERY_N``, plus always-fire on
+        settle-step ticks) and STRICT under
+        ``PHASE4_STRICT_ATTRIBUTION=1`` / pytest's autouse strict-
+        mode default. Drift here is the load-bearing failure mode the
+        original assert was guarding against; the change is purely
+        about *frequency*, not the algebra. The output array is
+        byte-identical regardless of which path runs.
         """
         pending_bets = state.pending_bets
         prev_pnl_by_id = state.prev_pnl_by_id
@@ -684,7 +746,16 @@ class RolloutCollector:
         # since been replaced).
         settled_list = env._settled_bets
         new_settled_n = len(settled_list)
-        if new_settled_n > state.settled_count:
+        # Phase 4 Session 05: settle-step detection. The env extends
+        # ``_settled_bets`` exactly once per race-end inside
+        # ``env.step`` (see ``_settle_current_race`` →
+        # ``self._settled_bets.extend(self.bet_manager.bets)``). A
+        # tick that grew the list IS the settle tick — the highest-
+        # mutation tick of the episode and the most likely place
+        # for attribution algebra to drift. Always-check on settle
+        # in sampled mode; strict mode checks every tick anyway.
+        is_settle_step = new_settled_n > state.settled_count
+        if is_settle_step:
             for i in range(state.settled_count, new_settled_n):
                 bet = settled_list[i]
                 bid = id(bet)
@@ -754,22 +825,38 @@ class RolloutCollector:
         residual = step_reward - attributed_total
         per_runner += residual / self.max_runners
 
-        # Belt-and-braces invariant: sum across runners equals the
-        # env's scalar reward to floating-point tolerance. Drift here
-        # is the load-bearing failure mode the session prompt
-        # flagged — stop and investigate, don't silence.
-        total = float(per_runner.sum())
-        if not np.isclose(
-            total, step_reward,
-            rtol=0.0, atol=_ATTRIBUTION_TOLERANCE,
-        ):
-            raise AssertionError(
-                f"per-runner reward attribution drift: sum={total!r} "
-                f"vs scalar reward={step_reward!r} "
-                f"(diff={total - step_reward!r}). "
-                "A reward component in env._settle_current_race or "
-                "the per-step path isn't being captured by the "
-                "bet-pnl-delta + equal-residual split.",
-            )
+        # Phase 4 Session 05: sampled / strict invariant assert.
+        # The check is correctness-only — drift here is load-bearing
+        # ("attribution algebra silently breaks") but a per-tick
+        # ``np.isclose`` at 12 k ticks/episode is wasted work in
+        # production once the algebra has stabilised. Sample one tick
+        # in N (default 100) plus always-fire on settle-step ticks
+        # (the highest-mutation tick, where drift is most likely);
+        # strict mode (``PHASE4_STRICT_ATTRIBUTION=1`` env var or
+        # ``conftest.py`` autouse fixture) restores the per-tick
+        # check for development / regression runs. The ``per_runner``
+        # output is unchanged whether the check fires or not.
+        should_check = (
+            _STRICT_ATTRIBUTION
+            or state.steps_since_last_check >= _SAMPLED_ATTRIBUTION_EVERY_N
+            or is_settle_step
+        )
+        if should_check:
+            total = float(per_runner.sum())
+            if not np.isclose(
+                total, step_reward,
+                rtol=0.0, atol=_ATTRIBUTION_TOLERANCE,
+            ):
+                raise AssertionError(
+                    f"per-runner reward attribution drift: sum={total!r} "
+                    f"vs scalar reward={step_reward!r} "
+                    f"(diff={total - step_reward!r}). "
+                    "A reward component in env._settle_current_race or "
+                    "the per-step path isn't being captured by the "
+                    "bet-pnl-delta + equal-residual split.",
+                )
+            state.steps_since_last_check = 0
+        else:
+            state.steps_since_last_check += 1
 
         return per_runner.astype(np.float32, copy=False)
