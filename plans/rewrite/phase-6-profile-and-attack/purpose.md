@@ -175,15 +175,37 @@ profile actually shows. The candidate menu below is the likely
 shape; the actual order and content depends on Session 01's
 assessment.
 
-## Candidate optimisations (likely targets — confirm via Session 01)
+## Candidate optimisations (Session 01 profile-confirmed)
 
 Listed roughly in expected impact × ease order. Each is a
-self-contained Session 02+ candidate.
+self-contained Session 02+ candidate. Estimated gains were
+revised in-place after Session 01's profile (see
+`findings.md` §"Per-candidate upper-bound speedup" and
+§"Ranked target list for Session 02+" for the ranking that
+informs which session attacks which candidate first).
+
+Two entries were added or expanded post-Session-01:
+
+- **A′** is the calibrator-side companion to A. The
+  Session 01 profile showed the sklearn isotonic wrapper has
+  the same 28-call pathology as the booster and admits the
+  identical fix. Filed as a same-session companion to A
+  rather than a separate entry because splitting them would
+  waste the per-session measurement budget.
+- **S** is the new "rewrite `_spread_in_ticks` to be O(1)"
+  candidate. Profile-discovered: tick_ladder helpers via
+  the scorer feature path were 28 % of per-tick rollout, the
+  largest unlisted hot path. In scope (lives in
+  `training_v2/scorer/`, not `env/`) and bit-identical via a
+  closed-form reformulation.
 
 ### A. Batched LightGBM `booster.predict()` in env_shim
 
-**Estimated gain: ~1.4–2.8 ms/tick** (Phase 4b's headline
-estimate).
+**Estimated gain: ~1.6 ms/tick** (booster wrapper portion;
+Session 01 profile-revised down from Phase 4b's 1.4–2.8 ms/tick
+ceiling because the LightGBM C-extension `__inner_predict_np2d`
+is only 0.66 ms/tick of the 2.26 ms/tick total predict path —
+batching saves the wrapper but not the C kernel).
 
 `agents_v2/env_shim.py::compute_extended_obs` calls
 `self._booster.predict(feature_vec)` ~28 times per tick (per
@@ -200,6 +222,30 @@ poisoning others. Batching changes the contract — a single NaN
 in the stacked matrix needs to map back to a single skipped
 runner, not the whole batch. The session prompt will spec the
 fault-isolation strategy.
+
+### A′. Batched isotonic `calibrator.predict()` (same-session companion to A)
+
+**Estimated gain: ~1.0 ms/tick.**
+
+The Session 01 profile revealed the sklearn isotonic calibrator
+is paid 28× per tick alongside the booster, with the same
+Python-wrapper pathology: `check_array` (~0.5 ms/tick),
+`_assert_all_finite` (~0.1), `np.clip` / `_wrapfunc` (~0.3) all
+run per row. Underlying scipy `_evaluate` interpolation kernel
+is tiny (~0.13 ms/tick); the wrapper accounts for ~1.05 ms/tick
+of the 1.19 ms/tick total. Mechanically identical to A —
+stack 28 booster outputs into a single ndarray, call
+`calibrator.predict()` once. Bit-identical (Regime A): isotonic
+regression is a piecewise-linear function evaluated independently
+per row, so 28-row and 1-row paths produce identical floats.
+
+**Ship in the same session as A.** Splitting them across two
+sessions wastes the per-session measurement budget on changes
+whose individual deltas (~1.2 and ~0.8 ms/tick after slack)
+sit close to the per-episode noise floor. The fault-isolation
+caveat from A applies symmetrically: a NaN booster output must
+flag exactly one runner's calibrator slot as skipped, not the
+whole batch. The session prompt specs this in one place.
 
 ### B. Slot-to-tick-runner-index cache in env_shim
 
@@ -270,6 +316,51 @@ trigger recompile; our rollout shape is fixed batch=1 so this
 should be stable, but the session needs to verify).
 
 Caveat: compile adds a ~5–30 s warmup on the first forward. Acceptable on a 12 k-tick episode but visible on smoke tests.
+
+### S. O(1) `_spread_in_ticks` in `training_v2/scorer/feature_extractor.py`
+
+**Estimated gain: ~1.5–2.0 ms/tick.**
+
+Added to the menu post-Session-01 after the profile revealed
+`env.tick_ladder.tick_offset` and `_band_for` consume **~28 % of
+per-tick rollout = 2.4 ms/tick**, almost entirely reachable via
+one chain: `compute_extended_obs` → `feature_extractor.extract`
+→ `_spread_in_ticks(best_back, best_lay)` →
+`tick_offset(price, n, +1)`. Called 28× per tick; each call
+walks the ladder one tick at a time up to 50 iterations, and
+each `tick_offset` step does its own `_band_for` band scan.
+Worst case ~2500 `_band_for` calls per `_spread_in_ticks` call.
+
+The function returns a deterministic float (the integer count of
+Betfair ticks between two prices) and the ladder bands are a
+fixed constant. A closed-form replacement using direct band
+arithmetic is bit-identical AND O(1):
+
+1. Find the band containing `best_back` (one band scan).
+2. Find the band containing `best_lay` (one band scan).
+3. Sum: ticks-to-end-of-back-band + full-band-tick-counts for any
+   intervening bands + ticks-from-start-of-lay-band-to-best_lay.
+
+For the typical 1–5 tick spreads seen in horse markets the
+benefit is largely Python-overhead reduction; for the rare
+multi-band spreads the benefit is algorithmic (O(1) vs O(50²)
+worst case). Either way the per-call wall drops from ~85 µs to
+~5 µs, and at 28 calls per tick that recovers ~1.5–2 ms.
+
+**Regime: A (bit-identical).** The closed form returns
+mathematically the same float for every well-formed input. The
+session prompt specs a 10 k random-price-pair `np.array_equal`
+test as the parity guard.
+
+**In scope:** `training_v2/scorer/feature_extractor.py` is in
+the env_shim subsystem boundary (Phase 6 hard constraint #1
+allows env_shim edits; the env itself stays off-limits). The
+fix does NOT touch `env/tick_ladder.py` — it bypasses the slow
+path from the caller side rather than rewriting the helper. Any
+other caller of `tick_offset` (the `_process_action` path inside
+`env/betfair_env.py` shows up at ~65 samples in the profile —
+0.5 % of rollout) is unaffected and remains on the original
+implementation.
 
 ### G. PPO update mini-batch consolidation
 
