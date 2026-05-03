@@ -178,9 +178,17 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
         assert row["schema"] == "v2_cohort_scoreboard"
         assert "hyperparameters" in row
         assert set(row["hyperparameters"].keys()) == {
+            # Phase 3 (legacy 7) — always evolved.
             "learning_rate", "entropy_coeff", "clip_range",
             "gae_lambda", "value_coeff", "mini_batch_size",
             "hidden_size",
+            # Phase 5 (promoted 11, 2026-05-03) — at default unless
+            # the cohort enables them via --enable-gene NAME.
+            "open_cost", "matured_arb_bonus_weight",
+            "mark_to_market_weight", "naked_loss_scale",
+            "stop_loss_pnl_threshold", "arb_spread_scale",
+            "fill_prob_loss_weight", "mature_prob_loss_weight",
+            "risk_loss_weight", "alpha_lr", "reward_clip",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2
