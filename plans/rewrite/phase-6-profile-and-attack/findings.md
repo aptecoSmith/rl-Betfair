@@ -36,6 +36,7 @@ Per-session post-change rows are 5-episode runs written to
 | Pre-Phase-6 baseline | 9.595 | — | — | — |
 | + S01 (profile + assess) | 8.389 (1-ep, profile run only) | — | n/a (assessment-only) | 0 |
 | + S02 (batched booster + batched calibrator) | **6.923** | −2.672 vs pre-S02 5-ep baseline | A (bit-identical) | 4 (1 integration + 3 unit) |
+| + S03 (O(1) `_spread_in_ticks`) | **3.968** | −2.955 vs S02 | A (bit-identical) | 8 (1 integration + 7 unit) |
 | v1 reference (`ppo_lstm_v1`) | 2.94 | — | — | — |
 
 The S01 row is the 1-episode wall reported by the py-spy profile run
@@ -425,12 +426,166 @@ distinguished this verdict from "in the noise".
   call-shape-agnostic, which is strictly the right contract for
   a wiring test anyway.
 
-## Session 03+ — TBD
+## Session 03 — O(1) `_spread_in_ticks`
 
-Written *after* Session 02 lands. The candidate menu in
-`purpose.md` is the expected shape; the actual target order and
-content depends on the post-S02 profile shape. Likely Session 03
-target is **Candidate S** (O(1) `_spread_in_ticks` in
-`training_v2/scorer/feature_extractor.py`, Regime A bit-identical,
-~1.5 ms/tick estimated recovery after slack) per the Session 01
-ranked target list entry 2.
+**Verdict: GREEN.** 5-ep median **3.968 ms/tick** sits well inside
+the GREEN band (recovery ≥ 1.0 ms vs the post-S02 baseline). Recovery
+against the post-S02 5-ep median of 6.923 ms/tick is **−2.955
+ms/tick** — almost **2× the predicted ~1.5 ms/tick after slack**.
+The cumulative pre-Phase-6 → post-S03 result (9.595 → 3.968) clears
+the Phase 6 GREEN success bar of ≤ 4.0 ms/tick (2.42× speedup),
+and brings v2 within 1.0 ms/tick of v1 reference (2.94).
+
+### What shipped
+
+- Closed-form O(1) rewrite of
+  `training_v2/scorer/feature_extractor.py::_spread_in_ticks`. Two new
+  module-level helpers: `_band_index_and_snap` (inline band-table
+  lookup + grid snap, mirrors `env.tick_ladder.snap_to_tick` semantics)
+  and the rewritten `_spread_in_ticks` (band-by-band walk bounded by
+  `_N_BANDS = 10`). Module-level constants `_BAND_LOWS`,
+  `_BAND_HIGHS`, `_BAND_STEPS`, `_N_BANDS` precomputed at import from
+  `env.tick_ladder._LADDER_BANDS` (the single source of truth — ladder
+  edits in env automatically flow through). The new implementation
+  imports BAND CONSTANTS only from `env/tick_ladder.py`; it does NOT
+  call any function from that module. The public function signature
+  (`_spread_in_ticks(best_back, best_lay) -> float`) is unchanged.
+  The single call site inside `extract()` at line 224 is unchanged.
+
+- **Algorithm note (deviation from prompt sketch).** The prompt's
+  sketch snapped BOTH prices and computed tick distance between them.
+  This breaks bit-identity when `best_lay` is between two ticks but
+  closer to the lower tick (e.g. `(2.10, 2.105)` — the original walk
+  returns 1, snap-both returns 0, because `snap(2.105) = 2.10` rounds
+  DOWN). The shipped algorithm snaps `best_back` only and walks
+  band-by-band to find the smallest `k >= 1` with
+  `walked_price(k) >= best_lay - 1e-9` — preserving the original's
+  ceiling semantic against the unsnapped raw `best_lay`. Pre-write
+  10k random-pair check + 752 hand-constructed edge cases (every band
+  boundary, ±tick prices, MIN/MAX clamping, near-half-tick FP edges):
+  **0 diffs** vs the iterative walk oracle.
+
+- `tests/test_feature_extractor_spread_in_ticks.py`: 7 unit tests.
+  - `test_closed_form_matches_walk_on_10k_random_pairs` — load-bearing
+    bit-identity guard. NaN-aware byte equality across 10 000 random
+    `(best_back, best_lay)` pairs spanning `[1.01, 1000.0]`. Walk
+    oracle is kept private to the test file
+    (`_spread_in_ticks_walk_oracle`).
+  - `test_zero_spread_returns_zero` — `back >= lay` short-circuit.
+  - `test_single_band_spread` — `(2.10, 2.20) == 5.0`.
+  - `test_cross_band_spread` — `(1.95, 2.10) == 10.0` (5 ticks of 0.01
+    + 5 ticks of 0.02).
+  - `test_spread_above_cap_returns_nan` — `(1.50, 3.00)` returns NaN
+    (50+ ticks of 0.01 saturates the 49-tick cap).
+  - `test_min_price_clamping` — `(1.005, 1.05) == 4.0`
+    (1.005 snaps up to 1.01, then 4 ticks of 0.01).
+  - `test_max_price_clamping` — `(995.0, 1005.0)` returns NaN
+    (995 snaps to 1000 via banker's rounding `round(89.5) = 90`;
+    best_lay > MAX so the walk never reaches it). Prompt left the
+    snap behaviour open; documented inline in the test.
+
+- `tests/test_phase6_s03_episode_parity.py`: 1 integration test
+  (slow). Runs one full episode on `--seed 42 --day 2026-04-23
+  --device cpu` twice — once with the production closed form and
+  once with the pre-S03 iterative walk monkey-patched in via
+  `monkeypatch.setattr("training_v2.scorer.feature_extractor.
+  _spread_in_ticks", _walk_spread_in_ticks)` — and asserts byte-
+  equality on every per-step `obs` and `mask`, per-step
+  `info["raw_pnl_reward"]`, final `info["day_pnl"]`, and the first
+  100 `log_prob_action` entries from the rollout. Mirrors the S02
+  integration test shape. ~143 s wall for both episodes.
+
+### Parity result
+
+**Bit-identity verified end-to-end.** Pre-write 10k random + 752
+edge-case check: 0 diffs. Episode-parity integration test (real-data
+price distributions on the 2026-04-23 amber day): 0 diffs across all
+11 872 steps' `obs` / `mask` / `raw_pnl_reward` / final `day_pnl` /
+first-100 `log_prob_action`. The closed form is byte-equivalent to
+the iterative walk on every input the rollout actually exercised.
+
+### ms/tick recovery vs prediction
+
+| Reference baseline | Pre | Post | Δ | Predicted | Verdict |
+|---|---|---|---|---|---|
+| Post-S02 5-ep median | 6.923 | **3.968** | **−2.955** | ~1.5 | **2× prediction** |
+| Pre-Phase-6 5-ep median (9.595) | 9.595 | 3.968 | −5.627 | n/a (cumulative) | 2.42× speedup |
+| Phase 6 GREEN bar (≤ 4.0 ms/tick) | n/a | 3.968 | n/a | yes | **passes by 0.03** |
+| GREEN-with-stretch (≤ 3.0, v1 parity) | n/a | 3.968 | n/a | no | misses by 0.97 |
+
+Per-episode walls (sec): 44.23, 46.19, 47.10, 49.04, 48.05.
+Per-episode ms/tick: 3.726, 3.891, 3.968, 4.130, 4.048 (median
+**3.968**, mean 3.953; range 0.40 ms; n_steps fixed at 11872).
+
+### Why 2× the predicted recovery
+
+The S01 estimate of ~1.5 ms/tick after slack was conservative on two
+axes: (1) it assumed only the wrapper-overhead portion of the
+~2.4 ms/tick `tick_ladder` cost was saveable, but the closed form
+also eliminates the per-call `_band_for` band-scan cascade (each old
+`tick_offset(price, n, +1)` did `n` band scans, and the `_spread_in_
+ticks` outer loop called `tick_offset` up to 49 times per call —
+worst-case ~2400 band scans per call, called 28× per tick); (2)
+removing the 28 calls per tick to a function-with-import (the old
+implementation re-resolved `from env.tick_ladder import tick_offset`
+inside `_spread_in_ticks` on every call) shed Python attribute /
+import-cache overhead the profile didn't isolate as a separate hot
+frame. Both effects compound. The 2.96 ms/tick observed recovery is
+consistent with the full 2.4 ms/tick of `tick_ladder` cost identified
+in S01 (Top-5 hot frames combining `tick_offset` + `_band_for`)
+disappearing entirely, plus a small downstream cache-locality bonus
+from no longer interleaving 28 LightGBM matrix preparations with 28
+band-scan cascades per tick.
+
+### Implications for Session 04+
+
+We are at **3.97 ms/tick**, 0.03 inside the Phase 6 GREEN bar. The
+remaining headroom to v1 parity (2.94) is 1.03 ms/tick. From the S01
+profile, the candidates that compose with shipped S02 + S03 are:
+
+- **Candidate F** (`torch.compile` on policy forward, ~0.3 ms/tick
+  after slack, Regime B). Attacks the policy forward — now the
+  largest non-env_shim contributor since `tick_ladder` cost is gone.
+- **Candidate D / E** (Treelite or ONNX Runtime, ~0.4 ms/tick after
+  slack, Regime B). Attacks the residual LightGBM C-kernel
+  (~0.66 ms/tick) inside the now-batched booster path.
+
+Either alone closes ~30 % of the remaining gap. Combined they could
+land us inside 3.0 ms/tick (GREEN-with-stretch). Both are Regime B;
+the Phase 6 contract requires per-session declaration. Operator
+triage decides Session 04's target after this commit lands.
+
+A **re-profile** before Session 04 is recommended: with `tick_ladder`
+gone from the hot list and the booster wrapper gone, the post-S03
+profile shape will be different from S01's. Whatever was previously
+hidden behind those two rises into view.
+
+### Surprises
+
+- The recovery exceeded prediction by 2×. The S01 estimate was based
+  on the wrapper-overhead share of the visible `tick_ladder` cost; in
+  practice the closed form also eliminates the worst-case algorithmic
+  cost (49 outer × 49 inner band scans for cross-band spreads, even
+  though typical horse spreads only exercise 1–5 outer iterations).
+- The pre-write 10k synthetic check covered all edge cases the
+  integration test would have surfaced — no real-data divergence
+  appeared in the integration test run despite the algorithm having
+  asymmetric snap semantics (snap-back-only with ceiling-walk-to-
+  unsnapped-target). The 1e-9 slack in the original comparison
+  absorbs all FP error in the closed-form arithmetic; `+`/`*` over
+  a single multiply-add is well within the 1e-12 ULP-error budget
+  the slack provides.
+- No pre-existing tests broke. The 10 tests in
+  `test_scorer_v1_inference.py` and `test_env_shim_batched_scorer.py`
+  all still pass — the closed form is byte-equivalent, the contract
+  the scorer pipeline depends on is preserved.
+
+## Session 04+ — TBD
+
+Written *after* Session 03 lands. With Phase 6 already inside GREEN
+(3.97 ≤ 4.0 ms/tick), Session 04's role is GREEN-with-stretch: close
+the 1.0 ms/tick gap to v1 parity (2.94 ms/tick). Likely targets are
+Candidate F (`torch.compile`) or Candidate D / E (Treelite / ONNX),
+both Regime B, both ~0.3–0.4 ms/tick after slack. Operator triage
+decides; a re-profile is recommended first because the post-S03
+hot-frame distribution is now materially different from S01's.
