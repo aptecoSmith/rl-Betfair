@@ -130,6 +130,119 @@ def test_render_json_produces_aggregate_verdict_metrics(tmp_path: Path):
     assert all("fc_rate" in a for a in payload["agents"])
 
 
+def test_skill_metrics_compute_correctly(tmp_path: Path):
+    """Scalping-skill metrics (maturation_rate, naked_open_rate,
+    locked_per_matured) compute from the right fields and handle
+    div-by-zero cleanly."""
+    _seed_db(tmp_path, agents=[
+        # Agent: 100 pairs opened, 30 matured, 10 closed, 20 stop, 30 forced, 10 naked.
+        # locked_pnl=£120, naked_pnl=-£20.
+        # maturation_rate = (30+10)/100 = 0.40
+        # naked_open_rate = 10/100 = 0.10
+        # locked_per_matured = 120/(30+10) = £3.00
+        dict(agent_id="aaaa", day_pnl=+10.0, bet_count=200,
+             matured=30, closed=10, stop=20, forced=30, naked=10,
+             locked=120.0, naked_pnl=-20.0),
+    ])
+    # Patch the test's _seed_db to also write pairs_opened, since the
+    # default helper sets it to 0 (we need 100 to validate the rates).
+    store = ModelStore(
+        db_path=tmp_path / "models.db",
+        weights_dir=tmp_path / "weights",
+        bet_logs_dir=tmp_path / "bet_logs",
+    )
+    # Re-write the row with pairs_opened = 100.
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "models.db"))
+    conn.execute("UPDATE evaluation_days SET pairs_opened = 100")
+    conn.commit()
+    conn.close()
+
+    snaps = collect_snapshots(tmp_path)
+    assert len(snaps) == 1
+    s = snaps[0]
+    assert s.maturation_rate == pytest.approx(0.40)
+    assert s.naked_open_rate == pytest.approx(0.10)
+    assert s.locked_per_matured == pytest.approx(3.0)
+
+
+def test_skill_metrics_handle_zero_pairs_opened(tmp_path: Path):
+    """If pairs_opened == 0 (no opens, e.g. collapsed agent), the
+    rate-style skill metrics return None — render layer prints
+    placeholder."""
+    _seed_db(tmp_path, agents=[
+        dict(agent_id="aaaa", day_pnl=0.0, bet_count=0,
+             matured=0, closed=0, stop=0, forced=0, naked=0,
+             locked=0.0, naked_pnl=0.0),
+    ])
+    snaps = collect_snapshots(tmp_path)
+    assert snaps[0].maturation_rate is None
+    assert snaps[0].naked_open_rate is None
+    assert snaps[0].locked_per_matured is None
+    # Render shouldn't crash on None.
+    out = render_table(snaps)
+    assert "Scalping skill" in out
+
+
+def test_render_json_includes_skill_aggregates(tmp_path: Path):
+    """JSON output exposes mean/median maturation_rate, naked_open_rate,
+    locked_per_matured, mean_locked_pnl for downstream tooling."""
+    _seed_db(tmp_path, agents=[
+        dict(agent_id="aaaa", day_pnl=+10.0, bet_count=50,
+             matured=10, closed=5, stop=15, forced=0, naked=5,
+             locked=30.0),
+        dict(agent_id="bbbb", day_pnl=+20.0, bet_count=60,
+             matured=12, closed=6, stop=18, forced=0, naked=6,
+             locked=40.0),
+    ])
+    # Set pairs_opened so rates compute.
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "models.db"))
+    conn.execute("UPDATE evaluation_days SET pairs_opened = bet_count")
+    conn.commit()
+    conn.close()
+
+    snaps = collect_snapshots(tmp_path)
+    payload = json.loads(render_json(snaps))
+    assert payload["mean_maturation_rate"] is not None
+    assert payload["median_naked_open_rate"] is not None
+    assert payload["mean_locked_per_matured"] is not None
+    assert payload["mean_locked_pnl"] == pytest.approx(35.0)
+    assert all("maturation_rate" in a for a in payload["agents"])
+
+
+def test_per_generation_summary_appears_for_multigen(tmp_path: Path):
+    """When agents span multiple generations (read from JSONL
+    'generation' field), the table includes a per-generation
+    summary section."""
+    sb = tmp_path / "scoreboard.jsonl"
+    rows = []
+    for i in range(4):
+        rows.append({
+            "schema": "v2_cohort_scoreboard",
+            "agent_id": f"a{i:08x}aaa",
+            "eval_day": "2026-05-02",
+            "generation": i // 2,  # 2 agents in gen 0, 2 in gen 1
+            "eval_day_pnl": -10.0 * i,
+            "eval_bet_count": 100,
+            "eval_arbs_completed": 20,
+            "eval_arbs_closed": 5,
+            "eval_arbs_stop_closed": 10,
+            "eval_arbs_force_closed": 30,
+            "eval_arbs_naked": 5,
+            "eval_pairs_opened": 70,
+            "eval_locked_pnl": 50.0,
+            "eval_naked_pnl": 0.0,
+        })
+    sb.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    snaps = collect_snapshots(tmp_path)
+    out = render_table(snaps)
+    assert "Per-generation skill trends" in out
+    # Both generations should show in the table.
+    assert "  0   2" in out  # gen 0, n=2
+    assert "  1   2" in out  # gen 1, n=2
+
+
 def test_render_table_emits_verdict_summary_rows(tmp_path: Path):
     """The text table contains the four canonical verdict-bar
     summary lines so an operator scanning the output can compare
