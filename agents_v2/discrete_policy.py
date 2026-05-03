@@ -187,6 +187,35 @@ class BaseDiscretePolicy(nn.Module, abc.ABC):
         """Slice a packed hidden state by integer ``indices`` along dim 0."""
         return tuple(t.index_select(0, indices) for t in packed)
 
+    @staticmethod
+    def pack_hidden_buffer(
+        buffers: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        """Pack pre-stacked time-axis-0 buffers into the per-policy packed form.
+
+        Phase 4 Session 06 (2026-05-02). Equivalent to
+        ``pack_hidden_states([tuple(buf[t] for buf in buffers) for t in
+        range(n_steps)])`` but skips the per-tick list-of-tuples
+        construction and the N-way ``torch.cat`` over small slices —
+        the input buffers already hold the per-tick states in
+        contiguous memory.
+
+        Default implementation handles BasePolicy-style states whose
+        per-tick element shape has the batch axis at dim 0 (e.g.
+        transformer state ``(1, ctx, d_model)``). The pre-stacked
+        buffer's shape is ``(n_steps, 1, *rest)`` and the packed form
+        is ``(n_steps, *rest)`` — equivalent to concat along dim=0 of
+        N copies of a ``(1, *rest)`` tensor. ``.squeeze(1)`` is a view
+        (no copy).
+
+        The LSTM subclass overrides this to handle the
+        ``(n_steps, num_layers, 1, hidden)`` → ``(num_layers, n_steps,
+        hidden)`` reshape.
+        """
+        if not buffers:
+            raise ValueError("pack_hidden_buffer: buffers tuple is empty")
+        return tuple(buf.squeeze(1) for buf in buffers)
+
 
 # ── Discrete LSTM ──────────────────────────────────────────────────────────
 
@@ -269,6 +298,34 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         return (
             packed[0].index_select(1, indices),
             packed[1].index_select(1, indices),
+        )
+
+    @staticmethod
+    def pack_hidden_buffer(
+        buffers: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """LSTM-specific: ``(n_steps, num_layers, 1, hidden)`` → ``(num_layers, n_steps, hidden)``.
+
+        Phase 4 Session 06 (2026-05-02). The pre-stacked buffer's shape
+        is ``(n_steps, num_layers, 1, hidden)`` (Session 04). The packed
+        form expected by ``slice_hidden_states`` (and downstream by
+        ``policy.forward``) is ``(num_layers, n_steps, hidden)`` —
+        equivalent to ``torch.cat([s[k] for s in states], dim=1)`` over
+        N states each ``(num_layers, 1, hidden)``.
+
+        ``.squeeze(2)`` drops the singleton ``1`` (the per-tick batch
+        axis); ``.permute(1, 0, 2)`` swaps the leading time axis with
+        the layers axis. Both are views — no data movement.
+        """
+        if not buffers or len(buffers) != 2:
+            raise ValueError(
+                f"pack_hidden_buffer: expected 2-tuple (h, c), got "
+                f"{len(buffers) if buffers else 0} buffers",
+            )
+        h_buf, c_buf = buffers
+        return (
+            h_buf.squeeze(2).permute(1, 0, 2),
+            c_buf.squeeze(2).permute(1, 0, 2),
         )
 
     # ── Forward ───────────────────────────────────────────────────────────

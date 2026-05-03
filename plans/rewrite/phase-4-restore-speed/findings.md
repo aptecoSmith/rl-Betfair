@@ -37,7 +37,7 @@ Per-session post-change rows are 1-episode runs with `--n-episodes
 | + S03 (distributions) | **9.906** (1 ep) | −3.3 % vs S02 ep0 (10.240), +4.3 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 11 |
 | + S04 (hidden state) | **10.359** (1 ep) | +4.6 % vs S03 ep0 (9.906), +9.1 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 5 |
 | + S05 (assert) | **9.527** (1 ep) | −8.0 % vs S04 ep0 (10.359), +0.4 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 6 |
-| + S06 (RolloutBatch) | — | — | — | — |
+| + S06 (RolloutBatch) | **9.611** (1 ep) | +0.9 % vs S05 ep0 (9.527), +1.2 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 6 |
 | + S07 (mask path) | — | — | — | — |
 | v1 reference (`ppo_lstm_v1`) | 2.94 | — | — | — |
 
@@ -964,3 +964,280 @@ mode default.
 - **One fix per session** — Session 05 only changes the
   invariant-assert frequency. Session 06 (RolloutBatch)
   remains for its own session.
+
+## Session 06 — replace Transition list with aligned RolloutBatch
+
+**Verdict: PARTIAL.** Bit-identity preserved on every numerical
+field of the PPO update output (same signature used in Sessions
+02 / 03 / 04 / 05: `total_reward`, `day_pnl`, `policy_loss_mean`,
+`value_loss_mean`, `entropy_mean`, `approx_kl_mean`,
+`advantage_*`, `action_histogram` all match Session 05's
+episode-0 row to the last printed digit on the same seed-42 /
+2026-04-23 day). All 6 new regression tests in
+`tests/test_v2_rollout_batch.py` pass; the wider 98-test v2
+rollout / trainer / transition / sync / distribution / buffer-
+reuse / attribution / hidden-state-buffer / batched / multi-day
+/ cohort / policy suite passes on CPU. Measured wall is +0.9 %
+vs S05 ep0 (9.611 vs 9.527 ms/tick), inside the 8.0–10.7
+episode-to-episode spread observed in Session 01's 5-episode
+baseline — same shape as Sessions 01–05.
+
+### Measurement
+
+1-episode CPU run on 2026-04-23
+(`logs/discrete_ppo_v2/phase4_s06_post.jsonl`, ``--seed 42``,
+``--n-episodes 1``):
+
+| Field | Pre-S06 (S05 ep0) | Post-S06 (S06 ep0) |
+|---|---|---|
+| n_steps | 11 872 | 11 872 |
+| wall_time_sec | 113.10 | 114.10 |
+| **ms/tick** | **9.527** | **9.611** |
+| total_reward | −1455.5805904269218 | −1455.5805904269218 |
+| day_pnl | −578.0975377788117 | −578.0975377788117 |
+| policy_loss_mean | 0.1482754966829464 | 0.1482754966829464 |
+| value_loss_mean | 2.541815901916194 | 2.541815901916194 |
+| entropy_mean | 2.424904021845069 | 2.424904021845069 |
+| approx_kl_mean | 0.03635444635930922 | 0.03635444635930922 |
+| advantage_max_abs | 132.9420166015625 | 132.9420166015625 |
+| action_histogram | OB=3913 OL=4153 NOOP=1111 CL=2695 | (identical) |
+
+The +0.9 % delta is well inside the 8.0–10.7 episode-to-episode
+spread documented in S01. Bit-identity on every numeric field is
+the strongest possible signal that the change is correctness-
+neutral; the speed verdict is PARTIAL — the structural refactor
+landed but didn't surface a measurable wall-time win on this
+1-episode point estimate. The phase-cumulative verdict is gated
+on Session 99's verdict re-run.
+
+### Why the win was smaller than expected
+
+Same compounding factors documented under Sessions 01–05 plus
+two specific to this session:
+
+1. **The `Transition(...)` instantiation cost is small per call.**
+   `@dataclass(frozen=True)` instantiation is a Python-level
+   ~1–2 µs operation; 11 872 calls / episode × ~1.5 µs ≈ 18 ms
+   total — three orders of magnitude below the per-episode wall-
+   time noise floor.
+2. **The `float()` conversion cost is similar.** ~12 k × 2
+   `float(...)` calls × ~100 ns each ≈ 2.4 ms total — also
+   well below the noise floor.
+
+The structural wins (no per-tick dataclass round-trip, no
+end-of-episode `np.stack([tr.field for tr in transitions])` pass)
+ARE present in the refactor but at this episode shape they sit
+beneath the variance from the PPO update path (~744 mini-batches
+/ episode dominates wall time regardless of rollout speed).
+
+### What changed
+
+`training_v2/discrete_ppo/transition.py` gained:
+
+1. `RolloutBatch` namedtuple with 11 fields:
+   - `obs (n, obs_dim) float32`
+   - `hidden_state_in: tuple[torch.Tensor, ...]` — for LSTM
+     `(H, C)` each `(n, num_layers, 1, hidden)`; for the
+     BasePolicy default each entry has the per-tick element shape
+     prefixed with the time axis.
+   - `mask (n, action_n) bool`
+   - `action_idx (n,) int64`
+   - `stake_unit (n,) float32`
+   - `log_prob_action (n,) float32`
+   - `log_prob_stake (n,) float32`
+   - `value_per_runner (n, max_runners) float32`
+   - `per_runner_reward (n, max_runners) float32`
+   - `done (n,) bool`
+   - `n_steps: int`
+2. `transitions_to_rollout_batch(transitions: list[Transition])
+   -> RolloutBatch` — adapter for the legacy list form, used by
+   the trainer's `update_from_rollout` (called from
+   `BatchedRolloutCollector` per Session 06 hard constraint #5)
+   and by tests that build synthetic transitions.
+3. `rollout_batch_to_transitions(batch: RolloutBatch) ->
+   list[Transition]` — reverse adapter for tests / legacy callers
+   that still want per-tick views. Slice views into the batch's
+   pre-stacked buffers (no copy).
+4. `Transition` itself stays — marked deprecated for the rollout
+   hot path but kept for tests and `BatchedRolloutCollector`.
+
+`training_v2/discrete_ppo/rollout.py::_collect`:
+
+- Replaces the per-tick `per_tick_*` Python lists with pre-
+  allocated numpy buffers (`action_idx_arr`, `stake_unit_arr`,
+  `per_runner_reward_arr`, `done_arr`) sized off
+  `_estimate_max_steps(env)` — same shape as Sessions 02 / 04.
+- Single `_grow_episode_buffers(...)` helper replaces
+  `_grow_obs_mask_buffers` and grows ALL six numpy buffers in
+  lockstep (they share the time axis).
+- End-of-episode materialisation builds a single `RolloutBatch`
+  from slice views into the per-episode buffers — no
+  ~12 k `Transition(...)` instantiations, no 24 k `float()`
+  conversions on the hot path.
+- The hidden-state buffer (Session 04) slots directly into
+  `RolloutBatch.hidden_state_in` as a tuple of `buf[:n_steps]`
+  slice views — no concat, no copy.
+- The deferred log-prob / value transfer (Session 01 / Phase 3
+  Session 01b) stays unchanged — three batched `.cpu()` calls
+  at end-of-episode.
+
+`agents_v2/discrete_policy.py` gained a new `pack_hidden_buffer`
+classmethod on `BaseDiscretePolicy` (default impl: `.squeeze(1)`)
+and an LSTM override (`.squeeze(2).permute(1, 0, 2)`). Both are
+view-only ops — no data movement. The trainer's `_ppo_update`
+calls this in place of the pre-Session-06
+`pack_hidden_states([tr.hidden_state_in for tr in transitions])`
+N-way concat over small slices.
+
+`training_v2/discrete_ppo/trainer.py::_ppo_update`:
+
+- Renamed parameter `transitions: list[Transition]` →
+  `batch: RolloutBatch`.
+- Replaces the `np.stack([tr.field for tr in transitions])` /
+  `np.array([tr.field ...])` block with direct reads from the
+  batch's slice views.
+- `np.ascontiguousarray(...)` wraps numpy slice views before
+  `torch.from_numpy` — no-op on already-contiguous slices (the
+  `[:n_steps]` axis-0 slices are C-contiguous in practice).
+- `pack_hidden_states([tr.hidden_state_in ...])` →
+  `pack_hidden_buffer(batch.hidden_state_in)` — view-only ops
+  replace the N-way concat.
+
+`training_v2/discrete_ppo/trainer.py::_update_from_transitions`
+renamed to `_update_from_batch(batch, last_info, t0)`. The legacy
+`update_from_rollout(transitions, last_info)` entry point stays
+on the public surface for `BatchedRolloutCollector` callers and
+adapts via `transitions_to_rollout_batch` before flowing into the
+shared pipeline.
+
+`training_v2/discrete_ppo/trainer.py::_bootstrap_value` now reads
+the final tick from the `RolloutBatch` (`batch.obs[last]`,
+`batch.mask[last]`, `tuple(buf[last] for buf in
+batch.hidden_state_in)`) instead of a per-tick `Transition`.
+
+`training_v2/cohort/worker.py` and
+`training_v2/cohort/batched_worker.py`: the eval-rollout helper
+`_eval_rollout_stats` now takes `batch: RolloutBatch` instead of
+`transitions: list`. Both call sites updated.
+
+`BatchedRolloutCollector` (`training_v2/discrete_ppo/
+batched_rollout.py`): unchanged. Per Session 06 hard constraint
+#5 the batched collector keeps returning `list[list[Transition]]`;
+the trainer's `update_from_rollout` adapts via
+`transitions_to_rollout_batch` so cohort-batched callers see no
+behavioural change.
+
+### Bit-identity verification
+
+1. **End-to-end PPO update output** — every numerical field of
+   `phase4_s06_post.jsonl` row 0 matches the corresponding row 0
+   of `phase4_s05_post.jsonl` to the last printed digit
+   (`total_reward`, `day_pnl`, all loss / KL / advantage means,
+   action histogram). Identity on every field on a deterministic
+   seed is the strongest signature: every per-tick field flowing
+   into the PPO update reaches the surrogate / value loss
+   verbatim.
+
+2. **Per-field bit-identity vs the legacy list form** — the new
+   `test_rollout_batch_fields_match_legacy_transition_list_form`
+   builds a fresh rollout, projects the `RolloutBatch` into the
+   legacy list-of-Transition form via
+   `rollout_batch_to_transitions`, and asserts strict equality
+   between each batch field and the per-tick `np.stack([tr.field
+   ...])` of the equivalent transition fields. Pass on the
+   synthetic 2-race day.
+
+3. **Direct vs round-trip PPO update produces byte-equal
+   state_dict** — the
+   `test_ppo_update_state_dict_byte_identical_via_direct_vs_list_path`
+   test runs two PPO updates on identically-seeded fresh
+   policies. Path A: trainer consumes the batch directly. Path
+   B: convert batch → list[Transition] → batch (round-trip via
+   the public helpers) and feed THAT to the trainer. Every
+   tensor in the post-update `state_dict` is byte-equal. This is
+   the load-bearing test for Session 06.
+
+### Other tests added
+
+All 6 tests live in `tests/test_v2_rollout_batch.py` per the
+session prompt:
+
+- `test_rollout_batch_fields_match_legacy_transition_list_form`
+  — per-field bit-identity vs the `np.stack([tr.field for tr in
+  transitions])` form. (Session prompt #1.)
+- `test_ppo_update_state_dict_byte_identical_via_direct_vs_list_path`
+  — load-bearing. (Session prompt #2.)
+- `test_transition_dataclass_not_constructed_on_rollout_hot_path`
+  — patches `Transition.__init__` to count invocations; runs a
+  synthetic rollout via `collect_episode`; asserts call count is
+  exactly zero. (Session prompt #3.)
+- `test_rollout_batch_obs_is_a_view_into_underlying_buffer` —
+  writes a sentinel into `batch.obs[0, 0]` and reads it back;
+  confirms the numpy field is a view, not a copy. Includes the
+  same view check on `batch.hidden_state_in[0]`. (Session prompt
+  #4.)
+- `test_existing_trainer_smoke_with_rollout_batch` — meta-
+  sentinel. Builds a trainer, runs one episode, confirms the
+  episode stats are finite and the action histogram sums to
+  `n_steps`. (Session prompt #5.)
+- `test_collect_episode_returns_rollout_batch_not_list` — pins
+  the public-API change. A regression that flips the return type
+  back to `list[Transition]` would also break the trainer's
+  `_update_from_batch` path; the type-check gives a faster
+  signal.
+
+All 6 new tests pass. The wider 98-test v2 suite (rollout /
+trainer / transition / sync / distribution / buffer-reuse /
+attribution / hidden-state-buffer / invariant-assert / batched /
+multi-day / cohort / eval-pnl / policy) passes after the
+consumer-side updates in `tests/test_discrete_ppo_*.py`,
+`tests/test_v2_rollout_*.py`, `tests/test_v2_batched_rollout.py`,
+`tests/test_v2_multi_day_train.py` (each updated to consume
+`RolloutBatch` via `rollout_batch_to_transitions`).
+
+### Hard-constraint adherence
+
+- **No env edits** — only the rollout / trainer / transition /
+  policy / cohort modules. The env / shim / matcher / bet manager
+  are untouched.
+- **CPU bit-identity preserved** — strongest signature: every
+  numeric field of `phase4_s06_post.jsonl` matches `phase4_s05_
+  post.jsonl` row 0 exactly. The byte-equal `state_dict` test
+  (#2 above) corroborates end-to-end through one PPO update.
+- **PPO update output is bit-identical end-to-end** — the
+  Session 06 §"End-of-session bar" #1 — pinned by the
+  `test_ppo_update_state_dict_byte_identical_via_direct_vs_list_path`
+  guard.
+- **All pre-existing v2 trainer / rollout / collector / cohort
+  tests pass on CPU** — Session 06 §"End-of-session bar" #2.
+- **Transition dataclass kept** — Session 06 §"Hard constraints"
+  #3. The dataclass is preserved with a deprecation note for the
+  rollout hot path but still used by tests / `BatchedRolloutCollector`.
+- **Sequential collector only this session** — Session 06
+  §"Hard constraints" #5. `BatchedRolloutCollector` stays
+  returning `list[list[Transition]]`; the trainer's adapter
+  `transitions_to_rollout_batch` keeps cohort-batched callers
+  byte-identical.
+- **Don't restructure `pack_hidden_states` / `slice_hidden_
+  states`** — Session 06 §"Hard constraints" #2. Their
+  signatures are unchanged. The new `pack_hidden_buffer`
+  classmethod is additive; downstream callers unaffected.
+- **Audit every `collect_episode` caller** — Session 06
+  §"Hard constraints" #4. Audited and updated:
+  `training_v2/cohort/worker.py` (eval rollout),
+  `training_v2/cohort/batched_worker.py` (eval rollout),
+  `tests/test_discrete_ppo_rollout.py`,
+  `tests/test_v2_rollout_buffer_reuse.py`,
+  `tests/test_v2_rollout_distributions.py`,
+  `tests/test_v2_rollout_hidden_state_buffer.py`,
+  `tests/test_v2_rollout_invariant_assert.py`,
+  `tests/test_v2_rollout_per_runner_attribution.py`,
+  `tests/test_v2_rollout_sync.py`,
+  `tests/test_v2_batched_rollout.py`,
+  `tests/test_v2_multi_day_train.py`,
+  `tests/test_discrete_ppo_trainer.py`. None remain that
+  consume `transitions` as a list of dataclasses without going
+  through `rollout_batch_to_transitions` first.
+- **One fix per session** — Session 06 only swaps the per-tick
+  dataclass round-trip for a `RolloutBatch` namedtuple. The
+  remaining S07 (mask path) is its own session.

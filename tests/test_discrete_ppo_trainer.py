@@ -238,15 +238,11 @@ def test_value_loss_decreases_across_epochs():
     _env, _shim, policy, trainer = _build_trainer(
         seed=0, mini_batch_size=8,
     )
-    transitions = trainer._collector.collect_episode()
-    T = len(transitions)
-    rewards = np.stack(
-        [tr.per_runner_reward for tr in transitions], axis=0,
-    ).astype(np.float32)
-    values = np.stack(
-        [tr.value_per_runner for tr in transitions], axis=0,
-    ).astype(np.float32)
-    dones = np.array([tr.done for tr in transitions], dtype=bool)
+    batch = trainer._collector.collect_episode()
+    T = int(batch.n_steps)
+    rewards = batch.per_runner_reward
+    values = batch.value_per_runner
+    dones = batch.done
     bootstrap = np.zeros(trainer.max_runners, dtype=np.float32)
     advantages, returns = compute_per_runner_gae(
         rewards, values, bootstrap, dones,
@@ -290,17 +286,12 @@ def test_value_loss_decreases_across_epochs():
     # mb tracking; the spec allows the fallback "end < start", which
     # we exercise here for stability on the tiny synthetic day.
     # Read pre-update value loss with a forward pass on all transitions.
-    obs_np = np.stack([tr.obs for tr in transitions], axis=0).astype(np.float32)
-    masks_np = np.stack([tr.mask for tr in transitions], axis=0).astype(bool)
-
-    obs = torch.from_numpy(obs_np)
-    masks = torch.from_numpy(masks_np)
+    obs = torch.from_numpy(np.ascontiguousarray(batch.obs))
+    masks = torch.from_numpy(np.ascontiguousarray(batch.mask))
     returns_t = torch.from_numpy(returns)
 
-    # Phase 3 Session 01b: hidden_state_in is now a tuple of torch
-    # tensors (device-resident). No torch.from_numpy round-trip.
-    hidden_pairs = [tr.hidden_state_in for tr in transitions]
-    packed = policy.pack_hidden_states(hidden_pairs)
+    # Phase 4 Session 06: hidden state arrives pre-stacked in the batch.
+    packed = policy.pack_hidden_buffer(batch.hidden_state_in)
     indices = torch.arange(T)
 
     with torch.no_grad():
@@ -310,7 +301,7 @@ def test_value_loss_decreases_across_epochs():
 
     # Restore the original optimiser step and run the actual update.
     trainer.optimiser.step = original_step  # type: ignore[assignment]
-    update_log = trainer._ppo_update(transitions, advantages, returns)
+    update_log = trainer._ppo_update(batch, advantages, returns)
 
     # Re-measure post-update value MSE the same way.
     with torch.no_grad():
@@ -424,8 +415,13 @@ def test_uses_stake_mask_blocks_stake_grad_for_noop_actions():
 
     # Reset gradients explicitly so we know any non-None .grad on
     # the stake heads after _ppo_update came from THIS update.
+    # Phase 4 Session 06: trainer._ppo_update now consumes RolloutBatch.
+    from training_v2.discrete_ppo.transition import (
+        transitions_to_rollout_batch,
+    )
+    batch = transitions_to_rollout_batch(transitions)
     trainer.optimiser.zero_grad()
-    trainer._ppo_update(transitions, advantages, returns)
+    trainer._ppo_update(batch, advantages, returns)
 
     for head_name in ("stake_alpha_head", "stake_beta_head"):
         head = getattr(policy, head_name)

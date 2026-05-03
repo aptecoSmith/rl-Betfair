@@ -47,6 +47,9 @@ import torch
 from env.betfair_env import BetfairEnv
 
 from agents_v2.discrete_policy import DiscreteLSTMPolicy
+from training_v2.discrete_ppo.transition import (
+    rollout_batch_to_transitions,
+)
 from tests.test_betfair_env import _make_day
 
 
@@ -185,7 +188,9 @@ def test_obs_mask_buffers_bit_identical_to_pre_session_02_on_fixed_seed():
     shim.step = step_spy  # type: ignore[method-assign]
     shim.get_action_mask = mask_spy  # type: ignore[method-assign]
     try:
-        transitions = collector.collect_episode()
+        transitions = rollout_batch_to_transitions(
+            collector.collect_episode()
+        )
     finally:
         shim.reset = real_reset  # type: ignore[method-assign]
         shim.step = real_step  # type: ignore[method-assign]
@@ -233,7 +238,9 @@ def test_obs_buffer_allocated_once_per_episode():
     the rollout's own buffer.
     """
     _env, _shim, _policy, collector = _build_collector(seed=43)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
 
     assert len(transitions) > 1, "test premise: need >1 transition"
 
@@ -273,7 +280,9 @@ def test_mask_buffer_allocated_once_per_episode():
     about).
     """
     _env, _shim, _policy, collector = _build_collector(seed=44)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
 
     assert len(transitions) > 1, "test premise: need >1 transition"
 
@@ -311,7 +320,9 @@ def test_buffer_grow_path_warns_and_continues(monkeypatch, caplog):
     _env_ref, _shim_ref, _policy_ref, collector_ref = _build_collector(
         seed=45,
     )
-    transitions_ref = collector_ref.collect_episode()
+    transitions_ref = rollout_batch_to_transitions(
+        collector_ref.collect_episode()
+    )
 
     # Forced-grow run.
     _env, _shim, _policy, collector = _build_collector(seed=45)
@@ -320,7 +331,9 @@ def test_buffer_grow_path_warns_and_continues(monkeypatch, caplog):
     )
 
     with caplog.at_level(logging.WARNING, logger="training_v2.discrete_ppo.rollout"):
-        transitions = collector.collect_episode()
+        transitions = rollout_batch_to_transitions(
+            collector.collect_episode()
+        )
 
     assert len(transitions) == len(transitions_ref), (
         "grow path produced a different number of transitions "
@@ -375,7 +388,9 @@ def test_transition_obs_not_aliased_after_buffer_grow(monkeypatch):
     monkeypatch.setattr(
         RolloutCollector, "_estimate_max_steps", lambda self, env: 1,
     )
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
 
     assert len(transitions) > 2, (
         "test premise: need >2 ticks for a meaningful no-alias check"

@@ -95,8 +95,11 @@ def _build_collector(seed: int = 0, n_races: int = 2):
 @pytest.mark.timeout(60)
 def test_collect_episode_emits_one_transition_per_step():
     """One transition per env step; final ``done=True``, others ``False``."""
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     env, _shim, _policy, collector = _build_collector(seed=0)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(collector.collect_episode())
 
     assert len(transitions) > 0, "rollout produced no transitions"
     assert transitions[-1].done is True, (
@@ -134,8 +137,11 @@ def test_hidden_state_in_captured_before_forward_pass():
     collector accidentally captured the post-forward state we'd see
     ``hidden_state_in != 0`` at t=0.
     """
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     _env, _shim, _policy, collector = _build_collector(seed=0)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(collector.collect_episode())
 
     h0_t0, c0_t0 = transitions[0].hidden_state_in
     # Phase 3 Session 01b: hidden_state_in stores torch tensors, not
@@ -165,8 +171,11 @@ def test_per_runner_reward_sums_to_total_reward():
     walks the whole episode and confirms the cumulative sum matches
     the env's own raw + shaped totals to floating-point tolerance.
     """
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     env, _shim, _policy, collector = _build_collector(seed=1)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(collector.collect_episode())
 
     total_per_runner = sum(
         float(tr.per_runner_reward.sum()) for tr in transitions
@@ -189,8 +198,11 @@ def test_mask_is_carried_with_transition():
     transition's ``mask`` against ``shim.get_action_mask()``
     re-evaluated step-by-step against an independently-driven env.
     """
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     env_a, shim_a, _policy_a, collector_a = _build_collector(seed=7)
-    transitions = collector_a.collect_episode()
+    transitions = rollout_batch_to_transitions(collector_a.collect_episode())
 
     # Re-run an identical episode and compare masks at each step.
     torch.manual_seed(7)
@@ -207,7 +219,7 @@ def test_mask_is_carried_with_transition():
     )
     from training_v2.discrete_ppo.rollout import RolloutCollector
     collector_b = RolloutCollector(shim=shim_b, policy=policy_b, device="cpu")
-    transitions_b = collector_b.collect_episode()
+    transitions_b = rollout_batch_to_transitions(collector_b.collect_episode())
 
     # Determinism guard: same seed, same masks (the env is fully
     # deterministic on the synthetic day; the policy's sampling uses

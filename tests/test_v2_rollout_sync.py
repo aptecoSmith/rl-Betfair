@@ -253,8 +253,13 @@ def test_action_idx_and_stake_unit_still_materialise_per_tick():
             type_witness["stake_calls"] += 1
         return real_step(action_idx, *args, **kwargs)
 
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     shim.step = asserting_step  # type: ignore[method-assign]
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
 
     assert type_witness["action_calls"] == len(transitions)
     assert type_witness["stake_calls"] == len(transitions)
@@ -285,10 +290,17 @@ def test_transition_log_probs_byte_identical_across_two_cpu_runs():
     Strict equality (``==``), not ``np.isclose`` — CPU is fully
     deterministic with seeded RNG.
     """
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     _env_a, _shim_a, _policy_a, collector_a = _build_collector(seed=7)
-    transitions_a = collector_a.collect_episode()
+    transitions_a = rollout_batch_to_transitions(
+        collector_a.collect_episode()
+    )
     _env_b, _shim_b, _policy_b, collector_b = _build_collector(seed=7)
-    transitions_b = collector_b.collect_episode()
+    transitions_b = rollout_batch_to_transitions(
+        collector_b.collect_episode()
+    )
 
     assert len(transitions_a) == len(transitions_b)
     assert len(transitions_a) > 0

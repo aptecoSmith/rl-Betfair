@@ -227,18 +227,24 @@ def _rebind_trainer(
 
 def _eval_rollout_stats(
     *,
-    transitions: list,
+    batch,
     last_info: dict,
     action_space,
 ) -> EvalSummary:
-    """Build :class:`EvalSummary` from a rollout-only pass on the eval day."""
-    n_steps = len(transitions)
-    total_reward = float(
-        sum(float(tr.per_runner_reward.sum()) for tr in transitions),
-    )
+    """Build :class:`EvalSummary` from a rollout-only pass on the eval day.
+
+    Phase 4 Session 06 (2026-05-02): consumes a
+    :class:`training_v2.discrete_ppo.transition.RolloutBatch` instead
+    of ``list[Transition]``. The action histogram and total-reward
+    sum read from the batch's pre-stacked arrays — same numbers as
+    pre-Session-06.
+    """
+    n_steps = int(batch.n_steps)
+    total_reward = float(batch.per_runner_reward.sum())
     hist: dict[str, int] = {}
-    for tr in transitions:
-        kind, _runner = action_space.decode(int(tr.action_idx))
+    action_idx_arr = batch.action_idx
+    for i in range(n_steps):
+        kind, _runner = action_space.decode(int(action_idx_arr[i]))
         hist[kind.name] = hist.get(kind.name, 0) + 1
 
     day_pnl = float(last_info.get("day_pnl", 0.0))
@@ -534,9 +540,9 @@ def train_one_agent(
     eval_collector = RolloutCollector(
         shim=eval_shim, policy=policy, device=device,
     )
-    transitions = eval_collector.collect_episode()
+    eval_batch = eval_collector.collect_episode()
     eval_summary_partial = _eval_rollout_stats(
-        transitions=transitions,
+        batch=eval_batch,
         last_info=eval_collector.last_info,
         action_space=eval_shim.action_space,
     )

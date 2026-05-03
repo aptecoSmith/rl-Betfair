@@ -223,11 +223,12 @@ def test_attribution_bit_identical_to_pre_session_01_on_fixed_seed():
 
     RolloutCollector._attribute_step_reward = wrapped
     try:
-        transitions = collector.collect_episode()
+        batch = collector.collect_episode()
+        transitions = batch  # alias kept for context
     finally:
         RolloutCollector._attribute_step_reward = original
 
-    assert len(transitions) > 0, "rollout produced no transitions"
+    assert int(batch.n_steps) > 0, "rollout produced no transitions"
     if drifts:
         first = drifts[0]
         raise AssertionError(
@@ -311,8 +312,9 @@ def test_attribution_invariant_assert_still_holds():
     _env, _shim, _policy, collector = _build_collector(seed=43)
     # If any per-tick invariant fires, collect_episode raises and the
     # test fails. The implicit assertion is "no exception".
-    transitions = collector.collect_episode()
-    assert len(transitions) > 0
+    batch = collector.collect_episode()
+    transitions = batch  # alias kept for context
+    assert int(batch.n_steps) > 0
 
 
 @pytest.mark.timeout(60)
@@ -331,7 +333,8 @@ def test_pending_set_size_bounded_across_episode():
     ``pending_bets`` must be empty at end-of-episode.
     """
     _env, _shim, _policy, collector = _build_collector(seed=44, n_races=2)
-    transitions = collector.collect_episode()
+    batch = collector.collect_episode()
+    transitions = batch  # alias kept for context
 
     state = collector.last_attribution_state
     # Per-tick bound across the episode.
@@ -348,4 +351,4 @@ def test_pending_set_size_bounded_across_episode():
     )
     # ``transitions`` is just the rollout's product; we depend on at
     # least one being produced to make the bound meaningful.
-    assert len(transitions) > 0
+    assert int(batch.n_steps) > 0

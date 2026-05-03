@@ -51,7 +51,12 @@ from agents_v2.discrete_policy import BaseDiscretePolicy
 from agents_v2.env_shim import DiscreteActionShim
 from training_v2.discrete_ppo.gae import compute_per_runner_gae
 from training_v2.discrete_ppo.rollout import RolloutCollector
-from training_v2.discrete_ppo.transition import Transition, action_uses_stake
+from training_v2.discrete_ppo.transition import (
+    RolloutBatch,
+    Transition,
+    action_uses_stake,
+    transitions_to_rollout_batch,
+)
 
 if TYPE_CHECKING:
     pass
@@ -266,10 +271,10 @@ class DiscretePPOTrainer:
     def train_episode(self) -> EpisodeStats:
         """Run one episode → GAE → PPO update; return per-episode stats."""
         t0 = time.perf_counter()
-        transitions = self._collector.collect_episode()
+        batch = self._collector.collect_episode()
         last_info = self._collector.last_info
-        return self._update_from_transitions(
-            transitions=transitions, last_info=last_info, t0=t0,
+        return self._update_from_batch(
+            batch=batch, last_info=last_info, t0=t0,
         )
 
     def update_from_rollout(
@@ -285,51 +290,53 @@ class DiscretePPOTrainer:
         post-rollout pipeline (GAE → PPO update → stats) is identical
         to :meth:`train_episode` — the only difference is who owns the
         rollout phase.
+
+        Phase 4 Session 06 (2026-05-02): the legacy ``list[Transition]``
+        input is adapted into a :class:`RolloutBatch` via
+        :func:`transitions_to_rollout_batch` before flowing into the
+        shared ``_update_from_batch`` pipeline. The sequential rollout
+        path skips this adapter (its collector returns the batch
+        directly).
         """
-        return self._update_from_transitions(
-            transitions=transitions,
+        batch = transitions_to_rollout_batch(transitions)
+        return self._update_from_batch(
+            batch=batch,
             last_info=last_info,
             t0=time.perf_counter(),
         )
 
     # ── Internal: post-rollout pipeline ────────────────────────────────────
 
-    def _update_from_transitions(
+    def _update_from_batch(
         self,
-        transitions: list[Transition],
+        batch: RolloutBatch,
         last_info: dict,
         t0: float,
     ) -> EpisodeStats:
-        n_steps = len(transitions)
+        n_steps = int(batch.n_steps)
         if n_steps == 0:
             raise RuntimeError(
                 "Rollout produced 0 transitions — the env did not "
                 "produce any steps before terminating.",
             )
 
-        total_reward = float(
-            sum(float(tr.per_runner_reward.sum()) for tr in transitions),
-        )
+        # Phase 4 Session 06: pre-stacked arrays come straight from the
+        # collector — no per-transition list comprehension here.
+        rewards = batch.per_runner_reward
+        values = batch.value_per_runner
+        dones = batch.done
 
-        rewards = np.stack(
-            [tr.per_runner_reward for tr in transitions], axis=0,
-        ).astype(np.float32)
-        values = np.stack(
-            [tr.value_per_runner for tr in transitions], axis=0,
-        ).astype(np.float32)
-        dones = np.array(
-            [tr.done for tr in transitions], dtype=bool,
-        )
+        total_reward = float(rewards.sum())
 
         # Bootstrap. Episodes from RolloutCollector always terminate
         # naturally (the loop is ``while not done``), so the final
         # transition's ``done`` is True and the bootstrap is zero. We
         # keep the explicit branch for the truncated-episode case
         # Session 03 may want.
-        if dones[-1]:
+        if bool(dones[-1]):
             bootstrap_value = np.zeros(self.max_runners, dtype=np.float32)
         else:
-            bootstrap_value = self._bootstrap_value(transitions[-1])
+            bootstrap_value = self._bootstrap_value(batch)
 
         advantages, returns = compute_per_runner_gae(
             rewards=rewards,
@@ -345,8 +352,9 @@ class DiscretePPOTrainer:
         # rollout's chosen action_idx; advantage stats summarise the
         # per-runner GAE output that the surrogate loss will consume.
         action_hist: dict[str, int] = {}
-        for tr in transitions:
-            kind, _runner = self.action_space.decode(int(tr.action_idx))
+        action_idx_arr = batch.action_idx
+        for i in range(n_steps):
+            kind, _runner = self.action_space.decode(int(action_idx_arr[i]))
             action_hist[kind.name] = action_hist.get(kind.name, 0) + 1
         adv_mean = float(np.mean(advantages))
         adv_std = float(np.std(advantages))
@@ -357,7 +365,7 @@ class DiscretePPOTrainer:
         day_pnl = float((last_info or {}).get("day_pnl", 0.0))
 
         update_log = self._ppo_update(
-            transitions=transitions,
+            batch=batch,
             advantages=advantages,
             returns=returns,
         )
@@ -396,7 +404,7 @@ class DiscretePPOTrainer:
 
     def _ppo_update(
         self,
-        transitions: list[Transition],
+        batch: RolloutBatch,
         advantages: np.ndarray,
         returns: np.ndarray,
     ) -> UpdateLog:
@@ -406,29 +414,22 @@ class DiscretePPOTrainer:
         AFTER the optimiser step and breaks BOTH the inner mini-batch
         loop and the outer epoch loop. The count of skipped
         mini-batches is logged so the operator can see compute saved.
+
+        Phase 4 Session 06 (2026-05-02): consumes a :class:`RolloutBatch`
+        directly. The pre-Session-06 ``np.stack([tr.field for tr in
+        transitions])`` pass is gone — the rollout collector already
+        emits the per-tick fields as contiguous arrays.
         """
-        T = len(transitions)
+        T = int(batch.n_steps)
         device = self.device
 
-        # ── Stack rollout tensors ───────────────────────────────────────
-        obs_np = np.stack(
-            [tr.obs for tr in transitions], axis=0,
-        ).astype(np.float32)
-        masks_np = np.stack(
-            [tr.mask for tr in transitions], axis=0,
-        ).astype(bool)
-        action_idx_np = np.array(
-            [tr.action_idx for tr in transitions], dtype=np.int64,
-        )
-        stake_unit_np = np.array(
-            [tr.stake_unit for tr in transitions], dtype=np.float32,
-        )
-        log_prob_action_np = np.array(
-            [tr.log_prob_action for tr in transitions], dtype=np.float32,
-        )
-        log_prob_stake_np = np.array(
-            [tr.log_prob_stake for tr in transitions], dtype=np.float32,
-        )
+        # ── Source rollout arrays from the batch directly ───────────────
+        # ``batch.{obs,mask,...}`` are slice views into the rollout's
+        # per-episode buffers (Phase 4 Sessions 02 / 06). We re-read
+        # the same slot every PPO update for a single rollout, but the
+        # rollout doesn't mutate those slots after collect_episode
+        # returns, so the views stay stable.
+        action_idx_np = batch.action_idx
         uses_stake_np = build_uses_stake_mask(self.action_space, action_idx_np)
         chosen_adv_np = build_chosen_advantage(
             self.action_space, action_idx_np, advantages,
@@ -437,13 +438,28 @@ class DiscretePPOTrainer:
         # by ``uses_stake_np`` so NOOP / CLOSE transitions ratio purely
         # off the categorical log-prob.
         joint_old_lp_np = (
-            log_prob_action_np + uses_stake_np * log_prob_stake_np
-        ).astype(np.float32)
+            batch.log_prob_action + uses_stake_np * batch.log_prob_stake
+        ).astype(np.float32, copy=False)
 
-        obs = _move_to_device(torch.from_numpy(obs_np), device)
-        masks = _move_to_device(torch.from_numpy(masks_np), device)
-        action_idx = _move_to_device(torch.from_numpy(action_idx_np), device)
-        stake_unit = _move_to_device(torch.from_numpy(stake_unit_np), device)
+        # ``np.ascontiguousarray`` is a no-op when the input already
+        # owns contiguous storage; here it covers the slice-view case
+        # so ``torch.from_numpy`` doesn't refuse a non-contiguous
+        # input. The episode-long buffers are C-contiguous, and
+        # ``[:n_steps]`` is contiguous along axis 0, so this is the
+        # zero-copy path in practice.
+        obs = _move_to_device(
+            torch.from_numpy(np.ascontiguousarray(batch.obs)), device,
+        )
+        masks = _move_to_device(
+            torch.from_numpy(np.ascontiguousarray(batch.mask)), device,
+        )
+        action_idx = _move_to_device(
+            torch.from_numpy(np.ascontiguousarray(action_idx_np)), device,
+        )
+        stake_unit = _move_to_device(
+            torch.from_numpy(np.ascontiguousarray(batch.stake_unit)),
+            device,
+        )
         uses_stake = _move_to_device(torch.from_numpy(uses_stake_np), device)
         chosen_adv = _move_to_device(torch.from_numpy(chosen_adv_np), device)
         joint_old_lp = _move_to_device(torch.from_numpy(joint_old_lp_np), device)
@@ -451,14 +467,16 @@ class DiscretePPOTrainer:
 
         # ── Pack per-transition hidden states ──────────────────────────
         # ppo-kl-fix protocol: Phase 1's policy class owns the batch-
-        # axis convention via pack_hidden_states; we don't peek inside.
+        # axis convention via pack_hidden_states / pack_hidden_buffer;
+        # we don't peek inside.
         # Phase 3 Session 01b: states arrive from rollout already on
-        # the trainer's device (no per-tick CUDA→CPU sync). Pack
-        # directly — no torch.from_numpy round-trip, no device move.
-        hidden_pairs: list[tuple[torch.Tensor, ...]] = [
-            tr.hidden_state_in for tr in transitions
-        ]
-        packed_hidden = self.policy.pack_hidden_states(hidden_pairs)
+        # the trainer's device (no per-tick CUDA→CPU sync).
+        # Phase 4 Session 06: the batch carries pre-stacked
+        # ``(n_steps, *element_shape)`` buffers. ``pack_hidden_buffer``
+        # converts to the policy-specific packed form via view-only
+        # ops (squeeze + permute) — no per-tick concat over N small
+        # slices.
+        packed_hidden = self.policy.pack_hidden_buffer(batch.hidden_state_in)
 
         # ── Mini-batch loop ────────────────────────────────────────────
         policy_losses: list[float] = []
@@ -601,22 +619,33 @@ class DiscretePPOTrainer:
 
     # ── Internals ──────────────────────────────────────────────────────────
 
-    def _bootstrap_value(self, final_transition: Transition) -> np.ndarray:
+    def _bootstrap_value(self, batch: RolloutBatch) -> np.ndarray:
         """Forward pass on the post-terminal observation for the bootstrap.
 
         Only called when the last transition has ``done=False`` (i.e.
         a truncated episode). RolloutCollector currently terminates
         only on natural ``done=True``, so this path is dormant in
         Session 02 — kept for the Session 03 truncated-episode case.
+
+        Phase 4 Session 06 (2026-05-02): reads the final tick straight
+        from the :class:`RolloutBatch` instead of a per-tick
+        ``Transition``.
         """
         device = self.device
-        obs_t = torch.from_numpy(final_transition.obs).to(
-            device, dtype=torch.float32,
-        ).unsqueeze(0)
-        mask_t = torch.from_numpy(final_transition.mask).to(device).unsqueeze(0)
+        last = int(batch.n_steps) - 1
+        obs_t = torch.from_numpy(
+            np.ascontiguousarray(batch.obs[last])
+        ).to(device, dtype=torch.float32).unsqueeze(0)
+        mask_t = torch.from_numpy(
+            np.ascontiguousarray(batch.mask[last])
+        ).to(device).unsqueeze(0)
         # Phase 3 Session 01b: hidden_state_in is already a tuple of
         # device-resident tensors — no torch.from_numpy / .to(device).
-        hidden_in = final_transition.hidden_state_in
+        # Phase 4 Session 06: the batch's hidden_state_in is the
+        # pre-stacked ``(n_steps, *element_shape)`` buffer; slicing
+        # ``buf[last]`` reproduces the per-tick element shape that
+        # the policy.forward expects.
+        hidden_in = tuple(buf[last] for buf in batch.hidden_state_in)
         was_training = self.policy.training
         self.policy.eval()
         try:

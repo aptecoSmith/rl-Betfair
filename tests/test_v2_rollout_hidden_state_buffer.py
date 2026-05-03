@@ -63,6 +63,9 @@ import torch
 from env.betfair_env import BetfairEnv
 
 from agents_v2.discrete_policy import DiscreteLSTMPolicy
+from training_v2.discrete_ppo.transition import (
+    rollout_batch_to_transitions,
+)
 from tests.test_betfair_env import _make_day
 
 
@@ -173,7 +176,9 @@ def test_hidden_state_packed_bit_identical_to_pre_session_04_on_fixed_seed():
     here, where a snapshot-only test would silently re-bless.
     """
     _env, _shim, policy, collector = _build_collector(seed=42)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
     assert len(transitions) > 1, "test premise: need >1 tick"
 
     # First tick's hidden state must be zero (init_hidden contract).
@@ -239,7 +244,9 @@ def test_hidden_state_buffer_allocated_once_per_episode():
     of the hidden-state tuple.
     """
     _env, _shim, _policy, collector = _build_collector(seed=43)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
     assert len(transitions) > 1, "test premise: need >1 transition"
 
     # Distinct storage data_ptrs across all transitions for h.
@@ -276,7 +283,9 @@ def test_hidden_state_slice_independent_of_subsequent_ticks():
     has processed any input).
     """
     _env, _shim, _policy, collector = _build_collector(seed=44)
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
     assert len(transitions) > 1, "test premise: need >1 transition"
 
     h0, c0 = transitions[0].hidden_state_in
@@ -335,7 +344,9 @@ def test_per_tick_clone_count_drops_to_zero(monkeypatch):
 
     monkeypatch.setattr(torch.Tensor, "clone", counting_clone)
 
-    transitions = collector.collect_episode()
+    transitions = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
     n_steps = len(transitions)
     assert n_steps > 1, "test premise: need >1 transition"
 

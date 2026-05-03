@@ -3,8 +3,10 @@
 Phase 2, Session 01 deliverable. Drives Phase 1's
 :class:`agents_v2.env_shim.DiscreteActionShim` and a
 :class:`agents_v2.discrete_policy.BaseDiscretePolicy` subclass through
-one episode (one day) and returns a list of :class:`Transition`
-objects ready for the (Session 02) PPO update.
+one episode (one day) and returns a :class:`RolloutBatch` of
+pre-stacked per-tick arrays ready for the PPO update (Phase 4
+Session 06; pre-Session-06 the return type was
+``list[:class:`Transition`]``).
 
 What this does AND DOES NOT do:
 
@@ -95,7 +97,10 @@ import torch.distributions
 from agents_v2.discrete_policy import BaseDiscretePolicy
 from agents_v2.env_shim import DiscreteActionShim
 from env.bet_manager import MIN_BET_STAKE, BetOutcome
-from training_v2.discrete_ppo.transition import Transition, action_uses_stake
+from training_v2.discrete_ppo.transition import (
+    RolloutBatch,
+    action_uses_stake,
+)
 
 if TYPE_CHECKING:
     pass
@@ -226,15 +231,19 @@ class RolloutCollector:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    def collect_episode(self) -> list[Transition]:
+    def collect_episode(self) -> RolloutBatch:
         """Run one full episode end-to-end.
 
-        Returns the list of transitions in order. The final
-        transition's ``done`` is ``True``; intermediate transitions'
-        ``done`` is ``False``. The collector enforces (per step) that
-        per-runner reward attribution sums to the env's scalar
-        reward — failure raises immediately so attribution drift
-        can't silently corrupt the PPO update.
+        Phase 4 Session 06 (2026-05-02): returns a :class:`RolloutBatch`
+        of pre-stacked per-tick arrays / tensors (was
+        ``list[Transition]`` pre-Session-06). The trainer consumes the
+        batch directly without an intermediate ``np.stack(...)`` pass.
+
+        The collector enforces (per step, per
+        ``_STRICT_ATTRIBUTION`` / sample-rate gating) that per-runner
+        reward attribution sums to the env's scalar reward — failure
+        raises immediately so attribution drift can't silently
+        corrupt the PPO update.
         """
         was_training = self.policy.training
         self.policy.eval()
@@ -245,7 +254,7 @@ class RolloutCollector:
 
     # ── Internals ──────────────────────────────────────────────────────────
 
-    def _collect(self) -> list[Transition]:
+    def _collect(self) -> RolloutBatch:
         shim = self.shim
         env = shim.env
         policy = self.policy
@@ -302,6 +311,21 @@ class RolloutCollector:
         n_steps_estimate = self._estimate_max_steps(env)
         obs_arr = np.empty((n_steps_estimate, obs_dim), dtype=np.float32)
         mask_arr = np.empty((n_steps_estimate, action_n), dtype=bool)
+
+        # Phase 4 Session 06: pre-allocated per-tick numpy buffers for
+        # the remaining fields the PPO update consumes. Replaces the
+        # per-tick ``per_tick_*`` Python lists. Same grow-path shape as
+        # obs / mask (doubled on overflow); empirically the estimate is
+        # exact-or-loose so the grow path is dormant in practice. The
+        # PPO update reads these directly via ``RolloutBatch`` slice
+        # views — no end-of-episode ``np.array(...)`` / ``np.stack(...)``
+        # pass.
+        action_idx_arr = np.empty((n_steps_estimate,), dtype=np.int64)
+        stake_unit_arr = np.empty((n_steps_estimate,), dtype=np.float32)
+        per_runner_reward_arr = np.empty(
+            (n_steps_estimate, self.max_runners), dtype=np.float32,
+        )
+        done_arr = np.empty((n_steps_estimate,), dtype=bool)
 
         # Phase 4 Session 04: pre-allocated hidden-state capture
         # buffers. Pre-Session-04 each tick did
@@ -364,17 +388,13 @@ class RolloutCollector:
         pending_log_prob_stake: list[torch.Tensor] = []
         pending_value_per_runner: list[torch.Tensor] = []
 
-        # Per-tick CPU-side bookkeeping. Transition objects are built
-        # at end-of-episode so the deferred device tensors can be
-        # materialised in one batched transfer (Transition is a
-        # frozen dataclass; we can't backfill in-place).
-        # Phase 4 Session 02: obs / mask now live in the shared
-        # contiguous buffers above — no per-tick list.
-        per_tick_hidden_in: list[tuple[torch.Tensor, ...]] = []
-        per_tick_action_idx: list[int] = []
-        per_tick_stake_unit: list[float] = []
-        per_tick_per_runner_reward: list[np.ndarray] = []
-        per_tick_done: list[bool] = []
+        # Phase 4 Session 06: per-tick CPU-side bookkeeping is now
+        # carried entirely by the pre-allocated numpy / torch buffers
+        # above. The end-of-episode ``Transition(...)`` list
+        # comprehension is replaced by a single ``RolloutBatch(...)``
+        # construction with slice views into those buffers — no
+        # ~12 k dataclass instantiations and no 24 k ``float()``
+        # conversions on the rollout's hot path.
 
         done = False
         n_steps = 0
@@ -382,14 +402,23 @@ class RolloutCollector:
 
         with torch.no_grad():
             while not done:
-                # Phase 4 Session 02: single materialisation per tick.
-                # Grow the contiguous buffers if the episode exceeds
-                # the upper-bound estimate. The grow path is once-per-
-                # episode at most in practice; the warning surfaces a
-                # bad estimate so it can be tuned.
+                # Phase 4 Session 02 / Session 06: single materialisation
+                # per tick. Grow the contiguous buffers if the episode
+                # exceeds the upper-bound estimate. The grow path is
+                # once-per-episode at most in practice; the warning
+                # surfaces a bad estimate so it can be tuned.
                 if n_steps >= obs_arr.shape[0]:
-                    obs_arr, mask_arr = self._grow_obs_mask_buffers(
-                        obs_arr, mask_arr, n_steps,
+                    (
+                        obs_arr, mask_arr, action_idx_arr,
+                        stake_unit_arr, per_runner_reward_arr, done_arr,
+                    ) = self._grow_episode_buffers(
+                        obs_arr=obs_arr,
+                        mask_arr=mask_arr,
+                        action_idx_arr=action_idx_arr,
+                        stake_unit_arr=stake_unit_arr,
+                        per_runner_reward_arr=per_runner_reward_arr,
+                        done_arr=done_arr,
+                        n_filled=n_steps,
                     )
 
                 # Single write per tick into the contiguous row;
@@ -424,7 +453,6 @@ class RolloutCollector:
                     )
                 for buf, t in zip(hidden_buffers, hidden_state):
                     buf[n_steps].copy_(t.detach())
-                hidden_in_t = tuple(buf[n_steps] for buf in hidden_buffers)
 
                 out = policy(obs_t, hidden_state=hidden_state, mask=mask_t)
                 hidden_state = out.new_hidden_state
@@ -496,15 +524,16 @@ class RolloutCollector:
                     market_to_runner_map=market_to_runner_map,
                 )
 
-                # Phase 4 Session 02: obs / mask already in the
-                # contiguous buffers; the Transition reads from
-                # ``obs_arr[i]`` / ``mask_arr[i]`` (a view) at end-
-                # of-episode. No per-tick CPU-list copy.
-                per_tick_hidden_in.append(hidden_in_t)
-                per_tick_action_idx.append(action_idx)
-                per_tick_stake_unit.append(stake_unit)
-                per_tick_per_runner_reward.append(per_runner_reward)
-                per_tick_done.append(done)
+                # Phase 4 Session 06: write directly into the
+                # pre-allocated per-tick numpy buffers. ``hidden_in_t``
+                # is already a slice view into ``hidden_buffers``
+                # (Session 04); the per-tick action/stake/reward/done
+                # lists are gone. The RolloutBatch built at
+                # end-of-episode reads slice views into these buffers.
+                action_idx_arr[n_steps] = action_idx
+                stake_unit_arr[n_steps] = stake_unit
+                per_runner_reward_arr[n_steps] = per_runner_reward
+                done_arr[n_steps] = done
 
                 obs = next_obs
                 n_steps += 1
@@ -537,30 +566,32 @@ class RolloutCollector:
                 (0, self.max_runners), dtype=np.float32,
             )
 
-        # Phase 4 Session 02: ``obs_arr[i]`` / ``mask_arr[i]`` are
-        # views into the contiguous per-episode buffers. The PPO
-        # update consumer (``trainer._ppo_update``) does
-        # ``np.stack([tr.obs ...]).astype(np.float32)`` which copies
-        # into a new contiguous array, so view aliasing does NOT
-        # leak into the gradient path. Verified by audit of
-        # ``training_v2/discrete_ppo/trainer.py`` at the start of
-        # this session — no in-place mutation of ``Transition.obs``
-        # or ``Transition.mask`` anywhere.
-        transitions: list[Transition] = [
-            Transition(
-                obs=obs_arr[i],
-                hidden_state_in=per_tick_hidden_in[i],
-                mask=mask_arr[i],
-                action_idx=per_tick_action_idx[i],
-                stake_unit=per_tick_stake_unit[i],
-                log_prob_action=float(log_prob_action_arr[i]),
-                log_prob_stake=float(log_prob_stake_arr[i]),
-                value_per_runner=value_per_runner_arr[i],
-                per_runner_reward=per_tick_per_runner_reward[i],
-                done=per_tick_done[i],
-            )
-            for i in range(n_steps)
-        ]
+        # Phase 4 Session 06: assemble the RolloutBatch directly from
+        # the per-episode buffers. Every numpy field is a SLICE VIEW
+        # ``arr[:n_steps]`` (zero-copy). The hidden-state buffers
+        # ditto: ``buf[:n_steps]`` is a view into the contiguous
+        # episode-long buffer. The PPO update consumer
+        # (``trainer._ppo_update``) reads from these views directly —
+        # no ``np.stack(...)`` or ``np.array([t.field for t in
+        # transitions])`` pass; downstream consumers that need
+        # contiguous copies (``torch.from_numpy``) do their own
+        # materialisation.
+        hidden_state_in: tuple[torch.Tensor, ...] = tuple(
+            buf[:n_steps] for buf in hidden_buffers
+        )
+        batch = RolloutBatch(
+            obs=obs_arr[:n_steps],
+            hidden_state_in=hidden_state_in,
+            mask=mask_arr[:n_steps],
+            action_idx=action_idx_arr[:n_steps],
+            stake_unit=stake_unit_arr[:n_steps],
+            log_prob_action=log_prob_action_arr,
+            log_prob_stake=log_prob_stake_arr,
+            value_per_runner=value_per_runner_arr,
+            per_runner_reward=per_runner_reward_arr[:n_steps],
+            done=done_arr[:n_steps],
+            n_steps=n_steps,
+        )
 
         self.last_info = last_info
         # Stashed for tests / debug. The pending set should be empty
@@ -574,7 +605,7 @@ class RolloutCollector:
             "RolloutCollector: collected %d transitions (terminated)",
             n_steps,
         )
-        return transitions
+        return batch
 
     # ── Per-episode obs / mask buffer helpers (Phase 4 Session 02) ─────────
 
@@ -599,39 +630,69 @@ class RolloutCollector:
             return 20_000
         return sum(len(r.ticks) for r in races) + len(races) + 1
 
-    def _grow_obs_mask_buffers(
+    def _grow_episode_buffers(
         self,
+        *,
         obs_arr: np.ndarray,
         mask_arr: np.ndarray,
+        action_idx_arr: np.ndarray,
+        stake_unit_arr: np.ndarray,
+        per_runner_reward_arr: np.ndarray,
+        done_arr: np.ndarray,
         n_filled: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Double the obs / mask buffer capacity, preserving filled rows.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Double every per-episode numpy buffer's capacity, preserving filled rows.
 
-        Returns the (obs, mask) pair of fresh np arrays. Rows
-        ``[0, n_filled)`` are copied from the old buffers so any
-        Transition built later that reads from the new buffer sees
-        the same values for those rows. The OLD buffers are dropped
-        — their refcounts go to zero unless the caller still holds
-        references; in this collector they don't, so they're GCed.
+        Phase 4 Session 06 (2026-05-02): merged
+        ``_grow_obs_mask_buffers`` (Session 02) with the
+        Session-06-introduced action/stake/reward/done buffers. All
+        six grow in lockstep — they share the same time axis so the
+        same condition (``n_steps >= obs_arr.shape[0]``) governs
+        them all.
 
-        ``np.empty`` (not ``np.zeros``) is fine here: only
-        ``[0, n_filled)`` is read after the copy and ``[n_filled,
-        new_n)`` is overwritten by future ticks before any read.
+        Returns the six fresh np arrays in the order they appear in
+        the parameter list. Rows ``[0, n_filled)`` are copied from
+        the old buffers so any RolloutBatch slice view built later
+        that reads from the new buffer sees the same values. The
+        OLD buffers are dropped — refcounts go to zero unless the
+        caller still holds references; in this collector they
+        don't.
+
+        ``np.empty`` (not ``np.zeros``) is fine: only ``[0, n_filled)``
+        is read after the copy and ``[n_filled, new_n)`` is
+        overwritten by future ticks before any read.
         """
+        old_n = obs_arr.shape[0]
+        new_n = old_n * 2
         obs_dim = obs_arr.shape[1]
         action_n = mask_arr.shape[1]
-        new_n = obs_arr.shape[0] * 2
+        max_runners = per_runner_reward_arr.shape[1]
+
         new_obs = np.empty((new_n, obs_dim), dtype=np.float32)
         new_obs[:n_filled] = obs_arr[:n_filled]
         new_mask = np.empty((new_n, action_n), dtype=bool)
         new_mask[:n_filled] = mask_arr[:n_filled]
+        new_action_idx = np.empty((new_n,), dtype=np.int64)
+        new_action_idx[:n_filled] = action_idx_arr[:n_filled]
+        new_stake_unit = np.empty((new_n,), dtype=np.float32)
+        new_stake_unit[:n_filled] = stake_unit_arr[:n_filled]
+        new_per_runner_reward = np.empty(
+            (new_n, max_runners), dtype=np.float32,
+        )
+        new_per_runner_reward[:n_filled] = per_runner_reward_arr[:n_filled]
+        new_done = np.empty((new_n,), dtype=bool)
+        new_done[:n_filled] = done_arr[:n_filled]
+
         logger.warning(
             "RolloutCollector: obs/mask buffer grow fired (was %d, "
             "now %d) — _estimate_max_steps undercounted; tune for "
             "this day shape if the warning recurs",
-            obs_arr.shape[0], new_n,
+            old_n, new_n,
         )
-        return new_obs, new_mask
+        return (
+            new_obs, new_mask, new_action_idx, new_stake_unit,
+            new_per_runner_reward, new_done,
+        )
 
     def _grow_hidden_buffers(
         self,

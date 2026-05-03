@@ -390,9 +390,9 @@ def train_cluster_batched(
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policies[i], device=device,
         )
-        transitions = eval_collector.collect_episode()
+        eval_batch = eval_collector.collect_episode()
         partial = _eval_rollout_stats(
-            transitions=transitions,
+            batch=eval_batch,
             last_info=eval_collector.last_info,
             action_space=eval_shim.action_space,
         )

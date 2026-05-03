@@ -271,14 +271,21 @@ def test_full_episode_stake_unit_and_log_prob_stake_unchanged_by_toggle():
 
     torch.distributions.Distribution.set_default_validate_args(False)
     assert torch.distributions.Distribution._validate_args is False
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     _env, _shim, _policy, collector_off = _build_collector(seed=42)
-    transitions_off = collector_off.collect_episode()
+    transitions_off = rollout_batch_to_transitions(
+        collector_off.collect_episode()
+    )
 
     # Re-enable validation and re-run with the same seed.
     torch.distributions.Distribution.set_default_validate_args(True)
     try:
         _env2, _shim2, _policy2, collector_on = _build_collector(seed=42)
-        transitions_on = collector_on.collect_episode()
+        transitions_on = rollout_batch_to_transitions(
+            collector_on.collect_episode()
+        )
     finally:
         # Restore the post-Session-03 default so subsequent tests in
         # the session see the production state.

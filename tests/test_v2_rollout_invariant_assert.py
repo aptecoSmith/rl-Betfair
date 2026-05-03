@@ -64,6 +64,9 @@ import torch
 from env.betfair_env import BetfairEnv
 
 from agents_v2.discrete_policy import DiscreteLSTMPolicy
+from training_v2.discrete_ppo.transition import (
+    rollout_batch_to_transitions,
+)
 from tests.test_betfair_env import _make_day
 
 
@@ -189,7 +192,9 @@ def test_strict_mode_fires_per_tick(monkeypatch):
 
     spy, calls = _make_isclose_spy()
     with mock.patch.object(rollout_mod.np, "isclose", side_effect=spy):
-        transitions = collector.collect_episode()
+        transitions = rollout_batch_to_transitions(
+            collector.collect_episode()
+        )
 
     assert len(transitions) > 0
     assert len(calls) == len(transitions), (
@@ -223,7 +228,9 @@ def test_sampled_mode_fires_at_most_once_per_n_plus_settle_ticks(
 
     spy, calls = _make_isclose_spy()
     with mock.patch.object(rollout_mod.np, "isclose", side_effect=spy):
-        transitions = collector.collect_episode()
+        transitions = rollout_batch_to_transitions(
+            collector.collect_episode()
+        )
 
     n_steps = len(transitions)
     state = collector.last_attribution_state
@@ -332,7 +339,9 @@ def test_sampled_mode_misses_drift_on_non_sample_non_settle_tick(
 
     spy, calls = _make_isclose_spy()
     with mock.patch.object(rollout_mod.np, "isclose", side_effect=spy):
-        transitions = collector.collect_episode()
+        transitions = rollout_batch_to_transitions(
+            collector.collect_episode()
+        )
 
     n_steps = len(transitions)
     n_settle_ticks = 2  # 2 races × 1 settle tick each
@@ -363,7 +372,9 @@ def test_attribution_outputs_unchanged_across_modes(monkeypatch):
     # Run 1: strict mode.
     monkeypatch.setattr(rollout_mod, "_STRICT_ATTRIBUTION", True)
     _env, _shim, _policy, collector = _build_collector(seed=42)
-    transitions_strict = collector.collect_episode()
+    transitions_strict = rollout_batch_to_transitions(
+        collector.collect_episode()
+    )
 
     # Run 2: sampled mode (settle-only, since N is huge).
     monkeypatch.setattr(rollout_mod, "_STRICT_ATTRIBUTION", False)
@@ -371,7 +382,9 @@ def test_attribution_outputs_unchanged_across_modes(monkeypatch):
         rollout_mod, "_SAMPLED_ATTRIBUTION_EVERY_N", 10_000,
     )
     _env2, _shim2, _policy2, collector2 = _build_collector(seed=42)
-    transitions_sampled = collector2.collect_episode()
+    transitions_sampled = rollout_batch_to_transitions(
+        collector2.collect_episode()
+    )
 
     assert len(transitions_strict) == len(transitions_sampled), (
         f"transition count diverged across modes "

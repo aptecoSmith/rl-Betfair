@@ -184,9 +184,12 @@ def test_per_agent_self_parity_batched_vs_solo():
     # ``collect_episode`` equals what BatchedRolloutCollector
     # captured for agent 0 (``torch.manual_seed(42)`` then
     # ``torch.get_rng_state()``).
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     _env_solo, _shim_solo, _policy_solo, solo = _build_solo(seed=42)
     torch.manual_seed(42)
-    transitions_solo = solo.collect_episode()
+    transitions_solo = rollout_batch_to_transitions(solo.collect_episode())
 
     assert len(transitions_solo) > 0
     assert len(transitions_batched_0) == len(transitions_solo), (
@@ -517,9 +520,12 @@ def test_batched_collector_falls_back_to_n1_session01_path():
     per-agent RNG save/restore and uses the global RNG, exactly
     like RolloutCollector.
     """
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
     seed = 7
     _e_solo, _s_solo, _p_solo, solo = _build_solo(seed=seed)
-    t_solo = solo.collect_episode()
+    t_solo = rollout_batch_to_transitions(solo.collect_episode())
 
     # Build a single-agent batched collector at the same seed. We
     # use seeds=None to take the global-RNG path, matching solo's

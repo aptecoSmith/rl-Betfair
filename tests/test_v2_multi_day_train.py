@@ -434,7 +434,12 @@ def test_episode_boundary_is_day_boundary_hidden_reset() -> None:
 
     # Day 1: rollout via the trainer's own collector — first
     # transition's hidden_state_in must be zeros.
-    transitions_day1 = trainer._collector.collect_episode()
+    from training_v2.discrete_ppo.transition import (
+        rollout_batch_to_transitions,
+    )
+    transitions_day1 = rollout_batch_to_transitions(
+        trainer._collector.collect_episode()
+    )
     assert len(transitions_day1) > 0
     h0_d1, c0_d1 = transitions_day1[0].hidden_state_in
     assert torch.equal(h0_d1, torch.zeros_like(h0_d1))
@@ -464,7 +469,9 @@ def test_episode_boundary_is_day_boundary_hidden_reset() -> None:
     assert trainer.shim is shim_day2
     assert isinstance(trainer._collector, RolloutCollector)
 
-    transitions_day2 = trainer._collector.collect_episode()
+    transitions_day2 = rollout_batch_to_transitions(
+        trainer._collector.collect_episode()
+    )
     assert len(transitions_day2) > 0
     h0_d2, c0_d2 = transitions_day2[0].hidden_state_in
     assert torch.equal(h0_d2, torch.zeros_like(h0_d2)), (
