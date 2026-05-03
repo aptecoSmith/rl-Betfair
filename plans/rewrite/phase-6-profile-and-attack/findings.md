@@ -35,6 +35,7 @@ Per-session post-change rows are 5-episode runs written to
 |---|---|---|---|---|
 | Pre-Phase-6 baseline | 9.595 | — | — | — |
 | + S01 (profile + assess) | 8.389 (1-ep, profile run only) | — | n/a (assessment-only) | 0 |
+| + S02 (batched booster + batched calibrator) | **6.923** | −2.672 vs pre-S02 5-ep baseline | A (bit-identical) | 4 (1 integration + 3 unit) |
 | v1 reference (`ppo_lstm_v1`) | 2.94 | — | — | — |
 
 The S01 row is the 1-episode wall reported by the py-spy profile run
@@ -315,18 +316,121 @@ compute_extended_obs (the calibrator wrapper, the
 and would not have been targeted in any code-read-driven phase.
 This validates the Phase 6 premise — profile first, then attack.
 
-## Session 02+ — TBD
+## Session 02 — batched booster + batched calibrator
 
-Written *after* Session 01 lands. The candidate menu in
+**Verdict: PARTIAL.** 5-ep median **6.923 ms/tick** sits in the
+PARTIAL band `(6.5, 8.0]` per the per-session bar in the session
+prompt. Recovery against the proper pre-Phase-6 5-ep baseline of
+9.595 ms/tick is **−2.672 ms/tick** — *larger* than the predicted
+~2.0 ms/tick after slack (1.2 from A, 0.8 from A′). Recovery
+against the noisier S01 1-ep point estimate of 8.389 ms/tick is
+**−1.466 ms/tick**, *smaller* than predicted. The verdict is
+PARTIAL by the absolute-threshold rule but the change shipped its
+predicted recovery against the right (5-ep median) baseline.
+
+### What shipped
+
+- Two-pass batched rewrite of
+  `agents_v2/env_shim.py::compute_extended_obs`. Pass 1 collects
+  the K priceable runner-side feature vectors and their
+  destination indices in `extra`; Pass 2 calls
+  `booster.predict(matrix)` once and `calibrator.predict(raw)`
+  once on the stacked `(K, n_features)` matrix; Pass 3 scatters
+  back, gating per-element via a vectorised `np.isfinite` mask.
+  Pre-batch filtering (status, LTP, extract-failure) and the
+  per-row finiteness contract are preserved unchanged.
+- `tests/test_env_shim_batched_scorer.py`: 1 integration test
+  + 3 smoke unit tests. The integration test runs one full
+  episode on `--seed 42 --day 2026-04-23 --device cpu` against
+  both the per-row reference (frozen copy of pre-S02 code, bound
+  via `types.MethodType` monkeypatch) and the production batched
+  path; asserts byte-equality on every step's `obs` and `mask`,
+  per-step `info["raw_pnl_reward"]`, final `info["day_pnl"]`, and
+  the first 100 `log_prob_action` entries from the rollout's
+  collected transitions. Marked `@pytest.mark.slow` because each
+  episode takes ~95 s; the smoke unit tests take <1 s and run by
+  default.
+- `tests/test_agents_v2_env_shim.py::TestScorerWiring`: two
+  pre-existing tests updated. Their booster mocks returned a
+  fixed `(1,)` array regardless of input shape — fine under the
+  per-row K=1 call shape, broken under the batched K=N shape.
+  The mocks now return `np.full(x.shape[0], FIXED, …)` so they
+  work under both call shapes.
+
+### Parity result
+
+**Bit-identity verified end-to-end.** The pre-write sanity
+check on synthetic inputs confirmed booster and calibrator
+both produce identical floats between batched and per-row
+paths (max abs diff = 0.0 for both). The full-episode
+integration test confirmed this carries through to every step's
+obs/mask/info and the first 100 log-prob entries — no ULP
+divergence in either direction.
+
+### ms/tick recovery vs prediction
+
+| Reference baseline | Pre | Post | Δ | Predicted | Verdict |
+|---|---|---|---|---|---|
+| Pre-Phase-6 5-ep median | 9.595 | 6.923 | **−2.672** | ~2.0 | exceeds prediction |
+| S01 1-ep point | 8.389 | 6.923 | −1.466 | ~2.0 | undershoots |
+| Absolute target ≤ 6.5 | n/a | 6.923 | n/a | yes | **misses by 0.4** |
+
+Per-episode walls (sec): 77.86, 75.03, 83.36, 83.98, 82.19.
+Per-episode ms/tick: 6.559, 6.320, 7.022, 7.074, 6.923 (median
+**6.923**, mean 6.779; n_steps fixed at 11872 per episode).
+
+### Root-cause hypothesis for the threshold miss
+
+The PARTIAL verdict is driven by anchor choice, not by the
+optimisation underdelivering. The Session 01 1-ep point estimate
+of 8.389 ms/tick sat at the low end of the 8.0–10.7 ms/tick
+episode-to-episode noise band documented in Phase 4 S01; the
+true pre-S02 5-ep median is closer to the 9.595 ms/tick of the
+Phase 4 final baseline (also a 5-ep median, same data, same
+seed). The post-S02 absolute target ≤ 6.5 ms/tick was derived as
+8.4 − 2.0 = 6.4 from the noisy 1-ep anchor; against the proper
+5-ep anchor (9.6 − 2.0 = 7.6) we shipped recovery at 6.923,
+exceeding the predicted destination by 0.7 ms/tick. The change
+ships the win it was scoped to ship; the threshold was set
+against the wrong baseline.
+
+### Implications for Session 03
+
+The recovery vs the 5-ep baseline (2.67 ms/tick) is consistent
+with Session 01's per-candidate upper-bound estimates for A + A′
+(2.0 ms/tick after slack from a notional 2.6 ms/tick combined
+ceiling). Session 03's Candidate S (O(1) `_spread_in_ticks`)
+estimated recovery ~1.5 ms/tick after slack should land us
+around **5.4–5.5 ms/tick** post-S03, comfortably in GREEN
+territory and within striking distance of the GREEN-with-stretch
+≤ 3.0 v1-parity bar after one further session (Candidate F,
+`torch.compile`).
+
+The 5-ep noise discipline is paying off: per-episode ms/tick
+spans 6.32–7.07 (range 0.75 ms), the median is well-defined,
+and the 2.67 ms/tick recovery is multiple times the
+within-cohort spread. A 1-ep point estimate would not have
+distinguished this verdict from "in the noise".
+
+### Surprises
+
+- The integration test ran in 190 s for two full episodes,
+  faster than expected — the extra ~3 s overhead per episode for
+  the env.step capture wrapper is negligible.
+- No pre-existing v2 trainer / rollout / collector / cohort /
+  policy tests broke. Two scorer-wiring tests in
+  `test_agents_v2_env_shim.py` had to be updated because their
+  booster mocks were per-row-shape-coupled — that surfaced
+  immediately, not as a flake. The fix made the mocks
+  call-shape-agnostic, which is strictly the right contract for
+  a wiring test anyway.
+
+## Session 03+ — TBD
+
+Written *after* Session 02 lands. The candidate menu in
 `purpose.md` is the expected shape; the actual target order and
-content depends on Session 01's assessment. Likely candidates
-(from purpose.md §"Candidate optimisations"):
-
-- **A.** Batched LightGBM `booster.predict()` (Regime A,
-  bit-identical, ~1.4–2.8 ms/tick estimated)
-- **B.** Slot-to-tick-runner-index cache (Regime A, 100–500 µs/tick)
-- **C.** C-API direct LightGBM call (Regime A, compounds with A)
-- **D.** Treelite AOT-compiled scorer (Regime B, fp32-aggregation)
-- **E.** ONNX Runtime scorer (Regime B, alt to D)
-- **F.** `torch.compile` on policy forward (Regime B, 30–50 %
-  forward speedup)
+content depends on the post-S02 profile shape. Likely Session 03
+target is **Candidate S** (O(1) `_spread_in_ticks` in
+`training_v2/scorer/feature_extractor.py`, Regime A bit-identical,
+~1.5 ms/tick estimated recovery after slack) per the Session 01
+ranked target list entry 2.

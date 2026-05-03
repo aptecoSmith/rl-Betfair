@@ -321,6 +321,16 @@ class DiscreteActionShim:
         in the current race; slot ``2*i + 1`` is LAY. Zeroes for slots
         where the runner is inactive, unpriceable, or whose feature
         vector tripped a NaN guard.
+
+        Two-pass batched scorer (Phase 6 S02). Pass 1 collects the K
+        priceable runner-side feature vectors and their destination
+        indices in ``extra``; Pass 2 calls ``booster.predict`` and
+        ``calibrator.predict`` once each on the stacked ``(K, n_feat)``
+        matrix; Pass 3 scatters the calibrated outputs back, skipping
+        any non-finite slot. Bit-identical to the per-row path
+        (LightGBM and isotonic regression both produce identical floats
+        between batched and per-row evaluation — verified pre-write,
+        see plans/rewrite/phase-6-profile-and-attack/findings.md S02).
         """
         extra = np.zeros(2 * self._N, dtype=np.float32)
         race = self._current_race()
@@ -334,6 +344,13 @@ class DiscreteActionShim:
         runner_by_sid = {r.selection_id: r for r in tick.runners}
         feature_names = self._feature_spec["feature_names"]
 
+        # Pass 1: collect priceable runner-side feature vectors + their
+        # destination indices in ``extra``. Skip semantics are identical
+        # to the per-row path — runners that are inactive, unpriceable,
+        # or whose feature_extractor.extract raises never enter the
+        # batch in the first place.
+        rows: list[np.ndarray] = []
+        extra_idx: list[int] = []
         for slot in range(self._N):
             sid = slot_map.get(slot)
             if sid is None:
@@ -346,8 +363,6 @@ class DiscreteActionShim:
             ltp = runner.last_traded_price
             if ltp is None or ltp <= 1.0:
                 continue
-            # Need the runner index *within tick.runners* for the
-            # extractor — it indexes ``tick.runners[runner_idx]``.
             try:
                 runner_idx_in_tick = next(
                     j for j, r in enumerate(tick.runners)
@@ -372,25 +387,38 @@ class DiscreteActionShim:
                         exc_info=True,
                     )
                     continue
-                feature_vec = np.asarray(
+                # NaN is expected here for the F7-dead velocity
+                # features. LightGBM handles NaN natively (see Phase 0
+                # findings); the post-calibrator finiteness gate in
+                # Pass 3 catches any genuine downstream blow-up.
+                row = np.asarray(
                     [feat_dict[name] for name in feature_names],
                     dtype=np.float32,
-                ).reshape(1, -1)
-                # NaN is expected here for the F7-dead velocity
-                # features (`time_since_last_trade_seconds`,
-                # `traded_volume_last_30s` etc — see Phase 0 findings).
-                # LightGBM handles NaN natively and the booster was
-                # trained on the same NaN-bearing data, so we pass the
-                # vector through. Output-side guard below catches any
-                # genuine downstream blow-up.
-                raw = self._booster.predict(feature_vec)
-                cal_arr = self._calibrator.predict(np.asarray(raw))
-                cal = float(cal_arr[0])
-                if not np.isfinite(cal):
-                    continue
-                extra[2 * slot + side_idx] = float(
-                    np.clip(cal, 0.0, 1.0),
                 )
+                rows.append(row)
+                extra_idx.append(2 * slot + side_idx)
+
+        if not rows:
+            return np.concatenate([base_obs, extra]).astype(
+                np.float32, copy=False,
+            )
+
+        # Pass 2: one batched booster call, one batched calibrator call.
+        matrix = np.stack(rows, axis=0)
+        raw = self._booster.predict(matrix)
+        cal = self._calibrator.predict(np.asarray(raw))
+
+        # Pass 3: scatter back. Per-row finiteness gate moves to a
+        # vectorised np.isfinite mask — non-finite slots stay at zero,
+        # preserving the per-row contract that one bad slot never
+        # poisons the others.
+        finite = np.isfinite(cal)
+        clipped = np.clip(cal, 0.0, 1.0).astype(np.float32, copy=False)
+        for k, dest in enumerate(extra_idx):
+            if not finite[k]:
+                continue
+            extra[dest] = clipped[k]
+
         return np.concatenate([base_obs, extra]).astype(
             np.float32, copy=False,
         )

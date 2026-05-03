@@ -299,10 +299,14 @@ class TestScorerWiring:
         self, shim, monkeypatch,
     ):
         """Monkeypatch booster to a fixed value; assert layout in obs."""
-        FIXED_RAW = np.array([0.7], dtype=np.float64)
-        # Predict returns a 1-element array per call.
+        # Predict returns one fixed value per input row — works under
+        # both the per-row K=1 and batched K=N call shapes (Phase 6 S02
+        # batched scorer + calibrator landed 2026-05-03).
         monkeypatch.setattr(
-            shim._booster, "predict", lambda x, *a, **k: FIXED_RAW.copy(),
+            shim._booster, "predict",
+            lambda x, *a, **k: np.full(
+                np.asarray(x).shape[0], 0.7, dtype=np.float64,
+            ),
         )
         # Calibrator: identity-like for predictability.
         monkeypatch.setattr(
@@ -341,8 +345,12 @@ class TestScorerWiring:
     ):
         """REMOVED runner → both scorer slots stay at 0 even though booster fires."""
         s = shim_first_inactive
+        # Per-input-row mock — works under per-row K=1 and batched K=N.
         monkeypatch.setattr(
-            s._booster, "predict", lambda x, *a, **k: np.array([0.9]),
+            s._booster, "predict",
+            lambda x, *a, **k: np.full(
+                np.asarray(x).shape[0], 0.9, dtype=np.float64,
+            ),
         )
         monkeypatch.setattr(
             s._calibrator, "predict",
