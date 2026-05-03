@@ -408,11 +408,12 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             mask = mask.bool()
         # ``masked_fill`` with ~mask: True (legal) stays as logits,
         # False (illegal) becomes -inf. The Categorical's softmax then
-        # routes zero probability to masked indices.
-        neg_inf = torch.tensor(
-            float("-inf"), dtype=logits.dtype, device=logits.device,
-        )
-        return torch.where(mask, logits, neg_inf)
+        # routes zero probability to masked indices. Out-of-place form
+        # (no trailing underscore) so the shared ``logits`` tensor
+        # exposed on ``DiscretePolicyOutput`` is not mutated; ``masked_
+        # _fill`` accepts a Python float scalar so no per-call ``-inf``
+        # tensor allocation is needed (Phase 4 S07, 2026-05-03).
+        return logits.masked_fill(~mask, float("-inf"))
 
 
 def make_stake_distribution(

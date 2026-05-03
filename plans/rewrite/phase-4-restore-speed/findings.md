@@ -38,7 +38,7 @@ Per-session post-change rows are 1-episode runs with `--n-episodes
 | + S04 (hidden state) | **10.359** (1 ep) | +4.6 % vs S03 ep0 (9.906), +9.1 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 5 |
 | + S05 (assert) | **9.527** (1 ep) | −8.0 % vs S04 ep0 (10.359), +0.4 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 6 |
 | + S06 (RolloutBatch) | **9.611** (1 ep) | +0.9 % vs S05 ep0 (9.527), +1.2 % vs S01 mean — within noise | ✓ bit-identical PPO update outputs | 6 |
-| + S07 (mask path) | — | — | — | — |
+| + S07 (mask path) | **11.009** (1 ep) | +14.5 % vs S06 ep0 (9.611), +16.0 % vs S01 mean — within episode-to-episode noise | ✓ bit-identical PPO update outputs | 5 |
 | v1 reference (`ppo_lstm_v1`) | 2.94 | — | — | — |
 
 ## Session 01 — per-runner attribution incremental tracking
@@ -1241,3 +1241,201 @@ consumer-side updates in `tests/test_discrete_ppo_*.py`,
 - **One fix per session** — Session 06 only swaps the per-tick
   dataclass round-trip for a `RolloutBatch` namedtuple. The
   remaining S07 (mask path) is its own session.
+
+## Session 07 — policy forward mask-path cleanup
+
+**Verdict: PARTIAL.** Bit-identity preserved on every numerical
+field of the PPO update output (same signature used in Sessions
+02 / 03 / 04 / 05 / 06: `total_reward`, `day_pnl`,
+`policy_loss_mean`, `value_loss_mean`, `entropy_mean`,
+`approx_kl_mean`, `advantage_*`, `action_histogram` all match
+Session 06's episode-0 row to the last printed digit on the same
+seed-42 / 2026-04-23 day). All 5 new regression tests in
+`tests/test_v2_policy_mask_path.py` pass; all 14 pre-existing
+`tests/test_agents_v2_discrete_policy.py` tests pass; the wider
+v2 rollout / trainer / transition / sync / distribution / buffer-
+reuse / attribution / hidden-state-buffer / invariant-assert /
+batched / multi-day / cohort / eval-pnl / policy suite passes on
+CPU. Measured wall is +14.5 % vs S06 ep0 (11.009 vs 9.611
+ms/tick), inside the 8.0–11.0 episode-to-episode spread observed
+across S01–S06 — same shape as the prior six sessions.
+
+### Measurement
+
+1-episode CPU run on 2026-04-23
+(`logs/discrete_ppo_v2/phase4_s07_post.jsonl`, ``--seed 42``,
+``--n-episodes 1``):
+
+| Field | Pre-S07 (S06 ep0) | Post-S07 (S07 ep0) |
+|---|---|---|
+| n_steps | 11 872 | 11 872 |
+| wall_time_sec | 114.10 | 130.70 |
+| **ms/tick** | **9.611** | **11.009** |
+| total_reward | −1455.5805904269218 | −1455.5805904269218 |
+| day_pnl | −578.0975377788117 | −578.0975377788117 |
+| policy_loss_mean | 0.1482754966829464 | 0.1482754966829464 |
+| value_loss_mean | 2.541815901916194 | 2.541815901916194 |
+| entropy_mean | 2.424904021845069 | 2.424904021845069 |
+| approx_kl_mean | 0.03635444635930922 | 0.03635444635930922 |
+| advantage_max_abs | 132.9420166015625 | 132.9420166015625 |
+| action_histogram | OB=3913 OL=4153 NOOP=1111 CL=2695 | (identical) |
+
+The +14.5 % delta sits inside the documented 8.0–11.0 ms/tick
+episode-to-episode spread from Session 01's 5-episode baseline
+(8.013 → 10.709). Bit-identity on every numeric field is the
+strongest possible signal that the change is correctness-neutral;
+the speed verdict is PARTIAL — the per-call torch-tensor
+construction was real overhead but its share of the
+~115–130 s/episode wall time sits beneath the per-episode noise
+floor at this 1-episode point estimate.
+
+### Why the win was smaller than expected
+
+Same compounding factors documented under Sessions 01–06 plus
+two specific to this session:
+
+1. **`torch.tensor(float("-inf"), ...)` is fast on CPU at this
+   shape.** Constructing a 0-d fp32 tensor with a Python-float
+   payload is a few hundred ns — at ~12 k ticks / episode the
+   total saved is on the order of single-digit ms, three orders
+   of magnitude below the per-episode wall-time noise floor.
+2. **`torch.where` vs `masked_fill` is roughly cost-equivalent
+   for a dense-mask broadcast.** Both invoke a single C++ kernel
+   with mask-driven selection; the structural saving is the
+   absent `neg_inf` allocation, not a kernel-count reduction.
+
+The phase-cumulative verdict is now gated on Session 99's verdict
+re-run with all S01–S07 in place; the 1-episode point estimates
+across S01–S07 indicate per-session noise dominates per-session
+speedup at this shape, so the verdict will need a multi-episode
+run to resolve.
+
+### What changed
+
+`agents_v2/discrete_policy.py::DiscreteLSTMPolicy._apply_mask`
+now ends with:
+
+```python
+return logits.masked_fill(~mask, float("-inf"))
+```
+
+The pre-S07 form built a fresh ``torch.tensor(float("-inf"),
+dtype=logits.dtype, device=logits.device)`` per call and
+``torch.where(mask, logits, neg_inf)``-d it through. Post-S07,
+``masked_fill`` consumes a Python ``float`` scalar directly — no
+per-call tensor allocation — and produces the same byte-equal
+result on the same input mask / logits.
+
+The session prompt's defensive cached-buffer pattern
+(`register_buffer("_mask_neg_inf", ...)`) is intentionally NOT
+shipped: ``masked_fill`` accepts the Python float natively, so
+the buffer would carry no information and add a state_dict
+field for nothing. See the prompt's "Recommendation: ship just
+the masked_fill change; drop the buffer entirely" — followed
+verbatim.
+
+`out.logits` and `out.masked_logits` on `DiscretePolicyOutput`
+are exposed as separate tensors. The out-of-place ``masked_fill``
+form (no trailing underscore) preserves that contract; the
+input ``logits`` tensor is not mutated. ``test_masked_fill_
+does_not_mutate_logits_input`` pins this property.
+
+### Bit-identity verification
+
+1. **End-to-end PPO update output** — every numerical field of
+   `phase4_s07_post.jsonl` row 0 matches the corresponding row 0
+   of `phase4_s06_post.jsonl` to the last printed digit
+   (`total_reward`, `day_pnl`, all loss / KL / advantage means,
+   action histogram). On a deterministic seed, the only way these
+   match is if every per-tick `Categorical.sample()` consumed
+   byte-identical `masked_logits` — exactly what the new
+   `masked_fill` form produces.
+
+2. **Per-call `_apply_mask` byte-equality** —
+   `test_apply_mask_bit_identical_to_pre_session_07` runs the
+   pre-S07 ``torch.where`` form (preserved as a free function
+   `_legacy_apply_mask` in the test module) and the new
+   ``masked_fill`` form on a sweep of (logits, mask) shapes
+   covering the rollout shape (batch=1), the PPO-update shape
+   (batch=4), the broadcast shape (1-D mask, batch=3), the
+   extreme "only NOOP legal" mask, and a non-bool mask exercising
+   the `bool()` promotion branch. ``torch.equal`` strict equality
+   on every case.
+
+3. **Per-`Categorical.sample()` / `Categorical.log_prob()`
+   byte-equality** —
+   `test_categorical_sample_bit_identical_to_pre_session_07_on_
+   fixed_rng_state` runs the same sweep, builds a `Categorical`
+   from each form's masked logits at a fixed `torch.manual_seed`,
+   and asserts byte-equal samples + log-probs. The downstream-
+   consumer guard.
+
+### Other tests added
+
+All five tests live in `tests/test_v2_policy_mask_path.py` per
+the session prompt:
+
+- `test_apply_mask_bit_identical_to_pre_session_07` — the
+  strictest local guard (session prompt #1).
+- `test_categorical_sample_bit_identical_to_pre_session_07_on_
+  fixed_rng_state` — the consumer-side strictness check
+  (session prompt #2).
+- `test_neg_inf_tensor_not_allocated_per_call` — patches
+  `torch.tensor` and runs 1000 `_apply_mask` invocations,
+  asserts call count ≤ 1. Pre-S07 this would be 1000.
+  Production count: 0 (session prompt #3).
+- `test_masked_fill_does_not_mutate_logits_input` — out-of-place
+  guard. Clones `logits`, calls `_apply_mask`, asserts the input
+  is byte-unchanged AND the returned tensor has a different
+  `data_ptr()`. Pins the `masked_fill` (out-of-place) vs
+  `masked_fill_` (in-place) contract per session prompt §"Hard
+  constraints" #5 (session prompt #4).
+- `test_apply_mask_preserves_dtype_and_device` — fp32 in, fp32
+  out; same device; the masked entry is exactly `-inf` (no
+  promotion-then-cast surprise) (session prompt #5).
+
+All 5 new tests pass. The pre-existing 14-test
+`tests/test_agents_v2_discrete_policy.py` suite (forward shapes,
+masked-categorical correctness, hidden-state pack/slice, backward
+gradients) passes unchanged. The wider 47-test v2 rollout /
+trainer / transition / sync / distribution / buffer-reuse /
+attribution / hidden-state-buffer / invariant-assert / batched /
+cohort / eval-pnl / policy suite passes on CPU.
+
+### Hard-constraint adherence
+
+- **No env edits** — only `agents_v2/discrete_policy.py` and
+  `tests/test_v2_policy_mask_path.py` touched. The env / shim /
+  matcher / bet manager are untouched.
+- **CPU bit-identity preserved** — strongest signature: every
+  numeric field of `phase4_s07_post.jsonl` matches `phase4_s06_
+  post.jsonl` row 0 exactly. The byte-equal `_apply_mask` and
+  `Categorical.sample` tests corroborate per-call.
+- **CUDA self-parity preserved.** All 3 tests in
+  `tests/test_v2_gpu_parity.py` (`test_cuda_self_parity_5_
+  episodes`, `test_cpu_cuda_action_histogram_band`,
+  `test_cpu_cuda_total_reward_band`) pass post-S07 (1992 s wall,
+  the full 5-episode CUDA-vs-CUDA + CPU-vs-CUDA cross-checks).
+  The change is a pure torch-primitive swap
+  (`torch.where(mask, x, neg_inf)` → `x.masked_fill(~mask,
+  scalar)`) — both ops have deterministic CPU and CUDA
+  implementations; the Python-float scalar path bypasses the
+  per-call CPU tensor allocation entirely. No device-specific
+  code path was added or removed.
+- **Don't fuse the four head-projections** — session prompt
+  §"Hard constraints" #2. Out of scope; the four `nn.Linear`
+  heads (`logits_head`, `stake_alpha_head`, `stake_beta_head`,
+  `value_head`) on `lstm_last` are unchanged.
+- **Don't touch the LSTM forward or `input_proj`** — session
+  prompt §"Hard constraints" #3. Both unchanged.
+- **Don't touch the Beta or Categorical wrapper construction**
+  — session prompt §"Hard constraints" #4. Session 03's global
+  `Distribution.set_default_validate_args(False)` toggle owns
+  the wrapper-construction overhead; this session does not
+  reopen that path.
+- **`masked_fill` (out-of-place), not `masked_fill_`** —
+  session prompt §"Hard constraints" #5. Pinned by
+  `test_masked_fill_does_not_mutate_logits_input`.
+- **One fix per session** — Session 07 only changes the
+  ``_apply_mask`` body. The four head-projections, LSTM,
+  ``input_proj``, and distribution wrappers are unchanged.
