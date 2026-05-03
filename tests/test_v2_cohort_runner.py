@@ -367,6 +367,157 @@ def test_scoreboard_writes_per_agent_in_sequential_mode(
         assert row["generation"] == 0
 
 
+# ── Phase 5 (restore-genes, 2026-05-03): --enable-gene plumbing ─────────
+
+
+class TestPhase5EnableGeneCli:
+    """CLI parsing + enabled_set plumbing through run_cohort."""
+
+    def test_parse_enabled_genes_dedupes_and_returns_frozenset(self):
+        result = runner_mod._parse_enabled_genes([
+            "open_cost", "alpha_lr", "open_cost",
+        ])
+        assert isinstance(result, frozenset)
+        assert result == frozenset({"open_cost", "alpha_lr"})
+
+    def test_parse_enabled_genes_empty(self):
+        assert runner_mod._parse_enabled_genes([]) == frozenset()
+        assert runner_mod._parse_enabled_genes(None) == frozenset()  # type: ignore[arg-type]
+
+    def test_parse_enabled_genes_unknown_name_errors(self):
+        import pytest
+        with pytest.raises(ValueError, match="unknown gene name"):
+            runner_mod._parse_enabled_genes(["fake_gene"])
+        # Legacy gene names are NOT valid for --enable-gene either —
+        # they're unconditionally evolved already.
+        with pytest.raises(ValueError, match="unknown gene name"):
+            runner_mod._parse_enabled_genes(["learning_rate"])
+
+    def test_main_errors_on_reward_overrides_enable_gene_collision(
+        self, tmp_path: Path,
+    ) -> None:
+        """``--reward-overrides open_cost=1.0 --enable-gene open_cost``
+        errors at startup."""
+        import pytest
+        with pytest.raises(ValueError, match="Cannot combine"):
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--reward-overrides", "open_cost=1.0",
+                "--enable-gene", "open_cost",
+            ])
+
+    def test_legacy_launch_no_enable_gene_passes_no_phase5_keys(
+        self, tmp_path: Path,
+    ) -> None:
+        """A cohort launched WITHOUT any ``--enable-gene`` flags MUST
+        produce a per-agent ``reward_overrides`` dict that contains no
+        Phase 5 gene keys — preserving byte-identity for legacy
+        launches at the same seed."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        _populate_data_dir(data_dir, [
+            "2026-04-21", "2026-04-22", "2026-04-23",
+        ])
+        out_dir = tmp_path / "cohort_out"
+
+        captured: list[dict | None] = []
+
+        def _spying_stub(**kwargs):
+            captured.append(kwargs.get("reward_overrides"))
+            return _stub_train_one_agent(**kwargs)
+
+        runner_mod.run_cohort(
+            n_agents=2, n_generations=1, days=3,
+            data_dir=data_dir, device="cpu", seed=42,
+            output_dir=out_dir,
+            train_one_agent_fn=_spying_stub,
+        )
+
+        # Stub receives the cohort-level ``reward_overrides`` (None
+        # here). The per-agent reward_overrides dict is built INSIDE
+        # the real worker; the stub bypasses that path. So the
+        # invariant we assert at the runner level is: no cohort
+        # reward_overrides were passed (the runner never injects
+        # gene values at the cohort level — those happen per-agent
+        # inside the worker).
+        for ro in captured:
+            assert ro is None or not (
+                set(ro) & {
+                    "open_cost", "matured_arb_bonus_weight",
+                    "mark_to_market_weight", "naked_loss_scale",
+                    "stop_loss_pnl_threshold", "fill_prob_loss_weight",
+                    "mature_prob_loss_weight", "risk_loss_weight",
+                    "reward_clip",
+                }
+            )
+
+    def test_run_cohort_passes_enabled_set_to_worker(
+        self, tmp_path: Path,
+    ) -> None:
+        """``run_cohort(enabled_set=...)`` reaches the worker function."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        _populate_data_dir(data_dir, [
+            "2026-04-21", "2026-04-22", "2026-04-23",
+        ])
+        out_dir = tmp_path / "cohort_out"
+
+        captured: list[frozenset[str]] = []
+
+        def _spying_stub(**kwargs):
+            captured.append(kwargs.get("enabled_set", frozenset()))
+            return _stub_train_one_agent(**kwargs)
+
+        enabled = frozenset({"open_cost", "alpha_lr"})
+        runner_mod.run_cohort(
+            n_agents=2, n_generations=1, days=3,
+            data_dir=data_dir, device="cpu", seed=42,
+            output_dir=out_dir,
+            train_one_agent_fn=_spying_stub,
+            enabled_set=enabled,
+        )
+        # Both agents see the same enabled_set.
+        assert all(es == enabled for es in captured)
+
+    def test_run_cohort_with_enabled_set_samples_varied_gene_values(
+        self, tmp_path: Path,
+    ) -> None:
+        """With ``open_cost`` enabled, each agent's gene draw differs.
+        With it disabled, every agent has the cohort-wide default."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        _populate_data_dir(data_dir, [
+            "2026-04-21", "2026-04-22", "2026-04-23",
+        ])
+        from training_v2.cohort.genes import PHASE5_GENE_DEFAULTS
+
+        # ── enabled ──
+        out_dir = tmp_path / "enabled"
+        results = runner_mod.run_cohort(
+            n_agents=4, n_generations=1, days=3,
+            data_dir=data_dir, device="cpu", seed=7,
+            output_dir=out_dir,
+            train_one_agent_fn=_stub_train_one_agent,
+            enabled_set=frozenset({"open_cost"}),
+        )
+        open_costs_enabled = {r.genes.open_cost for r in results}
+        # 4 fresh continuous samples — overwhelmingly distinct.
+        assert len(open_costs_enabled) >= 3
+
+        # ── disabled ──
+        out_dir2 = tmp_path / "disabled"
+        results2 = runner_mod.run_cohort(
+            n_agents=4, n_generations=1, days=3,
+            data_dir=data_dir, device="cpu", seed=7,
+            output_dir=out_dir2,
+            train_one_agent_fn=_stub_train_one_agent,
+        )
+        for r in results2:
+            assert r.genes.open_cost == PHASE5_GENE_DEFAULTS["open_cost"]
+
+
 def test_run_cohort_rejects_invalid_args(tmp_path: Path) -> None:
     """Boundary checks: n_agents >= 2, n_generations >= 1, days >= 2."""
     data_dir = tmp_path / "data"

@@ -61,6 +61,8 @@ from training_v2.cohort.worker import (
     EvalSummary,
     TrainSummary,
     _build_env_for_day,
+    _build_per_agent_reward_overrides,
+    _build_per_agent_scalping_overrides,
     _eval_rollout_stats,
     arch_name_for_genes,
     scalping_train_config,
@@ -97,6 +99,7 @@ def train_cluster_batched(
     agent_indices_in_cohort: list[int] | None = None,
     n_agents_in_cohort: int = 1,
     reward_overrides: dict | None = None,
+    enabled_set: frozenset[str] = frozenset(),
 ) -> list[AgentResult]:
     """Train ``N`` arch-compatible agents in lock-step with a batched rollout.
 
@@ -157,6 +160,27 @@ def train_cluster_batched(
     cfg["training"]["starting_budget"] = float(starting_budget)
     max_runners = int(cfg["training"]["max_runners"])
 
+    # Phase 5 (2026-05-03): per-agent reward / scalping overrides built
+    # from each agent's enabled-gene values combined with the cohort-
+    # level overrides. Disabled genes contribute nothing — a launch
+    # without ``--enable-gene`` flags reproduces the pre-Phase-5
+    # passthrough shape.
+    per_agent_reward_overrides_list: list[dict | None] = [
+        _build_per_agent_reward_overrides(
+            cohort_overrides=reward_overrides,
+            genes=genes_list[i],
+            enabled_set=enabled_set,
+        )
+        for i in range(n)
+    ]
+    per_agent_scalping_overrides_list: list[dict | None] = [
+        _build_per_agent_scalping_overrides(
+            genes=genes_list[i],
+            enabled_set=enabled_set,
+        )
+        for i in range(n)
+    ]
+
     # ── Per-agent RNG seeding (top-level torch.manual_seed) ──────────
     # Each agent's :class:`DiscreteLSTMPolicy` is constructed in turn
     # under its own ``torch.manual_seed(seed)`` so initial weights are
@@ -183,7 +207,8 @@ def train_cluster_batched(
         env_i, shim_i = _build_env_for_day(
             day_str=first_day, data_dir=data_dir, cfg=cfg,
             scorer_dir=scorer_dir,
-            reward_overrides=reward_overrides,
+            reward_overrides=per_agent_reward_overrides_list[i],
+            scalping_overrides=per_agent_scalping_overrides_list[i],
         )
         envs.append(env_i)
         shims.append(shim_i)
@@ -257,7 +282,8 @@ def train_cluster_batched(
                 _, new_shim = _build_env_for_day(
                     day_str=day_str, data_dir=data_dir, cfg=cfg,
                     scorer_dir=scorer_dir,
-                    reward_overrides=reward_overrides,
+                    reward_overrides=per_agent_reward_overrides_list[i],
+                    scalping_overrides=per_agent_scalping_overrides_list[i],
                 )
                 shims.append(new_shim)
                 envs.append(new_shim.env)
@@ -385,7 +411,8 @@ def train_cluster_batched(
         _, eval_shim = _build_env_for_day(
             day_str=eval_day, data_dir=data_dir, cfg=cfg,
             scorer_dir=scorer_dir,
-            reward_overrides=reward_overrides,
+            reward_overrides=per_agent_reward_overrides_list[i],
+            scalping_overrides=per_agent_scalping_overrides_list[i],
         )
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policies[i], device=device,

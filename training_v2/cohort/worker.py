@@ -50,7 +50,11 @@ from training_v2.cohort.events import (
     agent_training_started_event,
     episode_complete_event,
 )
-from training_v2.cohort.genes import CohortGenes, assert_in_range
+from training_v2.cohort.genes import (
+    PHASE5_GENE_NAMES,
+    CohortGenes,
+    assert_in_range,
+)
 from training_v2.discrete_ppo.rollout import RolloutCollector
 from training_v2.discrete_ppo.trainer import DiscretePPOTrainer, EpisodeStats
 
@@ -65,7 +69,34 @@ __all__ = [
     "arch_name_for_genes",
     "scalping_train_config",
     "train_one_agent",
+    "_build_per_agent_reward_overrides",
+    "_build_per_agent_scalping_overrides",
 ]
+
+
+# Phase 5 (2026-05-03): genes that flow through the env's
+# ``reward_overrides`` passthrough. ``arb_spread_scale`` lives in
+# ``scalping_overrides`` instead (handled separately below); ``alpha_lr``
+# is trainer-only and not currently consumed by either path (the v2
+# trainer doesn't yet accept an alpha_lr hyperparameter — see
+# plans/rewrite/phase-5-restore-genes/session_prompts/02_*.md
+# §"Stop conditions"; the gene is still recorded on the CohortGenes
+# row so future trainer support can read it without a schema bump).
+_PHASE5_GENES_VIA_REWARD_OVERRIDES: frozenset[str] = frozenset({
+    "open_cost",
+    "matured_arb_bonus_weight",
+    "mark_to_market_weight",
+    "naked_loss_scale",
+    "stop_loss_pnl_threshold",
+    "fill_prob_loss_weight",
+    "mature_prob_loss_weight",
+    "risk_loss_weight",
+    "reward_clip",
+})
+
+_PHASE5_GENES_VIA_SCALPING_OVERRIDES: frozenset[str] = frozenset({
+    "arb_spread_scale",
+})
 
 
 # ── Public dataclasses ────────────────────────────────────────────────────
@@ -199,11 +230,60 @@ def _build_env_for_day(
     cfg: dict,
     scorer_dir: Path,
     reward_overrides: dict | None = None,
+    scalping_overrides: dict | None = None,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     day = load_day(day_str, data_dir=data_dir)
-    env = BetfairEnv(day, cfg, reward_overrides=reward_overrides)
+    env = BetfairEnv(
+        day, cfg,
+        reward_overrides=reward_overrides,
+        scalping_overrides=scalping_overrides,
+    )
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
+
+
+def _build_per_agent_reward_overrides(
+    *,
+    cohort_overrides: dict | None,
+    genes: CohortGenes,
+    enabled_set: frozenset[str],
+) -> dict | None:
+    """Combine cohort-level reward_overrides with this agent's
+    enabled-gene values.
+
+    Cohort-level overrides apply to ALL agents (e.g.
+    ``force_close_before_off_seconds=60``). Enabled-gene values are
+    per-agent (e.g. ``open_cost`` = this agent's gene draw).
+
+    Phase 5 invariant: enabled-gene names cannot collide with
+    cohort-level override keys (CLI guard at runner enforces).
+
+    Returns ``None`` when nothing would be passed — keeps the
+    pre-Phase-5 ``reward_overrides=None`` byte-identity for legacy
+    launches (no cohort overrides, no enabled genes).
+    """
+    out: dict = dict(cohort_overrides or {})
+    for name in PHASE5_GENE_NAMES:
+        if name in enabled_set and name in _PHASE5_GENES_VIA_REWARD_OVERRIDES:
+            out[name] = float(getattr(genes, name))
+    return out or None
+
+
+def _build_per_agent_scalping_overrides(
+    *,
+    genes: CohortGenes,
+    enabled_set: frozenset[str],
+) -> dict | None:
+    """Build the per-agent ``scalping_overrides`` dict from gene values.
+
+    Currently only ``arb_spread_scale`` lives in scalping_overrides;
+    other Phase 5 genes flow via ``reward_overrides``.
+    """
+    out: dict = {}
+    for name in _PHASE5_GENES_VIA_SCALPING_OVERRIDES:
+        if name in enabled_set:
+            out[name] = float(getattr(genes, name))
+    return out or None
 
 
 def _rebind_trainer(
@@ -329,6 +409,7 @@ def train_one_agent(
     agent_idx: int = 0,
     n_agents: int = 1,
     reward_overrides: dict | None = None,
+    enabled_set: frozenset[str] = frozenset(),
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_day``.
 
@@ -383,6 +464,20 @@ def train_one_agent(
     cfg["training"]["starting_budget"] = float(starting_budget)
     max_runners = int(cfg["training"]["max_runners"])
 
+    # Phase 5 (2026-05-03): combine cohort-level overrides with this
+    # agent's enabled-gene values. Disabled genes contribute nothing,
+    # so a launch without ``--enable-gene`` flags reproduces the
+    # pre-Phase-5 reward_overrides shape byte-identically.
+    per_agent_reward_overrides = _build_per_agent_reward_overrides(
+        cohort_overrides=reward_overrides,
+        genes=genes,
+        enabled_set=enabled_set,
+    )
+    per_agent_scalping_overrides = _build_per_agent_scalping_overrides(
+        genes=genes,
+        enabled_set=enabled_set,
+    )
+
     # ── Build first-day env + shim to size the policy ────────────────
     first_day = days_to_train[0]
     logger.info(
@@ -391,7 +486,8 @@ def train_one_agent(
     )
     env, shim = _build_env_for_day(
         day_str=first_day, data_dir=data_dir, cfg=cfg, scorer_dir=scorer_dir,
-        reward_overrides=reward_overrides,
+        reward_overrides=per_agent_reward_overrides,
+        scalping_overrides=per_agent_scalping_overrides,
     )
 
     policy = DiscreteLSTMPolicy(
@@ -459,7 +555,8 @@ def train_one_agent(
             _, new_shim = _build_env_for_day(
                 day_str=day_str, data_dir=data_dir, cfg=cfg,
                 scorer_dir=scorer_dir,
-                reward_overrides=reward_overrides,
+                reward_overrides=per_agent_reward_overrides,
+                scalping_overrides=per_agent_scalping_overrides,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -535,7 +632,8 @@ def train_one_agent(
     _, eval_shim = _build_env_for_day(
         day_str=eval_day, data_dir=data_dir, cfg=cfg,
         scorer_dir=scorer_dir,
-        reward_overrides=reward_overrides,
+        reward_overrides=per_agent_reward_overrides,
+        scalping_overrides=per_agent_scalping_overrides,
     )
     eval_collector = RolloutCollector(
         shim=eval_shim, policy=policy, device=device,

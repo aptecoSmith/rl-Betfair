@@ -61,6 +61,128 @@ def test_scalping_train_config_returns_fresh_dict():
     assert cfg_b["training"]["max_runners"] != 999
 
 
+# ── Phase 5 (restore-genes, 2026-05-03) ──────────────────────────────────
+
+
+class TestPerAgentOverrideHelpers:
+    """``_build_per_agent_reward_overrides`` /
+    ``_build_per_agent_scalping_overrides`` translate a Phase 5
+    enabled_set + an agent's gene draws into the dicts the env
+    consumes."""
+
+    def _genes(self, **overrides):
+        from training_v2.cohort.genes import CohortGenes
+        base = dict(
+            learning_rate=1e-4, entropy_coeff=1e-3, clip_range=0.2,
+            gae_lambda=0.95, value_coeff=0.5, mini_batch_size=64,
+            hidden_size=128,
+        )
+        base.update(overrides)
+        return CohortGenes(**base)
+
+    def test_legacy_no_enabled_genes_returns_none(self):
+        from training_v2.cohort.worker import (
+            _build_per_agent_reward_overrides,
+            _build_per_agent_scalping_overrides,
+        )
+        g = self._genes(open_cost=1.5, arb_spread_scale=1.7)
+        # No enabled_set, no cohort overrides → None for both (legacy
+        # byte-identity invariant).
+        assert _build_per_agent_reward_overrides(
+            cohort_overrides=None, genes=g, enabled_set=frozenset(),
+        ) is None
+        assert _build_per_agent_scalping_overrides(
+            genes=g, enabled_set=frozenset(),
+        ) is None
+
+    def test_disabled_gene_does_not_appear_even_with_non_default_value(
+        self,
+    ):
+        """A gene with a non-default field value (e.g. set manually
+        on a CohortGenes for a test) must NOT leak into the overrides
+        dict unless the gene is in ``enabled_set``."""
+        from training_v2.cohort.worker import (
+            _build_per_agent_reward_overrides,
+        )
+        g = self._genes(open_cost=1.5, mark_to_market_weight=0.07)
+        out = _build_per_agent_reward_overrides(
+            cohort_overrides=None, genes=g, enabled_set=frozenset(),
+        )
+        assert out is None
+
+    def test_enabled_gene_value_lands_in_reward_overrides(self):
+        from training_v2.cohort.worker import (
+            _build_per_agent_reward_overrides,
+        )
+        g = self._genes(open_cost=1.5, mark_to_market_weight=0.07)
+        out = _build_per_agent_reward_overrides(
+            cohort_overrides=None, genes=g,
+            enabled_set=frozenset({"open_cost"}),
+        )
+        assert out == {"open_cost": 1.5}
+
+    def test_combines_cohort_overrides_with_enabled_gene_value(self):
+        from training_v2.cohort.worker import (
+            _build_per_agent_reward_overrides,
+        )
+        g = self._genes(open_cost=1.5)
+        out = _build_per_agent_reward_overrides(
+            cohort_overrides={"force_close_before_off_seconds": 60},
+            genes=g, enabled_set=frozenset({"open_cost"}),
+        )
+        assert out == {
+            "force_close_before_off_seconds": 60,
+            "open_cost": 1.5,
+        }
+
+    def test_arb_spread_scale_routes_to_scalping_overrides(self):
+        """``arb_spread_scale`` lives in scalping_overrides, not
+        reward_overrides — the env reads it from a different dict."""
+        from training_v2.cohort.worker import (
+            _build_per_agent_reward_overrides,
+            _build_per_agent_scalping_overrides,
+        )
+        g = self._genes(arb_spread_scale=1.7)
+        ro = _build_per_agent_reward_overrides(
+            cohort_overrides=None, genes=g,
+            enabled_set=frozenset({"arb_spread_scale"}),
+        )
+        so = _build_per_agent_scalping_overrides(
+            genes=g, enabled_set=frozenset({"arb_spread_scale"}),
+        )
+        # Goes to scalping_overrides ONLY.
+        assert ro is None
+        assert so == {"arb_spread_scale": 1.7}
+
+    def test_enables_all_eight_env_consumed_genes(self):
+        """All Phase 5 genes routed through reward_overrides land in
+        the dict when enabled."""
+        from training_v2.cohort.worker import (
+            _PHASE5_GENES_VIA_REWARD_OVERRIDES,
+            _build_per_agent_reward_overrides,
+        )
+        g = self._genes(
+            open_cost=1.5,
+            matured_arb_bonus_weight=2.0,
+            mark_to_market_weight=0.08,
+            naked_loss_scale=0.7,
+            stop_loss_pnl_threshold=0.1,
+            fill_prob_loss_weight=0.2,
+            mature_prob_loss_weight=0.1,
+            risk_loss_weight=0.15,
+            reward_clip=5.0,
+        )
+        out = _build_per_agent_reward_overrides(
+            cohort_overrides=None, genes=g,
+            enabled_set=_PHASE5_GENES_VIA_REWARD_OVERRIDES,
+        )
+        assert out is not None
+        assert set(out) == set(_PHASE5_GENES_VIA_REWARD_OVERRIDES)
+        # Every value matches the gene field.
+        for name in _PHASE5_GENES_VIA_REWARD_OVERRIDES:
+            assert out[name] == float(getattr(g, name))
+
+
 # ── End-to-end worker (real env + scorer) ───────────────────────────────
 
 

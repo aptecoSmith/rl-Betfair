@@ -49,6 +49,7 @@ from training_v2.cohort.events import (
     cohort_started_event,
 )
 from training_v2.cohort.genes import (
+    PHASE5_GENE_NAMES,
     CohortGenes,
     assert_in_range,
     crossover,
@@ -84,6 +85,7 @@ def run_cohort(
     train_one_agent_fn: Callable[..., AgentResult] = train_one_agent,
     event_emitter: Callable[[dict], None] | None = None,
     reward_overrides: dict | None = None,
+    enabled_set: frozenset[str] = frozenset(),
     batched: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
@@ -150,7 +152,9 @@ def run_cohort(
 
     # ── Initial population (gen 0) ───────────────────────────────────
     rng = random.Random(int(seed))
-    cohort: list[CohortGenes] = [sample_genes(rng) for _ in range(n_agents)]
+    cohort: list[CohortGenes] = [
+        sample_genes(rng, enabled_set=enabled_set) for _ in range(n_agents)
+    ]
     parent_ids: list[tuple[str | None, str | None]] = [
         (None, None) for _ in range(n_agents)
     ]
@@ -232,6 +236,7 @@ def run_cohort(
                         agent_indices_in_cohort=[int(i) for i in idxs],
                         n_agents_in_cohort=int(n_agents),
                         reward_overrides=reward_overrides,
+                        enabled_set=enabled_set,
                     )
                     for k, i in enumerate(idxs):
                         results[i] = cluster_results[k]
@@ -255,6 +260,7 @@ def run_cohort(
                         agent_idx=int(idx),
                         n_agents=int(n_agents),
                         reward_overrides=reward_overrides,
+                        enabled_set=enabled_set,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -328,6 +334,7 @@ def run_cohort(
                     mutation_rate=mutation_rate,
                     model_store=model_store,
                     next_generation=generation + 1,
+                    enabled_set=enabled_set,
                 )
 
     cohort_wall = time.perf_counter() - cohort_t0
@@ -386,6 +393,7 @@ def _breed_next_generation(
     mutation_rate: float,
     model_store: ModelStore | None,
     next_generation: int,
+    enabled_set: frozenset[str] = frozenset(),
 ) -> tuple[list[CohortGenes], list[tuple[str | None, str | None]]]:
     """Top-half elites carry over verbatim; bottom-half bred + mutated.
 
@@ -409,8 +417,11 @@ def _breed_next_generation(
             a, b = rng.sample(elites, 2)
         else:
             a = b = elites[0]
-        child = crossover(a.genes, b.genes, rng)
-        child = mutate(child, rng, mutation_rate=mutation_rate)
+        child = crossover(a.genes, b.genes, rng, enabled_set=enabled_set)
+        child = mutate(
+            child, rng, mutation_rate=mutation_rate,
+            enabled_set=enabled_set,
+        )
         assert_in_range(child)
         next_cohort.append(child)
         next_parent_ids.append((a.model_id, b.model_id))
@@ -530,6 +541,27 @@ def _agent_result_to_scoreboard_row(
 # ── CLI ──────────────────────────────────────────────────────────────────
 
 
+def _parse_enabled_genes(items: list[str]) -> frozenset[str]:
+    """Validate and dedupe ``--enable-gene`` values.
+
+    Each value must name a Phase 5 gene (see
+    :data:`training_v2.cohort.genes.PHASE5_GENE_NAMES`). Unknown
+    names raise so a typo doesn't silently revert an agent to the
+    cohort-wide default for the gene the operator thought they
+    enabled.
+    """
+    enabled: set[str] = set()
+    for name in items or []:
+        name = name.strip()
+        if name not in PHASE5_GENE_NAMES:
+            raise ValueError(
+                f"--enable-gene: unknown gene name {name!r}. "
+                f"Valid: {sorted(PHASE5_GENE_NAMES)}"
+            )
+        enabled.add(name)
+    return frozenset(enabled)
+
+
 def _parse_reward_overrides(items: list[str]) -> dict:
     """Parse a list of ``key=value`` strings into a dict.
 
@@ -634,6 +666,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--enable-gene", action="append", default=[], metavar="NAME",
+        help=(
+            "Enable a Phase 5 gene to evolve per-agent (repeatable). "
+            "Disabled genes use cohort-wide defaults so a launch "
+            "without any --enable-gene flags is byte-identical to a "
+            "pre-Phase-5 run. Cannot be combined with "
+            "--reward-overrides for the same gene name. Valid names: "
+            "open_cost, matured_arb_bonus_weight, "
+            "mark_to_market_weight, naked_loss_scale, "
+            "stop_loss_pnl_threshold, arb_spread_scale, "
+            "fill_prob_loss_weight, mature_prob_loss_weight, "
+            "risk_loss_weight, alpha_lr, reward_clip."
+        ),
+    )
+    p.add_argument(
         "--ws-port", type=int, default=8002,
         help=(
             "Bind port for --emit-websocket. Default 8002 (matches the v1 "
@@ -667,8 +714,26 @@ def main(argv: list[str] | None = None) -> int:
         emitter = server
 
     reward_overrides = _parse_reward_overrides(args.reward_overrides)
+    enabled_set = _parse_enabled_genes(args.enable_gene)
+    # Mutual-exclusion guard. Operator must pick one source of truth
+    # per knob per run: either evolve the gene per-agent
+    # (``--enable-gene``) or fix it cohort-wide
+    # (``--reward-overrides``), not both. See
+    # ``plans/rewrite/phase-5-restore-genes/purpose.md``
+    # §"Hard constraints" item 5.
+    collision = enabled_set & set(reward_overrides)
+    if collision:
+        raise ValueError(
+            "Cannot combine --enable-gene with --reward-overrides for "
+            f"the same gene name(s): {sorted(collision)}. Operator "
+            "must pick one source of truth per knob per run. Either "
+            "evolve the gene per-agent (--enable-gene) or fix it "
+            "cohort-wide (--reward-overrides), not both."
+        )
     if reward_overrides:
         logger.info("reward_overrides: %s", reward_overrides)
+    if enabled_set:
+        logger.info("Phase 5 enabled genes: %s", sorted(enabled_set))
 
     try:
         run_cohort(
@@ -682,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
             mutation_rate=args.mutation_rate,
             event_emitter=emitter,
             reward_overrides=reward_overrides or None,
+            enabled_set=enabled_set,
             batched=bool(args.batched),
         )
     finally:
