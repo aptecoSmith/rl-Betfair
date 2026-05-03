@@ -1,7 +1,11 @@
 ---
 plan: rewrite/phase-6-profile-and-attack
-status: design-locked
+status: GREEN — closed at S03 (2026-05-03)
 opened: 2026-05-03
+closed: 2026-05-03
+verdict: GREEN (5-ep median 3.968 ms/tick, 2.42× cumulative speedup vs
+         pre-Phase-6 baseline). Phase 7 hand-off written; see
+         findings.md §"Phase 7 hand-off".
 depends_on: rewrite/phase-4-restore-speed (PARTIAL — bit-identity
             preserved on every session; cumulative ms/tick unchanged
             within episode-to-episode noise)

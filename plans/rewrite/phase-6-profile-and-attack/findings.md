@@ -580,12 +580,95 @@ hidden behind those two rises into view.
   all still pass — the closed form is byte-equivalent, the contract
   the scorer pipeline depends on is preserved.
 
-## Session 04+ — TBD
+## Phase 6 verdict — GREEN, closed at S03
 
-Written *after* Session 03 lands. With Phase 6 already inside GREEN
-(3.97 ≤ 4.0 ms/tick), Session 04's role is GREEN-with-stretch: close
-the 1.0 ms/tick gap to v1 parity (2.94 ms/tick). Likely targets are
-Candidate F (`torch.compile`) or Candidate D / E (Treelite / ONNX),
-both Regime B, both ~0.3–0.4 ms/tick after slack. Operator triage
-decides; a re-profile is recommended first because the post-S03
-hot-frame distribution is now materially different from S01's.
+Two code-shipping sessions cleared the Phase 6 success bar. Operator
+decision (2026-05-03): close Phase 6 here rather than run Session 04.
+
+| Bar | Target | Achieved |
+|---|---|---|
+| §1 CPU ms/tick (5-ep median) | ≤ 4.0 | **3.968** (passes by 0.03) |
+| §2 Per-session parity (Regime A) | bit-identical | **PASS** (S02 + S03) |
+| §3 CUDA self-parity (Regime A) | preserved | PASS (no Regime B sessions shipped) |
+| §4 Pre-existing v2 tests pass | all | **PASS** |
+| §5 Cohort behavioural drift | none | n/a (no Regime B) |
+| Cumulative speedup | ≥ 2.4× (per Phase 6 note) | **2.42×** (9.595 → 3.968) |
+| GREEN-with-stretch (≤ 3.0, v1 parity) | stretch | **not achieved** (3.97 vs 2.94) |
+
+**Why close here.** Post-S03 re-profile (2026-05-03,
+[`logs/discrete_ppo_v2/phase6_s04_profile.svg`](../../../logs/discrete_ppo_v2/phase6_s04_profile.svg))
+showed the rollout's hot-frame distribution is now dominated by two
+subsystems:
+
+| Rank | Subsystem | ms/tick | % rollout | In Phase 6 scope? |
+|---|---|---|---|---|
+| 1 | policy_forward (LSTM + heads + sampling) | 0.889 | 37.9% | yes |
+| 2 | env_step (features, matcher, bet_manager, _process_action's tick_offset) | 0.583 | 24.8% | **no** (HC#1) |
+| 3 | env_shim/feature_extractor (post-S03 residual) | 0.264 | 11.2% | yes |
+| 4 | rollout collector self | 0.129 | 5.5% | yes |
+| 5 | env_shim/booster_predict (LightGBM C-kernel only) | 0.125 | 5.3% | yes |
+| 6 | env_shim/calibrator_predict | 0.115 | 4.9% | yes |
+| ... | (others) | < 0.1 each | — | mixed |
+| (PPO update equivalent) | 0.72 | n/a | **no** (Candidate G) |
+
+The two largest remaining costs together (env_step 0.58 + PPO update
+0.72 = 1.30 ms/tick) are both out of Phase 6 scope. The remaining
+in-scope target ceiling is:
+
+- **Candidate F (`torch.compile`)** — predicted 0.25–0.35 ms/tick
+  recovery on the 0.89 ms/tick policy forward. Regime B. ~4 h.
+- **Candidate D / E (Treelite / ONNX)** — predicted 0.05–0.08 ms/tick
+  recovery on the now-small 0.125 ms/tick LightGBM C-kernel.
+  Regime B. ~4 h. Diminished by S02; not worth a session at current
+  size.
+
+Best-case in-scope cumulative recovery: ~0.35 ms/tick → ~3.6 ms/tick
+post-Session-04, still 0.66 ms/tick above v1 parity. **The path to
+v1 parity (2.94) requires opening the env step**, which exits Phase 6
+by definition.
+
+## Phase 7 hand-off
+
+Bullet-point scope sketch — full purpose.md to be written when Phase 7
+opens. Targets identified by post-S03 profile; estimates conservative.
+
+1. **`env/tick_ladder.py::tick_offset` and `ticks_between` closed-form
+   rewrite.** Same shape as S03 — bit-identical band-arithmetic
+   replacement. `tick_offset` is called from
+   `env/betfair_env.py::_process_action` (matcher path) and
+   `env/scalping_math.py::min_arb_ticks_for_profit`. `ticks_between`
+   is called from `env/betfair_env.py:1286`. Profile shows
+   `_band_for` + `tick_offset` in the env_step path at ~0.07 ms/tick
+   self-time leaves; cumulative through `_process_action` is larger.
+   Estimated recovery: ~0.10–0.15 ms/tick. Bit-identical (Regime A).
+2. **`env/features.py` per-tick feature engineering** —
+   `compute_traded_delta`, `compute_mid_drift`, `compute_book_churn`
+   together ~0.07 ms/tick of leaves; cumulative through `_features_to_array`
+   is larger (1.74 % of total = ~0.06 ms/tick at the leaf, but the
+   cumulative chain is several × this). Likely candidates: vectorise
+   per-tick computations, cache repeated runner traversals. Estimated
+   recovery: ~0.10 ms/tick.
+3. **`env/bet_manager.py` per-tick lookups** — `race_bet_count`,
+   per-tick aggregations. Smaller; ~0.03 ms/tick. Defer unless 1+2
+   under-deliver.
+4. **(Phase 6 deferred) Candidate F (`torch.compile`)** — could ship
+   independently of env work; predicted ~0.3 ms/tick. Cleanest test
+   of "is the policy compile-stable on our shape" before any larger
+   architectural change.
+5. **(Phase 6 deferred) Candidate D / E (Treelite / ONNX)** — predicted
+   ~0.05 ms/tick now. Probably never worth it on its own; bundle into
+   a "small-wins" cleanup session or skip.
+
+Combined Phase 7 ceiling (1 + 2 + 3 + 4): ~0.55 ms/tick → ~3.4 ms/tick
+post-Phase-7. Still 0.46 ms/tick above v1 parity. Closing the final
+gap likely requires a structural change (matcher rewrite, env step
+loop reorganisation) that exceeds the per-session-bit-identity
+discipline both phases inherit.
+
+**Operator triage gate.** Phase 7 scoping should weigh the ~0.55
+ms/tick remaining headroom against (a) RL-training throughput needs
+on the 66-agent scale-up (gated separately), (b) the v1 deletion
+gate, and (c) reward-shape / training-stability work in
+`plans/arb-signal-cleanup/` and successors. If the wall is no longer
+the binding constraint on iteration speed at the scale we actually
+run, Phase 7 may be deferred indefinitely.
