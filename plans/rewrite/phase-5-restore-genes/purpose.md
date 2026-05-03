@@ -1,7 +1,8 @@
 ---
 plan: rewrite/phase-5-restore-genes
-status: design-locked
+status: GREEN
 opened: 2026-05-03
+session_03_completed: 2026-05-03
 depends_on: rewrite/phase-3-followups/force-close-architecture
             (5-stack mechanism layer GREEN, Bar 6c open),
             rewrite/phase-4-restore-speed (per-tick perf restored)
