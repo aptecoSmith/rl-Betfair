@@ -545,3 +545,190 @@ def test_run_cohort_rejects_invalid_args(tmp_path: Path) -> None:
             output_dir=out_dir,
             train_one_agent_fn=_stub_train_one_agent,
         )
+
+
+# ── composite_score (2026-05-04) ───────────────────────────────────────────
+
+
+def _make_eval_summary(
+    *, total_reward: float, arbs_completed: int, arbs_closed: int,
+    day_pnl: float = 0.0,
+) -> EvalSummary:
+    """Tiny EvalSummary builder for the composite-score tests."""
+    return EvalSummary(
+        eval_day="2026-05-03",
+        total_reward=float(total_reward),
+        day_pnl=float(day_pnl),
+        n_steps=1,
+        bet_count=0,
+        winning_bets=0,
+        bet_precision=0.0,
+        pnl_per_bet=0.0,
+        early_picks=0,
+        profitable=False,
+        action_histogram={},
+        arbs_completed=int(arbs_completed),
+        arbs_closed=int(arbs_closed),
+    )
+
+
+def test_composite_score_default_weight_equals_total_reward() -> None:
+    """``maturation_bonus_weight = 0.0`` ⇒ composite == total_reward.
+
+    Byte-identical regression guard: the default-disabled knob must
+    not change the GA selection signal compared to pre-2026-05-04.
+    """
+    e = _make_eval_summary(
+        total_reward=-500.0, arbs_completed=40, arbs_closed=10,
+    )
+    assert runner_mod._composite_score(e, 0.0) == -500.0
+
+
+def test_composite_score_adds_weight_times_completed_pairs() -> None:
+    """Per-completed-pair bonus lands in the score at the right scale."""
+    e = _make_eval_summary(
+        total_reward=-500.0, arbs_completed=40, arbs_closed=10,
+    )
+    # 40 + 10 = 50 completed; weight 5 ⇒ +250 bonus.
+    assert runner_mod._composite_score(e, 5.0) == -250.0
+
+
+def test_composite_score_excludes_force_closed_pairs() -> None:
+    """``arbs_force_closed`` must NOT contribute (env bail-out, not skill)."""
+    e = EvalSummary(
+        eval_day="2026-05-03", total_reward=-500.0, day_pnl=0.0,
+        n_steps=1, bet_count=0, winning_bets=0, bet_precision=0.0,
+        pnl_per_bet=0.0, early_picks=0, profitable=False,
+        action_histogram={},
+        arbs_completed=10, arbs_closed=0,
+        arbs_force_closed=200,  # large — would dominate if mistakenly counted
+    )
+    # Only 10 completed should count; weight 5 ⇒ +50.
+    assert runner_mod._composite_score(e, 5.0) == -450.0
+
+
+def test_run_cohort_sort_uses_composite_score(tmp_path: Path) -> None:
+    """High-maturation low-reward agent ranks above low-maturation high-
+    reward agent when the bonus is large enough.
+
+    Stub workforce: agent A has total_reward=-500 with 50 completed
+    pairs; agent B has total_reward=-100 with 0 completed pairs. With
+    a £5/pair bonus, A's composite is -250 and B's is -100 — B wins.
+    With a £20/pair bonus, A's composite is +500 and B's is -100 — A
+    wins. The test confirms the knob's direction.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _populate_data_dir(data_dir, [
+        "2026-04-21", "2026-04-22", "2026-04-23",
+    ])
+
+    def _two_agent_stub(*, agent_id, genes, **kwargs) -> AgentResult:
+        # Agent A (low LR ⇒ high-arbs profile): -500 reward, 50 completed
+        # Agent B (high LR ⇒ low-arbs profile):  -100 reward,  0 completed
+        is_a = float(genes.learning_rate) < 5e-4
+        if is_a:
+            total_reward, completed, closed = -500.0, 40, 10
+        else:
+            total_reward, completed, closed = -100.0, 0, 0
+        eval_summary = _make_eval_summary(
+            total_reward=total_reward, arbs_completed=completed,
+            arbs_closed=closed, day_pnl=total_reward,
+        )
+        train_summary = TrainSummary(
+            n_days=1, total_steps=1, total_reward=total_reward,
+            mean_reward=total_reward, mean_pnl=total_reward,
+            mean_value_loss=0.0, mean_policy_loss=0.0,
+            mean_approx_kl=0.0, wall_time_sec=0.0,
+            per_day_rows=[],
+        )
+        return AgentResult(
+            agent_id=str(agent_id), model_id=str(agent_id),
+            architecture_name="lstm-stub", genes=genes,
+            train=train_summary, eval=eval_summary,
+            weights_path="", run_id="",
+        )
+
+    # Force one agent each side of the LR threshold by overriding
+    # gene draws via a controlled seed search.
+    rng_a = random.Random(0)
+    while True:
+        ga = sample_genes(rng_a)
+        if ga.learning_rate < 5e-4:
+            break
+    rng_b = random.Random(0)
+    while True:
+        gb = sample_genes(rng_b)
+        if gb.learning_rate >= 5e-4:
+            break
+
+    # Patch sample_genes for one cohort run so the two seeded genes
+    # land on slot 0 and slot 1.
+    seeded = [ga, gb]
+    real_sample_genes = runner_mod.sample_genes
+    runner_mod.sample_genes = lambda *a, **k: seeded.pop(0)
+    try:
+        # Bonus = £5/pair: A composite = -250, B composite = -100 ⇒ B wins.
+        out_dir_low = tmp_path / "low_bonus"
+        seeded[:] = [ga, gb]
+        results_low = runner_mod.run_cohort(
+            n_agents=2, n_generations=1, days=2,
+            data_dir=data_dir, device="cpu", seed=0,
+            output_dir=out_dir_low,
+            train_one_agent_fn=_two_agent_stub,
+            maturation_bonus_weight=5.0,
+        )
+        # Bonus = £20/pair: A composite = +500, B composite = -100 ⇒ A wins.
+        out_dir_high = tmp_path / "high_bonus"
+        seeded[:] = [ga, gb]
+        results_high = runner_mod.run_cohort(
+            n_agents=2, n_generations=1, days=2,
+            data_dir=data_dir, device="cpu", seed=0,
+            output_dir=out_dir_high,
+            train_one_agent_fn=_two_agent_stub,
+            maturation_bonus_weight=20.0,
+        )
+    finally:
+        runner_mod.sample_genes = real_sample_genes
+
+    assert results_low[0].eval.total_reward == -100.0, (
+        "Low bonus should rank low-arbs/high-reward agent first"
+    )
+    assert results_high[0].eval.total_reward == -500.0, (
+        "High bonus should rank high-arbs/low-reward agent first"
+    )
+
+
+def test_scoreboard_row_persists_composite_score_field(tmp_path: Path) -> None:
+    """``composite_score`` and ``maturation_bonus_weight`` land in the
+    scoreboard row at the values the GA selected on."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _populate_data_dir(data_dir, [
+        "2026-04-21", "2026-04-22", "2026-04-23",
+    ])
+    out_dir = tmp_path / "cohort_out"
+
+    runner_mod.run_cohort(
+        n_agents=2, n_generations=1, days=2,
+        data_dir=data_dir, device="cpu", seed=0,
+        output_dir=out_dir,
+        train_one_agent_fn=_stub_train_one_agent,
+        maturation_bonus_weight=3.0,
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (out_dir / "scoreboard.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    assert rows, "scoreboard should not be empty"
+    for row in rows:
+        assert "composite_score" in row
+        assert "maturation_bonus_weight" in row
+        assert row["maturation_bonus_weight"] == 3.0
+        # Stub gives arbs_completed = arbs_closed = 0 by default ⇒
+        # composite == total_reward.
+        assert row["composite_score"] == row["eval_total_reward"]

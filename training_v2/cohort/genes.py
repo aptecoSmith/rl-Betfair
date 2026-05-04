@@ -338,6 +338,15 @@ def assert_in_range(genes: CohortGenes) -> None:
         )
     for name, (lo, hi) in _PHASE5_RANGES.items():
         value = getattr(genes, name)
+        # Disabled-gene values land on the cohort-wide default. When the
+        # GA's sampled range doesn't include the default (e.g.
+        # ``mature_prob_loss_weight`` range [1.0, 5.0] with default 0.0),
+        # accept the default explicitly so a disabled gene's pinned-zero
+        # value isn't rejected by the validator. Enabled genes get a
+        # fresh draw via ``_sample_field`` which lives in the declared
+        # range; this branch only covers the disabled-default case.
+        if value == PHASE5_GENE_DEFAULTS[name]:
+            continue
         if not lo <= value <= hi:
             raise ValueError(
                 f"{name} {value} outside [{lo}, {hi}]",

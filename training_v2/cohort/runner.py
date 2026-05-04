@@ -72,6 +72,33 @@ logger = logging.getLogger(__name__)
 # ── Public API ────────────────────────────────────────────────────────────
 
 
+def _composite_score(
+    eval_stats, maturation_bonus_weight: float,
+) -> float:
+    """GA selection score = ``total_reward + w × (matured + closed)``.
+
+    ``w = 0.0`` (default) → ``composite_score == total_reward`` and the
+    selection sort is byte-identical to pre-2026-05-04 behaviour.
+
+    ``w > 0`` adds a per-completed-pair bonus directly into the GA
+    selection signal. ``arbs_completed + arbs_closed`` is the
+    numerator of ``maturation_rate``; multiplying by a £-scale weight
+    rewards both rate AND volume in a unit that's interpretable on
+    the same scale as ``total_reward`` (which lives at ~£100s per
+    eval). Force-closed pairs are excluded — they're env bail-outs,
+    not skill, matching the strict ``mature_prob`` label semantics.
+
+    The scoreboard row's ``composite_score`` field carries this exact
+    value so downstream tooling sees what the GA actually selected on.
+    """
+    n_completed = (
+        int(eval_stats.arbs_completed) + int(eval_stats.arbs_closed)
+    )
+    return float(eval_stats.total_reward) + float(
+        maturation_bonus_weight,
+    ) * n_completed
+
+
 def run_cohort(
     *,
     n_agents: int,
@@ -87,6 +114,7 @@ def run_cohort(
     reward_overrides: dict | None = None,
     enabled_set: frozenset[str] = frozenset(),
     batched: bool = False,
+    maturation_bonus_weight: float = 0.0,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -279,6 +307,7 @@ def run_cohort(
                         agent_idx=idx,
                         eval_day=eval_day,
                         training_days=list(training_days),
+                        maturation_bonus_weight=maturation_bonus_weight,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
@@ -297,31 +326,41 @@ def run_cohort(
                         agent_idx=idx,
                         eval_day=eval_day,
                         training_days=list(training_days),
+                        maturation_bonus_weight=maturation_bonus_weight,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
 
-            # Sort by eval-day total_reward (descending). Ties are
-            # broken by day_pnl (descending) so a higher cash-P&L
-            # agent ranks above a higher-shaped-reward agent at the
-            # same total — useful when the eval rollouts produce
-            # similar shaped contributions.
+            # Sort by composite_score (descending) — equals total_reward
+            # when ``maturation_bonus_weight = 0.0`` (byte-identical to
+            # pre-2026-05-04). When > 0 the GA also rewards matured + agent-
+            # closed pairs at the operator-specified £-scale. Ties are
+            # broken by day_pnl (descending) so a higher cash-P&L agent
+            # ranks above a higher-shaped-reward agent at the same total
+            # — useful when eval rollouts produce similar shaped
+            # contributions.
             results.sort(
                 key=lambda r: (
-                    -float(r.eval.total_reward),
+                    -_composite_score(r.eval, maturation_bonus_weight),
                     -float(r.eval.day_pnl),
                 ),
             )
             gen_wall = time.perf_counter() - gen_t0
             logger.info(
-                "Generation %d complete in %.1fs. Top-3 by eval reward:",
-                generation + 1, gen_wall,
+                "Generation %d complete in %.1fs. Top-3 by composite_score "
+                "(maturation_bonus_weight=%.3f):",
+                generation + 1, gen_wall, maturation_bonus_weight,
             )
             for rank, r in enumerate(results[:3]):
                 logger.info(
-                    "  #%d agent=%s reward=%+.3f pnl=%+.2f bets=%d genes=%s",
-                    rank + 1, r.agent_id[:12], r.eval.total_reward,
-                    r.eval.day_pnl, r.eval.bet_count, r.genes.to_dict(),
+                    "  #%d agent=%s composite=%+.3f reward=%+.3f "
+                    "pnl=%+.2f bets=%d matured=%d closed=%d genes=%s",
+                    rank + 1, r.agent_id[:12],
+                    _composite_score(r.eval, maturation_bonus_weight),
+                    r.eval.total_reward,
+                    r.eval.day_pnl, r.eval.bet_count,
+                    r.eval.arbs_completed, r.eval.arbs_closed,
+                    r.genes.to_dict(),
                 )
 
             last_results = results
@@ -349,7 +388,9 @@ def run_cohort(
             top_5 = [
                 {
                     "model_id": r.model_id,
-                    "composite_score": float(r.eval.total_reward),
+                    "composite_score": _composite_score(
+                        r.eval, maturation_bonus_weight,
+                    ),
                     "pnl": float(r.eval.day_pnl),
                     "win_rate": float(r.eval.bet_precision),
                     "architecture": r.architecture_name,
@@ -361,7 +402,9 @@ def run_cohort(
                 br = last_results[0]
                 best_model = {
                     "model_id": br.model_id,
-                    "composite_score": float(br.eval.total_reward),
+                    "composite_score": _composite_score(
+                        br.eval, maturation_bonus_weight,
+                    ),
                     "total_pnl": float(br.eval.day_pnl),
                     "win_rate": float(br.eval.bet_precision),
                     "architecture": br.architecture_name,
@@ -479,6 +522,7 @@ def _agent_result_to_scoreboard_row(
     agent_idx: int,
     eval_day: str,
     training_days: list[str],
+    maturation_bonus_weight: float = 0.0,
 ) -> dict:
     """Flatten an :class:`AgentResult` into a v1-shape scoreboard row.
 
@@ -533,8 +577,14 @@ def _agent_result_to_scoreboard_row(
         "eval_force_closed_pnl": result.eval.force_closed_pnl,
         "eval_stop_closed_pnl": result.eval.stop_closed_pnl,
         "eval_wall_time_sec": result.eval.wall_time_sec,
-        # Composite — same as v1: a single scalar the UI sorts by.
-        "composite_score": result.eval.total_reward,
+        # Composite — single scalar the UI sorts by AND the scalar GA
+        # selection actually used. Equals ``total_reward`` when
+        # ``maturation_bonus_weight = 0.0`` (byte-identical to pre-2026-05-04
+        # rows). When > 0 includes ``w × (matured + closed)`` per pair.
+        "composite_score": _composite_score(
+            result.eval, maturation_bonus_weight,
+        ),
+        "maturation_bonus_weight": float(maturation_bonus_weight),
     }
 
 
@@ -689,6 +739,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--maturation-bonus-weight", type=float, default=0.0,
+        metavar="FLOAT",
+        help=(
+            "GA selection-score bonus per matured-or-agent-closed pair "
+            "(£-scale). Default 0.0 = byte-identical to pre-2026-05-04 "
+            "selection (sort by total_reward only). When > 0 the GA "
+            "sorts by ``total_reward + w × (arbs_completed + arbs_closed)`` "
+            "so high-maturation lineages survive selection even when "
+            "their total_reward is dragged down by the open_cost penalty. "
+            "Force-closed pairs are excluded — they're env bail-outs, "
+            "not skill, matching the strict mature_prob label semantics. "
+            "Knob lives at runner level, not gene level: every agent in "
+            "the cohort uses the same weight in the selection signal "
+            "(the GA itself can still evolve mature_prob_loss_weight as "
+            "a per-agent gene). The composite_score is persisted to "
+            "scoreboard.jsonl so downstream tooling sees the actual "
+            "selection scalar."
+        ),
+    )
+    p.add_argument(
         "--batched", action="store_true",
         help=(
             "Use the batched cohort path (throughput-fix Session 02). "
@@ -734,6 +804,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("reward_overrides: %s", reward_overrides)
     if enabled_set:
         logger.info("Phase 5 enabled genes: %s", sorted(enabled_set))
+    if float(args.maturation_bonus_weight) != 0.0:
+        logger.info(
+            "GA selection composite_score = total_reward + %.3f × "
+            "(arbs_completed + arbs_closed)",
+            float(args.maturation_bonus_weight),
+        )
 
     try:
         run_cohort(
@@ -749,6 +825,7 @@ def main(argv: list[str] | None = None) -> int:
             reward_overrides=reward_overrides or None,
             enabled_set=enabled_set,
             batched=bool(args.batched),
+            maturation_bonus_weight=float(args.maturation_bonus_weight),
         )
     finally:
         if server is not None:
