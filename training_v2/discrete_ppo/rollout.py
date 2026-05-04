@@ -97,6 +97,9 @@ import torch.distributions
 from agents_v2.discrete_policy import BaseDiscretePolicy
 from agents_v2.env_shim import DiscreteActionShim
 from env.bet_manager import MIN_BET_STAKE, BetOutcome
+from training_v2.discrete_ppo.aux_labels import (
+    compute_per_runner_aux_labels,
+)
 from training_v2.discrete_ppo.transition import (
     RolloutBatch,
     action_uses_stake,
@@ -579,6 +582,25 @@ class RolloutCollector:
         hidden_state_in: tuple[torch.Tensor, ...] = tuple(
             buf[:n_steps] for buf in hidden_buffers
         )
+
+        # Phase 7 Session 02 — per-runner aux labels for the BCE / NLL
+        # auxiliary heads. Walk every matched bet of the day (settled
+        # races' bets in env._settled_bets, plus any still-live bets in
+        # the current race's BetManager) and aggregate per-pair
+        # outcomes onto the per-slot label arrays. The trainer reads
+        # these via ``RolloutBatch.aux_labels``; default-tolerant
+        # downstream so ``aux_labels=None`` (legacy / synthetic
+        # batches) skips the aux loss terms. See
+        # ``training_v2/discrete_ppo/aux_labels.py`` for the per-pair
+        # aggregation rules.
+        aux_bets = list(env._settled_bets)
+        live_bm = getattr(env, "bet_manager", None)
+        if live_bm is not None:
+            aux_bets.extend(live_bm.bets)
+        aux_labels = compute_per_runner_aux_labels(
+            aux_bets, market_to_runner_map, self.max_runners,
+        )
+
         batch = RolloutBatch(
             obs=obs_arr[:n_steps],
             hidden_state_in=hidden_state_in,
@@ -591,6 +613,7 @@ class RolloutCollector:
             per_runner_reward=per_runner_reward_arr[:n_steps],
             done=done_arr[:n_steps],
             n_steps=n_steps,
+            aux_labels=aux_labels,
         )
 
         self.last_info = last_info

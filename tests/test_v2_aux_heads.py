@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -385,3 +386,495 @@ def test_v1_v2_head_parity_at_fixed_weights(policy, space):
     assert torch.allclose(v1_mature_prob, v2_mature_prob, atol=eps)
     assert torch.allclose(v1_risk_mean, v2_risk_mean, atol=eps)
     assert torch.allclose(v1_risk_log_var, v2_risk_log_var, atol=eps)
+
+
+# ── Phase 7 Session 02 ─────────────────────────────────────────────────────
+#
+# S02 wires the three aux losses into ``DiscretePPOTrainer`` and adds the
+# load-bearing fix for the v1↔v2 hp-dict-precedence trap (see
+# ``plans/rewrite/phase-7-port-aux-heads/lessons_learnt.md``).
+
+
+from env.bet_manager import Bet, BetSide  # noqa: E402
+from training_v2.discrete_ppo.aux_labels import (  # noqa: E402
+    AUX_LABEL_COMMISSION,
+    PerRunnerAuxLabels,
+    compute_pair_locked_pnl,
+    compute_per_runner_aux_labels,
+)
+
+
+def _make_bet(
+    *,
+    selection_id: int,
+    side: BetSide,
+    matched_stake: float,
+    average_price: float,
+    market_id: str = "M",
+    pair_id: str = "P",
+    force_close: bool = False,
+    close_leg: bool = False,
+) -> Bet:
+    return Bet(
+        selection_id=int(selection_id),
+        side=side,
+        requested_stake=float(matched_stake),
+        matched_stake=float(matched_stake),
+        average_price=float(average_price),
+        market_id=str(market_id),
+        pair_id=str(pair_id),
+        force_close=bool(force_close),
+        close_leg=bool(close_leg),
+    )
+
+
+# ── Pure label-helper tests ───────────────────────────────────────────────
+
+
+def test_risk_label_arithmetic_matches_v1():
+    """Locked-P&L on a hand-computed fixture.
+
+    Fixture from session prompt §"Tests": BACK £10 @ 5.0, LAY £8 @ 4.5,
+    commission 0.05. Hand computation:
+
+        win_pnl  = 10 * (5.0 - 1.0) * (1 - 0.05) - 8 * (4.5 - 1)
+                 = 10 * 4 * 0.95 - 8 * 3.5
+                 = 38.0 - 28.0
+                 = 10.0
+        lose_pnl = -10 + 8 * (1 - 0.05)
+                 = -10 + 7.6
+                 = -2.4
+        locked   = max(0, min(10.0, -2.4)) = 0.0
+
+    Anchors the v2 port to v1 ``agents/ppo_trainer.py:1696-1712``.
+    """
+    legs = [
+        _make_bet(
+            selection_id=1, side=BetSide.BACK,
+            matched_stake=10.0, average_price=5.0,
+        ),
+        _make_bet(
+            selection_id=1, side=BetSide.LAY,
+            matched_stake=8.0, average_price=4.5,
+        ),
+    ]
+    expected = 0.0  # see docstring derivation.
+    assert compute_pair_locked_pnl(legs) == pytest.approx(expected)
+    assert AUX_LABEL_COMMISSION == 0.05
+
+
+def test_risk_label_arithmetic_positive_lock():
+    """Fixture chosen so locked > 0 — sanity check on the algebra.
+
+    BACK £10 @ 5.0, LAY £11 @ 4.0:
+        win_pnl  = 10 * 4 * 0.95 - 11 * 3 = 38 - 33 = 5.0
+        lose_pnl = -10 + 11 * 0.95        = -10 + 10.45 = 0.45
+        locked   = max(0, min(5.0, 0.45)) = 0.45
+    """
+    legs = [
+        _make_bet(
+            selection_id=1, side=BetSide.BACK,
+            matched_stake=10.0, average_price=5.0,
+        ),
+        _make_bet(
+            selection_id=1, side=BetSide.LAY,
+            matched_stake=11.0, average_price=4.0,
+        ),
+    ]
+    assert compute_pair_locked_pnl(legs) == pytest.approx(0.45, abs=1e-6)
+
+
+def test_risk_label_naked_pair_returns_nan_in_per_runner_aggregation():
+    """A pair with only one matched leg → naked → risk label is NaN.
+
+    The aggregation function emits NaN at slots with no completed pair;
+    the trainer's NLL term masks NaN out via ``risk_mask``.
+    """
+    legs = [
+        _make_bet(
+            selection_id=1, side=BetSide.BACK,
+            matched_stake=10.0, average_price=5.0,
+            pair_id="naked",
+        ),
+    ]
+    market_to_runner_map = {"M": {1: 0}}
+    out = compute_per_runner_aux_labels(legs, market_to_runner_map, max_runners=4)
+    assert np.isnan(out.risk_label[0])
+    assert out.risk_mask[0] is np.bool_(False) or out.risk_mask[0] == False  # noqa: E712
+    # Naked pair counts toward runner_mask (slot had a matched leg) but
+    # NOT toward risk_mask (no completed pair on that slot).
+    assert out.runner_mask[0] == True  # noqa: E712
+    assert out.fill_label[0] == 0.0
+    assert out.mature_label[0] == 0.0
+
+
+def test_strict_mature_label_excludes_force_closes():
+    """Three pairs (matured, agent-closed, force-closed) → labels [1, 1, 0].
+
+    Load-bearing semantic test for the strict mature_prob label
+    contract — force-closed pairs land in the negative class even
+    though both legs matched (CLAUDE.md §"mature_prob_head feeds
+    actor_head").
+    """
+    bets: list[Bet] = []
+    # Pair 0 — matured naturally on slot 0.
+    bets.append(_make_bet(
+        selection_id=10, side=BetSide.BACK, matched_stake=5.0,
+        average_price=3.0, pair_id="p0",
+    ))
+    bets.append(_make_bet(
+        selection_id=10, side=BetSide.LAY, matched_stake=5.0,
+        average_price=2.9, pair_id="p0",
+    ))
+    # Pair 1 — agent-closed on slot 1 (close_leg=True, force_close=False).
+    bets.append(_make_bet(
+        selection_id=20, side=BetSide.BACK, matched_stake=5.0,
+        average_price=3.0, pair_id="p1",
+    ))
+    bets.append(_make_bet(
+        selection_id=20, side=BetSide.LAY, matched_stake=5.0,
+        average_price=2.9, pair_id="p1",
+        close_leg=True,  # agent-closed, NOT force_close.
+    ))
+    # Pair 2 — env force-closed on slot 2.
+    bets.append(_make_bet(
+        selection_id=30, side=BetSide.BACK, matched_stake=5.0,
+        average_price=3.0, pair_id="p2",
+    ))
+    bets.append(_make_bet(
+        selection_id=30, side=BetSide.LAY, matched_stake=5.0,
+        average_price=2.9, pair_id="p2",
+        force_close=True, close_leg=True,
+    ))
+
+    market_to_runner_map = {"M": {10: 0, 20: 1, 30: 2}}
+    out = compute_per_runner_aux_labels(
+        bets, market_to_runner_map, max_runners=4,
+    )
+    assert out.mature_label[0] == 1.0  # matured naturally
+    assert out.mature_label[1] == 1.0  # agent-closed → positive class
+    assert out.mature_label[2] == 0.0  # force-closed → negative class
+    assert out.mature_label[3] == 0.0  # no pair on slot 3
+    # All three pairs have matched_legs >= 2 so fill_label = 1.0 on
+    # slots 0/1/2.
+    assert out.fill_label[0] == 1.0
+    assert out.fill_label[1] == 1.0
+    assert out.fill_label[2] == 1.0
+    assert out.fill_label[3] == 0.0
+
+
+# ── Trainer hp-dict precedence (load-bearing regression guard) ─────────────
+
+
+def _build_minimal_trainer(hp: dict | None = None):
+    """Build a DiscretePPOTrainer + tiny dummy shim without exercising the env.
+
+    The trainer's hp-dict reads happen in ``__init__`` BEFORE any
+    rollout, so we don't need a real env / shim — only enough surface
+    for the constructor to succeed (action_space, max_runners,
+    .env, .obs_dim).
+    """
+    from agents_v2.action_space import DiscreteActionSpace
+    from agents_v2.discrete_policy import DiscreteLSTMPolicy
+    from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+
+    space = DiscreteActionSpace(max_runners=4)
+
+    class _StubShim:
+        def __init__(self):
+            self.action_space = space
+            self.max_runners = space.max_runners
+            self.obs_dim = 8
+            self.env = None  # collector tries to read this but only on rollout
+
+    shim = _StubShim()
+    policy = DiscreteLSTMPolicy(
+        obs_dim=shim.obs_dim, action_space=space, hidden_size=16,
+    )
+    trainer = DiscretePPOTrainer(
+        policy=policy, shim=shim, hp=hp, device="cpu",
+    )
+    return trainer
+
+
+def test_trainer_reads_loss_weights_from_hp_dict():
+    """``hp[name]`` is the source of truth for the three weights."""
+    hp = {
+        "fill_prob_loss_weight": 0.1,
+        "mature_prob_loss_weight": 0.2,
+        "risk_loss_weight": 0.3,
+    }
+    trainer = _build_minimal_trainer(hp=hp)
+    assert trainer.fill_prob_loss_weight == 0.1
+    assert trainer.mature_prob_loss_weight == 0.2
+    assert trainer.risk_loss_weight == 0.3
+
+
+def test_trainer_defaults_loss_weights_to_zero_when_hp_absent():
+    """No hp dict → all three weights default to 0.0 (byte-identical)."""
+    trainer = _build_minimal_trainer(hp=None)
+    assert trainer.fill_prob_loss_weight == 0.0
+    assert trainer.mature_prob_loss_weight == 0.0
+    assert trainer.risk_loss_weight == 0.0
+
+
+def test_trainer_does_NOT_consult_config_reward_fallback():
+    """Forward-looking guard against re-introducing the v1 precedence trap.
+
+    Read the trainer's source and assert the loss-weight reads do NOT
+    cascade into a ``config["reward"][...]`` lookup. v1's pattern
+    silently swallows ``--reward-overrides`` under v2's always-populated
+    hp dict; copying it would un-ship the entire phase-7 work.
+    """
+    import inspect
+    from training_v2.discrete_ppo import trainer as trainer_mod
+    src = inspect.getsource(trainer_mod.DiscretePPOTrainer.__init__)
+    # Heuristic: a v1-style fallback would read ``config.get("reward",``
+    # somewhere near the loss-weight reads. The trainer constructor
+    # never reads `config` at all in v2 (it takes individual kwargs).
+    assert 'config["reward"]' not in src
+    assert 'config.get("reward"' not in src
+
+
+# ── Worker pre-merge (Path A) — load-bearing integration test ─────────────
+
+
+@pytest.mark.parametrize("key", [
+    "fill_prob_loss_weight",
+    "mature_prob_loss_weight",
+    "risk_loss_weight",
+])
+def test_reward_overrides_reaches_trainer_via_real_genes_flow(key):
+    """``--reward-overrides <key>=0.5`` reaches ``trainer.<key>`` even
+    when the gene's default is 0.0 in ``CohortGenes.to_dict()``.
+
+    This is the **load-bearing regression guard** for the v1↔v2
+    precedence trap (purpose.md §"Trainer reads weights..."). The
+    test must use the real ``CohortGenes`` → ``hp`` flow because the
+    failure mode is specifically v2's always-populated hp dict — a
+    hand-constructed hp dict would not exercise it.
+    """
+    from training_v2.cohort.genes import CohortGenes
+    from training_v2.cohort.worker import _build_trainer_hp
+
+    genes = CohortGenes(
+        learning_rate=3e-4,
+        entropy_coeff=0.01,
+        clip_range=0.2,
+        gae_lambda=0.95,
+        value_coeff=0.5,
+        mini_batch_size=64,
+        hidden_size=64,
+    )
+    # Sanity — the gene's default is 0.0, and to_dict() carries it.
+    assert genes.to_dict()[key] == 0.0
+
+    hp = _build_trainer_hp(
+        cohort_overrides={key: 0.5},
+        genes=genes,
+        enabled_set=frozenset(),  # not enabled — gene default is 0.0
+    )
+    # The override survived the merge — NOT swallowed by the gene
+    # default.
+    assert hp[key] == 0.5
+
+    # And the trainer reads it from hp.
+    trainer = _build_minimal_trainer(hp=hp)
+    assert getattr(trainer, key) == 0.5
+
+
+def test_build_trainer_hp_gene_value_used_when_no_override():
+    """No cohort override + gene enabled → hp carries the gene draw."""
+    from training_v2.cohort.genes import CohortGenes
+    from training_v2.cohort.worker import _build_trainer_hp
+
+    genes = CohortGenes(
+        learning_rate=3e-4,
+        entropy_coeff=0.01,
+        clip_range=0.2,
+        gae_lambda=0.95,
+        value_coeff=0.5,
+        mini_batch_size=64,
+        hidden_size=64,
+        mature_prob_loss_weight=0.25,
+    )
+    hp = _build_trainer_hp(
+        cohort_overrides=None,
+        genes=genes,
+        enabled_set=frozenset({"mature_prob_loss_weight"}),
+    )
+    assert hp["mature_prob_loss_weight"] == 0.25
+
+
+# ── _compute_aux_losses behavioural tests ──────────────────────────────────
+
+
+def _aux_label_pack(
+    *,
+    fill_label: list[float],
+    mature_label: list[float],
+    risk_label: list[float],
+    runner_mask: list[bool],
+    risk_mask: list[bool],
+) -> PerRunnerAuxLabels:
+    return PerRunnerAuxLabels(
+        fill_label=np.asarray(fill_label, dtype=np.float32),
+        mature_label=np.asarray(mature_label, dtype=np.float32),
+        risk_label=np.asarray(risk_label, dtype=np.float32),
+        runner_mask=np.asarray(runner_mask, dtype=bool),
+        risk_mask=np.asarray(risk_mask, dtype=bool),
+    )
+
+
+def _aux_loss_inputs(trainer, labels: PerRunnerAuxLabels):
+    """Run a forward pass on synthetic obs and return (out, label tensors)."""
+    torch.manual_seed(7)
+    obs = torch.randn(3, trainer.policy.obs_dim)  # batch=3
+    out = trainer.policy(obs)
+    device = obs.device
+    fill_label_t = torch.from_numpy(labels.fill_label).to(device)
+    mature_label_t = torch.from_numpy(labels.mature_label).to(device)
+    risk_label_t = torch.from_numpy(
+        np.nan_to_num(labels.risk_label, nan=0.0)
+    ).to(device)
+    runner_mask_t = torch.from_numpy(
+        labels.runner_mask.astype(np.float32)
+    ).to(device)
+    risk_mask_t = torch.from_numpy(
+        labels.risk_mask.astype(np.float32)
+    ).to(device)
+    return out, (
+        fill_label_t, mature_label_t, risk_label_t,
+        runner_mask_t, risk_mask_t,
+    )
+
+
+def test_compute_aux_losses_zero_when_all_runners_unmasked():
+    """Empty rollout (no matched pairs anywhere) → BCE denom guarded.
+
+    The BCE term's masked-mean denominator clamps to ``1.0`` when the
+    runner mask is all-False, so the loss is ``(0 / 1) = 0`` rather
+    than ``0 / 0 = NaN``. Risk loss takes the explicit "no completed
+    pair" early-out and returns scalar 0.
+    """
+    trainer = _build_minimal_trainer(hp={
+        "fill_prob_loss_weight": 0.5,
+        "mature_prob_loss_weight": 0.5,
+        "risk_loss_weight": 0.5,
+    })
+    R = trainer.max_runners
+    labels = _aux_label_pack(
+        fill_label=[0.0] * R,
+        mature_label=[0.0] * R,
+        risk_label=[float("nan")] * R,
+        runner_mask=[False] * R,
+        risk_mask=[False] * R,
+    )
+    out, lts = _aux_loss_inputs(trainer, labels)
+    fill_loss, mature_loss, risk_loss = trainer._compute_aux_losses(
+        policy_out=out,
+        fill_label=lts[0], mature_label=lts[1], risk_label=lts[2],
+        runner_mask=lts[3], risk_mask=lts[4],
+    )
+    assert torch.isfinite(fill_loss)
+    assert torch.isfinite(mature_loss)
+    assert torch.isfinite(risk_loss)
+    assert float(fill_loss.item()) == 0.0
+    assert float(mature_loss.item()) == 0.0
+    assert float(risk_loss.item()) == 0.0
+
+
+def test_compute_aux_losses_bce_nonzero_when_label_disagrees_with_pred():
+    """Labels = 1 + sigmoid output near 0.5 → BCE ≈ -log(0.5) ≈ 0.693.
+
+    Establishes that the BCE term moves with the labels. The fresh-init
+    sigmoid output is near 0.5 (Linear weights ~ 0 init → logit ~ 0 →
+    prob ~ 0.5), so a target of 1.0 produces a non-trivial BCE.
+    """
+    trainer = _build_minimal_trainer(hp={
+        "fill_prob_loss_weight": 0.5,
+        "mature_prob_loss_weight": 0.5,
+        "risk_loss_weight": 0.0,
+    })
+    R = trainer.max_runners
+    labels = _aux_label_pack(
+        fill_label=[1.0] * R,
+        mature_label=[1.0] * R,
+        risk_label=[float("nan")] * R,
+        runner_mask=[True] * R,
+        risk_mask=[False] * R,
+    )
+    out, lts = _aux_loss_inputs(trainer, labels)
+    fill_loss, mature_loss, _ = trainer._compute_aux_losses(
+        policy_out=out,
+        fill_label=lts[0], mature_label=lts[1], risk_label=lts[2],
+        runner_mask=lts[3], risk_mask=lts[4],
+    )
+    assert float(fill_loss.item()) > 0.1
+    assert float(mature_loss.item()) > 0.1
+
+
+def test_compute_aux_losses_risk_nll_nonzero_when_completed_pair_present():
+    """Risk NLL on a fixture with one completed pair → non-zero.
+
+    Lock in that the NLL term contributes when at least one slot has
+    a real label. The NLL has the form
+    ``0.5 * (diff^2/exp(log_var) + log_var)``; with fresh-init
+    log_var ~ 0 and diff non-trivial, the term is positive.
+    """
+    trainer = _build_minimal_trainer(hp={
+        "fill_prob_loss_weight": 0.0,
+        "mature_prob_loss_weight": 0.0,
+        "risk_loss_weight": 0.5,
+    })
+    R = trainer.max_runners
+    risk_label_arr = [float("nan")] * R
+    risk_mask_arr = [False] * R
+    risk_label_arr[1] = 5.0          # one slot has a real label
+    risk_mask_arr[1] = True
+    labels = _aux_label_pack(
+        fill_label=[0.0] * R,
+        mature_label=[0.0] * R,
+        risk_label=risk_label_arr,
+        runner_mask=[False] * R,
+        risk_mask=risk_mask_arr,
+    )
+    out, lts = _aux_loss_inputs(trainer, labels)
+    _, _, risk_loss = trainer._compute_aux_losses(
+        policy_out=out,
+        fill_label=lts[0], mature_label=lts[1], risk_label=lts[2],
+        runner_mask=lts[3], risk_mask=lts[4],
+    )
+    assert float(risk_loss.item()) != 0.0
+    assert torch.isfinite(risk_loss)
+
+
+def test_compute_aux_losses_risk_nll_skipped_when_all_naked():
+    """All-naked rollout → risk NLL returns scalar 0 without NaN.
+
+    The trainer's ``_compute_aux_losses`` short-circuits when
+    ``risk_mask.sum() == 0`` so no division-by-zero / NaN can leak
+    into total_loss. Regression guard for the
+    "test_risk_nll_zero_when_no_completed_pairs_in_minibatch" case.
+    """
+    trainer = _build_minimal_trainer(hp={
+        "fill_prob_loss_weight": 0.0,
+        "mature_prob_loss_weight": 0.0,
+        "risk_loss_weight": 0.5,
+    })
+    R = trainer.max_runners
+    labels = _aux_label_pack(
+        fill_label=[1.0] * R,         # naked pair counts toward fill
+        mature_label=[0.0] * R,
+        risk_label=[float("nan")] * R,
+        runner_mask=[True] * R,
+        risk_mask=[False] * R,        # no completed pairs anywhere
+    )
+    out, lts = _aux_loss_inputs(trainer, labels)
+    _, _, risk_loss = trainer._compute_aux_losses(
+        policy_out=out,
+        fill_label=lts[0], mature_label=lts[1], risk_label=lts[2],
+        runner_mask=lts[3], risk_mask=lts[4],
+    )
+    assert float(risk_loss.item()) == 0.0
+    assert torch.isfinite(risk_loss)

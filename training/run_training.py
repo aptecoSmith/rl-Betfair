@@ -794,7 +794,6 @@ class TrainingOrchestrator:
                 if self.device == "cuda":
                     try:
                         import gc
-                        import torch
                         gc.collect()
                         torch.cuda.empty_cache()
                     except Exception:

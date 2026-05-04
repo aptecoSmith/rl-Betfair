@@ -71,6 +71,7 @@ __all__ = [
     "train_one_agent",
     "_build_per_agent_reward_overrides",
     "_build_per_agent_scalping_overrides",
+    "_build_trainer_hp",
 ]
 
 
@@ -96,6 +97,23 @@ _PHASE5_GENES_VIA_REWARD_OVERRIDES: frozenset[str] = frozenset({
 
 _PHASE5_GENES_VIA_SCALPING_OVERRIDES: frozenset[str] = frozenset({
     "arb_spread_scale",
+})
+
+# Phase 7 Session 02 (2026-05-04). The three auxiliary-head loss
+# weights are read by the trainer directly from a per-agent ``hp``
+# dict (NOT the env's ``reward_overrides`` passthrough). The worker
+# pre-merges any cohort-level ``--reward-overrides <key>=<value>`` into
+# the hp dict before constructing the trainer (Path A in
+# ``plans/rewrite/phase-7-port-aux-heads/session_prompts/
+# 02_wire_bce_loss_in_trainer.md``). This is the load-bearing fix for
+# the v1↔v2 hp-dict-precedence trap: v2's ``CohortGenes.to_dict``
+# always populates these keys with their default 0.0, so a v1-style
+# ``hp.get(name, config_fallback)`` would return 0.0 and silently
+# swallow the override. See ``lessons_learnt.md``.
+_PHASE7_TRAINER_HP_KEYS: frozenset[str] = frozenset({
+    "fill_prob_loss_weight",
+    "mature_prob_loss_weight",
+    "risk_loss_weight",
 })
 
 
@@ -267,6 +285,45 @@ def _build_per_agent_reward_overrides(
         if name in enabled_set and name in _PHASE5_GENES_VIA_REWARD_OVERRIDES:
             out[name] = float(getattr(genes, name))
     return out or None
+
+
+def _build_trainer_hp(
+    *,
+    cohort_overrides: dict | None,
+    genes: CohortGenes,
+    enabled_set: frozenset[str],
+) -> dict:
+    """Pre-merge cohort-level reward_overrides into the per-agent hp dict.
+
+    Phase 7 Session 02 — Path A. The trainer reads
+    ``fill_prob_loss_weight`` / ``mature_prob_loss_weight`` /
+    ``risk_loss_weight`` from this dict ONLY (no config fallback). The
+    precedence cascade for each trainer-side key:
+
+    1. ``cohort_overrides[key]`` — operator's cohort-wide pin via
+       ``--reward-overrides``. Wins iff present.
+    2. ``genes.<key>`` — per-agent gene draw. Wins iff the gene is in
+       ``enabled_set`` (operator opted in via ``--enable-gene``).
+    3. The gene's default (always present in ``genes.to_dict()``,
+       0.0 for the three S02 keys).
+
+    Other ``CohortGenes`` fields are passed through verbatim so the
+    trainer can read them too if it wants. Worker sole responsibility:
+    one source of truth before the trainer is constructed.
+    """
+    hp: dict = dict(genes.to_dict())
+    overrides = dict(cohort_overrides or {})
+    for name in _PHASE7_TRAINER_HP_KEYS:
+        if name in overrides:
+            # Cohort-wide pin wins over the gene default. (If the
+            # operator also enabled the gene the runner's CLI guard
+            # rejected the launch — see ``training_v2/cohort/runner.py``
+            # mutual-exclusion check.)
+            hp[name] = float(overrides[name])
+        elif name in enabled_set:
+            hp[name] = float(getattr(genes, name))
+        # else: gene default already in ``hp`` from genes.to_dict().
+    return hp
 
 
 def _build_per_agent_scalping_overrides(
@@ -477,6 +534,16 @@ def train_one_agent(
         genes=genes,
         enabled_set=enabled_set,
     )
+    # Phase 7 Session 02 (Path A). Pre-merge any reward_overrides for
+    # trainer-side keys into the per-agent hp dict so the trainer's
+    # ``hp.get(name, 0.0)`` reads the override. NEVER add a config
+    # fallback inside the trainer — that would re-introduce the v1
+    # precedence trap (lessons_learnt.md).
+    trainer_hp = _build_trainer_hp(
+        cohort_overrides=reward_overrides,
+        genes=genes,
+        enabled_set=enabled_set,
+    )
 
     # ── Build first-day env + shim to size the policy ────────────────
     first_day = days_to_train[0]
@@ -509,6 +576,7 @@ def train_one_agent(
         mini_batch_size=int(genes.mini_batch_size),
         max_grad_norm=0.5,
         device=device,
+        hp=trainer_hp,
     )
 
     arch_name = arch_name_for_genes(genes)

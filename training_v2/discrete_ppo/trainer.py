@@ -112,6 +112,13 @@ class UpdateLog:
     approx_kl_max: float
     mini_batches_skipped: int
     kl_early_stopped: bool
+    # Phase 7 Session 02 (2026-05-04). Aux head losses, mean over
+    # mini-batches that ran. Always populated; zero when the
+    # corresponding weight is 0.0 OR the rollout's aux_labels is
+    # None (synthetic / legacy batch).
+    fill_prob_bce_mean: float = 0.0
+    mature_prob_bce_mean: float = 0.0
+    risk_nll_mean: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -136,6 +143,12 @@ class EpisodeStats:
     advantage_std: float = 0.0
     advantage_max_abs: float = 0.0
     day_pnl: float = 0.0
+    # Phase 7 Session 02 — auxiliary-head loss diagnostics. Zero when
+    # the corresponding weight is 0.0 OR the rollout's aux_labels is
+    # None.
+    fill_prob_bce_mean: float = 0.0
+    mature_prob_bce_mean: float = 0.0
+    risk_nll_mean: float = 0.0
 
 
 # ── Helpers (exported for tests) ───────────────────────────────────────────
@@ -239,6 +252,7 @@ class DiscretePPOTrainer:
         max_grad_norm: float = 0.5,
         kl_early_stop_threshold: float = 0.15,
         device: str = "cpu",
+        hp: dict | None = None,
     ) -> None:
         self.policy = policy
         self.shim = shim
@@ -254,6 +268,28 @@ class DiscretePPOTrainer:
         self.max_grad_norm = float(max_grad_norm)
         self.kl_early_stop_threshold = float(kl_early_stop_threshold)
         self.device = torch.device(device)
+
+        # Phase 7 Session 02 — auxiliary-head loss weights, read from
+        # the per-agent ``hp`` dict ONLY. NO config fallback. The
+        # worker pre-merges any ``--reward-overrides`` values into
+        # ``hp`` before constructing the trainer (Path A in
+        # ``plans/rewrite/phase-7-port-aux-heads/session_prompts/
+        # 02_wire_bce_loss_in_trainer.md``). A nested fallback would
+        # re-introduce the v1 precedence trap: v2's ``CohortGenes.
+        # to_dict`` always populates these keys with their default
+        # 0.0, so ``hp.get(name, fallback)`` would return 0.0 and the
+        # fallback would never be consulted — silently swallowing the
+        # override. See ``lessons_learnt.md`` for the full audit.
+        hp = dict(hp or {})
+        self.fill_prob_loss_weight = float(
+            hp.get("fill_prob_loss_weight", 0.0) or 0.0
+        )
+        self.mature_prob_loss_weight = float(
+            hp.get("mature_prob_loss_weight", 0.0) or 0.0
+        )
+        self.risk_loss_weight = float(
+            hp.get("risk_loss_weight", 0.0) or 0.0
+        )
 
         self.policy.to(self.device)
         self.optimiser = torch.optim.Adam(
@@ -388,14 +424,21 @@ class DiscretePPOTrainer:
             advantage_std=adv_std,
             advantage_max_abs=adv_max_abs,
             day_pnl=day_pnl,
+            fill_prob_bce_mean=update_log.fill_prob_bce_mean,
+            mature_prob_bce_mean=update_log.mature_prob_bce_mean,
+            risk_nll_mean=update_log.risk_nll_mean,
         )
         logger.info(
             "DiscretePPOTrainer episode: n_steps=%d n_updates=%d "
             "policy_loss=%.4f value_loss=%.4f entropy=%.4f "
-            "approx_kl=%.4f total_reward=%.3f wall=%.2fs",
+            "approx_kl=%.4f fill_prob_bce_mean=%.4f "
+            "mature_prob_bce_mean=%.4f risk_nll_mean=%.4f "
+            "total_reward=%.3f wall=%.2fs",
             stats.n_steps, stats.n_updates_run,
             stats.policy_loss_mean, stats.value_loss_mean,
             stats.entropy_mean, stats.approx_kl_mean,
+            stats.fill_prob_bce_mean, stats.mature_prob_bce_mean,
+            stats.risk_nll_mean,
             stats.total_reward, stats.wall_time_sec,
         )
         return stats
@@ -465,6 +508,41 @@ class DiscretePPOTrainer:
         joint_old_lp = _move_to_device(torch.from_numpy(joint_old_lp_np), device)
         returns_t = _move_to_device(torch.from_numpy(returns), device)
 
+        # ── Phase 7 S02 aux-loss tensors (per-rollout, per-runner) ──────
+        # The aux labels live at the rollout scope (not per-tick), so
+        # we materialise them ONCE here and broadcast inside the
+        # mini-batch loop. ``aux_active`` is False when all three
+        # weights are 0 OR the producer didn't compute labels — in
+        # that case the loss expression collapses to the pre-S02 form
+        # and total_loss is byte-identical (regression test:
+        # ``test_all_aux_losses_zero_when_weights_zero``).
+        aux_labels = batch.aux_labels
+        aux_weights_any = (
+            self.fill_prob_loss_weight > 0.0
+            or self.mature_prob_loss_weight > 0.0
+            or self.risk_loss_weight > 0.0
+        )
+        aux_active = aux_weights_any and aux_labels is not None
+        if aux_active:
+            fill_label_t = torch.from_numpy(
+                aux_labels.fill_label
+            ).to(device)                                  # (R,)
+            mature_label_t = torch.from_numpy(
+                aux_labels.mature_label
+            ).to(device)
+            risk_label_t = torch.from_numpy(
+                np.nan_to_num(aux_labels.risk_label, nan=0.0)
+            ).to(device)
+            runner_mask_t = torch.from_numpy(
+                aux_labels.runner_mask.astype(np.float32)
+            ).to(device)                                  # (R,)
+            risk_mask_t = torch.from_numpy(
+                aux_labels.risk_mask.astype(np.float32)
+            ).to(device)
+        else:
+            fill_label_t = mature_label_t = risk_label_t = None
+            runner_mask_t = risk_mask_t = None
+
         # ── Pack per-transition hidden states ──────────────────────────
         # ppo-kl-fix protocol: Phase 1's policy class owns the batch-
         # axis convention via pack_hidden_states / pack_hidden_buffer;
@@ -483,6 +561,9 @@ class DiscretePPOTrainer:
         value_losses: list[float] = []
         entropies: list[float] = []
         approx_kls: list[float] = []
+        fill_prob_losses: list[float] = []
+        mature_prob_losses: list[float] = []
+        risk_losses: list[float] = []
         mini_batches_skipped = 0
         kl_early_stopped = False
         mini_batches_per_epoch = (T + self.mini_batch_size - 1) // self.mini_batch_size
@@ -556,6 +637,34 @@ class DiscretePPOTrainer:
                         policy_loss + value_loss - self.entropy_coeff * entropy
                     )
 
+                    # Phase 7 S02 — auxiliary-head loss terms. Skipped
+                    # entirely when all weights are 0 OR aux_labels is
+                    # None, so total_loss is byte-identical to pre-S02.
+                    if aux_active:
+                        fill_loss_mb, mature_loss_mb, risk_loss_mb = (
+                            self._compute_aux_losses(
+                                policy_out=out,
+                                fill_label=fill_label_t,
+                                mature_label=mature_label_t,
+                                risk_label=risk_label_t,
+                                runner_mask=runner_mask_t,
+                                risk_mask=risk_mask_t,
+                            )
+                        )
+                        total_loss = (
+                            total_loss
+                            + self.fill_prob_loss_weight * fill_loss_mb
+                            + self.mature_prob_loss_weight * mature_loss_mb
+                            + self.risk_loss_weight * risk_loss_mb
+                        )
+                        fill_prob_losses.append(float(fill_loss_mb.item()))
+                        mature_prob_losses.append(float(mature_loss_mb.item()))
+                        risk_losses.append(float(risk_loss_mb.item()))
+                    else:
+                        fill_prob_losses.append(0.0)
+                        mature_prob_losses.append(0.0)
+                        risk_losses.append(0.0)
+
                     self.optimiser.zero_grad()
                     total_loss.backward()
                     nn.utils.clip_grad_norm_(
@@ -615,7 +724,95 @@ class DiscretePPOTrainer:
             approx_kl_max=float(np.max(approx_kls)) if n_run else 0.0,
             mini_batches_skipped=mini_batches_skipped,
             kl_early_stopped=kl_early_stopped,
+            fill_prob_bce_mean=(
+                float(np.mean(fill_prob_losses)) if n_run else 0.0
+            ),
+            mature_prob_bce_mean=(
+                float(np.mean(mature_prob_losses)) if n_run else 0.0
+            ),
+            risk_nll_mean=(
+                float(np.mean(risk_losses)) if n_run else 0.0
+            ),
         )
+
+    # ── Phase 7 S02 aux-loss helper ────────────────────────────────────────
+
+    def _compute_aux_losses(
+        self,
+        *,
+        policy_out,
+        fill_label: torch.Tensor,
+        mature_label: torch.Tensor,
+        risk_label: torch.Tensor,
+        runner_mask: torch.Tensor,
+        risk_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """BCE on fill_prob + mature_prob, Gaussian NLL on risk_head.
+
+        Per-rollout per-runner labels are broadcast across the
+        mini-batch's transition axis. Both BCE terms are masked by
+        ``runner_mask`` (slot had any matched pair leg). The NLL term
+        is masked by ``risk_mask`` (slot had at least one completed
+        pair) — naked-only slots' NaN risk labels are replaced with
+        zero arithmetic-side and skipped via the mask, so no NaN
+        propagates into the gradient.
+
+        Returns the three scalar losses unweighted; the caller
+        multiplies by ``self.{fill_prob,mature_prob,risk}_loss_weight``
+        and adds to total_loss.
+        """
+        # Policy outputs: (B, R) each.
+        fill_pred = policy_out.fill_prob_per_runner
+        mature_pred = policy_out.mature_prob_per_runner
+        risk_mean = policy_out.predicted_locked_pnl_per_runner
+        risk_log_var = policy_out.predicted_locked_log_var_per_runner
+
+        # Broadcast (R,) labels / masks to (1, R) for broadcasting.
+        fill_label_b = fill_label.unsqueeze(0)
+        mature_label_b = mature_label.unsqueeze(0)
+        runner_mask_b = runner_mask.unsqueeze(0)
+        risk_label_b = risk_label.unsqueeze(0)
+        risk_mask_b = risk_mask.unsqueeze(0)
+
+        # Numerically-stable BCE on probabilities. Clamping inputs of
+        # ``log`` to ``[1e-7, 1 - 1e-7]`` mirrors PyTorch's internal
+        # ``BCELoss`` epsilon and keeps gradients finite when the
+        # sigmoid output saturates.
+        eps = 1e-7
+        fill_pred_c = fill_pred.clamp(eps, 1.0 - eps)
+        mature_pred_c = mature_pred.clamp(eps, 1.0 - eps)
+
+        fill_bce = -(
+            fill_label_b * torch.log(fill_pred_c)
+            + (1.0 - fill_label_b) * torch.log(1.0 - fill_pred_c)
+        )
+        mature_bce = -(
+            mature_label_b * torch.log(mature_pred_c)
+            + (1.0 - mature_label_b) * torch.log(1.0 - mature_pred_c)
+        )
+
+        # Mask sums broadcast to (B, R); .sum() collapses to a scalar
+        # weight count. clamp(min=1) keeps the denominator finite if
+        # the rollout had no matched pairs at all (all-NOOP day).
+        bce_denom = (runner_mask_b.expand_as(fill_bce)).sum().clamp(min=1.0)
+        fill_loss = (fill_bce * runner_mask_b).sum() / bce_denom
+        mature_loss = (mature_bce * runner_mask_b).sum() / bce_denom
+
+        # Gaussian NLL: 0.5 * ((label - mean)^2 / exp(log_var) + log_var).
+        # Masked entries (no completed pair on this slot) contribute 0.
+        diff_sq = (risk_label_b - risk_mean) ** 2
+        nll = 0.5 * (diff_sq / torch.exp(risk_log_var) + risk_log_var)
+        risk_denom = (risk_mask_b.expand_as(nll)).sum()
+        if float(risk_denom.item()) > 0.0:
+            risk_loss = (nll * risk_mask_b).sum() / risk_denom
+        else:
+            # No completed pair anywhere in the rollout — skip the
+            # term entirely. ``zeros_like`` keeps the dtype / device /
+            # autograd-graph-detached property the caller expects so
+            # ``total_loss + 0`` flows through unchanged.
+            risk_loss = torch.zeros((), device=fill_pred.device)
+
+        return fill_loss, mature_loss, risk_loss
 
     # ── Internals ──────────────────────────────────────────────────────────
 

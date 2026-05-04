@@ -41,6 +41,7 @@ import numpy as np
 import torch
 
 from agents_v2.action_space import ActionType, DiscreteActionSpace
+from training_v2.discrete_ppo.aux_labels import PerRunnerAuxLabels
 
 if TYPE_CHECKING:  # pragma: no cover - import-cycle guard
     from agents_v2.discrete_policy import BaseDiscretePolicy
@@ -105,6 +106,13 @@ class RolloutBatch(NamedTuple):
         terminating episodes.
     n_steps:
         Convenience int — same as ``obs.shape[0]``.
+    aux_labels:
+        Per-rollout (NOT per-tick) per-runner labels for the Phase 7
+        S02 aux losses, or ``None`` when the producer didn't compute
+        them (e.g. the legacy ``transitions_to_rollout_batch`` path,
+        synthetic test fixtures). The trainer's ``_ppo_update`` skips
+        the aux loss terms entirely when this is ``None``, preserving
+        byte-identity with pre-S02 trainer behaviour.
     """
 
     obs: np.ndarray
@@ -118,6 +126,7 @@ class RolloutBatch(NamedTuple):
     per_runner_reward: np.ndarray
     done: np.ndarray
     n_steps: int
+    aux_labels: PerRunnerAuxLabels | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +299,7 @@ def transitions_to_rollout_batch(
         per_runner_reward=per_runner_reward,
         done=done,
         n_steps=n,
+        aux_labels=None,
     )
 
 

@@ -195,13 +195,28 @@ def test_one_update_produces_gradients_on_every_param():
     gradient flowing. Random init samples uniformly across the
     masked categorical so OPEN_* fires routinely on a multi-step
     episode.
+
+    Phase 7 S01: ``risk_head`` is by design a side-channel — it does
+    NOT feed actor_head, only ``DiscretePolicyOutput.predicted_locked_
+    pnl_per_runner``. Its only gradient signal is the Gaussian NLL aux
+    loss term wired in S02. This test runs at the default
+    ``risk_loss_weight=0.0`` so no NLL gradient flows; ``risk_head``
+    is therefore expected to land with ``.grad is None`` and is
+    excluded from the "every param has grad" assertion. A separate
+    S02 test (``tests/test_v2_aux_heads.py
+    ::test_compute_aux_losses_risk_nll_nonzero_when_completed_pair_present``)
+    covers risk_head's gradient pathway when the loss is active.
     """
     _env, _shim, policy, trainer = _build_trainer(seed=0)
     trainer.train_episode()
 
     missing = [
         name for name, p in policy.named_parameters()
-        if p.requires_grad and p.grad is None
+        if (
+            p.requires_grad
+            and p.grad is None
+            and not name.startswith("risk_head.")
+        )
     ]
     assert not missing, f"params with .grad=None after update: {missing}"
 

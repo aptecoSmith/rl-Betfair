@@ -1688,16 +1688,26 @@ class TestRecurrentStateThroughPpoUpdate:
         """
         config = _make_config()
         policy = _make_policy(config)
-        # Threshold of 1e-12 → first mini-batch with ANY gradient
-        # step will trip. ppo_epochs=4 so a per-epoch check would
-        # do at least one full epoch's worth of mini-batches before
-        # the first KL evaluation.
+        # Threshold of 1e-12 → first mini-batch whose post-step
+        # ``new_log_probs`` are sufficiently shifted from the rollout
+        # log-probs will trip. Bumping ``learning_rate`` to 1e-2 (vs
+        # the 3e-4 default) ensures every mini-batch's gradient step
+        # produces a ``mb_approx_kl`` well above 1e-12, regardless of
+        # which direction the policy happened to move on the seed —
+        # the earlier 3e-4 setting could yield negative ``approx_kl``
+        # on a chosen-actions-up-shift, masking the per-mini-batch
+        # behaviour and making the test indistinguishable from
+        # per-epoch when the trip lands on the final mini-batch of
+        # epoch 0. ppo_epochs=4 so a per-epoch check would do at
+        # least one full epoch's worth of mini-batches before the
+        # first KL evaluation.
         trainer = PPOTrainer(
             policy, config,
             hyperparams={
                 "ppo_epochs": 4,
                 "mini_batch_size": 2,
                 "kl_early_stop_threshold": 1e-12,
+                "learning_rate": 1e-2,
             },
         )
 

@@ -384,13 +384,23 @@ class TestKLEarlyStop:
         assert trainer.kl_early_stop_threshold == pytest.approx(0.07)
 
     def test_default_threshold_is_literature_standard(self, tmp_path):
-        """Default = 0.03 (Andrychowicz et al. 2021,
-        Engstrom et al. 2020). No hp override → default wins."""
+        """Default = 0.15 — CleanRL's ``target_kl × 1.5`` convention
+        scaled for the per-mini-batch measurement.
+
+        The original default of 0.03 (SB3-style end-of-update target_kl)
+        was raised in 2026-04-25 (``ppo-kl-fix`` Session 02 / CLAUDE.md
+        §"Per-mini-batch KL check") because the per-mini-batch
+        measurement we make is NOT comparable to the per-update KL
+        SB3/Andrychowicz et al. paper about. At 0.03 the per-mb check
+        tripped after 1–2 mini-batches per update on natural drift in
+        the 0.03–0.07 range; at 0.15 PPO can take its full 4-epoch
+        budget when drift is healthy.
+        """
         config = _make_config()
         config["paths"]["logs"] = str(tmp_path / "logs")
         policy = _make_policy(seed=0)
         trainer = PPOTrainer(policy, config, hyperparams={})
-        assert trainer.kl_early_stop_threshold == pytest.approx(0.03)
+        assert trainer.kl_early_stop_threshold == pytest.approx(0.15)
 
     def test_does_not_fire_on_normal_rollout(self, tmp_path):
         """A typical rollout with ``ratio == 1`` on update 0 produces

@@ -292,3 +292,114 @@ def test_train_one_agent_runs_end_to_end_on_synthetic_data(
     days_rows = store.get_evaluation_days(eval_run.run_id)
     assert len(days_rows) == 1
     assert days_rows[0].date == "2026-04-24"
+
+
+# ── Phase 7 Session 02 — load-bearing reward-overrides integration ────────
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(600)
+@pytest.mark.skipif(not _runtime, reason=_runtime_reason)
+@pytest.mark.parametrize("weight_key", [
+    "fill_prob_loss_weight",
+    "mature_prob_loss_weight",
+    "risk_loss_weight",
+])
+def test_reward_overrides_for_aux_weights_reaches_constructed_trainer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    weight_key: str,
+) -> None:
+    """``--reward-overrides <weight_key>=0.5`` flows into the trainer.
+
+    Phase 7 Session 02 — the **load-bearing regression guard for the
+    bug this whole plan exists to fix**. The 2026-05-04 cohort
+    ``v2_phase5_oc1_mpw05_clean5day_1777849498`` was byte-identical
+    to its predecessor because the trainer never read the override:
+    v2's ``CohortGenes.to_dict`` always populates the three weight
+    keys with their default 0.0, so a v1-style ``hp.get(name,
+    config_fallback)`` would return 0.0 and silently swallow the
+    override. The S02 fix routes overrides through the worker's
+    ``_build_trainer_hp`` so the hp dict carries the override value
+    BEFORE the trainer is constructed (Path A).
+
+    This integration test exercises the full ``train_one_agent`` flow
+    with a synthetic day, captures the hp dict the worker passed to
+    ``DiscretePPOTrainer.__init__``, and asserts the override survived
+    end-to-end. Spy-style: monkeypatches ``DiscretePPOTrainer`` to
+    record the constructor's ``hp`` kwarg, then asserts on the
+    captured value AND the constructed trainer's stored attribute.
+    """
+    from tests.test_betfair_env import _make_day
+
+    from training_v2.cohort.genes import CohortGenes
+    from training_v2.cohort import worker as worker_mod
+    from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+
+    days = {
+        "2026-04-23": _make_day(
+            n_races=1, n_pre_ticks=4, n_inplay_ticks=2,
+        ),
+        "2026-04-24": _make_day(
+            n_races=1, n_pre_ticks=4, n_inplay_ticks=2,
+        ),
+    }
+
+    def _fake_load_day(date_str, data_dir):
+        return days[date_str]
+
+    monkeypatch.setattr(worker_mod, "load_day", _fake_load_day)
+
+    captured_hp: list[dict] = []
+    captured_trainer: list[DiscretePPOTrainer] = []
+    real_init = DiscretePPOTrainer.__init__
+
+    def _spy_init(self, *args, **kwargs):
+        captured_hp.append(dict(kwargs.get("hp") or {}))
+        real_init(self, *args, **kwargs)
+        captured_trainer.append(self)
+
+    monkeypatch.setattr(DiscretePPOTrainer, "__init__", _spy_init)
+
+    genes = CohortGenes(
+        learning_rate=3e-4,
+        entropy_coeff=0.01,
+        clip_range=0.2,
+        gae_lambda=0.95,
+        value_coeff=0.5,
+        mini_batch_size=32,
+        hidden_size=64,
+    )
+    # Sanity — the gene's default is 0.0 in to_dict(), the precondition
+    # for the v2-specific failure mode this test guards against.
+    assert genes.to_dict()[weight_key] == 0.0
+
+    worker_mod.train_one_agent(
+        agent_id=f"smoke-{weight_key}",
+        genes=genes,
+        days_to_train=["2026-04-23"],
+        eval_day="2026-04-24",
+        data_dir=tmp_path,
+        device="cpu",
+        seed=42,
+        model_store=None,  # skip registry IO; we only care about hp.
+        scorer_dir=SCORER_DIR,
+        generation=0,
+        reward_overrides={weight_key: 0.5},
+        enabled_set=frozenset(),  # gene NOT enabled — pure override path.
+    )
+
+    # Spy invariants — exactly one trainer constructed, hp carries the
+    # override, and the constructed trainer's stored attribute reads
+    # 0.5 (not the gene default 0.0).
+    assert len(captured_hp) == 1, (
+        f"expected one trainer construction, got {len(captured_hp)}"
+    )
+    assert captured_hp[0][weight_key] == 0.5, (
+        f"hp dict swallowed the override: hp[{weight_key!r}]="
+        f"{captured_hp[0].get(weight_key)!r} (expected 0.5). "
+        "v1↔v2 precedence trap regression — see "
+        "plans/rewrite/phase-7-port-aux-heads/lessons_learnt.md"
+    )
+    trainer = captured_trainer[0]
+    assert getattr(trainer, weight_key) == 0.5
