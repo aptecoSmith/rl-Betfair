@@ -199,7 +199,10 @@ class TestBackwardGradients:
 
         Catches accidental ``.detach()`` on a head — the failure mode
         the v1 fill-prob plan tripped over (CLAUDE.md "fill_prob feeds
-        actor_head" §"Do not detach").
+        actor_head" §"Do not detach"). Phase 7 S01: the loss now also
+        drives ``risk_mean`` / ``risk_log_var`` so the risk-head
+        params see a gradient (without it the all-params check would
+        always fail since risk_head doesn't feed any other output).
         """
         out = policy(torch.randn(3, policy.obs_dim))
         loss = (
@@ -207,6 +210,8 @@ class TestBackwardGradients:
             + out.value_per_runner.sum()
             + out.stake_alpha.sum()
             + out.stake_beta.sum()
+            + out.predicted_locked_pnl_per_runner.sum()
+            + out.predicted_locked_log_var_per_runner.sum()
         )
         loss.backward()
         for name, p in policy.named_parameters():
@@ -217,11 +222,22 @@ class TestBackwardGradients:
                 f"detached?"
             )
 
-    def test_value_head_gradient_independent_from_logits(self, policy):
-        """Backward on value alone reaches value_head; logits_head untouched."""
+    def test_value_head_gradient_independent_from_actor(self, policy):
+        """Backward on value alone reaches value_head; actor heads untouched.
+
+        Phase 7 S01: the old single ``logits_head`` is replaced by a
+        per-runner ``actor_head`` + a global ``noop_head``. Both
+        belong to the action pathway; backward through ``value_per_
+        runner`` should leave them alone.
+        """
         out = policy(torch.randn(3, policy.obs_dim))
         out.value_per_runner.sum().backward()
         assert policy.value_head.weight.grad is not None
-        # ``logits_head`` doesn't feed into the value path, so its
-        # gradient stays None.
-        assert policy.logits_head.weight.grad is None
+        # Action-pathway heads don't feed value, so their grads stay None.
+        assert policy.actor_head[0].weight.grad is None
+        assert policy.actor_head[2].weight.grad is None
+        assert policy.noop_head.weight.grad is None
+        # Aux heads feed actor_head, not value_head — also untouched.
+        assert policy.fill_prob_head.weight.grad is None
+        assert policy.mature_prob_head.weight.grad is None
+        assert policy.risk_head.weight.grad is None

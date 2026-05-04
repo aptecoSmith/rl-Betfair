@@ -42,10 +42,21 @@ from agents_v2.action_space import DiscreteActionSpace
 
 
 __all__ = [
+    "RISK_LOG_VAR_MIN",
+    "RISK_LOG_VAR_MAX",
     "DiscretePolicyOutput",
     "BaseDiscretePolicy",
     "DiscreteLSTMPolicy",
 ]
+
+
+# Clamp bounds on the risk head's log-var output. Ported verbatim from
+# v1 ``agents/policy_network.py`` (Session 03 of the scalping-active-
+# management plan). ``stddev = exp(0.5 * log_var)`` then spans ~£0.02
+# to ~£7.39 on £100 stakes — covering realistic locked-P&L stddev while
+# keeping ``exp(log_var)`` numerically well-behaved inside the NLL.
+RISK_LOG_VAR_MIN: float = -8.0
+RISK_LOG_VAR_MAX: float = 4.0
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,26 @@ class DiscretePolicyOutput:
         transformer (Phase 1 follow-on): ``(buffer, valid_count)``.
         The exact shape is private to each subclass — only the
         2-tuple-of-tensors contract is shared.
+    fill_prob_per_runner:
+        Sigmoid output of ``fill_prob_head``, shape
+        ``(batch, max_runners)``. Auxiliary BCE-trained per-runner
+        forecast of "will the pair's second leg fill". Phase 7 S01
+        port from v1 — feeds ``actor_head`` via column-concat.
+    mature_prob_per_runner:
+        Sigmoid output of ``mature_prob_head``, shape
+        ``(batch, max_runners)``. Strict per-runner forecast of
+        "will the pair mature naturally OR be closed by agent
+        signal" — force-closed pairs are the negative class. Feeds
+        ``actor_head`` via column-concat.
+    predicted_locked_pnl_per_runner:
+        Mean channel of ``risk_head``, shape ``(batch, max_runners)``.
+        Per-runner predicted locked-P&L. Does NOT feed ``actor_head``;
+        only shapes the shared backbone via the Gaussian NLL gradient.
+    predicted_locked_log_var_per_runner:
+        Log-variance channel of ``risk_head``, shape
+        ``(batch, max_runners)``, clamped to
+        ``[RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX]`` at the forward
+        boundary so NLL consumers never see an unsafe value.
     """
 
     logits: torch.Tensor
@@ -91,6 +122,10 @@ class DiscretePolicyOutput:
     stake_beta: torch.Tensor
     value_per_runner: torch.Tensor
     new_hidden_state: tuple[torch.Tensor, ...]
+    fill_prob_per_runner: torch.Tensor
+    mature_prob_per_runner: torch.Tensor
+    predicted_locked_pnl_per_runner: torch.Tensor
+    predicted_locked_log_var_per_runner: torch.Tensor
 
 
 class BaseDiscretePolicy(nn.Module, abc.ABC):
@@ -221,18 +256,44 @@ class BaseDiscretePolicy(nn.Module, abc.ABC):
 
 
 class DiscreteLSTMPolicy(BaseDiscretePolicy):
-    """Single-layer LSTM baseline for the v2 discrete action space.
+    """Single-layer LSTM for the v2 discrete action space.
 
-    Architecture::
+    Architecture (Phase 7 S01)::
 
         Linear(obs_dim → hidden) → ReLU
         LSTM(hidden, hidden, num_layers=1, batch_first=True)
             → lstm_last : (batch, hidden)
-        Heads (all consume lstm_last):
-            logits_head      : Linear(hidden → action_space.n)
+
+        Auxiliary per-runner heads (all consume lstm_last):
+            fill_prob_head   : Linear(hidden → max_runners)
+            mature_prob_head : Linear(hidden → max_runners)
+            risk_head        : Linear(hidden → max_runners * 2)
+
+        Per-runner actor (feeds the categorical's per-runner classes):
+            runner_slot_embedding : Embedding(max_runners → embed_dim)
+            actor_head            : Sequential(
+                                       Linear(embed + hidden + 2 → mlp),
+                                       ReLU,
+                                       Linear(mlp → 3),
+                                    )
+            input per slot i = [slot_emb_i, lstm_last,
+                                fill_prob_i, mature_prob_i]
+            output per slot i = [OB_i, OL_i, CL_i] logits
+        NOOP logit:
+            noop_head : Linear(hidden → 1)
+        Final logits = cat([NOOP, OB_0..R-1, OL_0..R-1, CL_0..R-1])
+
+        Other heads (unchanged):
             stake_alpha_head : Linear(hidden → 1) → softplus → +1
             stake_beta_head  : Linear(hidden → 1) → softplus → +1
             value_head       : Linear(hidden → max_runners)
+
+    The per-runner actor pathway ports v1's contract: ``fill_prob`` and
+    ``mature_prob`` are concat'd column-wise into the per-runner actor
+    input so the BCE-trained heads' confidence scores feed the action
+    selection for the runner they describe. ``risk_head`` does NOT feed
+    the actor — its only training signal is the Gaussian NLL auxiliary
+    (Phase 7 S02) which shapes the shared LSTM backbone via gradient.
 
     Hidden state ``(h, c)``, each ``(num_layers=1, batch, hidden_size)``
     — the standard ``nn.LSTM`` layout.
@@ -241,18 +302,44 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
     architecture_name = "discrete_lstm_v2"
     description = (
         "v2 discrete-action policy: single-layer LSTM (hidden=128 by "
-        "default), masked categorical over {NOOP, OPEN_BACK_i, "
-        "OPEN_LAY_i, CLOSE_i}, Beta stake head, per-runner value head."
+        "default), per-runner actor MLP fed by fill_prob + mature_prob "
+        "BCE heads, risk head emitting locked-P&L (mean, log_var), "
+        "Beta stake head, per-runner value head."
     )
+
+    DEFAULT_RUNNER_EMBED_DIM: int = 16
+    DEFAULT_ACTOR_MLP_HIDDEN: int = 64
 
     def __init__(
         self,
         obs_dim: int,
         action_space: DiscreteActionSpace,
         hidden_size: int = 128,
+        runner_embed_dim: int | None = None,
+        actor_mlp_hidden: int | None = None,
     ) -> None:
         super().__init__(obs_dim, action_space, hidden_size)
         self.num_layers = 1
+        self.runner_embed_dim = int(
+            runner_embed_dim
+            if runner_embed_dim is not None
+            else self.DEFAULT_RUNNER_EMBED_DIM,
+        )
+        self.actor_mlp_hidden = int(
+            actor_mlp_hidden
+            if actor_mlp_hidden is not None
+            else self.DEFAULT_ACTOR_MLP_HIDDEN,
+        )
+        if self.runner_embed_dim <= 0:
+            raise ValueError(
+                f"runner_embed_dim must be positive, got "
+                f"{self.runner_embed_dim!r}",
+            )
+        if self.actor_mlp_hidden <= 0:
+            raise ValueError(
+                f"actor_mlp_hidden must be positive, got "
+                f"{self.actor_mlp_hidden!r}",
+            )
 
         self.input_proj = nn.Sequential(
             nn.Linear(self.obs_dim, self.hidden_size),
@@ -265,7 +352,38 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             batch_first=True,
         )
 
-        self.logits_head = nn.Linear(self.hidden_size, action_space.n)
+        # Auxiliary per-runner heads (Phase 7 S01).
+        # fill_prob_head + mature_prob_head feed actor_head via
+        # column-concat; risk_head does not (CLAUDE.md "fill_prob feeds
+        # actor_head" / "mature_prob_head feeds actor_head" /
+        # purpose.md §3 risk-head-as-side-channel).
+        self.fill_prob_head = nn.Linear(
+            self.hidden_size, self.max_runners,
+        )
+        self.mature_prob_head = nn.Linear(
+            self.hidden_size, self.max_runners,
+        )
+        self.risk_head = nn.Linear(
+            self.hidden_size, self.max_runners * 2,
+        )
+
+        # Per-runner actor (Phase 7 S01). The flat categorical from
+        # Phase 1 is now produced by stitching: NOOP from noop_head + a
+        # per-runner head producing [OB_i, OL_i, CL_i] per slot. The
+        # per-runner head sees a learned slot embedding so it can
+        # distinguish runner identities (v1 carries a per-slot runner
+        # embedding for the same reason).
+        self.runner_slot_embedding = nn.Embedding(
+            self.max_runners, self.runner_embed_dim,
+        )
+        actor_input_dim = self.runner_embed_dim + self.hidden_size + 2
+        self.actor_head = nn.Sequential(
+            nn.Linear(actor_input_dim, self.actor_mlp_hidden),
+            nn.ReLU(),
+            nn.Linear(self.actor_mlp_hidden, 3),  # [OB, OL, CL]
+        )
+        self.noop_head = nn.Linear(self.hidden_size, 1)
+
         self.stake_alpha_head = nn.Linear(self.hidden_size, 1)
         self.stake_beta_head = nn.Linear(self.hidden_size, 1)
         self.value_head = nn.Linear(self.hidden_size, self.max_runners)
@@ -359,8 +477,57 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         lstm_out, new_hidden = self.lstm(proj, hidden_state)
         lstm_last = lstm_out[:, -1, :]  # (batch, hidden)
 
-        # Categorical head
-        logits = self.logits_head(lstm_last)  # (batch, n)
+        # ── Auxiliary heads (Phase 7 S01) ─────────────────────────────
+        # fill_prob and mature_prob feed actor_head; risk_head does not.
+        fill_logit = self.fill_prob_head(lstm_last)        # (batch, R)
+        mature_logit = self.mature_prob_head(lstm_last)    # (batch, R)
+        fill_prob = torch.sigmoid(fill_logit)
+        mature_prob = torch.sigmoid(mature_logit)
+
+        # Risk head: (batch, R * 2) → (batch, R, 2). Clamp log_var at
+        # the forward boundary so PolicyOutput consumers (UI, parquet,
+        # NLL) never see an unsafe value.
+        risk_out = self.risk_head(lstm_last)
+        risk_out = risk_out.view(batch, self.max_runners, 2)
+        risk_mean = risk_out[..., 0]
+        risk_log_var = risk_out[..., 1].clamp(
+            RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX,
+        )
+
+        # ── Per-runner actor (Phase 7 S01) ────────────────────────────
+        # Build per-runner inputs: [slot_emb_i, lstm_last,
+        # fill_prob_i, mature_prob_i] for each runner i. The two BCE
+        # head outputs are NOT detached — surrogate-loss gradient flows
+        # back through fill_prob_head and mature_prob_head (CLAUDE.md
+        # "fill_prob feeds actor_head" §"Do not detach").
+        slot_idx = torch.arange(self.max_runners, device=lstm_last.device)
+        runner_embs = self.runner_slot_embedding(slot_idx)  # (R, embed)
+        runner_embs = runner_embs.unsqueeze(0).expand(batch, -1, -1)
+        lstm_expanded = lstm_last.unsqueeze(1).expand(
+            -1, self.max_runners, -1,
+        )
+        actor_input = torch.cat(
+            [
+                runner_embs,
+                lstm_expanded,
+                fill_prob.unsqueeze(-1),
+                mature_prob.unsqueeze(-1),
+            ],
+            dim=-1,
+        )  # (batch, R, embed + hidden + 2)
+        per_runner_logits = self.actor_head(actor_input)  # (batch, R, 3)
+        ob_logits = per_runner_logits[..., 0]  # (batch, R)
+        ol_logits = per_runner_logits[..., 1]
+        cl_logits = per_runner_logits[..., 2]
+
+        # NOOP logit (no per-runner conditioning).
+        noop_logit = self.noop_head(lstm_last)  # (batch, 1)
+
+        # Stitch into the flat action layout that DiscreteActionSpace
+        # uses: [NOOP, OB_0..R-1, OL_0..R-1, CL_0..R-1].
+        logits = torch.cat(
+            [noop_logit, ob_logits, ol_logits, cl_logits], dim=-1,
+        )  # (batch, 1 + 3 * R)
         masked_logits = self._apply_mask(logits, mask)
         dist = Categorical(logits=masked_logits)
 
@@ -383,6 +550,10 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             stake_beta=stake_beta,
             value_per_runner=value_per_runner,
             new_hidden_state=new_hidden,
+            fill_prob_per_runner=fill_prob,
+            mature_prob_per_runner=mature_prob,
+            predicted_locked_pnl_per_runner=risk_mean,
+            predicted_locked_log_var_per_runner=risk_log_var,
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────
