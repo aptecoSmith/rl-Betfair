@@ -119,6 +119,7 @@ up findings, decide whether to iterate inside v2 or step back.
 - `phase-1-policy-and-env-wiring/purpose.md` (GREEN, 2026-04-27)
 - `phase-2-trainer/purpose.md` + `findings.md` (AMBER, 2026-04-29)
 - `phase-3-cohort/purpose.md` + 4 session prompts (design-locked, 2026-04-29)
+- `phase-7-port-aux-heads/purpose.md` + `findings.md` (AMBER, 2026-05-04) — three aux heads (`fill_prob_head`, `mature_prob_head`, `risk_head`) ported into the v2 `DiscreteLSTMPolicy` + `DiscretePPOTrainer`. Wiring proven end-to-end (probe loss non-zero, ref loss zero, 26 integration tests pass). Risk-NLL liveness PASS; BCE behavioural-effect gate fails at probe weight 0.5 over 1 generation — follow-up tuning run (mature_prob_loss_weight gene at `[1.0, 5.0]`, 6 generations) is the disambiguator.
 
 ## Lessons carried over from v1
 

@@ -1131,6 +1131,58 @@ investigation that motivated this head.
 
 ---
 
+## v2 stack consumes aux-head loss weights (2026-05-04)
+
+The v2 trainer + policy stack
+(`agents_v2/discrete_policy.py::DiscreteLSTMPolicy` +
+`training_v2/discrete_ppo/trainer.py::DiscretePPOTrainer`) now
+consumes `fill_prob_loss_weight`, `mature_prob_loss_weight`, and
+`risk_loss_weight`. Forward-pass shape, gradient-through
+guarantees, architecture-hash break, and the strict
+mature_prob label semantics carry over verbatim from v1 — see
+§"fill_prob feeds actor_head" and §"mature_prob_head feeds
+actor_head" above. The v1 contract on those heads applies in v2
+unchanged. `risk_head` is per-runner `nn.Linear(hidden,
+max_runners * 2)` with the log-var clamp applied at the forward
+boundary using the v1 `RISK_LOG_VAR_MIN` / `RISK_LOG_VAR_MAX`
+constants ported from `agents/policy_network.py`. It does NOT
+feed actor_input; outputs surface on
+`PolicyOutput.predicted_locked_pnl_per_runner` and
+`predicted_locked_log_var_per_runner` and shape the shared LSTM
+backbone via the Gaussian NLL gradient when
+`risk_loss_weight > 0`. The NLL label per pair is
+`max(0, min(win_pnl, lose_pnl))` after the 0.05 commission;
+naked pairs contribute NaN and are masked out of the NLL term
+(`risk_denom > 0` guard).
+
+**v2-specific worker plumbing (load-bearing).** v1's trainer
+read `hp.get(name, config["reward"][name])` — relying on a
+sparse `hp` dict that omits keys for genes the operator pinned
+cohort-wide. v2's `hp` dict comes from `CohortGenes.to_dict()`,
+which always populates every gene field with its default
+(typically `0.0`), so the v1 fallback would never fire and any
+`--reward-overrides <weight>=<value>` would be silently
+swallowed. The v2 trainer therefore reads from `hp` ONLY (no
+config fallback). `--reward-overrides` for the three aux
+weights is pre-merged into the per-agent `hp` dict by
+`training_v2/cohort/worker.py::_build_trainer_hp` (Path A) so
+the trainer's read returns the override value. Do NOT copy the
+v1 precedence pattern verbatim into v2 — it has a silent-
+swallow failure mode under `CohortGenes.to_dict()` semantics.
+See `plans/rewrite/phase-7-port-aux-heads/lessons_learnt.md`
+for the empirical evidence (cohort
+`v2_phase5_oc1_mpw05_clean5day_1777849498` produced byte-
+identical eval results to its predecessor before this fix).
+
+`mature_prob_loss_weight` gene range is `[1.0, 5.0]` (raised
+2026-05-04 from the original `[0.0, 0.30]`) for the post-S03
+tuning experiment.
+
+See `plans/rewrite/phase-7-port-aux-heads/{purpose,findings,
+lessons_learnt}.md`.
+
+---
+
 ## `info["realised_pnl"]` is last-race-only
 
 **Use `info["day_pnl"]` for the episode's true day P&L.**

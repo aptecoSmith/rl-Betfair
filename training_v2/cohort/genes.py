@@ -25,7 +25,7 @@ naked_loss_scale                 [0.0, 1.0]   uniform         1.0
 stop_loss_pnl_threshold          [0.0, 0.30]  uniform         0.0
 arb_spread_scale                 [0.5, 2.0]   uniform         1.0
 fill_prob_loss_weight            [0.0, 0.30]  uniform         0.0
-mature_prob_loss_weight          [0.0, 0.30]  uniform         0.0
+mature_prob_loss_weight          [1.0, 5.0]   uniform         0.0
 risk_loss_weight                 [0.0, 0.30]  uniform         0.0
 alpha_lr                         [1e-2, 1e-1] log-uniform     1e-2
 reward_clip                      [1.0, 10.0]  uniform         10.0
@@ -61,7 +61,7 @@ NAKED_LOSS_SCALE_RANGE: tuple[float, float] = (0.0, 1.0)
 STOP_LOSS_PNL_THRESHOLD_RANGE: tuple[float, float] = (0.0, 0.30)
 ARB_SPREAD_SCALE_RANGE: tuple[float, float] = (0.5, 2.0)
 FILL_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.30)
-MATURE_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.30)
+MATURE_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (1.0, 5.0)
 RISK_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.30)
 ALPHA_LR_RANGE: tuple[float, float] = (1e-2, 1e-1)
 REWARD_CLIP_RANGE: tuple[float, float] = (1.0, 10.0)
