@@ -155,6 +155,17 @@ class CohortGenes:
     alpha_lr: float = 1e-2
     reward_clip: float = 10.0
 
+    # Phase 8 (added 2026-05-05). BC pretrain knobs. Defaults are
+    # inert — ``bc_pretrain_steps = 0`` is the no-op switch; the other
+    # two are unread when steps == 0. Adding fields with defaults to
+    # the frozen dataclass is backward-compatible at the registry
+    # layer (rows persist via ``to_dict``; old rows missing these keys
+    # round-trip through ``CohortGenes(**existing_dict)`` because every
+    # new field has a default).
+    bc_pretrain_steps: int = 0
+    bc_learning_rate: float = 3e-4
+    bc_target_entropy_warmup_eps: int = 5
+
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
         return {
@@ -176,6 +187,11 @@ class CohortGenes:
             "risk_loss_weight": float(self.risk_loss_weight),
             "alpha_lr": float(self.alpha_lr),
             "reward_clip": float(self.reward_clip),
+            "bc_pretrain_steps": int(self.bc_pretrain_steps),
+            "bc_learning_rate": float(self.bc_learning_rate),
+            "bc_target_entropy_warmup_eps": int(
+                self.bc_target_entropy_warmup_eps,
+            ),
         }
 
 
@@ -213,6 +229,19 @@ def _sample_field(rng: random.Random, field_name: str):
         if field_name in _LOG_UNIFORM_FLOATS:
             return _sample_log_uniform(rng, lo, hi)
         return _sample_uniform(rng, lo, hi)
+    # Phase 8 (2026-05-05). BC pretrain knobs are operator-controlled
+    # (cohort runner ``--bc-pretrain-steps`` flag) rather than
+    # GA-evolved per-agent. Sampling pins them to their pre-S02 inert
+    # defaults so a fresh CohortGenes draw is byte-identical to a
+    # pre-S02 draw at the same seed. If a future plan wants the GA to
+    # explore BC settings, replace these returns with proper random
+    # samplers and add the genes to ``_PHASE5_RANGES``.
+    if field_name == "bc_pretrain_steps":
+        return 0
+    if field_name == "bc_learning_rate":
+        return 3e-4
+    if field_name == "bc_target_entropy_warmup_eps":
+        return 5
     raise KeyError(f"Unknown gene field: {field_name!r}")
 
 

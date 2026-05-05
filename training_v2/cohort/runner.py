@@ -118,6 +118,9 @@ def run_cohort(
     n_eval_days: int | None = None,
     argmax_eval: bool = False,
     per_transition_credit: bool = False,
+    bc_pretrain_steps_override: int | None = None,
+    bc_learning_rate_override: float | None = None,
+    bc_target_entropy_warmup_eps_override: int | None = None,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -285,6 +288,20 @@ def run_cohort(
                             "per_transition_credit=True ignored under "
                             "--batched; flag has no effect on this run.",
                         )
+                    if (
+                        bc_pretrain_steps_override is not None
+                        and int(bc_pretrain_steps_override) > 0
+                    ):
+                        # BC pretrain lives in the sequential per-agent
+                        # path (worker.py); the batched cluster runner
+                        # has not been wired through. Same surface as
+                        # per_transition_credit above — warn so the
+                        # operator knows the flag was a no-op.
+                        logger.warning(
+                            "--bc-pretrain-steps=%d ignored under "
+                            "--batched; flag has no effect on this run.",
+                            int(bc_pretrain_steps_override),
+                        )
                     for k, i in enumerate(idxs):
                         results[i] = cluster_results[k]
                         total_agents_trained += 1
@@ -310,6 +327,11 @@ def run_cohort(
                         enabled_set=enabled_set,
                         argmax_eval=argmax_eval,
                         per_transition_credit=per_transition_credit,
+                        bc_pretrain_steps_override=bc_pretrain_steps_override,
+                        bc_learning_rate_override=bc_learning_rate_override,
+                        bc_target_entropy_warmup_eps_override=(
+                            bc_target_entropy_warmup_eps_override
+                        ),
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -823,6 +845,48 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--bc-pretrain-steps", type=int, default=None, metavar="N",
+        help=(
+            "Phase 8 S02. Cohort-wide pin for ``bc_pretrain_steps``. "
+            "Each agent runs N supervised BC steps on the v2 oracle "
+            "cache against its own training days BEFORE the PPO loop "
+            "starts. Trains only ``actor_head``; the PPO optimiser is "
+            "untouched (separate Adam). Default ``None`` = use each "
+            "agent's per-gene ``bc_pretrain_steps`` value (default 0 "
+            "= no BC = byte-identical to pre-S02). When set, the "
+            "operator's pin overrides any per-agent gene draw "
+            "cohort-wide. Requires populated v2 oracle caches "
+            "(``python -m training_v2.oracle_cli scan --dates ...``); "
+            "missing caches per training day emit a warning and BC "
+            "trains on whatever pool the present caches produce."
+        ),
+    )
+    p.add_argument(
+        "--bc-learning-rate", type=float, default=None, metavar="LR",
+        help=(
+            "Phase 8 S02. Cohort-wide pin for ``bc_learning_rate``. "
+            "Override the gene default (3e-4) for the BC pretrainer's "
+            "Adam optimiser. Independent of the PPO learning rate. "
+            "Operator escape hatch for tuning the BC loss surface "
+            "without code changes — Phase 11 ("
+            "plans/rewrite/phase-11-bc-gene-exploration/) will use "
+            "this flag to sweep values once Phase 8 S03 confirms BC "
+            "helps. Default ``None`` = leave each agent's gene at "
+            "default."
+        ),
+    )
+    p.add_argument(
+        "--bc-target-entropy-warmup-eps", type=int, default=None,
+        metavar="N",
+        help=(
+            "Phase 8 S02. Cohort-wide pin for "
+            "``bc_target_entropy_warmup_eps``. Override the gene "
+            "default (5) for the entropy-controller warmup window. "
+            "Phase 11 sweep target. Default ``None`` = leave each "
+            "agent's gene at default."
+        ),
+    )
+    p.add_argument(
         "--per-transition-credit", action="store_true",
         help=(
             "Phase 9 S02. Replace the per-slot mature_prob BCE label "
@@ -880,6 +944,21 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Eval mode: argmax (deterministic action + Beta.mean stake)")
     if args.per_transition_credit:
         logger.info("Per-transition mature_prob credit: ENABLED")
+    if args.bc_pretrain_steps is not None:
+        logger.info(
+            "BC pretrain: cohort-wide pin %d steps (overrides per-agent gene)",
+            int(args.bc_pretrain_steps),
+        )
+    if args.bc_learning_rate is not None:
+        logger.info(
+            "BC pretrain: cohort-wide pin learning_rate=%g",
+            float(args.bc_learning_rate),
+        )
+    if args.bc_target_entropy_warmup_eps is not None:
+        logger.info(
+            "BC pretrain: cohort-wide pin target_entropy_warmup_eps=%d",
+            int(args.bc_target_entropy_warmup_eps),
+        )
 
     try:
         run_cohort(
@@ -901,6 +980,18 @@ def main(argv: list[str] | None = None) -> int:
             ),
             argmax_eval=bool(args.argmax_eval),
             per_transition_credit=bool(args.per_transition_credit),
+            bc_pretrain_steps_override=(
+                int(args.bc_pretrain_steps)
+                if args.bc_pretrain_steps is not None else None
+            ),
+            bc_learning_rate_override=(
+                float(args.bc_learning_rate)
+                if args.bc_learning_rate is not None else None
+            ),
+            bc_target_entropy_warmup_eps_override=(
+                int(args.bc_target_entropy_warmup_eps)
+                if args.bc_target_entropy_warmup_eps is not None else None
+            ),
         )
     finally:
         if server is not None:

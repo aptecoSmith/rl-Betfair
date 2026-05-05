@@ -168,6 +168,16 @@ class EpisodeStats:
     # is the per-update sum (see ``UpdateLog`` for the exact semantics).
     per_transition_credit_active: bool = False
     n_mature_targets: int = 0
+    # Phase 8 Session 02 — BC entropy-warmup diagnostics. ``post_bc_entropy``
+    # is the value the worker measured immediately after BC and pushed via
+    # :meth:`DiscretePPOTrainer.set_post_bc_entropy`; ``None`` when no BC
+    # ran. ``effective_target_entropy`` is the linear-interp output for
+    # this episode (== ``entropy_coeff`` when warmup inactive).
+    # ``eps_since_bc`` is the post-BC PPO episode counter logged here so
+    # JSONL consumers can plot the warmup trajectory without recomputing.
+    post_bc_entropy: float | None = None
+    effective_target_entropy: float = 0.0
+    eps_since_bc: int = 0
 
 
 # ── Helpers (exported for tests) ───────────────────────────────────────────
@@ -320,6 +330,22 @@ class DiscretePPOTrainer:
             hp.get("per_transition_credit", False)
         )
 
+        # Phase 8 Session 02 — BC pretrain warmup handshake. The v2
+        # trainer doesn't run an SAC-style alpha controller (one is
+        # NOT added in this session — see the session prompt's stop
+        # conditions); these fields and ``_effective_target_entropy``
+        # are surfaced for diagnostic logging and for tests that
+        # validate the linear-interp arithmetic. Per
+        # ``hard_constraints.md §8`` the warmup activates only when
+        # the worker calls ``set_post_bc_entropy`` after a successful
+        # BC pass; absent that call the trainer is byte-identical
+        # to pre-S02.
+        self._post_bc_entropy: float | None = None
+        self._bc_warmup_eps: int = int(
+            hp.get("bc_target_entropy_warmup_eps", 5),
+        )
+        self._eps_since_bc: int = 0
+
         self.policy.to(self.device)
         self.optimiser = torch.optim.Adam(
             self.policy.parameters(), lr=float(learning_rate),
@@ -332,6 +358,40 @@ class DiscretePPOTrainer:
         )
 
     # ── Public API ─────────────────────────────────────────────────────────
+
+    def set_post_bc_entropy(self, entropy: float) -> None:
+        """Activate the BC entropy-warmup handshake.
+
+        Called by the worker immediately after a successful BC pass.
+        Resets the per-rollout episode counter so the linear interp
+        starts at episode 0. Calling this with a sentinel ``None`` (or
+        without calling it at all) leaves the trainer in pre-S02
+        byte-identical mode (``_effective_target_entropy`` returns the
+        constant ``self.entropy_coeff``).
+        """
+        self._post_bc_entropy = float(entropy)
+        self._eps_since_bc = 0
+
+    def _effective_target_entropy(self) -> float:
+        """Linear interp from ``_post_bc_entropy`` to ``entropy_coeff``.
+
+        Diagnostic only — no PPO code path consumes this value (the v2
+        trainer has no entropy controller in this session). Logged on
+        :class:`EpisodeStats` so the per-episode JSONL surfaces the
+        warmup trajectory; the coefficient consumed by the surrogate
+        loss stays at ``self.entropy_coeff``.
+        """
+        if self._post_bc_entropy is None:
+            return float(self.entropy_coeff)
+        if self._bc_warmup_eps <= 0:
+            return float(self.entropy_coeff)
+        if self._eps_since_bc >= self._bc_warmup_eps:
+            return float(self.entropy_coeff)
+        frac = float(self._eps_since_bc) / float(self._bc_warmup_eps)
+        return (
+            float(self._post_bc_entropy)
+            + frac * (float(self.entropy_coeff) - float(self._post_bc_entropy))
+        )
 
     def train_episode(self) -> EpisodeStats:
         """Run one episode → GAE → PPO update; return per-episode stats."""
@@ -436,6 +496,11 @@ class DiscretePPOTrainer:
         )
 
         wall = time.perf_counter() - t0
+        # Capture warmup state BEFORE the post-episode increment, so
+        # the first BC-warmup episode logs ``eps_since_bc = 0`` and
+        # ``effective_target_entropy = post_bc_entropy``.
+        effective_te = self._effective_target_entropy()
+        eps_since_bc_now = int(self._eps_since_bc)
         stats = EpisodeStats(
             total_reward=total_reward,
             n_steps=n_steps,
@@ -458,7 +523,16 @@ class DiscretePPOTrainer:
             risk_nll_mean=update_log.risk_nll_mean,
             per_transition_credit_active=self.per_transition_credit,
             n_mature_targets=update_log.n_mature_targets,
+            post_bc_entropy=self._post_bc_entropy,
+            effective_target_entropy=effective_te,
+            eps_since_bc=eps_since_bc_now,
         )
+        # Tick the post-BC counter for the NEXT episode. The increment
+        # is gated on ``_post_bc_entropy is not None`` so non-BC runs
+        # leave the counter at 0 (cosmetic; nothing reads it on those
+        # runs).
+        if self._post_bc_entropy is not None:
+            self._eps_since_bc += 1
         logger.info(
             "DiscretePPOTrainer episode: n_steps=%d n_updates=%d "
             "policy_loss=%.4f value_loss=%.4f entropy=%.4f "

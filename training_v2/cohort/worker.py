@@ -55,6 +55,11 @@ from training_v2.cohort.genes import (
     CohortGenes,
     assert_in_range,
 )
+from training_v2.discrete_ppo.bc_pretrain import (
+    DiscreteBCPretrainer,
+    load_oracle_samples_for_dates,
+    measure_post_bc_entropy,
+)
 from training_v2.discrete_ppo.rollout import RolloutCollector
 from training_v2.discrete_ppo.trainer import DiscretePPOTrainer, EpisodeStats
 
@@ -589,6 +594,9 @@ def train_one_agent(
     enabled_set: frozenset[str] = frozenset(),
     argmax_eval: bool = False,
     per_transition_credit: bool = False,
+    bc_pretrain_steps_override: int | None = None,
+    bc_learning_rate_override: float | None = None,
+    bc_target_entropy_warmup_eps_override: int | None = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -716,6 +724,69 @@ def train_one_agent(
         device=device,
         hp=trainer_hp,
     )
+
+    # ── Phase 8 S02: BC pretrain (optional) ──────────────────────────
+    # Runs BEFORE the day loop, in-place on ``policy``. The
+    # ``bc_pretrain_steps_override`` from the cohort runner pins the
+    # per-agent gene cohort-wide; absent the override each agent uses
+    # its own ``genes.bc_pretrain_steps`` (default 0 = no-op,
+    # byte-identical to pre-S02). The PPO optimiser already exists
+    # but its state is untouched by BC — the BC pretrainer holds its
+    # own Adam over actor_head parameters only and the per-param
+    # freeze restores ``requires_grad=True`` on exit.
+    bc_steps = (
+        int(bc_pretrain_steps_override)
+        if bc_pretrain_steps_override is not None
+        else int(getattr(genes, "bc_pretrain_steps", 0))
+    )
+    if bc_steps > 0:
+        bc_lr = (
+            float(bc_learning_rate_override)
+            if bc_learning_rate_override is not None
+            else float(getattr(genes, "bc_learning_rate", 3e-4))
+        )
+        bc_warmup_eps = (
+            int(bc_target_entropy_warmup_eps_override)
+            if bc_target_entropy_warmup_eps_override is not None
+            else int(getattr(genes, "bc_target_entropy_warmup_eps", 5))
+        )
+        # Push the operator's override into the trainer's warmup
+        # state — it was constructed reading the gene default. Skip
+        # when no override (gene default already in place).
+        if bc_target_entropy_warmup_eps_override is not None:
+            trainer._bc_warmup_eps = bc_warmup_eps
+        bc_samples = load_oracle_samples_for_dates(
+            dates=list(days_to_train),
+            data_dir=data_dir,
+            expected_obs_dim=int(shim.obs_dim),
+        )
+        if not bc_samples:
+            logger.warning(
+                "Agent %s: bc_pretrain_steps=%d but no oracle samples "
+                "loaded across %d training day(s); skipping BC. Run "
+                "`python -m training_v2.oracle_cli scan --dates %s` "
+                "to populate caches.",
+                agent_id, bc_steps, len(days_to_train),
+                ",".join(days_to_train),
+            )
+        else:
+            bc_history = DiscreteBCPretrainer(
+                lr=bc_lr, batch_size=64, seed=int(seed),
+            ).pretrain(
+                policy=policy,
+                samples=bc_samples,
+                n_steps=bc_steps,
+            )
+            post_bc_entropy = measure_post_bc_entropy(policy, bc_samples)
+            trainer.set_post_bc_entropy(post_bc_entropy)
+            logger.info(
+                "Agent %s: BC pretrain done — steps=%d samples=%d "
+                "final_ce=%.4f post_entropy=%.3f (warmup_eps=%d, "
+                "bc_lr=%g)",
+                agent_id, bc_steps, len(bc_samples),
+                bc_history.final_ce_loss, post_bc_entropy,
+                bc_warmup_eps, bc_lr,
+            )
 
     arch_name = arch_name_for_genes(genes)
     if event_emitter is not None:

@@ -196,6 +196,13 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             "stop_loss_pnl_threshold", "arb_spread_scale",
             "fill_prob_loss_weight", "mature_prob_loss_weight",
             "risk_loss_weight", "alpha_lr", "reward_clip",
+            # Phase 8 (added 2026-05-05). Operator-controlled via the
+            # runner's ``--bc-pretrain-steps`` flag, not GA-evolved.
+            # Always present in the persisted gene dict at their pinned
+            # defaults (0 / 3e-4 / 5) so registry rows have a stable
+            # schema and downstream tooling can read them uniformly.
+            "bc_pretrain_steps", "bc_learning_rate",
+            "bc_target_entropy_warmup_eps",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2

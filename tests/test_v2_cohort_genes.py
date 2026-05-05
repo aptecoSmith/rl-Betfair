@@ -329,15 +329,22 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_18_fields(self):
+    def test_to_dict_serialises_all_21_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
-        # 7 legacy + 11 Phase 5
-        assert len(d) == 18
+        # 7 legacy + 11 Phase 5 + 3 Phase 8 BC genes
+        assert len(d) == 21
         for name in PHASE5_GENE_NAMES:
             assert name in d
             assert isinstance(d[name], float)
+        # Phase 8 BC genes — pinned defaults at sample time, not
+        # GA-evolved (operator controls them via the runner's
+        # ``--bc-pretrain-steps`` flag instead).
+        assert d["bc_pretrain_steps"] == 0
+        assert isinstance(d["bc_pretrain_steps"], int)
+        assert d["bc_learning_rate"] == pytest.approx(3e-4)
+        assert d["bc_target_entropy_warmup_eps"] == 5
 
     def test_phase5_gene_names_set_size(self):
         assert len(PHASE5_GENE_NAMES) == 11
