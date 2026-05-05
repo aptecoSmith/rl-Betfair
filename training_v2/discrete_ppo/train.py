@@ -251,25 +251,49 @@ def select_days(
     data_dir: Path,
     n_days: int,
     day_shuffle_seed: int,
-) -> tuple[list[str], str]:
-    """Pick the training days + the held-out eval day.
+    n_eval_days: int | None = None,
+) -> tuple[list[str], list[str]]:
+    """Pick the training days + the held-out eval days.
 
-    Strategy (locked by Session 02 prompt §1):
+    Strategy:
 
     1. Enumerate ``YYYY-MM-DD.parquet`` under ``data_dir``.
     2. Sort lexicographically (chronological for ISO dates) and take
        the last ``n_days`` (most recent).
-    3. Hold out the LAST date as the Phase-3 cohort eval day.
-    4. Shuffle the remaining ``n_days - 1`` with
-       ``random.Random(day_shuffle_seed).shuffle(...)``.
+    3. Hold out the LAST ``n_eval_days`` dates as the cohort eval set.
+    4. Shuffle the remaining ``n_days - n_eval_days`` training days
+       with ``random.Random(day_shuffle_seed).shuffle(...)``.
 
-    Returns ``(training_days, eval_day)`` where ``training_days`` has
-    length ``n_days - 1`` and ``eval_day`` is the held-out date.
+    Default ``n_eval_days = n_days // 2`` so a 7-day window splits as
+    4 train + 3 eval (training gets the bigger half on odd ``n_days``).
+    This restores the v1 behaviour of evaluating across multiple days
+    to average out per-day naked-pnl variance — the 2026-05-05
+    investigation found that single-day evaluation had ~£200 of naked-
+    luck spread on identical-gene agents, dominating the cash signal
+    the GA was supposed to select on.
+
+    ``n_eval_days = 1`` reproduces the pre-2026-05-05 single-eval-day
+    behaviour for byte-identical comparisons.
+
+    Returns ``(training_days, eval_days)`` where ``training_days`` has
+    length ``n_days - n_eval_days`` and ``eval_days`` has length
+    ``n_eval_days``.
     """
     if n_days < 2:
         raise ValueError(
             f"--days {n_days} must be >= 2 (one training day + one held-out "
             "eval day). Use --day for single-day runs.",
+        )
+    if n_eval_days is None:
+        n_eval_days = n_days // 2
+    if n_eval_days < 1:
+        raise ValueError(
+            f"n_eval_days must be >= 1, got {n_eval_days}",
+        )
+    if n_eval_days >= n_days:
+        raise ValueError(
+            f"n_eval_days={n_eval_days} must be < n_days={n_days} so at "
+            "least one training day remains.",
         )
     available = _enumerate_day_files(data_dir)
     if len(available) < n_days:
@@ -278,11 +302,11 @@ def select_days(
             f"day-files found under {data_dir}.",
         )
     selected = available[-n_days:]
-    eval_day = selected[-1]
-    training = list(selected[:-1])
+    eval_days = list(selected[-n_eval_days:])
+    training = list(selected[:-n_eval_days])
     rng = random.Random(int(day_shuffle_seed))
     rng.shuffle(training)
-    return training, eval_day
+    return training, eval_days
 
 
 def _build_env_for_day(
@@ -427,11 +451,13 @@ def main(
 
     # ── Day selection ─────────────────────────────────────────────────────
     if days is not None:
-        training_days, eval_day = select_days(
+        training_days, eval_days_list = select_days(
             data_dir=data_dir,
             n_days=int(days),
             day_shuffle_seed=int(day_shuffle_seed),
+            n_eval_days=1,  # standalone single-agent mode keeps single-eval
         )
+        eval_day = eval_days_list[0]
         logger.info(
             "Multi-day mode: training on %d days, holding out %s for eval. "
             "Order: %s", len(training_days), eval_day, training_days,

@@ -138,7 +138,24 @@ class TrainSummary:
 
 @dataclass(frozen=True)
 class EvalSummary:
-    """Eval-day metrics from the rollout-only pass."""
+    """Eval-day metrics from the rollout-only pass.
+
+    When the cohort runs ``--n-eval-days N > 1``, the worker evaluates
+    the trained policy against each held-out day independently and
+    builds a single aggregate ``EvalSummary`` via :func:`aggregate_eval_summaries`
+    — every numeric field becomes the MEAN across the N per-day
+    summaries. ``eval_day`` carries the FIRST eval-day date string
+    (kept as a string for backward-compat with the single-eval-day
+    callers / scoreboard schema); ``per_day`` carries the unaggregated
+    list when N > 1.
+
+    The mean choice keeps fields' interpretation stable across runs
+    with different ``n_eval_days`` settings — a reported ``day_pnl=-£50``
+    means "expected to lose £50 per held-out day" regardless of how many
+    eval days were evaluated. ``composite_score = total_reward + w *
+    (arbs_completed + arbs_closed)`` then represents per-day skill, not
+    a sum that scales with eval-budget choice.
+    """
 
     eval_day: str
     total_reward: float
@@ -164,6 +181,108 @@ class EvalSummary:
     force_closed_pnl: float = 0.0
     stop_closed_pnl: float = 0.0
     wall_time_sec: float = 0.0
+    per_day: list["EvalSummary"] = field(default_factory=list)
+
+
+def aggregate_eval_summaries(
+    summaries: list[EvalSummary],
+) -> EvalSummary:
+    """Combine N per-day eval summaries into a single mean-aggregate.
+
+    All numeric fields are MEANED across the input summaries (counts
+    too — ``bet_count=421`` on a 3-day aggregate means "421 bets per
+    day on average"). ``action_histogram`` keys are union-merged with
+    summed counts then divided by N. ``profitable`` is True iff the
+    MEAN ``day_pnl`` is positive. ``eval_day`` is set to the FIRST
+    summary's eval_day for backward-compat with the single-string field;
+    callers needing the full date list should read ``per_day``.
+
+    A single-element input is returned with ``per_day=[input]`` (so the
+    aggregate carries the same data and the caller can still introspect
+    the per-day list uniformly).
+
+    Implementation notes:
+    - ``bet_precision`` is recomputed from MEAN(winning_bets) /
+      MEAN(bet_count) so it's a valid ratio rather than a mean of
+      ratios (which would be biased by per-day denominator differences).
+    - ``pnl_per_bet`` similarly recomputed from MEAN(day_pnl) /
+      MEAN(bet_count).
+    - ``wall_time_sec`` is SUMMED (operator wants total compute spent,
+      not "per-day wall").
+    """
+    if not summaries:
+        raise ValueError("aggregate_eval_summaries: empty input")
+    if len(summaries) == 1:
+        s = summaries[0]
+        # Wrap in per_day list so downstream code can iterate uniformly.
+        return EvalSummary(
+            eval_day=s.eval_day, total_reward=s.total_reward,
+            day_pnl=s.day_pnl, n_steps=s.n_steps,
+            bet_count=s.bet_count, winning_bets=s.winning_bets,
+            bet_precision=s.bet_precision, pnl_per_bet=s.pnl_per_bet,
+            early_picks=s.early_picks, profitable=s.profitable,
+            action_histogram=dict(s.action_histogram),
+            arbs_completed=s.arbs_completed, arbs_naked=s.arbs_naked,
+            arbs_closed=s.arbs_closed,
+            arbs_force_closed=s.arbs_force_closed,
+            arbs_stop_closed=s.arbs_stop_closed,
+            arbs_target_pnl_refused=s.arbs_target_pnl_refused,
+            pairs_opened=s.pairs_opened,
+            locked_pnl=s.locked_pnl, naked_pnl=s.naked_pnl,
+            closed_pnl=s.closed_pnl,
+            force_closed_pnl=s.force_closed_pnl,
+            stop_closed_pnl=s.stop_closed_pnl,
+            wall_time_sec=s.wall_time_sec,
+            per_day=[s],
+        )
+
+    n = len(summaries)
+    mean = lambda attr: sum(getattr(s, attr) for s in summaries) / n
+    total = lambda attr: sum(getattr(s, attr) for s in summaries)
+
+    merged_hist: dict[str, float] = {}
+    for s in summaries:
+        for k, v in s.action_histogram.items():
+            merged_hist[k] = merged_hist.get(k, 0.0) + v
+    mean_hist = {k: int(round(v / n)) for k, v in merged_hist.items()}
+
+    mean_winning = mean("winning_bets")
+    mean_bet_count = mean("bet_count")
+    mean_day_pnl = mean("day_pnl")
+    bet_precision = (
+        mean_winning / mean_bet_count if mean_bet_count > 0 else 0.0
+    )
+    pnl_per_bet = (
+        mean_day_pnl / mean_bet_count if mean_bet_count > 0 else 0.0
+    )
+
+    return EvalSummary(
+        eval_day=summaries[0].eval_day,
+        total_reward=mean("total_reward"),
+        day_pnl=mean_day_pnl,
+        n_steps=int(round(mean("n_steps"))),
+        bet_count=int(round(mean_bet_count)),
+        winning_bets=int(round(mean_winning)),
+        bet_precision=bet_precision,
+        pnl_per_bet=pnl_per_bet,
+        early_picks=int(round(mean("early_picks"))),
+        profitable=mean_day_pnl > 0.0,
+        action_histogram=mean_hist,
+        arbs_completed=int(round(mean("arbs_completed"))),
+        arbs_naked=int(round(mean("arbs_naked"))),
+        arbs_closed=int(round(mean("arbs_closed"))),
+        arbs_force_closed=int(round(mean("arbs_force_closed"))),
+        arbs_stop_closed=int(round(mean("arbs_stop_closed"))),
+        arbs_target_pnl_refused=int(round(mean("arbs_target_pnl_refused"))),
+        pairs_opened=int(round(mean("pairs_opened"))),
+        locked_pnl=mean("locked_pnl"),
+        naked_pnl=mean("naked_pnl"),
+        closed_pnl=mean("closed_pnl"),
+        force_closed_pnl=mean("force_closed_pnl"),
+        stop_closed_pnl=mean("stop_closed_pnl"),
+        wall_time_sec=total("wall_time_sec"),
+        per_day=list(summaries),
+    )
 
 
 @dataclass(frozen=True)
@@ -452,7 +571,8 @@ def train_one_agent(
     agent_id: str,
     genes: CohortGenes,
     days_to_train: list[str],
-    eval_day: str,
+    eval_days: list[str] | None = None,
+    eval_day: str | None = None,  # legacy single-day kwarg
     data_dir: Path,
     device: str,
     seed: int,
@@ -468,7 +588,7 @@ def train_one_agent(
     reward_overrides: dict | None = None,
     enabled_set: frozenset[str] = frozenset(),
 ) -> AgentResult:
-    """Train one agent through ``days_to_train`` and eval on ``eval_day``.
+    """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
     Parameters
     ----------
@@ -511,6 +631,17 @@ def train_one_agent(
     assert_in_range(genes)
     if not days_to_train:
         raise ValueError("days_to_train must contain at least one date.")
+    # Accept legacy ``eval_day=...`` kwarg (single string) for backward
+    # compat with existing callers and the integration-test stub.
+    if eval_days is None:
+        if eval_day is None:
+            raise ValueError(
+                "Either eval_days (list) or eval_day (single string) "
+                "must be provided.",
+            )
+        eval_days = [str(eval_day)]
+    if not eval_days:
+        raise ValueError("eval_days must contain at least one date.")
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -694,60 +825,86 @@ def train_one_agent(
         per_day_rows=per_day_rows,
     )
 
-    # ── Eval rollout (no PPO update) ────────────────────────────────
-    eval_t0 = time.perf_counter()
-    logger.info("Agent %s: eval rollout on held-out day %s", agent_id, eval_day)
-    _, eval_shim = _build_env_for_day(
-        day_str=eval_day, data_dir=data_dir, cfg=cfg,
-        scorer_dir=scorer_dir,
-        reward_overrides=per_agent_reward_overrides,
-        scalping_overrides=per_agent_scalping_overrides,
-    )
-    eval_collector = RolloutCollector(
-        shim=eval_shim, policy=policy, device=device,
-    )
-    eval_batch = eval_collector.collect_episode()
-    eval_summary_partial = _eval_rollout_stats(
-        batch=eval_batch,
-        last_info=eval_collector.last_info,
-        action_space=eval_shim.action_space,
-    )
-    eval_wall = time.perf_counter() - eval_t0
-    eval_summary = EvalSummary(
-        eval_day=eval_day,
-        total_reward=eval_summary_partial.total_reward,
-        day_pnl=eval_summary_partial.day_pnl,
-        n_steps=eval_summary_partial.n_steps,
-        bet_count=eval_summary_partial.bet_count,
-        winning_bets=eval_summary_partial.winning_bets,
-        bet_precision=eval_summary_partial.bet_precision,
-        pnl_per_bet=eval_summary_partial.pnl_per_bet,
-        early_picks=eval_summary_partial.early_picks,
-        profitable=eval_summary_partial.profitable,
-        action_histogram=eval_summary_partial.action_histogram,
-        arbs_completed=eval_summary_partial.arbs_completed,
-        arbs_naked=eval_summary_partial.arbs_naked,
-        arbs_closed=eval_summary_partial.arbs_closed,
-        arbs_force_closed=eval_summary_partial.arbs_force_closed,
-        arbs_stop_closed=eval_summary_partial.arbs_stop_closed,
-        arbs_target_pnl_refused=eval_summary_partial.arbs_target_pnl_refused,
-        pairs_opened=eval_summary_partial.pairs_opened,
-        locked_pnl=eval_summary_partial.locked_pnl,
-        naked_pnl=eval_summary_partial.naked_pnl,
-        closed_pnl=eval_summary_partial.closed_pnl,
-        force_closed_pnl=eval_summary_partial.force_closed_pnl,
-        stop_closed_pnl=eval_summary_partial.stop_closed_pnl,
-        wall_time_sec=eval_wall,
-    )
-    logger.info(
-        "Agent %s eval [%s] reward=%+.3f pnl=%+.2f bets=%d "
-        "precision=%.3f arbs=%d/%d locked=%+.2f naked=%+.2f wall=%.1fs",
-        agent_id, eval_day, eval_summary.total_reward,
-        eval_summary.day_pnl, eval_summary.bet_count,
-        eval_summary.bet_precision, eval_summary.arbs_completed,
-        eval_summary.arbs_naked, eval_summary.locked_pnl,
-        eval_summary.naked_pnl, eval_summary.wall_time_sec,
-    )
+    # ── Eval rollouts (no PPO update) ───────────────────────────────
+    # When ``eval_days`` has more than one date, we run an eval rollout
+    # against each day independently and then aggregate the per-day
+    # summaries into a single mean-aggregate. This averages out the
+    # per-day naked-pnl variance that dominated the 2026-05-05
+    # 24-agent cohort's signal (~£200 day_pnl spread on identical-gene
+    # agents from naked-luck alone).
+    per_day_summaries: list[EvalSummary] = []
+    for ed in eval_days:
+        eval_t0 = time.perf_counter()
+        logger.info(
+            "Agent %s: eval rollout on held-out day %s", agent_id, ed,
+        )
+        _, eval_shim = _build_env_for_day(
+            day_str=ed, data_dir=data_dir, cfg=cfg,
+            scorer_dir=scorer_dir,
+            reward_overrides=per_agent_reward_overrides,
+            scalping_overrides=per_agent_scalping_overrides,
+        )
+        eval_collector = RolloutCollector(
+            shim=eval_shim, policy=policy, device=device,
+        )
+        eval_batch = eval_collector.collect_episode()
+        eval_summary_partial = _eval_rollout_stats(
+            batch=eval_batch,
+            last_info=eval_collector.last_info,
+            action_space=eval_shim.action_space,
+        )
+        eval_wall = time.perf_counter() - eval_t0
+        per_day_summaries.append(EvalSummary(
+            eval_day=ed,
+            total_reward=eval_summary_partial.total_reward,
+            day_pnl=eval_summary_partial.day_pnl,
+            n_steps=eval_summary_partial.n_steps,
+            bet_count=eval_summary_partial.bet_count,
+            winning_bets=eval_summary_partial.winning_bets,
+            bet_precision=eval_summary_partial.bet_precision,
+            pnl_per_bet=eval_summary_partial.pnl_per_bet,
+            early_picks=eval_summary_partial.early_picks,
+            profitable=eval_summary_partial.profitable,
+            action_histogram=eval_summary_partial.action_histogram,
+            arbs_completed=eval_summary_partial.arbs_completed,
+            arbs_naked=eval_summary_partial.arbs_naked,
+            arbs_closed=eval_summary_partial.arbs_closed,
+            arbs_force_closed=eval_summary_partial.arbs_force_closed,
+            arbs_stop_closed=eval_summary_partial.arbs_stop_closed,
+            arbs_target_pnl_refused=eval_summary_partial.arbs_target_pnl_refused,
+            pairs_opened=eval_summary_partial.pairs_opened,
+            locked_pnl=eval_summary_partial.locked_pnl,
+            naked_pnl=eval_summary_partial.naked_pnl,
+            closed_pnl=eval_summary_partial.closed_pnl,
+            force_closed_pnl=eval_summary_partial.force_closed_pnl,
+            stop_closed_pnl=eval_summary_partial.stop_closed_pnl,
+            wall_time_sec=eval_wall,
+        ))
+        logger.info(
+            "Agent %s eval [%s] reward=%+.3f pnl=%+.2f bets=%d "
+            "precision=%.3f arbs=%d/%d locked=%+.2f naked=%+.2f wall=%.1fs",
+            agent_id, ed, per_day_summaries[-1].total_reward,
+            per_day_summaries[-1].day_pnl, per_day_summaries[-1].bet_count,
+            per_day_summaries[-1].bet_precision,
+            per_day_summaries[-1].arbs_completed,
+            per_day_summaries[-1].arbs_naked,
+            per_day_summaries[-1].locked_pnl,
+            per_day_summaries[-1].naked_pnl,
+            per_day_summaries[-1].wall_time_sec,
+        )
+
+    eval_summary = aggregate_eval_summaries(per_day_summaries)
+    if len(eval_days) > 1:
+        logger.info(
+            "Agent %s eval AGGREGATE across %d days: "
+            "reward=%+.3f pnl=%+.2f bets=%d arbs=%d/%d locked=%+.2f "
+            "naked=%+.2f (wall_sum=%.1fs)",
+            agent_id, len(eval_days),
+            eval_summary.total_reward, eval_summary.day_pnl,
+            eval_summary.bet_count, eval_summary.arbs_completed,
+            eval_summary.arbs_naked, eval_summary.locked_pnl,
+            eval_summary.naked_pnl, eval_summary.wall_time_sec,
+        )
 
     # ── Registry writes ─────────────────────────────────────────────
     weights_path = ""
@@ -762,36 +919,37 @@ def train_one_agent(
         run_id = model_store.create_evaluation_run(
             model_id=model_id,
             train_cutoff_date=days_to_train[-1],
-            test_days=[eval_day],
+            test_days=list(eval_days),
         )
-        model_store.record_evaluation_day(EvaluationDayRecord(
-            run_id=run_id,
-            date=eval_day,
-            day_pnl=eval_summary.day_pnl,
-            bet_count=eval_summary.bet_count,
-            winning_bets=eval_summary.winning_bets,
-            bet_precision=eval_summary.bet_precision,
-            pnl_per_bet=eval_summary.pnl_per_bet,
-            early_picks=eval_summary.early_picks,
-            profitable=eval_summary.profitable,
-            starting_budget=float(starting_budget),
-            arbs_completed=eval_summary.arbs_completed,
-            arbs_naked=eval_summary.arbs_naked,
-            locked_pnl=eval_summary.locked_pnl,
-            naked_pnl=eval_summary.naked_pnl,
-            # Cohort-visibility S01b (2026-05-02): persist the post-
-            # arb-signal-cleanup / force-close-architecture per-pair
-            # lifecycle counters so SQLite readers (peek tools, future
-            # UI panels) see the full breakdown live.
-            arbs_closed=eval_summary.arbs_closed,
-            arbs_force_closed=eval_summary.arbs_force_closed,
-            arbs_stop_closed=eval_summary.arbs_stop_closed,
-            arbs_target_pnl_refused=eval_summary.arbs_target_pnl_refused,
-            pairs_opened=eval_summary.pairs_opened,
-            closed_pnl=eval_summary.closed_pnl,
-            force_closed_pnl=eval_summary.force_closed_pnl,
-            stop_closed_pnl=eval_summary.stop_closed_pnl,
-        ))
+        # Persist one EvaluationDayRecord per eval day. peek_cohort
+        # already aggregates the per-day rows when summarising —
+        # writing them per-day keeps the registry's lineage detail
+        # intact rather than collapsing to a single row of means.
+        for per_day in eval_summary.per_day or [eval_summary]:
+            model_store.record_evaluation_day(EvaluationDayRecord(
+                run_id=run_id,
+                date=per_day.eval_day,
+                day_pnl=per_day.day_pnl,
+                bet_count=per_day.bet_count,
+                winning_bets=per_day.winning_bets,
+                bet_precision=per_day.bet_precision,
+                pnl_per_bet=per_day.pnl_per_bet,
+                early_picks=per_day.early_picks,
+                profitable=per_day.profitable,
+                starting_budget=float(starting_budget),
+                arbs_completed=per_day.arbs_completed,
+                arbs_naked=per_day.arbs_naked,
+                locked_pnl=per_day.locked_pnl,
+                naked_pnl=per_day.naked_pnl,
+                arbs_closed=per_day.arbs_closed,
+                arbs_force_closed=per_day.arbs_force_closed,
+                arbs_stop_closed=per_day.arbs_stop_closed,
+                arbs_target_pnl_refused=per_day.arbs_target_pnl_refused,
+                pairs_opened=per_day.pairs_opened,
+                closed_pnl=per_day.closed_pnl,
+                force_closed_pnl=per_day.force_closed_pnl,
+                stop_closed_pnl=per_day.stop_closed_pnl,
+            ))
         # Composite score = eval-day total_reward. Phase 3 keeps the
         # ranking simple; Session 04 may add a multi-component score.
         model_store.update_composite_score(

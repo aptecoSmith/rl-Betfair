@@ -127,36 +127,41 @@ def test_day_has_any_winner_data_falls_back_to_true_on_unreadable(
     assert train_mod._day_has_any_winner_data(bad) is True
 
 
-def test_select_days_holds_out_last_and_shuffles_rest(tmp_path: Path) -> None:
-    """Training = N-1 deterministically-shuffled; eval = most recent."""
-    # 8 days; ``--days 5`` → take last 5, hold out 2026-04-25 as eval,
-    # shuffle the remaining 4 deterministically.
+def test_select_days_holds_out_last_n_and_shuffles_rest(tmp_path: Path) -> None:
+    """Default 50/50 split: eval = last N//2 days, training = rest shuffled.
+
+    For ``--days 5`` default split is ``n_eval_days = 5 // 2 = 2``, so
+    eval = ['2026-04-24', '2026-04-25'] and training = the 3 earlier
+    dates shuffled. The 2026-05-05 ``select_days`` change restored v1's
+    50/50-with-extra-to-training default to mitigate per-day naked-pnl
+    variance.
+    """
     for d in [
         "2026-04-18", "2026-04-19", "2026-04-20", "2026-04-21",
         "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-25",
     ]:
         (tmp_path / f"{d}.parquet").write_bytes(b"")
 
-    training, eval_day = train_mod.select_days(
+    training, eval_days = train_mod.select_days(
         data_dir=tmp_path, n_days=5, day_shuffle_seed=42,
     )
-    assert eval_day == "2026-04-25", "most recent date must be held out"
-    assert len(training) == 4, "training set is N-1 days"
-    # Eval day never appears in training.
-    assert eval_day not in training
-    # The four training candidates were 2026-04-21..04-24 — not the older
-    # files (which are out of the most-recent-N window).
-    assert sorted(training) == [
-        "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24",
-    ]
+    assert eval_days == ["2026-04-24", "2026-04-25"], (
+        "default split: eval = last n_days // 2 in chronological order"
+    )
+    assert len(training) == 3, "training set is N - n_eval_days = 5 - 2 = 3"
+    # Eval days never appear in training.
+    for ed in eval_days:
+        assert ed not in training
+    # Training candidates were 2026-04-21..04-23 — older files are out of
+    # the most-recent-N window.
+    assert sorted(training) == ["2026-04-21", "2026-04-22", "2026-04-23"]
     # Determinism: same seed → same order.
     training_again, _ = train_mod.select_days(
         data_dir=tmp_path, n_days=5, day_shuffle_seed=42,
     )
     assert training == training_again
     # Different seed → at least one different ordering across the
-    # 4! = 24 permutations (sanity check that the seed actually drives
-    # the shuffle rather than no-op).
+    # 3! = 6 permutations.
     seen = {tuple(training)}
     for s in range(1, 50):
         t, _ = train_mod.select_days(
@@ -166,6 +171,39 @@ def test_select_days_holds_out_last_and_shuffles_rest(tmp_path: Path) -> None:
     assert len(seen) > 1, (
         "shuffle is not seed-driven — every seed produced the same order"
     )
+
+
+def test_select_days_n_eval_days_override(tmp_path: Path) -> None:
+    """Operator can override the default split with ``n_eval_days=N``."""
+    for d in [
+        "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-25",
+    ]:
+        (tmp_path / f"{d}.parquet").write_bytes(b"")
+
+    # Pre-2026-05-05 single-eval behaviour:
+    training, eval_days = train_mod.select_days(
+        data_dir=tmp_path, n_days=4, day_shuffle_seed=0, n_eval_days=1,
+    )
+    assert eval_days == ["2026-04-25"]
+    assert len(training) == 3
+
+    # Three eval days:
+    training, eval_days = train_mod.select_days(
+        data_dir=tmp_path, n_days=4, day_shuffle_seed=0, n_eval_days=3,
+    )
+    assert eval_days == ["2026-04-23", "2026-04-24", "2026-04-25"]
+    assert len(training) == 1
+    assert training == ["2026-04-22"]
+
+
+def test_select_days_n_eval_days_must_leave_training(tmp_path: Path) -> None:
+    """``n_eval_days >= n_days`` is rejected — at least one train day."""
+    for d in ["2026-04-24", "2026-04-25"]:
+        (tmp_path / f"{d}.parquet").write_bytes(b"")
+    with pytest.raises(ValueError, match="< n_days"):
+        train_mod.select_days(
+            data_dir=tmp_path, n_days=2, day_shuffle_seed=0, n_eval_days=2,
+        )
 
 
 def test_select_days_rejects_n_under_2(tmp_path: Path) -> None:
@@ -207,10 +245,14 @@ def test_multi_day_loop_uses_each_day_once_in_shuffled_order(
     for d in dates:
         (tmp_path / f"{d}.parquet").write_bytes(b"")
 
-    expected_training, expected_eval = train_mod.select_days(
-        data_dir=tmp_path, n_days=4, day_shuffle_seed=7,
+    # Pin n_eval_days=1 so this test exercises the standalone single-
+    # eval mode that train.py's CLI uses (not the cohort runner's 50/50
+    # default).
+    expected_training, expected_eval_days = train_mod.select_days(
+        data_dir=tmp_path, n_days=4, day_shuffle_seed=7, n_eval_days=1,
     )
-    assert expected_eval == "2026-04-25"
+    assert expected_eval_days == ["2026-04-25"]
+    expected_eval = expected_eval_days[0]
 
     # Track every load_day call (the inner _build_env_for_day uses
     # train_mod.load_day, which we monkey-patch directly on the module).

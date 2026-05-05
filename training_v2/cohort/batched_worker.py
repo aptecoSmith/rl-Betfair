@@ -64,6 +64,7 @@ from training_v2.cohort.worker import (
     _build_per_agent_reward_overrides,
     _build_per_agent_scalping_overrides,
     _eval_rollout_stats,
+    aggregate_eval_summaries,
     arch_name_for_genes,
     scalping_train_config,
 )
@@ -86,7 +87,8 @@ def train_cluster_batched(
     agent_ids: list[str],
     genes_list: list[CohortGenes],
     days_to_train: list[str],
-    eval_day: str,
+    eval_days: list[str] | None = None,
+    eval_day: str | None = None,  # legacy single-day kwarg
     data_dir: Path,
     device: str,
     seeds: list[int],
@@ -136,6 +138,16 @@ def train_cluster_batched(
         )
     if len(seeds) != n:
         raise ValueError(f"seeds length {len(seeds)} != agent_ids {n}")
+    # Accept legacy ``eval_day=...`` kwarg for backward compat.
+    if eval_days is None:
+        if eval_day is None:
+            raise ValueError(
+                "Either eval_days (list) or eval_day (single string) "
+                "must be provided.",
+            )
+        eval_days = [str(eval_day)]
+    if not eval_days:
+        raise ValueError("eval_days must contain at least one date.")
     if not days_to_train:
         raise ValueError("days_to_train must contain at least one date.")
     for g in genes_list:
@@ -396,60 +408,65 @@ def train_cluster_batched(
             per_day_rows=per_day_rows_per_agent[i],
         ))
 
-    # ── Eval rollout (per-agent, sequential) ────────────────────────
+    # ── Eval rollouts (per-agent, sequential, per-day) ──────────────
     # Sequential because eval is rollout-only — the gain from
     # batching it is bounded by the active-set shrinkage benefit on
     # one episode. The training loop is the dominant cost in cohort
-    # wall, not the eval pass.
+    # wall, not the eval pass. When ``eval_days`` has more than one
+    # date, each agent evaluates on every day and the results are
+    # mean-aggregated to average out per-day naked-pnl variance.
     eval_summaries: list[EvalSummary] = []
     for i in range(n):
-        eval_t0 = time.perf_counter()
-        logger.info(
-            "Agent %s: eval rollout on held-out day %s",
-            agent_ids[i], eval_day,
-        )
-        _, eval_shim = _build_env_for_day(
-            day_str=eval_day, data_dir=data_dir, cfg=cfg,
-            scorer_dir=scorer_dir,
-            reward_overrides=per_agent_reward_overrides_list[i],
-            scalping_overrides=per_agent_scalping_overrides_list[i],
-        )
-        eval_collector = RolloutCollector(
-            shim=eval_shim, policy=policies[i], device=device,
-        )
-        eval_batch = eval_collector.collect_episode()
-        partial = _eval_rollout_stats(
-            batch=eval_batch,
-            last_info=eval_collector.last_info,
-            action_space=eval_shim.action_space,
-        )
-        eval_wall = time.perf_counter() - eval_t0
-        eval_summaries.append(EvalSummary(
-            eval_day=eval_day,
-            total_reward=partial.total_reward,
-            day_pnl=partial.day_pnl,
-            n_steps=partial.n_steps,
-            bet_count=partial.bet_count,
-            winning_bets=partial.winning_bets,
-            bet_precision=partial.bet_precision,
-            pnl_per_bet=partial.pnl_per_bet,
-            early_picks=partial.early_picks,
-            profitable=partial.profitable,
-            action_histogram=partial.action_histogram,
-            arbs_completed=partial.arbs_completed,
-            arbs_naked=partial.arbs_naked,
-            arbs_closed=partial.arbs_closed,
-            arbs_force_closed=partial.arbs_force_closed,
-            arbs_stop_closed=partial.arbs_stop_closed,
-            arbs_target_pnl_refused=partial.arbs_target_pnl_refused,
-            pairs_opened=partial.pairs_opened,
-            locked_pnl=partial.locked_pnl,
-            naked_pnl=partial.naked_pnl,
-            closed_pnl=partial.closed_pnl,
-            force_closed_pnl=partial.force_closed_pnl,
-            stop_closed_pnl=partial.stop_closed_pnl,
-            wall_time_sec=eval_wall,
-        ))
+        per_day_summaries: list[EvalSummary] = []
+        for ed in eval_days:
+            eval_t0 = time.perf_counter()
+            logger.info(
+                "Agent %s: eval rollout on held-out day %s",
+                agent_ids[i], ed,
+            )
+            _, eval_shim = _build_env_for_day(
+                day_str=ed, data_dir=data_dir, cfg=cfg,
+                scorer_dir=scorer_dir,
+                reward_overrides=per_agent_reward_overrides_list[i],
+                scalping_overrides=per_agent_scalping_overrides_list[i],
+            )
+            eval_collector = RolloutCollector(
+                shim=eval_shim, policy=policies[i], device=device,
+            )
+            eval_batch = eval_collector.collect_episode()
+            partial = _eval_rollout_stats(
+                batch=eval_batch,
+                last_info=eval_collector.last_info,
+                action_space=eval_shim.action_space,
+            )
+            eval_wall = time.perf_counter() - eval_t0
+            per_day_summaries.append(EvalSummary(
+                eval_day=ed,
+                total_reward=partial.total_reward,
+                day_pnl=partial.day_pnl,
+                n_steps=partial.n_steps,
+                bet_count=partial.bet_count,
+                winning_bets=partial.winning_bets,
+                bet_precision=partial.bet_precision,
+                pnl_per_bet=partial.pnl_per_bet,
+                early_picks=partial.early_picks,
+                profitable=partial.profitable,
+                action_histogram=partial.action_histogram,
+                arbs_completed=partial.arbs_completed,
+                arbs_naked=partial.arbs_naked,
+                arbs_closed=partial.arbs_closed,
+                arbs_force_closed=partial.arbs_force_closed,
+                arbs_stop_closed=partial.arbs_stop_closed,
+                arbs_target_pnl_refused=partial.arbs_target_pnl_refused,
+                pairs_opened=partial.pairs_opened,
+                locked_pnl=partial.locked_pnl,
+                naked_pnl=partial.naked_pnl,
+                closed_pnl=partial.closed_pnl,
+                force_closed_pnl=partial.force_closed_pnl,
+                stop_closed_pnl=partial.stop_closed_pnl,
+                wall_time_sec=eval_wall,
+            ))
+        eval_summaries.append(aggregate_eval_summaries(per_day_summaries))
 
     # ── Registry writes (per agent) ──────────────────────────────────
     weights_paths: list[str] = [""] * n
@@ -466,26 +483,35 @@ def train_cluster_batched(
             rid = model_store.create_evaluation_run(
                 model_id=model_ids[i],
                 train_cutoff_date=days_to_train[-1],
-                test_days=[eval_day],
+                test_days=list(eval_days),
             )
             run_ids[i] = rid
             es = eval_summaries[i]
-            model_store.record_evaluation_day(EvaluationDayRecord(
-                run_id=rid,
-                date=eval_day,
-                day_pnl=es.day_pnl,
-                bet_count=es.bet_count,
-                winning_bets=es.winning_bets,
-                bet_precision=es.bet_precision,
-                pnl_per_bet=es.pnl_per_bet,
-                early_picks=es.early_picks,
-                profitable=es.profitable,
-                starting_budget=float(starting_budget),
-                arbs_completed=es.arbs_completed,
-                arbs_naked=es.arbs_naked,
-                locked_pnl=es.locked_pnl,
-                naked_pnl=es.naked_pnl,
-            ))
+            for per_day in es.per_day or [es]:
+                model_store.record_evaluation_day(EvaluationDayRecord(
+                    run_id=rid,
+                    date=per_day.eval_day,
+                    day_pnl=per_day.day_pnl,
+                    bet_count=per_day.bet_count,
+                    winning_bets=per_day.winning_bets,
+                    bet_precision=per_day.bet_precision,
+                    pnl_per_bet=per_day.pnl_per_bet,
+                    early_picks=per_day.early_picks,
+                    profitable=per_day.profitable,
+                    starting_budget=float(starting_budget),
+                    arbs_completed=per_day.arbs_completed,
+                    arbs_naked=per_day.arbs_naked,
+                    locked_pnl=per_day.locked_pnl,
+                    naked_pnl=per_day.naked_pnl,
+                    arbs_closed=per_day.arbs_closed,
+                    arbs_force_closed=per_day.arbs_force_closed,
+                    arbs_stop_closed=per_day.arbs_stop_closed,
+                    arbs_target_pnl_refused=per_day.arbs_target_pnl_refused,
+                    pairs_opened=per_day.pairs_opened,
+                    closed_pnl=per_day.closed_pnl,
+                    force_closed_pnl=per_day.force_closed_pnl,
+                    stop_closed_pnl=per_day.stop_closed_pnl,
+                ))
             model_store.update_composite_score(
                 model_id=model_ids[i],
                 score=float(es.total_reward),

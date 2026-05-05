@@ -115,6 +115,7 @@ def run_cohort(
     enabled_set: frozenset[str] = frozenset(),
     batched: bool = False,
     maturation_bonus_weight: float = 0.0,
+    n_eval_days: int | None = None,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -169,13 +170,19 @@ def run_cohort(
     )
 
     # ── Day selection ────────────────────────────────────────────────
-    training_days, eval_day = select_days(
+    training_days, eval_days = select_days(
         data_dir=data_dir, n_days=int(days), day_shuffle_seed=int(seed),
+        n_eval_days=n_eval_days,
+    )
+    eval_day_summary = (
+        eval_days[0] if len(eval_days) == 1
+        else f"{eval_days[0]}…{eval_days[-1]} ({len(eval_days)} days)"
     )
     logger.info(
         "Cohort: %d agents × %d generations on %d training days "
         "(eval=%s); device=%s output_dir=%s",
-        n_agents, n_generations, len(training_days), eval_day, device, output_dir,
+        n_agents, n_generations, len(training_days), eval_day_summary,
+        device, output_dir,
     )
 
     # ── Initial population (gen 0) ───────────────────────────────────
@@ -200,7 +207,7 @@ def run_cohort(
                 n_generations=int(n_generations),
                 n_agents=int(n_agents),
                 train_days=list(training_days),
-                eval_day=str(eval_day),
+                eval_day=str(eval_days[0]),
                 seed=int(seed),
             ))
         except Exception:
@@ -253,7 +260,7 @@ def run_cohort(
                         agent_ids=[agent_ids_gen[i] for i in idxs],
                         genes_list=[cohort[i] for i in idxs],
                         days_to_train=list(training_days),
-                        eval_day=eval_day,
+                        eval_days=list(eval_days),
                         data_dir=data_dir,
                         device=device,
                         seeds=[per_agent_seeds[i] for i in idxs],
@@ -276,7 +283,7 @@ def run_cohort(
                         agent_id=agent_ids_gen[idx],
                         genes=genes,
                         days_to_train=list(training_days),
-                        eval_day=eval_day,
+                        eval_days=list(eval_days),
                         data_dir=data_dir,
                         device=device,
                         seed=per_agent_seeds[idx],
@@ -305,7 +312,7 @@ def run_cohort(
                         result=result,
                         generation=generation,
                         agent_idx=idx,
-                        eval_day=eval_day,
+                        eval_days=list(eval_days),
                         training_days=list(training_days),
                         maturation_bonus_weight=maturation_bonus_weight,
                     )
@@ -324,7 +331,7 @@ def run_cohort(
                         result=result,
                         generation=generation,
                         agent_idx=idx,
-                        eval_day=eval_day,
+                        eval_days=list(eval_days),
                         training_days=list(training_days),
                         maturation_bonus_weight=maturation_bonus_weight,
                     )
@@ -520,7 +527,7 @@ def _agent_result_to_scoreboard_row(
     result: AgentResult,
     generation: int,
     agent_idx: int,
-    eval_day: str,
+    eval_days: list[str],
     training_days: list[str],
     maturation_bonus_weight: float = 0.0,
 ) -> dict:
@@ -541,7 +548,12 @@ def _agent_result_to_scoreboard_row(
         "weights_path": result.weights_path,
         "run_id": result.run_id,
         "training_days": list(training_days),
-        "eval_day": eval_day,
+        # ``eval_day`` retained as the FIRST eval day for peek_cohort
+        # backward compat (peek displays a single string). ``eval_days``
+        # is the full list — readers that want all N held-out days
+        # should use that field.
+        "eval_day": eval_days[0],
+        "eval_days": list(eval_days),
         # Train aggregates
         "train_n_days": result.train.n_days,
         "train_total_steps": result.train.total_steps,
@@ -739,6 +751,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--n-eval-days", type=int, default=None, metavar="N",
+        help=(
+            "Number of held-out eval days at the END of the day window "
+            "(the rest become training days). Default: ``--days // 2`` so "
+            "a 7-day window splits as 4 train + 3 eval (training gets the "
+            "bigger half on odd day counts). Restores v1's 50/50 split. "
+            "Pass ``1`` for the pre-2026-05-05 single-eval-day behaviour. "
+            "Eval metrics on the scoreboard are MEANS across the N eval "
+            "days, so per-agent naked-pnl variance averages down ~√N."
+        ),
+    )
+    p.add_argument(
         "--maturation-bonus-weight", type=float, default=0.0,
         metavar="FLOAT",
         help=(
@@ -826,6 +850,9 @@ def main(argv: list[str] | None = None) -> int:
             enabled_set=enabled_set,
             batched=bool(args.batched),
             maturation_bonus_weight=float(args.maturation_bonus_weight),
+            n_eval_days=(
+                int(args.n_eval_days) if args.n_eval_days is not None else None
+            ),
         )
     finally:
         if server is not None:

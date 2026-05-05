@@ -32,7 +32,8 @@ def _stub_train_one_agent(
     agent_id: str,
     genes: CohortGenes,
     days_to_train: list[str],
-    eval_day: str,
+    eval_days: list[str] | None = None,
+    eval_day: str | None = None,  # legacy single-string kwarg
     data_dir: Path,
     device: str,
     seed: int,
@@ -50,6 +51,12 @@ def _stub_train_one_agent(
     """
     arch = arch_name_for_genes(genes)
     fake_reward = -float(genes.learning_rate) * 1000.0
+    # Backward-compat: stub originally took eval_day=str; runner now
+    # passes eval_days=list. Accept either; record eval against the
+    # first (and typically only, in unit tests) date.
+    if eval_days is None and eval_day is not None:
+        eval_days = [eval_day]
+    eval_day = eval_days[0] if eval_days else ""
 
     # Always write the model + an eval row into the registry so the
     # runner's persistence path is covered too.
@@ -697,6 +704,132 @@ def test_run_cohort_sort_uses_composite_score(tmp_path: Path) -> None:
     assert results_high[0].eval.total_reward == -500.0, (
         "High bonus should rank high-arbs/low-reward agent first"
     )
+
+
+# ── multi-eval-day aggregator (2026-05-05) ────────────────────────────────
+
+
+def test_aggregate_eval_summaries_means_numeric_fields() -> None:
+    """All numeric fields are MEANED across the per-day inputs."""
+    from training_v2.cohort.worker import aggregate_eval_summaries
+
+    summaries = [
+        EvalSummary(
+            eval_day="2026-05-01", total_reward=-300.0, day_pnl=-100.0,
+            n_steps=10, bet_count=400, winning_bets=200,
+            bet_precision=0.5, pnl_per_bet=-0.25,
+            early_picks=10, profitable=False,
+            action_histogram={"NOOP": 100, "OPEN_BACK": 300},
+            arbs_completed=40, arbs_naked=10, locked_pnl=200.0,
+            naked_pnl=-50.0,
+        ),
+        EvalSummary(
+            eval_day="2026-05-02", total_reward=-100.0, day_pnl=+100.0,
+            n_steps=20, bet_count=600, winning_bets=200,
+            bet_precision=1/3, pnl_per_bet=100/600,
+            early_picks=20, profitable=True,
+            action_histogram={"NOOP": 200, "OPEN_BACK": 400},
+            arbs_completed=60, arbs_naked=20, locked_pnl=300.0,
+            naked_pnl=+150.0,
+        ),
+    ]
+    agg = aggregate_eval_summaries(summaries)
+
+    # Means
+    assert agg.total_reward == -200.0
+    assert agg.day_pnl == 0.0
+    assert agg.locked_pnl == 250.0
+    assert agg.naked_pnl == 50.0
+    assert agg.arbs_completed == 50
+    assert agg.bet_count == 500
+    # bet_precision recomputed from the means, not a mean-of-ratios.
+    assert agg.bet_precision == 200.0 / 500.0
+    # profitable iff mean day_pnl > 0; here mean is exactly 0 ⇒ False
+    assert agg.profitable is False
+    # eval_day = first summary's day
+    assert agg.eval_day == "2026-05-01"
+    # per_day populated with both inputs
+    assert len(agg.per_day) == 2
+    # action_histogram is mean per key (here both keys present in both
+    # so means are halves of summed values; rounded back to int)
+    assert agg.action_histogram == {"NOOP": 150, "OPEN_BACK": 350}
+
+
+def test_aggregate_eval_summaries_single_input_is_passthrough() -> None:
+    """Single-element list: returns the input wrapped with per_day=[input]."""
+    from training_v2.cohort.worker import aggregate_eval_summaries
+
+    s = EvalSummary(
+        eval_day="2026-05-03", total_reward=-55.0, day_pnl=-55.0,
+        n_steps=5, bet_count=10, winning_bets=5, bet_precision=0.5,
+        pnl_per_bet=-5.5, early_picks=0, profitable=False,
+        action_histogram={},
+        arbs_completed=20, arbs_closed=5,
+    )
+    agg = aggregate_eval_summaries([s])
+    assert agg.total_reward == s.total_reward
+    assert agg.day_pnl == s.day_pnl
+    assert agg.arbs_completed == 20
+    assert len(agg.per_day) == 1
+    assert agg.per_day[0].eval_day == "2026-05-03"
+
+
+def test_aggregate_eval_summaries_naked_pnl_averages_to_zero() -> None:
+    """The motivating use case: averaging across days drives naked_pnl
+    variance toward zero. Three days with naked outcomes +£200 / -£150 /
+    +£100 mean to +£50 — the agent's expected naked tail."""
+    from training_v2.cohort.worker import aggregate_eval_summaries
+
+    base = dict(
+        total_reward=-100.0, n_steps=1, bet_count=10,
+        winning_bets=5, bet_precision=0.5, pnl_per_bet=-10.0,
+        early_picks=0, profitable=False, action_histogram={},
+    )
+    summaries = [
+        EvalSummary(eval_day=f"d{i}", day_pnl=v, naked_pnl=v, **base)
+        for i, v in enumerate([200.0, -150.0, 100.0])
+    ]
+    agg = aggregate_eval_summaries(summaries)
+    assert abs(agg.naked_pnl - 50.0) < 1e-9
+    assert abs(agg.day_pnl - 50.0) < 1e-9
+
+
+def test_run_cohort_default_n_eval_days_is_50_50_split(
+    tmp_path: Path,
+) -> None:
+    """Default ``n_eval_days = n_days // 2`` — restores v1 50/50 split."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _populate_data_dir(data_dir, [
+        "2026-04-25", "2026-04-26", "2026-04-27", "2026-04-28",
+        "2026-04-29", "2026-04-30", "2026-05-01",
+    ])
+    out_dir = tmp_path / "cohort_out"
+
+    runner_mod.run_cohort(
+        n_agents=2, n_generations=1, days=7,
+        data_dir=data_dir, device="cpu", seed=42,
+        output_dir=out_dir,
+        train_one_agent_fn=_stub_train_one_agent,
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (out_dir / "scoreboard.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    for row in rows:
+        # 7 days → 3 eval (last 3) + 4 training. Training gets the
+        # bigger half on odd day counts.
+        assert len(row["eval_days"]) == 3, row["eval_days"]
+        assert row["eval_days"] == [
+            "2026-04-29", "2026-04-30", "2026-05-01",
+        ]
+        assert len(row["training_days"]) == 4
+        # eval_day kept for backward compat = first eval day
+        assert row["eval_day"] == "2026-04-29"
 
 
 def test_scoreboard_row_persists_composite_score_field(tmp_path: Path) -> None:
