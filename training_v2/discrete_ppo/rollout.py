@@ -98,6 +98,8 @@ from agents_v2.discrete_policy import BaseDiscretePolicy
 from agents_v2.env_shim import DiscreteActionShim
 from env.bet_manager import MIN_BET_STAKE, BetOutcome
 from training_v2.discrete_ppo.aux_labels import (
+    PairOpenRecord,
+    collect_pair_open_records_from_step,
     compute_per_runner_aux_labels,
 )
 from training_v2.discrete_ppo.transition import (
@@ -234,7 +236,7 @@ class RolloutCollector:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    def collect_episode(self) -> RolloutBatch:
+    def collect_episode(self, *, deterministic: bool = False) -> RolloutBatch:
         """Run one full episode end-to-end.
 
         Phase 4 Session 06 (2026-05-02): returns a :class:`RolloutBatch`
@@ -247,17 +249,26 @@ class RolloutCollector:
         reward attribution sums to the env's scalar reward — failure
         raises immediately so attribution drift can't silently
         corrupt the PPO update.
+
+        Parameters
+        ----------
+        deterministic:
+            When ``True``, replaces both stochastic sample sites with
+            their deterministic counterparts: the action is chosen by
+            ``logits.argmax`` (respects ``-inf`` masked logits) and the
+            stake is the Beta mean ``α / (α + β)``.  Default ``False``
+            preserves byte-identical pre-plan stochastic behaviour.
         """
         was_training = self.policy.training
         self.policy.eval()
         try:
-            return self._collect()
+            return self._collect(deterministic=deterministic)
         finally:
             self.policy.train(was_training)
 
     # ── Internals ──────────────────────────────────────────────────────────
 
-    def _collect(self) -> RolloutBatch:
+    def _collect(self, *, deterministic: bool = False) -> RolloutBatch:
         shim = self.shim
         env = shim.env
         policy = self.policy
@@ -284,6 +295,32 @@ class RolloutCollector:
         # by tick 11k of a 12k-tick day). See ``_AttributionState``
         # docstring + ``_attribute_step_reward`` for ENTRY/EXIT rules.
         attribution_state = _AttributionState()
+
+        # Phase 9 Session 01 — per-rollout open-step tracking. Walk
+        # the suffix of ``env._settled_bets`` AND ``env.bet_manager.bets``
+        # after every ``env.step``; new entries since the previous
+        # snapshot are the bets that landed on this tick. The diff
+        # has to span both lists because race-transition steps move
+        # the previous bm's bets into ``_settled_bets`` AND replace
+        # the bm with a fresh empty one — a naive
+        # ``bm.bets[bets_before:]`` slice misses bets placed on the
+        # outgoing bm when ``bets_before > 0``. The watermark pattern
+        # mirrors ``_AttributionState.settled_count``/``live_count``;
+        # ``seen_pair_ids`` dedupes the passive second leg of a pair
+        # whose aggressive leg already produced a record (we credit
+        # the OPEN decision only — the passive fill is not a new
+        # decision; CLAUDE.md §"mature_prob_head feeds actor_head"
+        # + plan §3 "Per-transition labels are assigned ONLY at the
+        # opening step of each pair").
+        pair_open_records: list[PairOpenRecord] = []
+        seen_pair_ids: set[str] = set()
+        prev_settled_count = len(getattr(env, "_settled_bets", []))
+        prev_bm_id: int | None = (
+            id(env.bet_manager) if env.bet_manager is not None else None
+        )
+        prev_live_count = (
+            len(env.bet_manager.bets) if env.bet_manager is not None else 0
+        )
 
         # Phase 3 Session 01: pre-allocated per-step transfer buffers.
         # Mirrors v1's ``agents/ppo_trainer.py:1384-1390`` pattern.
@@ -461,7 +498,10 @@ class RolloutCollector:
                 hidden_state = out.new_hidden_state
 
                 # Sample action and stake.
-                action = out.action_dist.sample()              # (1,) long
+                if deterministic:
+                    action = out.action_dist.logits.argmax(dim=-1)  # (1,) long
+                else:
+                    action = out.action_dist.sample()               # (1,) long
                 # STRUCTURAL sync: env.step needs an int.
                 action_idx = int(action.item())
 
@@ -479,7 +519,12 @@ class RolloutCollector:
                 stake_dist = torch.distributions.Beta(
                     out.stake_alpha, out.stake_beta,
                 )
-                stake_unit_t = stake_dist.sample()              # (1,)
+                if deterministic:
+                    # Beta(α, β).mean = α / (α + β); always defined for α, β > 0
+                    # (softplus + 1 activations guarantee this).
+                    stake_unit_t = out.stake_alpha / (out.stake_alpha + out.stake_beta)
+                else:
+                    stake_unit_t = stake_dist.sample()          # (1,)
                 # STRUCTURAL sync: env.step's stake_pounds needs a
                 # float (BetManager applies MIN_BET_STAKE clamp).
                 stake_unit = float(stake_unit_t.item())
@@ -526,6 +571,46 @@ class RolloutCollector:
                     state=attribution_state,
                     market_to_runner_map=market_to_runner_map,
                 )
+
+                # Phase 9 Session 01 — diff settled-bets + live bm to
+                # find every bet placed during this step. ``n_steps``
+                # is the index of the just-completed tick (it gets
+                # incremented after this block) — same convention as
+                # the surrounding pre-allocated buffer writes.
+                settled_after = getattr(env, "_settled_bets", [])
+                new_settled = settled_after[prev_settled_count:]
+                bm_after = env.bet_manager
+                if bm_after is None:
+                    new_live: list = []
+                    new_bm_id = None
+                    new_live_count = 0
+                else:
+                    new_bm_id = id(bm_after)
+                    new_live_count = len(bm_after.bets)
+                    if new_bm_id == prev_bm_id:
+                        new_live = bm_after.bets[prev_live_count:]
+                    else:
+                        # Race transition mid-step: any bets placed
+                        # on the outgoing bm migrated into
+                        # ``_settled_bets`` (already covered by
+                        # ``new_settled``); ``bm_after.bets[:]``
+                        # holds anything placed after the new bm was
+                        # installed. Both contributions are valid
+                        # opens for this tick.
+                        new_live = list(bm_after.bets)
+                if new_settled or new_live:
+                    pair_open_records.extend(
+                        collect_pair_open_records_from_step(
+                            list(new_settled) + list(new_live),
+                            step_index=n_steps,
+                            market_to_runner_map=market_to_runner_map,
+                            max_runners=self.max_runners,
+                            seen_pair_ids=seen_pair_ids,
+                        )
+                    )
+                prev_settled_count = len(settled_after)
+                prev_bm_id = new_bm_id
+                prev_live_count = new_live_count
 
                 # Phase 4 Session 06: write directly into the
                 # pre-allocated per-tick numpy buffers. ``hidden_in_t``
@@ -614,6 +699,7 @@ class RolloutCollector:
             done=done_arr[:n_steps],
             n_steps=n_steps,
             aux_labels=aux_labels,
+            pair_open_records=pair_open_records,
         )
 
         self.last_info = last_info

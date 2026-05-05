@@ -587,6 +587,8 @@ def train_one_agent(
     n_agents: int = 1,
     reward_overrides: dict | None = None,
     enabled_set: frozenset[str] = frozenset(),
+    argmax_eval: bool = False,
+    per_transition_credit: bool = False,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -675,6 +677,11 @@ def train_one_agent(
         genes=genes,
         enabled_set=enabled_set,
     )
+    # Phase 9 S02 — cohort-wide flag (NOT a gene). Threaded through hp
+    # so the trainer's ``hp.get("per_transition_credit", False)`` read
+    # picks it up. The default ``False`` keeps Phase 7 byte-identity
+    # for runs that don't pass the flag (hard_constraints.md §1, §6).
+    trainer_hp["per_transition_credit"] = bool(per_transition_credit)
 
     # ── Build first-day env + shim to size the policy ────────────────
     first_day = days_to_train[0]
@@ -847,7 +854,7 @@ def train_one_agent(
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policy, device=device,
         )
-        eval_batch = eval_collector.collect_episode()
+        eval_batch = eval_collector.collect_episode(deterministic=argmax_eval)
         eval_summary_partial = _eval_rollout_stats(
             batch=eval_batch,
             last_info=eval_collector.last_info,

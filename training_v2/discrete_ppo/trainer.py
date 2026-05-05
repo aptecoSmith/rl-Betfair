@@ -49,6 +49,9 @@ from torch.distributions import Beta
 from agents_v2.action_space import ActionType, DiscreteActionSpace
 from agents_v2.discrete_policy import BaseDiscretePolicy
 from agents_v2.env_shim import DiscreteActionShim
+from training_v2.discrete_ppo.aux_labels import (
+    assign_per_transition_labels,
+)
 from training_v2.discrete_ppo.gae import compute_per_runner_gae
 from training_v2.discrete_ppo.rollout import RolloutCollector
 from training_v2.discrete_ppo.transition import (
@@ -119,6 +122,15 @@ class UpdateLog:
     fill_prob_bce_mean: float = 0.0
     mature_prob_bce_mean: float = 0.0
     risk_nll_mean: float = 0.0
+    # Phase 9 Session 02 (2026-05-05). When per-transition credit is
+    # active, sums the count of mini-batch entries whose
+    # ``mature_mask`` is True across every mini-batch that ran in
+    # this update. Zero when the flag is off OR the rollout had no
+    # opens (a long all-NOOP rollout). On a healthy rollout this
+    # should be roughly ``ppo_epochs * pairs_opened`` because each
+    # open transition appears once per epoch's shuffled mini-batch
+    # pass — see test_n_mature_targets_nonzero_when_pairs_mature.
+    n_mature_targets: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,6 +161,13 @@ class EpisodeStats:
     fill_prob_bce_mean: float = 0.0
     mature_prob_bce_mean: float = 0.0
     risk_nll_mean: float = 0.0
+    # Phase 9 Session 02 — per-transition credit diagnostics. The
+    # ``_active`` flag mirrors the trainer's runtime config so JSONL
+    # consumers can filter scoreboard rows by which credit-assignment
+    # path produced them (hard_constraints.md §5). ``n_mature_targets``
+    # is the per-update sum (see ``UpdateLog`` for the exact semantics).
+    per_transition_credit_active: bool = False
+    n_mature_targets: int = 0
 
 
 # ── Helpers (exported for tests) ───────────────────────────────────────────
@@ -290,6 +309,16 @@ class DiscretePPOTrainer:
         self.risk_loss_weight = float(
             hp.get("risk_loss_weight", 0.0) or 0.0
         )
+        # Phase 9 Session 02 — per-transition mature_prob credit
+        # assignment. Default ``False`` keeps the per-slot path active
+        # for byte-identity with Phase 7 baseline runs
+        # (hard_constraints.md §1, §6). When ``True`` the trainer
+        # replaces the per-slot mature BCE with one that lands the
+        # label on the SINGLE step where each pair was opened
+        # (purpose.md §"The fix").
+        self.per_transition_credit = bool(
+            hp.get("per_transition_credit", False)
+        )
 
         self.policy.to(self.device)
         self.optimiser = torch.optim.Adam(
@@ -427,19 +456,26 @@ class DiscretePPOTrainer:
             fill_prob_bce_mean=update_log.fill_prob_bce_mean,
             mature_prob_bce_mean=update_log.mature_prob_bce_mean,
             risk_nll_mean=update_log.risk_nll_mean,
+            per_transition_credit_active=self.per_transition_credit,
+            n_mature_targets=update_log.n_mature_targets,
         )
         logger.info(
             "DiscretePPOTrainer episode: n_steps=%d n_updates=%d "
             "policy_loss=%.4f value_loss=%.4f entropy=%.4f "
             "approx_kl=%.4f fill_prob_bce_mean=%.4f "
             "mature_prob_bce_mean=%.4f risk_nll_mean=%.4f "
-            "total_reward=%.3f wall=%.2fs",
+            "total_reward=%.3f%s wall=%.2fs",
             stats.n_steps, stats.n_updates_run,
             stats.policy_loss_mean, stats.value_loss_mean,
             stats.entropy_mean, stats.approx_kl_mean,
             stats.fill_prob_bce_mean, stats.mature_prob_bce_mean,
             stats.risk_nll_mean,
-            stats.total_reward, stats.wall_time_sec,
+            stats.total_reward,
+            (
+                f" n_mature_targets={stats.n_mature_targets}"
+                if self.per_transition_credit else ""
+            ),
+            stats.wall_time_sec,
         )
         return stats
 
@@ -543,6 +579,53 @@ class DiscretePPOTrainer:
             fill_label_t = mature_label_t = risk_label_t = None
             runner_mask_t = risk_mask_t = None
 
+        # ── Phase 9 S02 per-transition mature_prob credit ────────────────
+        # When the flag is on AND the rollout collector populated
+        # ``pair_open_records`` (sequential rollout path; the batched
+        # rollout currently doesn't), build per-step label / mask /
+        # runner-slot arrays. The mini-batch loop substitutes the
+        # per-transition mature BCE for the per-slot one inside
+        # ``_compute_aux_losses``. fill_prob and risk_nll continue on
+        # the per-slot path (hard_constraints.md §7).
+        per_trans_active = (
+            self.per_transition_credit
+            and batch.pair_open_records is not None
+            and self.mature_prob_loss_weight > 0.0
+        )
+        if per_trans_active:
+            env = getattr(self.shim, "env", None)
+            settled = list(getattr(env, "_settled_bets", []) or [])
+            live_bm = getattr(env, "bet_manager", None)
+            if live_bm is not None:
+                settled.extend(live_bm.bets)
+            mature_label_np, mature_mask_np = assign_per_transition_labels(
+                batch.pair_open_records or [],
+                settled,
+                n_steps=T,
+            )
+            # ``runner_slot_at_step`` carries the slot the agent opened
+            # at each masked tick. The BCE consumer reads it ONLY at
+            # rows where mask is True; off-mask entries default to 0
+            # (a valid slot index that will never be consumed).
+            slot_np = np.zeros(T, dtype=np.int64)
+            for rec in batch.pair_open_records or []:
+                idx = int(rec.step_index)
+                if 0 <= idx < T:
+                    slot_np[idx] = int(rec.runner_slot)
+            mature_label_per_step = _move_to_device(
+                torch.from_numpy(mature_label_np), device,
+            )
+            mature_mask_per_step = _move_to_device(
+                torch.from_numpy(mature_mask_np), device,
+            )
+            runner_slot_at_step = _move_to_device(
+                torch.from_numpy(slot_np), device,
+            )
+        else:
+            mature_label_per_step = None
+            mature_mask_per_step = None
+            runner_slot_at_step = None
+
         # ── Pack per-transition hidden states ──────────────────────────
         # ppo-kl-fix protocol: Phase 1's policy class owns the batch-
         # axis convention via pack_hidden_states / pack_hidden_buffer;
@@ -564,6 +647,7 @@ class DiscretePPOTrainer:
         fill_prob_losses: list[float] = []
         mature_prob_losses: list[float] = []
         risk_losses: list[float] = []
+        n_mature_targets_total = 0
         mini_batches_skipped = 0
         kl_early_stopped = False
         mini_batches_per_epoch = (T + self.mini_batch_size - 1) // self.mini_batch_size
@@ -651,6 +735,20 @@ class DiscretePPOTrainer:
                                 risk_mask=risk_mask_t,
                             )
                         )
+                        # Phase 9 S02 — substitute the per-slot mature
+                        # BCE with the per-transition variant when the
+                        # flag is on. Fill / risk stay on the per-slot
+                        # path (hard_constraints.md §7).
+                        if per_trans_active:
+                            mature_loss_mb, n_targets_mb = (
+                                self._compute_per_transition_mature_loss(
+                                    policy_out=out,
+                                    mature_label_step=mature_label_per_step[mb_idx],
+                                    mature_mask_step=mature_mask_per_step[mb_idx],
+                                    runner_slot_step=runner_slot_at_step[mb_idx],
+                                )
+                            )
+                            n_mature_targets_total += int(n_targets_mb)
                         total_loss = (
                             total_loss
                             + self.fill_prob_loss_weight * fill_loss_mb
@@ -733,6 +831,7 @@ class DiscretePPOTrainer:
             risk_nll_mean=(
                 float(np.mean(risk_losses)) if n_run else 0.0
             ),
+            n_mature_targets=n_mature_targets_total,
         )
 
     # ── Phase 7 S02 aux-loss helper ────────────────────────────────────────
@@ -813,6 +912,61 @@ class DiscretePPOTrainer:
             risk_loss = torch.zeros((), device=fill_pred.device)
 
         return fill_loss, mature_loss, risk_loss
+
+    # ── Phase 9 S02 per-transition mature BCE helper ──────────────────────
+
+    def _compute_per_transition_mature_loss(
+        self,
+        *,
+        policy_out,
+        mature_label_step: torch.Tensor,
+        mature_mask_step: torch.Tensor,
+        runner_slot_step: torch.Tensor,
+    ) -> tuple[torch.Tensor, int]:
+        """Per-transition strict-mature BCE for one mini-batch.
+
+        Phase 9 S02. Replaces the per-slot mature BCE
+        (``_compute_aux_losses``) when ``per_transition_credit=True``.
+        For each step in the mini-batch where ``mature_mask_step`` is
+        True, picks the ``mature_prob_per_runner`` column corresponding
+        to the runner the agent opened at that step and applies BCE
+        against the strict-mature label (1.0 = matured naturally OR
+        agent-closed; 0.0 = naked OR force-closed).
+
+        When the mini-batch contains no open steps the loss is a
+        zeroed scalar that still produces a valid ``.backward()``
+        contribution (no NaN, no detached graph). Returns the loss
+        plus the count of masked entries actually consumed (used for
+        the ``n_mature_targets`` per-update diagnostic).
+
+        The expected gradient SNR improvement vs. the per-slot path:
+        the same total label signal lands on ~200–500 transitions per
+        ~11k-transition rollout instead of being broadcast across all
+        of them — purpose.md §"The fix" estimates a 20–50× concentration.
+        """
+        mature_pred = policy_out.mature_prob_per_runner  # (mb, R)
+        mb_size = mature_pred.shape[0]
+        device = mature_pred.device
+
+        # Gather per-step prediction at the runner the agent opened.
+        # ``runner_slot_step`` holds 0 at unmasked rows; harmless because
+        # the BCE term is zeroed out by the mask before reduction.
+        rows = torch.arange(mb_size, device=device)
+        per_step_pred = mature_pred[rows, runner_slot_step]  # (mb,)
+
+        eps = 1e-7
+        per_step_pred_c = per_step_pred.clamp(eps, 1.0 - eps)
+        bce = -(
+            mature_label_step * torch.log(per_step_pred_c)
+            + (1.0 - mature_label_step) * torch.log(1.0 - per_step_pred_c)
+        )
+        # Mask is bool; cast to the BCE dtype for the multiplication.
+        mask_f = mature_mask_step.to(bce.dtype)
+        masked = bce * mask_f
+        denom = mask_f.sum().clamp(min=1.0)
+        loss = masked.sum() / denom
+        n_targets = int(mature_mask_step.sum().item())
+        return loss, n_targets
 
     # ── Internals ──────────────────────────────────────────────────────────
 

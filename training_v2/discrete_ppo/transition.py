@@ -41,7 +41,10 @@ import numpy as np
 import torch
 
 from agents_v2.action_space import ActionType, DiscreteActionSpace
-from training_v2.discrete_ppo.aux_labels import PerRunnerAuxLabels
+from training_v2.discrete_ppo.aux_labels import (
+    PairOpenRecord,
+    PerRunnerAuxLabels,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import-cycle guard
     from agents_v2.discrete_policy import BaseDiscretePolicy
@@ -113,6 +116,14 @@ class RolloutBatch(NamedTuple):
         synthetic test fixtures). The trainer's ``_ppo_update`` skips
         the aux loss terms entirely when this is ``None``, preserving
         byte-identity with pre-S02 trainer behaviour.
+    pair_open_records:
+        Phase 9 Session 01. Per-rollout list of
+        :class:`PairOpenRecord` — one entry per arb pair that the
+        agent opened during this rollout, captured at the tick where
+        the aggressive first leg was placed. ``None`` when the
+        producer didn't compute it (legacy / synthetic batches).
+        Consumed by the trainer in Phase 9 Session 02; collected but
+        unused in S01.
     """
 
     obs: np.ndarray
@@ -127,6 +138,7 @@ class RolloutBatch(NamedTuple):
     done: np.ndarray
     n_steps: int
     aux_labels: PerRunnerAuxLabels | None = None
+    pair_open_records: list[PairOpenRecord] | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +312,7 @@ def transitions_to_rollout_batch(
         done=done,
         n_steps=n,
         aux_labels=None,
+        pair_open_records=None,
     )
 
 

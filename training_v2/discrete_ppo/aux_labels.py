@@ -49,7 +49,10 @@ from env.bet_manager import Bet, BetSide
 
 __all__ = [
     "AUX_LABEL_COMMISSION",
+    "PairOpenRecord",
     "PerRunnerAuxLabels",
+    "assign_per_transition_labels",
+    "collect_pair_open_records_from_step",
     "compute_pair_locked_pnl",
     "compute_per_runner_aux_labels",
 ]
@@ -59,6 +62,35 @@ __all__ = [
 # winnings on the winning side and unaffected stake-loss on the losing
 # side; the simulator's settle path uses the same constant.
 AUX_LABEL_COMMISSION: float = 0.05
+
+
+@dataclass(frozen=True)
+class PairOpenRecord:
+    """One arb pair's open-step coordinates inside a rollout.
+
+    Phase 9 Session 01. Captured by the rollout collector at the step
+    where the aggressive first leg of a pair was placed. Subsequent
+    passive fills on the same ``pair_id`` (and any agent-initiated
+    close legs) are filtered out at capture time so each pair has at
+    most one record.
+
+    Attributes
+    ----------
+    pair_id:
+        The ``Bet.pair_id`` shared by both legs of the arb pair.
+    step_index:
+        0-based index into the rollout's per-tick arrays — the tick
+        whose ``Transition`` / ``RolloutBatch`` row corresponds to the
+        OPEN decision.
+    runner_slot:
+        ``runner_map[bet.selection_id]`` for the bet's market at the
+        time of open. Carried so the trainer can index
+        ``mature_prob_logit[step, slot]`` without re-resolving.
+    """
+
+    pair_id: str
+    step_index: int
+    runner_slot: int
 
 
 @dataclass(frozen=True)
@@ -204,3 +236,142 @@ def compute_per_runner_aux_labels(
         runner_mask=runner_mask,
         risk_mask=risk_mask,
     )
+
+
+def collect_pair_open_records_from_step(
+    new_bets: Iterable[Bet],
+    *,
+    step_index: int,
+    market_to_runner_map: dict[str, dict[int, int]],
+    max_runners: int,
+    seen_pair_ids: set[str],
+) -> list[PairOpenRecord]:
+    """Filter newly placed bets into :class:`PairOpenRecord` entries.
+
+    Phase 9 Session 01. Called by the rollout collector once per
+    ``env.step`` with the bets that landed in the bet manager (or
+    settled-bets list) on this tick. Mutates ``seen_pair_ids`` so the
+    caller's running set reflects every pair_id we've already opened
+    in this rollout — the second matched leg of an arb pair has the
+    same ``pair_id`` as the aggressive first leg and must be skipped
+    (we label the OPEN decision only; the passive fill is not a new
+    decision).
+
+    Skip rules — match the deliverable §2 pseudocode:
+
+    - ``bet.pair_id is None`` — non-pair placements (legacy / unpaired
+      bets) carry no pair-level outcome and aren't credited here.
+    - ``bet.close_leg`` truthy — agent-initiated close_signal legs.
+      Per ``hard_constraints.md §4`` the closing transition is NOT
+      labelled; mature/naked outcome is credit-assigned to the OPEN
+      decision, not the tick the close happened to fill.
+    - ``pair_id in seen_pair_ids`` — passive second leg of a pair we
+      already opened. By construction the OPEN tick records first; any
+      later occurrence of the same pair_id is the passive fill.
+    - ``runner_map`` lookup misses — defensive guard; not expected to
+      fire under live data.
+    """
+    out: list[PairOpenRecord] = []
+    for bet in new_bets:
+        if bet.pair_id is None:
+            continue
+        if bool(getattr(bet, "close_leg", False)):
+            continue
+        pair_id = str(bet.pair_id)
+        if pair_id in seen_pair_ids:
+            continue
+        slot = _slot_for_bet(bet, market_to_runner_map, max_runners)
+        if slot is None:
+            continue
+        seen_pair_ids.add(pair_id)
+        out.append(PairOpenRecord(
+            pair_id=pair_id,
+            step_index=int(step_index),
+            runner_slot=int(slot),
+        ))
+    return out
+
+
+def assign_per_transition_labels(
+    pair_open_records: Iterable[PairOpenRecord],
+    all_bets: Iterable[Bet],
+    n_steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assign mature_prob BCE labels to open-step transitions only.
+
+    Phase 9 Session 01. Replaces the per-slot broadcast path
+    (``compute_per_runner_aux_labels.mature_label``) with a credit
+    assignment that lands the strict-mature label on the SINGLE step
+    where each pair was opened. Transitions where no pair was opened
+    receive ``mature_mask = False`` and the trainer skips the BCE
+    contribution there.
+
+    Outcome classification per pair is identical to
+    :func:`compute_per_runner_aux_labels`'s strict-mature rule
+    (CLAUDE.md §"mature_prob_head feeds actor_head"):
+
+    - ``count < 2`` (only one leg matched) → naked → ``label = 0.0``
+    - ``count >= 2`` AND any leg has ``force_close=True`` →
+      env-initiated bail-out → ``label = 0.0``
+    - ``count >= 2`` AND no force_close leg → matured naturally OR
+      closed by agent signal → ``label = 1.0``
+
+    When multiple pairs opened on the same step (two runners signalled
+    at the same tick), the step receives ``max`` over those pairs'
+    labels. If any one of them matured cleanly, the step gets
+    ``label = 1.0``.
+
+    Parameters
+    ----------
+    pair_open_records:
+        Iterable of :class:`PairOpenRecord` produced by the rollout
+        collector. Records whose ``step_index`` falls outside
+        ``[0, n_steps)`` are silently dropped (defensive — the
+        collector should never emit out-of-range indices).
+    all_bets:
+        Flat iterable over every matched leg the rollout produced
+        (typically ``list(env.all_settled_bets) +
+        list(env.bet_manager.bets)`` at end-of-rollout). Used solely
+        to classify each ``pair_id``'s outcome.
+    n_steps:
+        Length of the rollout. Drives the output arrays' shape.
+
+    Returns
+    -------
+    mature_label:
+        ``(n_steps,)`` float32. ``1.0`` at every step where a
+        cleanly-matured (or agent-closed) pair was opened, ``0.0``
+        elsewhere — including at force-closed and naked open steps.
+        Steps where ``mature_mask`` is ``False`` carry a placeholder
+        ``0.0`` that the trainer's BCE term must not consume.
+    mature_mask:
+        ``(n_steps,)`` bool. ``True`` only at steps where at least one
+        pair was opened.
+    """
+    n_steps = int(n_steps)
+    if n_steps < 0:
+        raise ValueError(f"n_steps must be non-negative, got {n_steps}")
+
+    pair_legs = _group_by_pair(all_bets)
+
+    def _classify(pair_id: str) -> float:
+        legs = pair_legs.get(pair_id, [])
+        if len(legs) < 2:
+            return 0.0
+        if any(bool(getattr(b, "force_close", False)) for b in legs):
+            return 0.0
+        return 1.0
+
+    mature_label = np.zeros(n_steps, dtype=np.float32)
+    mature_mask = np.zeros(n_steps, dtype=bool)
+
+    for rec in pair_open_records:
+        idx = int(rec.step_index)
+        if idx < 0 or idx >= n_steps:
+            continue
+        mature_mask[idx] = True
+        label = _classify(str(rec.pair_id))
+        if label > mature_label[idx]:
+            mature_label[idx] = label
+
+    return mature_label, mature_mask

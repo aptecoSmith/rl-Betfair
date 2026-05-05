@@ -116,6 +116,8 @@ def run_cohort(
     batched: bool = False,
     maturation_bonus_weight: float = 0.0,
     n_eval_days: int | None = None,
+    argmax_eval: bool = False,
+    per_transition_credit: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -272,7 +274,17 @@ def run_cohort(
                         n_agents_in_cohort=int(n_agents),
                         reward_overrides=reward_overrides,
                         enabled_set=enabled_set,
+                        argmax_eval=argmax_eval,
                     )
+                    if per_transition_credit:
+                        # Per-transition credit lives in the sequential
+                        # trainer path; the batched cohort runner has
+                        # not been wired through. Surface a clear
+                        # warning rather than silently failing the gate.
+                        logger.warning(
+                            "per_transition_credit=True ignored under "
+                            "--batched; flag has no effect on this run.",
+                        )
                     for k, i in enumerate(idxs):
                         results[i] = cluster_results[k]
                         total_agents_trained += 1
@@ -296,6 +308,8 @@ def run_cohort(
                         n_agents=int(n_agents),
                         reward_overrides=reward_overrides,
                         enabled_set=enabled_set,
+                        argmax_eval=argmax_eval,
+                        per_transition_credit=per_transition_credit,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -315,6 +329,7 @@ def run_cohort(
                         eval_days=list(eval_days),
                         training_days=list(training_days),
                         maturation_bonus_weight=maturation_bonus_weight,
+                        argmax_eval=argmax_eval,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
@@ -334,6 +349,7 @@ def run_cohort(
                         eval_days=list(eval_days),
                         training_days=list(training_days),
                         maturation_bonus_weight=maturation_bonus_weight,
+                        argmax_eval=argmax_eval,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
@@ -530,6 +546,7 @@ def _agent_result_to_scoreboard_row(
     eval_days: list[str],
     training_days: list[str],
     maturation_bonus_weight: float = 0.0,
+    argmax_eval: bool = False,
 ) -> dict:
     """Flatten an :class:`AgentResult` into a v1-shape scoreboard row.
 
@@ -597,6 +614,7 @@ def _agent_result_to_scoreboard_row(
             result.eval, maturation_bonus_weight,
         ),
         "maturation_bonus_weight": float(maturation_bonus_weight),
+        "eval_mode": "argmax" if argmax_eval else "stochastic",
     }
 
 
@@ -793,6 +811,30 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "batched path."
         ),
     )
+    p.add_argument(
+        "--argmax-eval", action="store_true",
+        help=(
+            "Use deterministic (argmax) action selection for eval "
+            "rollouts instead of stochastic sampling. Training rollouts "
+            "are always stochastic regardless of this flag. Removes "
+            "£100–£300 PnL swings caused by action-sampling RNG on "
+            "identical weights + identical day. Scoreboard rows gain "
+            "eval_mode='argmax' when active."
+        ),
+    )
+    p.add_argument(
+        "--per-transition-credit", action="store_true",
+        help=(
+            "Phase 9 S02. Replace the per-slot mature_prob BCE label "
+            "broadcast with per-transition credit assignment: each "
+            "pair's strict-mature label lands on the SINGLE step "
+            "where the pair was opened, not on every transition. "
+            "Default OFF (byte-identical to Phase 7). When ON, the "
+            "per-update log reports n_mature_targets and per-episode "
+            "stats carry per_transition_credit_active=True. fill_prob "
+            "and risk_nll stay on the per-slot path."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -834,6 +876,10 @@ def main(argv: list[str] | None = None) -> int:
             "(arbs_completed + arbs_closed)",
             float(args.maturation_bonus_weight),
         )
+    if args.argmax_eval:
+        logger.info("Eval mode: argmax (deterministic action + Beta.mean stake)")
+    if args.per_transition_credit:
+        logger.info("Per-transition mature_prob credit: ENABLED")
 
     try:
         run_cohort(
@@ -853,6 +899,8 @@ def main(argv: list[str] | None = None) -> int:
             n_eval_days=(
                 int(args.n_eval_days) if args.n_eval_days is not None else None
             ),
+            argmax_eval=bool(args.argmax_eval),
+            per_transition_credit=bool(args.per_transition_credit),
         )
     finally:
         if server is not None:
