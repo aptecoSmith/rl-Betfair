@@ -1,0 +1,397 @@
+"""Re-evaluate trained agents from a completed cohort against extra eval days.
+
+Loads each agent's saved weights and runs eval rollouts (no PPO updates)
+against a list of held-out days, then writes a new
+``reeval_scoreboard.jsonl`` alongside the existing one in the cohort
+directory. Per-day naked-pnl variance averages toward zero across
+multiple eval days, giving a much cleaner picture of agent skill than
+a single eval day's cash result.
+
+Usage:
+    python -m tools.reevaluate_cohort \\
+        --cohort-dir registry/_phase7_s06_24agent_overnight_1777941123 \\
+        --eval-days 2026-05-02 2026-05-03 2026-05-04 \\
+        --device cuda \\
+        --output reeval_scoreboard_3day.jsonl
+
+To re-evaluate only the top-N agents by composite_score (faster):
+
+    --top-n 24
+
+Wall: ~45s per agent per eval day on cuda. 144 agents x 3 days ~ 5h.
+24-top x 3 days ~ 50 min.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+logger = logging.getLogger("reevaluate_cohort")
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--cohort-dir", required=True, type=Path)
+    p.add_argument(
+        "--eval-days", required=True, nargs="+", metavar="YYYY-MM-DD",
+        help="One or more eval-day dates to evaluate against.",
+    )
+    p.add_argument(
+        "--data-dir", default="data/processed", type=Path,
+        help="Directory containing YYYY-MM-DD.parquet day files.",
+    )
+    p.add_argument(
+        "--device", default="cuda",
+        help="Torch device (cpu, cuda, cuda:N). Default cuda.",
+    )
+    p.add_argument(
+        "--output", default=None,
+        help=(
+            "Output JSONL filename inside the cohort dir. "
+            "Default: reeval_scoreboard_<n>day.jsonl"
+        ),
+    )
+    p.add_argument(
+        "--top-n", type=int, default=None,
+        help=(
+            "Re-evaluate only the top-N agents by existing composite_score. "
+            "Default: all agents in the scoreboard."
+        ),
+    )
+    p.add_argument(
+        "--filter-agent-ids", nargs="*", default=None,
+        help=(
+            "Re-evaluate only the listed agent_ids (prefix match supported). "
+            "Mutually exclusive with --top-n."
+        ),
+    )
+    p.add_argument(
+        "--seed", type=int, default=42,
+        help="Per-agent eval seed (rolled deterministically per agent).",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s",
+    )
+    args = _parse_args(argv if argv is not None else sys.argv[1:])
+
+    # Heavy imports deferred so --help is fast.
+    import numpy as np
+    import torch
+
+    from agents_v2.discrete_policy import DiscreteLSTMPolicy
+    from agents_v2.env_shim import DEFAULT_SCORER_DIR
+    from training_v2.cohort.genes import CohortGenes
+    from training_v2.cohort.worker import (
+        EvalSummary,
+        _build_env_for_day,
+        _build_per_agent_reward_overrides,
+        _build_per_agent_scalping_overrides,
+        _eval_rollout_stats,
+        aggregate_eval_summaries,
+        scalping_train_config,
+    )
+    from training_v2.discrete_ppo.rollout import RolloutCollector
+
+    cohort_dir: Path = args.cohort_dir
+    if not cohort_dir.exists():
+        raise SystemExit(f"--cohort-dir {cohort_dir} not found")
+    scoreboard = cohort_dir / "scoreboard.jsonl"
+    if not scoreboard.exists():
+        raise SystemExit(f"{scoreboard} not found")
+    weights_dir = cohort_dir / "weights"
+    if not weights_dir.exists():
+        raise SystemExit(f"{weights_dir} not found")
+
+    eval_days: list[str] = list(args.eval_days)
+    for ed in eval_days:
+        ep = args.data_dir / f"{ed}.parquet"
+        if not ep.exists():
+            raise SystemExit(f"missing parquet: {ep}")
+
+    output_name = args.output or (
+        f"reeval_scoreboard_{len(eval_days)}day.jsonl"
+    )
+    output_path = cohort_dir / output_name
+
+    rows = []
+    for line in scoreboard.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    logger.info(
+        "Cohort scoreboard: %d agents", len(rows),
+    )
+
+    # Filter the agent list per CLI choice.
+    if args.top_n is not None and args.filter_agent_ids:
+        raise SystemExit("--top-n and --filter-agent-ids are mutually exclusive")
+    if args.filter_agent_ids:
+        prefixes = [pfx.lower() for pfx in args.filter_agent_ids]
+        rows = [
+            r for r in rows
+            if any(r["agent_id"].lower().startswith(pfx) for pfx in prefixes)
+        ]
+        logger.info("Filtered to %d agents by --filter-agent-ids", len(rows))
+    if args.top_n is not None:
+        rows.sort(
+            key=lambda r: -float(r.get("composite_score", r.get("eval_total_reward", 0))),
+        )
+        rows = rows[: int(args.top_n)]
+        logger.info("Re-evaluating top %d by composite_score", len(rows))
+
+    if not rows:
+        raise SystemExit("No agents to re-evaluate after filtering")
+
+    cfg = scalping_train_config()
+    starting_budget = float(cfg["training"]["starting_budget"])
+    cfg["training"]["starting_budget"] = starting_budget
+    max_runners = int(cfg["training"]["max_runners"])
+
+    t0 = time.perf_counter()
+    n_done = 0
+    with output_path.open("w", encoding="utf-8") as out_f:
+        for row_idx, row in enumerate(rows):
+            agent_id = row["agent_id"]
+            model_id = row["model_id"]
+            hp = row.get("hyperparameters", {})
+
+            # Reconstruct the gene dataclass from the stored hp dict.
+            try:
+                genes = CohortGenes(**{
+                    k: v for k, v in hp.items()
+                    if k in CohortGenes.__dataclass_fields__
+                })
+            except Exception as e:
+                logger.warning(
+                    "[%d/%d] %s: skipping — could not rebuild genes (%s)",
+                    row_idx + 1, len(rows), agent_id[:12], e,
+                )
+                continue
+
+            weights_path = weights_dir / f"{model_id}.pt"
+            if not weights_path.exists():
+                logger.warning(
+                    "[%d/%d] %s: no weights file at %s",
+                    row_idx + 1, len(rows), agent_id[:12], weights_path,
+                )
+                continue
+
+            agent_seed = (int(args.seed) + row_idx * 1_000_003) & 0x7FFFFFFF
+            torch.manual_seed(agent_seed)
+            np.random.seed(agent_seed)
+            if str(args.device).startswith("cuda"):
+                torch.cuda.manual_seed_all(agent_seed)
+
+            # Per-agent reward + scalping overrides. The cohort recorded
+            # which genes were enabled implicitly via non-default values
+            # in hp; for reeval we treat ALL gene values as-is (every
+            # field is enabled because the saved row carries actual
+            # per-agent values, not cohort-default placeholders).
+            enabled_set = frozenset(CohortGenes.__dataclass_fields__)
+            reward_overrides = None  # cohort-level overrides already
+            # baked into env behaviour at training time; re-eval should
+            # use the same env config as training, which is exactly the
+            # per-agent reward_overrides the worker built. We don't have
+            # the cohort_overrides dict stored separately, so rebuild it
+            # from the gene values that are non-default — same path the
+            # worker takes.
+            per_agent_reward_overrides = _build_per_agent_reward_overrides(
+                cohort_overrides=reward_overrides,
+                genes=genes,
+                enabled_set=enabled_set,
+            )
+            per_agent_scalping_overrides = _build_per_agent_scalping_overrides(
+                genes=genes,
+                enabled_set=enabled_set,
+            )
+
+            # Build a sample env to size the policy. Use the FIRST eval
+            # day for the sizing — env.obs_dim and shim.action_space are
+            # day-agnostic.
+            try:
+                env, shim = _build_env_for_day(
+                    day_str=eval_days[0], data_dir=args.data_dir, cfg=cfg,
+                    scorer_dir=DEFAULT_SCORER_DIR,
+                    reward_overrides=per_agent_reward_overrides,
+                    scalping_overrides=per_agent_scalping_overrides,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[%d/%d] %s: failed to build env (%s)",
+                    row_idx + 1, len(rows), agent_id[:12], e,
+                )
+                continue
+
+            policy = DiscreteLSTMPolicy(
+                obs_dim=shim.obs_dim,
+                action_space=shim.action_space,
+                hidden_size=int(genes.hidden_size),
+            )
+            try:
+                state = torch.load(
+                    weights_path, weights_only=True, map_location="cpu",
+                )
+                if isinstance(state, dict) and "weights" in state:
+                    state = state["weights"]
+                policy.load_state_dict(state, strict=True)
+            except Exception as e:
+                logger.warning(
+                    "[%d/%d] %s: failed to load weights (%s)",
+                    row_idx + 1, len(rows), agent_id[:12], e,
+                )
+                continue
+            policy.to(args.device)
+            policy.eval()
+
+            # Eval each day
+            per_day_summaries: list[EvalSummary] = []
+            for ed in eval_days:
+                eval_t0 = time.perf_counter()
+                try:
+                    _, eval_shim = _build_env_for_day(
+                        day_str=ed, data_dir=args.data_dir, cfg=cfg,
+                        scorer_dir=DEFAULT_SCORER_DIR,
+                        reward_overrides=per_agent_reward_overrides,
+                        scalping_overrides=per_agent_scalping_overrides,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "%s: failed to build env for %s (%s)",
+                        agent_id[:12], ed, e,
+                    )
+                    continue
+                eval_collector = RolloutCollector(
+                    shim=eval_shim, policy=policy, device=str(args.device),
+                )
+                eval_batch = eval_collector.collect_episode()
+                partial = _eval_rollout_stats(
+                    batch=eval_batch,
+                    last_info=eval_collector.last_info,
+                    action_space=eval_shim.action_space,
+                )
+                per_day_summaries.append(EvalSummary(
+                    eval_day=ed,
+                    total_reward=partial.total_reward,
+                    day_pnl=partial.day_pnl,
+                    n_steps=partial.n_steps,
+                    bet_count=partial.bet_count,
+                    winning_bets=partial.winning_bets,
+                    bet_precision=partial.bet_precision,
+                    pnl_per_bet=partial.pnl_per_bet,
+                    early_picks=partial.early_picks,
+                    profitable=partial.profitable,
+                    action_histogram=partial.action_histogram,
+                    arbs_completed=partial.arbs_completed,
+                    arbs_naked=partial.arbs_naked,
+                    arbs_closed=partial.arbs_closed,
+                    arbs_force_closed=partial.arbs_force_closed,
+                    arbs_stop_closed=partial.arbs_stop_closed,
+                    arbs_target_pnl_refused=partial.arbs_target_pnl_refused,
+                    pairs_opened=partial.pairs_opened,
+                    locked_pnl=partial.locked_pnl,
+                    naked_pnl=partial.naked_pnl,
+                    closed_pnl=partial.closed_pnl,
+                    force_closed_pnl=partial.force_closed_pnl,
+                    stop_closed_pnl=partial.stop_closed_pnl,
+                    wall_time_sec=time.perf_counter() - eval_t0,
+                ))
+                logger.info(
+                    "[%d/%d] %s [%s] reward=%+.2f pnl=%+.2f bets=%d "
+                    "arbs=%d/%d locked=%+.2f naked=%+.2f wall=%.1fs",
+                    row_idx + 1, len(rows), agent_id[:12], ed,
+                    partial.total_reward, partial.day_pnl, partial.bet_count,
+                    partial.arbs_completed, partial.arbs_naked,
+                    partial.locked_pnl, partial.naked_pnl,
+                    per_day_summaries[-1].wall_time_sec,
+                )
+
+            if not per_day_summaries:
+                continue
+            agg = aggregate_eval_summaries(per_day_summaries)
+            n_completed = agg.arbs_completed + agg.arbs_closed
+            mat_rate = (
+                n_completed / agg.pairs_opened if agg.pairs_opened > 0 else 0.0
+            )
+
+            new_row = {
+                "schema": "v2_cohort_reeval",
+                "agent_id": agent_id,
+                "model_id": model_id,
+                "architecture_name": row.get("architecture_name"),
+                "generation": row.get("generation"),
+                "agent_idx": row.get("agent_idx"),
+                "hyperparameters": hp,
+                "training_days": row.get("training_days"),
+                "original_eval_days": row.get("eval_days") or [row.get("eval_day")],
+                "reeval_days": list(eval_days),
+                # Aggregated reeval metrics (mean across reeval_days)
+                "reeval_total_reward": agg.total_reward,
+                "reeval_day_pnl": agg.day_pnl,
+                "reeval_bet_count": agg.bet_count,
+                "reeval_bet_precision": agg.bet_precision,
+                "reeval_arbs_completed": agg.arbs_completed,
+                "reeval_arbs_closed": agg.arbs_closed,
+                "reeval_arbs_naked": agg.arbs_naked,
+                "reeval_arbs_force_closed": agg.arbs_force_closed,
+                "reeval_arbs_stop_closed": agg.arbs_stop_closed,
+                "reeval_pairs_opened": agg.pairs_opened,
+                "reeval_locked_pnl": agg.locked_pnl,
+                "reeval_naked_pnl": agg.naked_pnl,
+                "reeval_closed_pnl": agg.closed_pnl,
+                "reeval_force_closed_pnl": agg.force_closed_pnl,
+                "reeval_stop_closed_pnl": agg.stop_closed_pnl,
+                "reeval_maturation_rate": mat_rate,
+                # Per-day breakdown for variance inspection
+                "reeval_per_day": [
+                    {
+                        "eval_day": s.eval_day,
+                        "total_reward": s.total_reward,
+                        "day_pnl": s.day_pnl,
+                        "bet_count": s.bet_count,
+                        "arbs_completed": s.arbs_completed,
+                        "arbs_naked": s.arbs_naked,
+                        "arbs_closed": s.arbs_closed,
+                        "arbs_force_closed": s.arbs_force_closed,
+                        "arbs_stop_closed": s.arbs_stop_closed,
+                        "pairs_opened": s.pairs_opened,
+                        "locked_pnl": s.locked_pnl,
+                        "naked_pnl": s.naked_pnl,
+                        "closed_pnl": s.closed_pnl,
+                        "force_closed_pnl": s.force_closed_pnl,
+                        "stop_closed_pnl": s.stop_closed_pnl,
+                    }
+                    for s in agg.per_day
+                ],
+            }
+            out_f.write(json.dumps(new_row) + "\n")
+            out_f.flush()
+
+            n_done += 1
+            wall_so_far = time.perf_counter() - t0
+            avg_per_agent = wall_so_far / n_done
+            remaining = (len(rows) - n_done) * avg_per_agent
+            logger.info(
+                "[%d/%d] %s AGG: pnl=%+.2f mr=%.3f locked=%+.2f naked=%+.2f "
+                "(elapsed %.1fmin, ETA %.1fmin)",
+                row_idx + 1, len(rows), agent_id[:12],
+                agg.day_pnl, mat_rate, agg.locked_pnl, agg.naked_pnl,
+                wall_so_far / 60.0, remaining / 60.0,
+            )
+
+    logger.info(
+        "Re-eval complete in %.1fs. Wrote %d rows to %s",
+        time.perf_counter() - t0, n_done, output_path,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
