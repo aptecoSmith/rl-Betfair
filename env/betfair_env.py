@@ -645,6 +645,16 @@ class BetfairEnv(gymnasium.Env):
         # (10% loss → close, default working point), 0.20 (looser).
         # See plans/rewrite/phase-3-followups/force-close-architecture/.
         "stop_loss_pnl_threshold",
+        # Phase-13 S03 / S05 (2026-05-06): direction-prob aux head and
+        # direction-targeted BC. Trainer-only knobs; env doesn't
+        # consume them but they're whitelisted so the cohort-runner's
+        # reward_overrides passthrough doesn't trip the unknown-key
+        # debug log on a direction-on launch.
+        "direction_prob_loss_weight",
+        "direction_horizon_ticks",
+        "direction_threshold_ticks",
+        "direction_force_close_seconds",
+        "bc_direction_target_weight",
         # Force-close-architecture Session 02 (2026-05-02): naked-lay
         # carve-out price floor. Stop-close fires unconditionally on
         # naked-back exposures, but for naked-lay exposures only fires

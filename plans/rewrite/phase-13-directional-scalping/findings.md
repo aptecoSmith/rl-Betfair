@@ -60,6 +60,44 @@ in S03 has enough signal to test the alpha hypothesis without them.
 If S06 fails the force-close gate AND S03 calibration is poor, that
 is the moment to revisit feature gaps.
 
+## S06 validation cohort — IN-PROGRESS, started 2026-05-06 23:35
+
+### Cohort identity
+
+- **Arm A** (direction-off): `registry/_phase13_arm_A_off_1778106901/`
+  - `direction_prob_loss_weight = 0.0` via `--reward-overrides`.
+  - All other genes drawn from default schema (none enabled).
+  - Seed 42, 4 agents × 2 gens × 7 days (4 train + 1 eval; 2 days
+    leftover for cohort-runner's split).
+
+- **Arm B** (direction-on): `registry/_phase13_arm_B_on_1778106905/`
+  - `direction_prob_loss_weight = 0.1` via `--reward-overrides`.
+  - Otherwise identical to Arm A (same seed=42, same day window).
+
+Both arms launched in parallel ~23:35 UTC. Estimated wall ~90 min
+each (smoke test established ~5 min/agent/day baseline).
+
+The cohort design diverges from the prompt's 12-agent × 3-gen
+recommendation due to runtime constraints — 4 agents × 2 gens is
+the largest factorial that fits the operator's away-window. The
+shape is unchanged; the noise envelope on the force-close-rate
+delta will be wider, so a 5 pp drop ceases to be a clean
+significance bar. Note this in the decision write-up.
+
+### Read-out criteria (per-prompt §"Decision criteria")
+
+- **Primary gate:** force-close rate, arm B vs arm A at gen 2.
+  Drop ≥ 5 pp = SUCCESS.
+- **Non-regression:** raw_pnl_reward, arm B vs arm A. Drop > 10 % = FAIL.
+- **Aux-head health:** `direction_back_bce_mean` /
+  `direction_lay_bce_mean` should trend down across gen 1 → gen 2
+  on arm B. Calibration check deferred to follow-on (we don't have
+  the bin-level histogram tooling stood up in this session).
+
+### Results — TBD
+
+(To be filled in after both runs complete.)
+
 ## Notes for S02
 
 - The label-defining LTP series is `tick.runners[k].last_traded_price`
