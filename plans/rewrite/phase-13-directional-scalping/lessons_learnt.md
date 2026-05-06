@@ -120,7 +120,102 @@ Proceeding to S03.
 
 ## S03 — Direction head wired into actor
 
-(Append on completion.)
+Landed 2026-05-06. v2 stack only — v1 policy classes (`agents/
+policy_network.py`'s LSTM / TimeLSTM / Transformer) NOT touched
+(scoped out per `purpose.md` "if v1 is still in active use" + the
+fact that S06 runs against v2's `DiscreteLSTMPolicy`).
+
+**Changes:**
+
+- `agents_v2/discrete_policy.py::DiscreteLSTMPolicy`
+  - Added `self.direction_prob_head = nn.Linear(hidden,
+    max_runners * 2)` next to `mature_prob_head`.
+  - `actor_head[0].weight.shape[1]` widened from
+    `runner_embed + hidden + 2` to `runner_embed + hidden + 4`.
+    Architecture-hash break — pre-S03 checkpoints fail strict
+    load (regression test in
+    `tests/test_v2_direction_prob_in_actor.py::
+    test_pre_direction_weights_fail_to_load`).
+  - `DiscretePolicyOutput` gains four new fields:
+    `direction_back_prob_per_runner`, `direction_lay_prob_per_runner`,
+    `direction_back_logits_per_runner`, `direction_lay_logits_per_runner`.
+    The two sigmoid columns feed actor_input; the trainer reads the
+    raw logits for BCE-with-logits + pos_weight.
+
+- `training_v2/discrete_ppo/trainer.py::DiscretePPOTrainer`
+  - Reads four new keys from `hp` (Path-A precedence; no config
+    fallback): `direction_prob_loss_weight`,
+    `direction_horizon_ticks`, `direction_threshold_ticks`,
+    `direction_force_close_seconds`.
+  - Lazy-loads the offline label cache once per (date, knob) tuple
+    via `direction_label_scan.load_labels(strict=True)`. Cache key
+    embeds `max_runners` so a different shim shape on the same day
+    doesn't smuggle stale state.
+  - Builds a per-env-step `(n_steps, R, 2)` label grid +
+    `(n_steps, R)` mask aligned with the env's deterministic tick
+    walk (race-by-race, tick-index-in-race) — no collector changes
+    needed.
+  - BCE-with-logits with per-side `pos_weight = (1 − d) / d` from
+    the cache density, masked to supervised cells. Loss adds to
+    `total_loss` as `weight × (back_loss + lay_loss)`.
+  - Surfaces `direction_back_bce_mean`, `direction_lay_bce_mean`,
+    `n_direction_targets`, `direction_prob_loss_weight_active` on
+    `EpisodeStats` / `UpdateLog`.
+
+- `training_v2/cohort/genes.py::CohortGenes`
+  - Adds four phase-13 fields with defaults that are inert (weight
+    0, knobs match S02's default scan triple).
+  - `to_dict` extended; sample / mutate / crossover paths pin them
+    to defaults (operator-controlled via `--reward-overrides`,
+    not GA-evolved).
+
+- `training_v2/cohort/worker.py::_build_trainer_hp`
+  - Path-A passthrough: `--reward-overrides
+    direction_prob_loss_weight=X` lands in `hp` before trainer
+    construction. Same precedence guard as the Phase 7 keys.
+  - `_rebind_trainer` clears `_direction_label_cache` so day
+    transitions reload labels cleanly.
+
+**Architecture-hash break verified.** Pre-S03 checkpoints fail to
+load against post-S03 policies via the strict `load_state_dict`
+path — the +2 column widening on `actor_head[0].weight` carries the
+variant identity, no new explicit version field. Same protocol as
+fill-prob-in-actor / mature-prob-in-actor.
+
+**Default byte-identity verified.** `direction_prob_loss_weight = 0`
+skips the `_build_direction_label_grid` call AND the per-mini-batch
+BCE branch, so total_loss is byte-identical to pre-S03 on a
+default-config run. The forward pass DOES still run the head and
+inject its sigmoid output into `actor_input` — this is by design
+(same as fill_prob / mature_prob default — near-`sigmoid(0) ≈ 0.5`
+constant column). 268 v2 + policy_network tests pass. Five new
+direction-head tests in `tests/test_v2_direction_prob_in_actor.py`
+all pass.
+
+**Per-step label alignment.** The trainer materialises labels by
+walking `day.races` in race order, then iterating each race's
+ticks in tick-index order — pre-race ticks get a global index
+matching the scan output, in-play ticks get mask=False. This
+mirrors `BetfairEnv`'s tick walk, so the per-env-step grid lines
+up with the rollout's transition order without per-tick coords
+plumbing in the collector.
+
+**Calibration check deferred to S06.** A real-day rollout would
+populate `direction_back_bce_mean` / `direction_lay_bce_mean`
+across 3+ rollouts; that data lands when S06's cohort runs.
+
+**Trainer integration tests deferred.** The four trainer-level
+tests the prompt asks for (`test_direction_loss_zero_when_weight_zero`,
+`test_direction_loss_nonzero_when_weight_positive`,
+`test_direction_label_cache_missing_raises`,
+`test_direction_pos_weight_matches_cache_density`) need a real
+`shim.env.day` with a populated label cache to be meaningful. The
+existing 268 trainer / cohort / policy tests all pass with the
+default-zero weight, which exercises the byte-identity path; S06
+exercises the weight > 0 path against real data. If S06 surfaces
+a wiring bug we revisit.
+
+Proceeding to S04.
 
 ## S04 — MTM-loss stop-loss
 

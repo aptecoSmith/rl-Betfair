@@ -121,6 +121,18 @@ _PHASE7_TRAINER_HP_KEYS: frozenset[str] = frozenset({
     "risk_loss_weight",
 })
 
+# Phase-13 (2026-05-06). Direction-prob aux head — phase-13 S03.
+# Same Path-A precedence as the Phase 7 keys: read by the trainer
+# directly from the per-agent ``hp`` dict, NOT via env-side
+# ``reward_overrides`` passthrough. The four label-defining knobs
+# resolve the offline cache stem at trainer init.
+_PHASE13_TRAINER_HP_KEYS: frozenset[str] = frozenset({
+    "direction_prob_loss_weight",
+    "direction_horizon_ticks",
+    "direction_threshold_ticks",
+    "direction_force_close_seconds",
+})
+
 
 # ── Public dataclasses ────────────────────────────────────────────────────
 
@@ -447,6 +459,21 @@ def _build_trainer_hp(
         elif name in enabled_set:
             hp[name] = float(getattr(genes, name))
         # else: gene default already in ``hp`` from genes.to_dict().
+
+    # Phase-13 (2026-05-06). Direction-prob aux head: same Path-A
+    # precedence — cohort-level overrides win over the gene default.
+    # ``direction_prob_loss_weight`` is the on/off knob; the three
+    # cache-resolution keys are passed through verbatim so the trainer
+    # can build the cache-stem regardless of override order.
+    for name in _PHASE13_TRAINER_HP_KEYS:
+        if name in overrides:
+            value = overrides[name]
+            if name in (
+                "direction_horizon_ticks", "direction_threshold_ticks",
+            ):
+                hp[name] = int(value)
+            else:
+                hp[name] = float(value)
     return hp
 
 
@@ -484,6 +511,12 @@ def _rebind_trainer(
     trainer._collector = RolloutCollector(
         shim=shim, policy=trainer.policy, device=str(trainer.device),
     )
+    # Phase-13 S03 — direction-prob caches per-day labels keyed by
+    # date+config; clear on rebind so the new day's labels load
+    # cleanly. The cache is small (one numpy grid per (date, knob)
+    # tuple) so this only affects training-time label-load latency.
+    if hasattr(trainer, "_direction_label_cache"):
+        trainer._direction_label_cache.clear()
 
 
 def _eval_rollout_stats(

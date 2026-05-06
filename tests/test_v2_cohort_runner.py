@@ -203,6 +203,12 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             # schema and downstream tooling can read them uniformly.
             "bc_pretrain_steps", "bc_learning_rate",
             "bc_target_entropy_warmup_eps",
+            # Phase-13 (added 2026-05-06). Direction-prob aux head —
+            # operator-controlled via ``--reward-overrides``; pinned
+            # at defaults (0.0 / 60 / 5 / 60.0) on sample.
+            "direction_prob_loss_weight", "direction_horizon_ticks",
+            "direction_threshold_ticks",
+            "direction_force_close_seconds",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2

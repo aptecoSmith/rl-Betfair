@@ -79,15 +79,15 @@ def test_risk_log_var_constants_match_v1():
 
 
 def test_actor_input_dim_includes_bce_aux_columns(policy):
-    """``actor_head[0]`` accepts ``runner_embed + hidden + 2`` features.
+    """``actor_head[0]`` accepts ``runner_embed + hidden + 4`` features.
 
-    The +2 columns are ``fill_prob`` and ``mature_prob`` per runner.
-    ``risk_head`` does NOT add a third column — risk is a side-channel
-    that surfaces on ``DiscretePolicyOutput`` for the NLL term, not an
-    actor input. (Future readers: the third aux head is NOT a "third
-    column" — see purpose.md §"What's locked".)
+    The +4 columns are ``fill_prob``, ``mature_prob`` (Phase 7 S01) +
+    ``direction_back_prob``, ``direction_lay_prob`` (phase-13 S03)
+    per runner. ``risk_head`` does NOT add columns — risk is a
+    side-channel that surfaces on ``DiscretePolicyOutput`` for the
+    NLL term, not an actor input.
     """
-    expected_in = policy.runner_embed_dim + policy.hidden_size + 2
+    expected_in = policy.runner_embed_dim + policy.hidden_size + 4
     first_linear = policy.actor_head[0]
     assert isinstance(first_linear, nn.Linear)
     assert first_linear.weight.shape[1] == expected_in

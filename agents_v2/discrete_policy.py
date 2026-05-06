@@ -104,6 +104,17 @@ class DiscretePolicyOutput:
         "will the pair mature naturally OR be closed by agent
         signal" — force-closed pairs are the negative class. Feeds
         ``actor_head`` via column-concat.
+    direction_back_prob_per_runner, direction_lay_prob_per_runner:
+        Sigmoid outputs of the per-side direction head, shape
+        ``(batch, max_runners)`` each. BCE-trained on offline
+        threshold-crossing labels (phase-13 S02): "did LTP move
+        favourably for a back-first / lay-first scalp within the
+        close horizon". Feed ``actor_head`` via column-concat.
+    direction_back_logits_per_runner, direction_lay_logits_per_runner:
+        Raw logits before sigmoid, shape ``(batch, max_runners)``
+        each. Carried so the BCE loss can use
+        ``binary_cross_entropy_with_logits(..., pos_weight=...)``
+        for numerical stability + class balance.
     predicted_locked_pnl_per_runner:
         Mean channel of ``risk_head``, shape ``(batch, max_runners)``.
         Per-runner predicted locked-P&L. Does NOT feed ``actor_head``;
@@ -126,6 +137,10 @@ class DiscretePolicyOutput:
     mature_prob_per_runner: torch.Tensor
     predicted_locked_pnl_per_runner: torch.Tensor
     predicted_locked_log_var_per_runner: torch.Tensor
+    direction_back_prob_per_runner: torch.Tensor
+    direction_lay_prob_per_runner: torch.Tensor
+    direction_back_logits_per_runner: torch.Tensor
+    direction_lay_logits_per_runner: torch.Tensor
 
 
 class BaseDiscretePolicy(nn.Module, abc.ABC):
@@ -366,6 +381,17 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         self.risk_head = nn.Linear(
             self.hidden_size, self.max_runners * 2,
         )
+        # Phase-13 S03 (2026-05-06). Per-side direction head — emits
+        # 2 scalars per runner: P(direction_back), P(direction_lay).
+        # BCE-trained on offline threshold-crossing labels (phase-13
+        # S02). Sigmoid output feeds actor_head via column-concat as
+        # TWO new per-runner columns. Architecture-hash break:
+        # ``actor_head[0].weight.shape[1]`` widens by +2 over the
+        # mature-prob-in-actor shape (CLAUDE.md "fill_prob feeds
+        # actor_head" / "mature_prob_head feeds actor_head" pattern).
+        self.direction_prob_head = nn.Linear(
+            self.hidden_size, self.max_runners * 2,
+        )
 
         # Per-runner actor (Phase 7 S01). The flat categorical from
         # Phase 1 is now produced by stitching: NOOP from noop_head + a
@@ -376,7 +402,9 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         self.runner_slot_embedding = nn.Embedding(
             self.max_runners, self.runner_embed_dim,
         )
-        actor_input_dim = self.runner_embed_dim + self.hidden_size + 2
+        # +4 (was +2): fill_prob, mature_prob, direction_back_prob,
+        # direction_lay_prob (phase-13 S03).
+        actor_input_dim = self.runner_embed_dim + self.hidden_size + 4
         self.actor_head = nn.Sequential(
             nn.Linear(actor_input_dim, self.actor_mlp_hidden),
             nn.ReLU(),
@@ -484,6 +512,19 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         fill_prob = torch.sigmoid(fill_logit)
         mature_prob = torch.sigmoid(mature_logit)
 
+        # Phase-13 S03 — per-side direction head. (batch, R*2) →
+        # (batch, R, 2) → unpack the two columns. Sigmoid feeds
+        # actor_head; raw logits surface for BCE-with-logits (more
+        # stable + accepts pos_weight) at the trainer.
+        direction_logits_flat = self.direction_prob_head(lstm_last)
+        direction_logits = direction_logits_flat.view(
+            batch, self.max_runners, 2,
+        )
+        direction_back_logits = direction_logits[..., 0]   # (batch, R)
+        direction_lay_logits = direction_logits[..., 1]
+        direction_back_prob = torch.sigmoid(direction_back_logits)
+        direction_lay_prob = torch.sigmoid(direction_lay_logits)
+
         # Risk head: (batch, R * 2) → (batch, R, 2). Clamp log_var at
         # the forward boundary so PolicyOutput consumers (UI, parquet,
         # NLL) never see an unsafe value.
@@ -512,9 +553,11 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
                 lstm_expanded,
                 fill_prob.unsqueeze(-1),
                 mature_prob.unsqueeze(-1),
+                direction_back_prob.unsqueeze(-1),
+                direction_lay_prob.unsqueeze(-1),
             ],
             dim=-1,
-        )  # (batch, R, embed + hidden + 2)
+        )  # (batch, R, embed + hidden + 4)
         per_runner_logits = self.actor_head(actor_input)  # (batch, R, 3)
         ob_logits = per_runner_logits[..., 0]  # (batch, R)
         ol_logits = per_runner_logits[..., 1]
@@ -554,6 +597,10 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             mature_prob_per_runner=mature_prob,
             predicted_locked_pnl_per_runner=risk_mean,
             predicted_locked_log_var_per_runner=risk_log_var,
+            direction_back_prob_per_runner=direction_back_prob,
+            direction_lay_prob_per_runner=direction_lay_prob,
+            direction_back_logits_per_runner=direction_back_logits,
+            direction_lay_logits_per_runner=direction_lay_logits,
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────

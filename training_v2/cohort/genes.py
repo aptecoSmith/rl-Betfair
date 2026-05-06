@@ -166,6 +166,17 @@ class CohortGenes:
     bc_learning_rate: float = 3e-4
     bc_target_entropy_warmup_eps: int = 5
 
+    # Phase-13 (added 2026-05-06). Direction-prob aux head — phase-13
+    # S03. ``direction_prob_loss_weight = 0.0`` is byte-identical to
+    # pre-plan: head exists in the network (architecture-hash break)
+    # but contributes no BCE term to total_loss. The three label-
+    # defining knobs resolve the offline cache stem at trainer init
+    # — they MUST match the values used to scan the labels (S02 CLI).
+    direction_prob_loss_weight: float = 0.0
+    direction_horizon_ticks: int = 60
+    direction_threshold_ticks: int = 5
+    direction_force_close_seconds: float = 60.0
+
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
         return {
@@ -191,6 +202,16 @@ class CohortGenes:
             "bc_learning_rate": float(self.bc_learning_rate),
             "bc_target_entropy_warmup_eps": int(
                 self.bc_target_entropy_warmup_eps,
+            ),
+            "direction_prob_loss_weight": float(
+                self.direction_prob_loss_weight,
+            ),
+            "direction_horizon_ticks": int(self.direction_horizon_ticks),
+            "direction_threshold_ticks": int(
+                self.direction_threshold_ticks,
+            ),
+            "direction_force_close_seconds": float(
+                self.direction_force_close_seconds,
             ),
         }
 
@@ -242,6 +263,18 @@ def _sample_field(rng: random.Random, field_name: str):
         return 3e-4
     if field_name == "bc_target_entropy_warmup_eps":
         return 5
+    # Phase-13 (2026-05-06). Direction-prob knobs are operator-
+    # controlled (cohort runner ``--reward-overrides``); GA does not
+    # evolve them. Pin to the inert defaults so a fresh draw is
+    # byte-identical to a pre-S03 draw at the same seed.
+    if field_name == "direction_prob_loss_weight":
+        return 0.0
+    if field_name == "direction_horizon_ticks":
+        return 60
+    if field_name == "direction_threshold_ticks":
+        return 5
+    if field_name == "direction_force_close_seconds":
+        return 60.0
     raise KeyError(f"Unknown gene field: {field_name!r}")
 
 

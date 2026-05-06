@@ -52,6 +52,10 @@ from agents_v2.env_shim import DiscreteActionShim
 from training_v2.discrete_ppo.aux_labels import (
     assign_per_transition_labels,
 )
+from training_v2.direction_label_scan import (
+    DirectionLabel,
+    load_labels as _load_direction_labels,
+)
 from training_v2.discrete_ppo.gae import compute_per_runner_gae
 from training_v2.discrete_ppo.rollout import RolloutCollector
 from training_v2.discrete_ppo.transition import (
@@ -75,6 +79,60 @@ __all__ = [
     "build_chosen_advantage",
     "build_uses_stake_mask",
 ]
+
+
+def _materialise_direction_grid(
+    *,
+    day,
+    labels: list[DirectionLabel],
+    max_runners: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project a list of :class:`DirectionLabel` rows onto a per-env-
+    step grid aligned with the env's deterministic tick walk.
+
+    Returns
+    -------
+    label_grid:
+        ``(n_env_steps, max_runners, 2)`` float32. Columns
+        ``[..., 0]`` carry ``label_back``; ``[..., 1]`` carry
+        ``label_lay``. Zero on rows / runners with no cache row
+        (in-play ticks, non-priceable runners).
+    mask_grid:
+        ``(n_env_steps, max_runners)`` bool. ``True`` only at rows
+        the cache emitted (priceable runner at a pre-race tick) so
+        the BCE term is computed only on supervised cells.
+    env_idx_arr:
+        ``(n_env_steps,)`` int32. Diagnostic — pre-race global tick
+        index per env step (-1 for in-play steps).
+    """
+    n_env_steps = sum(len(race.ticks) for race in day.races)
+    label_grid = np.zeros(
+        (n_env_steps, max_runners, 2), dtype=np.float32,
+    )
+    mask_grid = np.zeros((n_env_steps, max_runners), dtype=bool)
+    env_idx_arr = np.full(n_env_steps, -1, dtype=np.int32)
+
+    # Group labels by global tick for O(1) per-cell lookup.
+    by_tick: dict[int, list[DirectionLabel]] = {}
+    for r in labels:
+        by_tick.setdefault(int(r.tick_index), []).append(r)
+
+    env_step = 0
+    global_pre_race = 0
+    for race in day.races:
+        for tick in race.ticks:
+            if not tick.in_play:
+                env_idx_arr[env_step] = global_pre_race
+                rows = by_tick.get(global_pre_race, [])
+                for row in rows:
+                    slot = int(row.runner_idx)
+                    if 0 <= slot < max_runners:
+                        label_grid[env_step, slot, 0] = row.label_back
+                        label_grid[env_step, slot, 1] = row.label_lay
+                        mask_grid[env_step, slot] = True
+                global_pre_race += 1
+            env_step += 1
+    return label_grid, mask_grid, env_idx_arr
 
 
 def _move_to_device(
@@ -131,6 +189,14 @@ class UpdateLog:
     # open transition appears once per epoch's shuffled mini-batch
     # pass — see test_n_mature_targets_nonzero_when_pairs_mature.
     n_mature_targets: int = 0
+    # Phase-13 Session 03 (2026-05-06). Per-side direction BCE means.
+    # Zero when ``direction_prob_loss_weight == 0`` OR the cache had
+    # no priceable rows for this day. ``n_direction_targets`` counts
+    # the masked entries that contributed to the BCE term across all
+    # mini-batches that ran (mirrors ``n_mature_targets`` semantics).
+    direction_back_bce_mean: float = 0.0
+    direction_lay_bce_mean: float = 0.0
+    n_direction_targets: int = 0
 
 
 @dataclass(frozen=True)
@@ -161,6 +227,11 @@ class EpisodeStats:
     fill_prob_bce_mean: float = 0.0
     mature_prob_bce_mean: float = 0.0
     risk_nll_mean: float = 0.0
+    # Phase-13 S03 — direction-prob BCE diagnostics.
+    direction_back_bce_mean: float = 0.0
+    direction_lay_bce_mean: float = 0.0
+    n_direction_targets: int = 0
+    direction_prob_loss_weight_active: float = 0.0
     # Phase 9 Session 02 — per-transition credit diagnostics. The
     # ``_active`` flag mirrors the trainer's runtime config so JSONL
     # consumers can filter scoreboard rows by which credit-assignment
@@ -329,6 +400,40 @@ class DiscretePPOTrainer:
         self.per_transition_credit = bool(
             hp.get("per_transition_credit", False)
         )
+
+        # Phase-13 Session 03 (2026-05-06). Direction-prob aux head.
+        # Read from ``hp`` ONLY (Path A; Phase 7 lessons-learnt
+        # precedence trap). ``direction_prob_loss_weight = 0.0`` is
+        # byte-identical to pre-S03: the head is present in the
+        # network (architecture-hash break) but contributes no BCE
+        # term to total_loss. The three label-defining knobs resolve
+        # the offline cache stem and MUST match the values used to
+        # scan the labels.
+        self.direction_prob_loss_weight = float(
+            hp.get("direction_prob_loss_weight", 0.0) or 0.0
+        )
+        self.direction_horizon_ticks = int(
+            hp.get("direction_horizon_ticks", 60),
+        )
+        self.direction_threshold_ticks = int(
+            hp.get("direction_threshold_ticks", 5),
+        )
+        self.direction_force_close_seconds = float(
+            hp.get("direction_force_close_seconds", 60.0),
+        )
+        # Optional explicit data-dir for the cache lookup. The trainer
+        # walks shim.env.day to resolve the date but the cache lives
+        # under ``{data_dir.parent}/direction_labels/``; we accept
+        # ``data_dir`` as a hint via hp and fall back to
+        # ``Path("data/processed")`` on absence.
+        self._direction_data_dir = (
+            hp.get("direction_data_dir", "data/processed")
+        )
+        # Lazy per-day label cache (avoid re-loading on the same day
+        # across multiple episodes / mini-batches).
+        self._direction_label_cache: dict[
+            str, tuple[np.ndarray, np.ndarray, np.ndarray]
+        ] = {}
 
         # Phase 8 Session 02 — BC pretrain warmup handshake. The v2
         # trainer doesn't run an SAC-style alpha controller (one is
@@ -521,6 +626,12 @@ class DiscretePPOTrainer:
             fill_prob_bce_mean=update_log.fill_prob_bce_mean,
             mature_prob_bce_mean=update_log.mature_prob_bce_mean,
             risk_nll_mean=update_log.risk_nll_mean,
+            direction_back_bce_mean=update_log.direction_back_bce_mean,
+            direction_lay_bce_mean=update_log.direction_lay_bce_mean,
+            n_direction_targets=update_log.n_direction_targets,
+            direction_prob_loss_weight_active=(
+                self.direction_prob_loss_weight
+            ),
             per_transition_credit_active=self.per_transition_credit,
             n_mature_targets=update_log.n_mature_targets,
             post_bc_entropy=self._post_bc_entropy,
@@ -700,6 +811,55 @@ class DiscretePPOTrainer:
             mature_mask_per_step = None
             runner_slot_at_step = None
 
+        # ── Phase-13 S03 direction-prob per-step labels ────────────────
+        # Per-(env-step, runner, side) cached labels resolve at trainer
+        # init time from the offline scan (training_v2.direction_label_
+        # scan). When weight is 0 the helper returns None and the
+        # branch below is skipped — byte-identical to pre-S03.
+        direction_active = (
+            self.direction_prob_loss_weight > 0.0
+            and self._build_direction_label_grid(T) is not None
+        )
+        if direction_active:
+            label_grid_np, mask_grid_np = (
+                self._build_direction_label_grid(T)
+            )
+            direction_label_per_step = _move_to_device(
+                torch.from_numpy(label_grid_np), device,
+            )
+            direction_mask_per_step = _move_to_device(
+                torch.from_numpy(mask_grid_np), device,
+            )
+            # Class-balance pos_weights from the grid's positive rate
+            # (same intuition as phase-12 / fill_prob path: rare class
+            # gets up-weighted).
+            mask_f = mask_grid_np.astype(np.float32)
+            mask_sum = float(mask_f.sum())
+            if mask_sum > 0.0:
+                pos_back = float((label_grid_np[..., 0] * mask_f).sum())
+                pos_lay = float((label_grid_np[..., 1] * mask_f).sum())
+                d_back = max(pos_back / mask_sum, 1e-6)
+                d_lay = max(pos_lay / mask_sum, 1e-6)
+                pos_w_back_t = torch.tensor(
+                    (1.0 - d_back) / d_back,
+                    dtype=torch.float32, device=device,
+                )
+                pos_w_lay_t = torch.tensor(
+                    (1.0 - d_lay) / d_lay,
+                    dtype=torch.float32, device=device,
+                )
+            else:
+                pos_w_back_t = torch.tensor(
+                    1.0, dtype=torch.float32, device=device,
+                )
+                pos_w_lay_t = torch.tensor(
+                    1.0, dtype=torch.float32, device=device,
+                )
+        else:
+            direction_label_per_step = None
+            direction_mask_per_step = None
+            pos_w_back_t = pos_w_lay_t = None
+
         # ── Pack per-transition hidden states ──────────────────────────
         # ppo-kl-fix protocol: Phase 1's policy class owns the batch-
         # axis convention via pack_hidden_states / pack_hidden_buffer;
@@ -721,7 +881,10 @@ class DiscretePPOTrainer:
         fill_prob_losses: list[float] = []
         mature_prob_losses: list[float] = []
         risk_losses: list[float] = []
+        direction_back_losses: list[float] = []
+        direction_lay_losses: list[float] = []
         n_mature_targets_total = 0
+        n_direction_targets_total = 0
         mini_batches_skipped = 0
         kl_early_stopped = False
         mini_batches_per_epoch = (T + self.mini_batch_size - 1) // self.mini_batch_size
@@ -837,6 +1000,41 @@ class DiscretePPOTrainer:
                         mature_prob_losses.append(0.0)
                         risk_losses.append(0.0)
 
+                    # Phase-13 S03 — per-side direction BCE-with-logits
+                    # on the masked per-step labels, weighted by
+                    # direction_prob_loss_weight. When direction_active
+                    # is False the branch is skipped and total_loss is
+                    # byte-identical to pre-S03.
+                    if direction_active:
+                        mb_dir_labels = direction_label_per_step[mb_idx]
+                        mb_dir_mask = direction_mask_per_step[mb_idx]
+                        (
+                            dir_back_loss_mb,
+                            dir_lay_loss_mb,
+                            n_dir_mb,
+                        ) = self._compute_direction_loss(
+                            policy_out=out,
+                            label_per_step=mb_dir_labels,
+                            mask_per_step=mb_dir_mask,
+                            pos_weight_back=pos_w_back_t,
+                            pos_weight_lay=pos_w_lay_t,
+                        )
+                        total_loss = (
+                            total_loss
+                            + self.direction_prob_loss_weight
+                            * (dir_back_loss_mb + dir_lay_loss_mb)
+                        )
+                        direction_back_losses.append(
+                            float(dir_back_loss_mb.item()),
+                        )
+                        direction_lay_losses.append(
+                            float(dir_lay_loss_mb.item()),
+                        )
+                        n_direction_targets_total += int(n_dir_mb)
+                    else:
+                        direction_back_losses.append(0.0)
+                        direction_lay_losses.append(0.0)
+
                     self.optimiser.zero_grad()
                     total_loss.backward()
                     nn.utils.clip_grad_norm_(
@@ -906,7 +1104,98 @@ class DiscretePPOTrainer:
                 float(np.mean(risk_losses)) if n_run else 0.0
             ),
             n_mature_targets=n_mature_targets_total,
+            direction_back_bce_mean=(
+                float(np.mean(direction_back_losses)) if n_run else 0.0
+            ),
+            direction_lay_bce_mean=(
+                float(np.mean(direction_lay_losses)) if n_run else 0.0
+            ),
+            n_direction_targets=n_direction_targets_total,
         )
+
+    # ── Phase-13 S03 direction-label resolution ────────────────────────────
+
+    def _build_direction_label_grid(
+        self,
+        n_steps: int,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Build per-env-step direction labels for the current day.
+
+        Returns ``(label_per_step, mask_per_step)`` of shapes
+        ``(n_steps, max_runners, 2)`` and ``(n_steps, max_runners)``,
+        or ``None`` when the cache is missing AND the loss weight is
+        0 (byte-identical opt-out path). When weight > 0 and cache is
+        missing, raises ``FileNotFoundError`` (hard_constraints §22).
+
+        Determinism: the env walks ``day.races`` in the listed order
+        and ticks within each race in tick-index order. This matches
+        exactly the iteration order ``training_v2.direction_label_scan
+        .scan_day`` uses to assign global pre-race tick indices, so a
+        per-env-step lookup by ``(global_pre_race_tick_idx,
+        runner_idx)`` is unambiguous.
+
+        Cache: per-date results are memoised on
+        ``self._direction_label_cache`` so multi-episode training on
+        the same day pays the load cost once.
+        """
+        if self.direction_prob_loss_weight <= 0.0:
+            return None
+        env = getattr(self.shim, "env", None)
+        if env is None or not hasattr(env, "day"):
+            return None
+        day = env.day
+        date = str(getattr(day, "date", ""))
+        if not date:
+            return None
+
+        from pathlib import Path as _Path
+        data_dir = _Path(self._direction_data_dir)
+
+        cache_key = (
+            f"{date}|{self.direction_horizon_ticks}|"
+            f"{self.direction_threshold_ticks}|"
+            f"{self.direction_force_close_seconds}|"
+            f"{self.max_runners}"
+        )
+        cached = self._direction_label_cache.get(cache_key)
+        if cached is not None:
+            label_grid, mask_grid, env_idx_arr = cached
+        else:
+            labels = _load_direction_labels(
+                date,
+                data_dir,
+                direction_horizon_ticks=self.direction_horizon_ticks,
+                direction_threshold_ticks=self.direction_threshold_ticks,
+                force_close_before_off_seconds=(
+                    self.direction_force_close_seconds
+                ),
+                strict=True,
+            )
+            label_grid, mask_grid, env_idx_arr = (
+                _materialise_direction_grid(
+                    day=day,
+                    labels=labels,
+                    max_runners=self.max_runners,
+                )
+            )
+            self._direction_label_cache[cache_key] = (
+                label_grid, mask_grid, env_idx_arr,
+            )
+
+        # The grid is indexed by env-step; trim or pad to the rollout's
+        # actual ``n_steps``. The env always walks the day's full tick
+        # sequence, so n_steps == grid.shape[0] in practice. Defensive
+        # branch: if the rollout was truncated mid-day, slice; if it
+        # somehow exceeded the grid, raise (a sign that the env / day
+        # mapping diverged from the assumption above).
+        if int(label_grid.shape[0]) < int(n_steps):
+            raise RuntimeError(
+                f"Direction-label grid has {label_grid.shape[0]} env "
+                f"steps but the rollout produced {n_steps} — env / "
+                "day-walk assumption violated. Re-run the offline scan "
+                "on the same day data the env was constructed from.",
+            )
+        return label_grid[:n_steps], mask_grid[:n_steps]
 
     # ── Phase 7 S02 aux-loss helper ────────────────────────────────────────
 
@@ -986,6 +1275,52 @@ class DiscretePPOTrainer:
             risk_loss = torch.zeros((), device=fill_pred.device)
 
         return fill_loss, mature_loss, risk_loss
+
+    # ── Phase-13 S03 direction BCE helper ──────────────────────────────────
+
+    def _compute_direction_loss(
+        self,
+        *,
+        policy_out,
+        label_per_step: torch.Tensor,
+        mask_per_step: torch.Tensor,
+        pos_weight_back: torch.Tensor,
+        pos_weight_lay: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Per-side direction BCE-with-logits across the mini-batch.
+
+        ``label_per_step`` is ``(mb, R, 2)`` carrying ``label_back`` /
+        ``label_lay``; ``mask_per_step`` is ``(mb, R)`` bool. Cells
+        outside the mask are EXCLUDED from the loss — they correspond
+        to in-play ticks or non-priceable runners where the cache
+        emitted no row.
+
+        Returns ``(back_loss, lay_loss, n_supervised_cells)``. Both
+        scalars carry the autograd graph back to ``policy_out``'s
+        direction logits. ``n_supervised_cells`` is the integer count
+        of cells used (== mask.sum()) for the diagnostic.
+        """
+        back_logits = policy_out.direction_back_logits_per_runner  # (mb, R)
+        lay_logits = policy_out.direction_lay_logits_per_runner    # (mb, R)
+        label_back = label_per_step[..., 0]
+        label_lay = label_per_step[..., 1]
+        mask_f = mask_per_step.to(back_logits.dtype)
+
+        # BCE-with-logits with per-element pos_weight. ``reduction
+        # ='none'`` so we mask cell-wise; mean over the masked cells.
+        back_bce = nn.functional.binary_cross_entropy_with_logits(
+            back_logits, label_back,
+            pos_weight=pos_weight_back, reduction="none",
+        )
+        lay_bce = nn.functional.binary_cross_entropy_with_logits(
+            lay_logits, label_lay,
+            pos_weight=pos_weight_lay, reduction="none",
+        )
+        denom = mask_f.sum().clamp(min=1.0)
+        back_loss = (back_bce * mask_f).sum() / denom
+        lay_loss = (lay_bce * mask_f).sum() / denom
+        n_supervised = int(mask_f.sum().item())
+        return back_loss, lay_loss, n_supervised
 
     # ── Phase 9 S02 per-transition mature BCE helper ──────────────────────
 
