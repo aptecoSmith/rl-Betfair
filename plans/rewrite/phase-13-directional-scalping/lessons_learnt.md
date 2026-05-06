@@ -74,7 +74,49 @@ narrow-PR opportunities. Proceeding directly to S02.
 
 ## S02 — Direction-label generator
 
-(Append on completion.)
+Landed 2026-05-06. `training_v2/direction_label_scan.py` +
+`training_v2/direction_label_cli.py` + 13 tests
+(`tests/test_v2_direction_labels.py` all pass). Cache layout
+`data/direction_labels/{date}/horizon{H}_thresh{T}_fc{F}.npz` with
+sibling `_header.json` carrying every invalidating key.
+
+**Density print at default knobs** (horizon=60, thresh=5, fc=60.0):
+
+| Date | Rows | density_back | density_lay | both | Wall |
+|---|---|---|---|---|---|
+| 2026-04-28 | 71,576 | 0.191 | 0.206 | 0.013 | 2.7s |
+| 2026-04-29 | 71,238 | 0.187 | 0.209 | 0.017 | 2.7s |
+| 2026-04-30 | 76,912 | 0.173 | 0.208 | 0.012 | 3.0s |
+| 2026-05-01 | 72,023 | 0.199 | 0.214 | 0.021 | 2.8s |
+| 2026-05-02 | 110,356 | 0.162 | 0.179 | 0.013 | 4.0s |
+| 2026-05-03 | 55,190 | 0.220 | 0.232 | 0.026 | 2.3s |
+| 2026-05-04 | 62,805 | 0.194 | 0.206 | 0.018 | 2.6s |
+
+Density readings 0.16–0.23 — at the lower end of the plan-level 0.20–
+0.50 healthy band but inside it for several days. Both-positive
+fractions 1.2–2.6 % — well under the 10 % concern threshold (no sign
+of LTP routinely oscillating through both thresholds within the
+horizon). Wall budgets ~3 s/day — three orders of magnitude under
+the 600 s budget; the vectorised window scan saturates the budget
+already. No tuning iteration needed at this stage; if S03's BCE loss
+struggles to converge we can revisit at threshold=3.
+
+**Implementation note** — the prompt's pseudocode emitted a row only
+when the future window had at least one tick. The deliverable test
+suite expected the LAST pre-race tick of a 2-tick day to also emit a
+row, which forced relaxing that gate: a row is now emitted whenever
+priceability passes at the open tick, with both labels = 0 if the
+forward window is empty. Determinism is preserved — every priceable
+(tick, runner) emits exactly one row — and the head will simply learn
+"no future evidence ⇒ stay near base rate" on those rows.
+
+**`force_close_before_off_seconds` shadowed cohort knob** — the
+direction labels are computed once with `fc=60`. If a cohort runs at
+a different `force_close_before_off_seconds`, the cache stem won't
+match and `load_labels(strict=True)` will raise. Cohort scripts must
+run the scan first with the target `fc` value (S06 does this).
+
+Proceeding to S03.
 
 ## S03 — Direction head wired into actor
 
