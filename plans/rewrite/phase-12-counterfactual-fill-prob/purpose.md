@@ -210,48 +210,28 @@ S03 (validation cohort):
 - If the gate fails, V1 conservative label was insufficient —
   proceed to V2 (queue-position-aware fill simulation).
 
-## Open questions to resolve in S01
+## Design decisions (resolved in session prompts)
 
-1. **Per-side or per-runner label?** The current head emits one
-   scalar per runner. The label is per-(runner, side). Options:
-   - Widen head to (max_runners × 2) outputs. Cleanest but bumps
-     architecture-hash.
-   - Aggregate label per runner: `max(fill_back, fill_lay)`. Loss
-     of information.
-   - Pick the side the agent's policy is choosing at that
-     transition, then label that side only. Tightest fit but
-     requires the rollout to know which side at label-generation
-     time, which we don't.
+The three open questions previously listed here have been
+resolved in S01 / S02 prompts. Summarised:
 
-   Decision: widen the head. The architecture-hash break is a
-   one-time cost we already pay for new feature columns
-   (precedent: fill_prob_in_actor and mature_prob_in_actor each
-   bumped the hash).
+1. **Per-side per-runner labels.** Each priceable (tick, runner)
+   emits separate `label_back` and `label_lay` fields. The head
+   widens to `(max_runners × 2)`; `actor_head` first layer
+   bumps by 1 column. Architecture-hash break documented in
+   hard_constraints §8.
 
-2. **Single arb_spread or multi-spread label tensor?** We're
-   testing arb_spread_scale=0.5 right now. If it works, we'll
-   want to use it. If `fill_prob_head` is trained on labels for
-   `arb_spread_ticks=20`, it can't predict fills for
-   `arb_spread_ticks=10`. Options:
-   - Label per spread bucket (e.g. 5, 10, 15, 20, 25 ticks),
-     pick at training time based on actual `arb_spread_ticks`
-     in use.
-   - Train per-cohort: regenerate the cache when arb_spread
-     changes.
+2. **Per-cohort cache regen.** Cache filename embeds
+   `spread{N}_fc{M}` for the `arb_spread_ticks` and
+   `force_close_before_off_seconds` keys. A cohort with a
+   different spread / fc combo regenerates its own cache.
+   Multi-spread tensor support is V2.
 
-   Decision: train per-cohort initially. Multi-spread tensor is a
-   V2 extension if needed.
-
-3. **Sample weighting?** Most labels (75-80%) will be 0
-   (don't-fill). Without rebalancing, BCE may collapse to
-   "always predict 0". Options:
-   - Class-balance the loss (positive class weight = N_neg /
-     N_pos).
-   - Sub-sample negatives.
-   - Focal loss.
-
-   Decision: class-balance the loss with a single positive
-   weight scalar. Simplest.
+3. **Class-balanced BCE per side.** `pos_weight_back =
+   N_neg_back / N_pos_back` and same for lay, computed once at
+   cache-load time. No focal loss, no sub-sampling. Two scalars
+   broadcast over their respective per-side losses; the pair is
+   averaged into the trainer's `fill_prob_loss_weight` term.
 
 ## Session structure (rough)
 
