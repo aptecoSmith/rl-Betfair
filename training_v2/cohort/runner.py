@@ -121,6 +121,7 @@ def run_cohort(
     bc_pretrain_steps_override: int | None = None,
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
+    arb_spread_scale_override: float | None = None,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -332,6 +333,7 @@ def run_cohort(
                         bc_target_entropy_warmup_eps_override=(
                             bc_target_entropy_warmup_eps_override
                         ),
+                        arb_spread_scale_override=arb_spread_scale_override,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -887,6 +889,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--arb-spread-scale", type=float, default=None, metavar="SCALE",
+        help=(
+            "Cohort-wide pin for ``arb_spread_scale`` (Phase 5 gene). "
+            "Multiplies the per-pair tick spread used by the auto-paired "
+            "passive when scalping_mode is on. Default ``None`` = leave "
+            "each agent at its gene draw / default (1.0). Useful for "
+            "ablation probes where the operator wants every agent to "
+            "use the same spread (e.g. 0.5 = halve the spread, "
+            "expected to lift natural fill rate but reduce per-pair "
+            "locked P&L). Mutually exclusive with --enable-gene "
+            "arb_spread_scale."
+        ),
+    )
+    p.add_argument(
         "--per-transition-credit", action="store_true",
         help=(
             "Phase 9 S02. Replace the per-slot mature_prob BCE label "
@@ -959,6 +975,17 @@ def main(argv: list[str] | None = None) -> int:
             "BC pretrain: cohort-wide pin target_entropy_warmup_eps=%d",
             int(args.bc_target_entropy_warmup_eps),
         )
+    if args.arb_spread_scale is not None:
+        logger.info(
+            "Scalping: cohort-wide pin arb_spread_scale=%g",
+            float(args.arb_spread_scale),
+        )
+        if "arb_spread_scale" in enabled_set:
+            raise ValueError(
+                "Cannot combine --arb-spread-scale with "
+                "--enable-gene arb_spread_scale (one source of truth "
+                "per knob per run).",
+            )
 
     try:
         run_cohort(
@@ -991,6 +1018,10 @@ def main(argv: list[str] | None = None) -> int:
             bc_target_entropy_warmup_eps_override=(
                 int(args.bc_target_entropy_warmup_eps)
                 if args.bc_target_entropy_warmup_eps is not None else None
+            ),
+            arb_spread_scale_override=(
+                float(args.arb_spread_scale)
+                if args.arb_spread_scale is not None else None
             ),
         )
     finally:

@@ -597,6 +597,7 @@ def train_one_agent(
     bc_pretrain_steps_override: int | None = None,
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
+    arb_spread_scale_override: float | None = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -675,6 +676,14 @@ def train_one_agent(
         genes=genes,
         enabled_set=enabled_set,
     )
+    # Cohort-wide pin for arb_spread_scale wins over the gene/enable
+    # path. The runner's CLI guard rejects --arb-spread-scale combined
+    # with --enable-gene arb_spread_scale, so we don't need to merge.
+    if arb_spread_scale_override is not None:
+        per_agent_scalping_overrides = dict(per_agent_scalping_overrides or {})
+        per_agent_scalping_overrides["arb_spread_scale"] = float(
+            arb_spread_scale_override,
+        )
     # Phase 7 Session 02 (Path A). Pre-merge any reward_overrides for
     # trainer-side keys into the per-agent hp dict so the trainer's
     # ``hp.get(name, 0.0)`` reads the override. NEVER add a config

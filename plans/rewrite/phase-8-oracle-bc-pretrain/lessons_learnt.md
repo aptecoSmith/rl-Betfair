@@ -248,3 +248,79 @@ oracle caches.
 - BC genes are pinned at defaults in `_sample_field`. The GA
   cannot evolve them this session by design (see "Why the BC
   genes are pinned at defaults" above). Phase 11 reopens this.
+
+## S03 + overnight findings (2026-05-06)
+
+Full writeup: [findings.md](findings.md). Headline lessons:
+
+### The gate measured the wrong quantity
+
+Phase 8 S03's "Δmr ≥ 1 pp" gate frames maturation rate as a
+*ratio* (matured / opened). BC raises BOTH the numerator and
+denominator. Across 5 generations × 12 agents the BC arm's mr
+ratio is consistently 1 pp BELOW the no-BC arm — gate FAIL — but
+the BC arm's *absolute* matured count is ~70 % higher and
+composite_score (with maturation_bonus_weight=10) prefers BC
+lineages by ~75 %. **Future plans must specify whether they
+measure ratio or absolute count.** A ratio metric under varying
+denominators rewards inactivity; an absolute metric is the
+right comparison when the operator wants more matured pairs.
+
+### BC's discrete CE loss has a missing-CLOSE bug
+
+The cross-entropy target on `out.logits` is a one-hot at
+`action_space.encode(ActionType.OPEN_BACK, runner_idx)`. The CLOSE
+head never receives positive gradient. Post-BC, every top agent
+in S03 Arm C and overnight cohort B has `closed=0` while no-BC
+agents have `closed=15-25`. BC silently disables a critical
+action of the policy.
+
+The fix is non-trivial: oracle samples don't carry "close here"
+labels, so adding CLOSE supervision needs either:
+- A heuristic CLOSE target (e.g. supervise close_signal on tick
+  T+N if the lay placed at oracle tick T hasn't filled by T+N)
+- A second oracle pass that identifies "close-here" moments
+  (e.g. ticks where holding the open into force-close costs
+  more than crossing the spread now)
+
+Either way, Phase 8 S02's "BC trains actor_head only" should be
+revisited — the close head is part of actor_head, but the loss
+shape currently ignores it.
+
+### Force-close rate at 72-76 % is a structural ceiling
+
+Five separate cohorts (Phase 7 S06, this S03 × 3 arms, this
+overnight × 2 cohorts) all converge to fc_rate ~72-76 %. None of
+the mechanism changes (multi-eval-day, per-transition credit,
+BC pretrain, gene-evolution generations) moved it. This is not
+a training-signal problem — it's the agent's passive lay leg
+not filling within the available window before
+`force_close_before_off_seconds=60`.
+
+The realistic mr ceiling under current `arb_spread_ticks=20` /
+`force_close_before_off_seconds=60` is probably ~0.30 even for
+an oracle-perfect actor. To break that ceiling requires
+structural changes: tighter spread, longer fill window, or
+adaptive close_signal. None of those are in Phase 8/9 scope.
+
+### Per-transition credit (Phase 9) didn't materialise
+
+The mechanism delivered correctly — `n_mature_targets > 0` per
+mini-batch in arm B + C + overnight B confirms the gradient
+landed at the right transitions. But ρ(weight, mr) stayed noisy
+across all generations, never clearing the +0.3 gate. The
+selectivity signal IS being delivered to the actor; the actor
+isn't translating it into different opening choices. This may
+be because:
+
+1. The label is correct but the gradient is too weak per
+   transition (only the open transition gets the per-pair label).
+2. The actor's input doesn't carry enough information for the
+   gradient to discriminate (despite mature_prob_head feeding
+   actor_head, the per-runner state at decision time may not
+   contain the features that distinguish "this passive will
+   fill" from "this passive won't").
+
+(2) is the more troubling possibility — it implies the obs
+schema is missing the relevant features rather than the loss
+formulation being wrong.
