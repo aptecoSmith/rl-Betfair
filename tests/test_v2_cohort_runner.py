@@ -209,6 +209,8 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             "direction_prob_loss_weight", "direction_horizon_ticks",
             "direction_threshold_ticks",
             "direction_force_close_seconds",
+            # Phase-13 S05 (added 2026-05-06). Direction-targeted BC.
+            "bc_direction_target_weight",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2

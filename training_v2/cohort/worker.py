@@ -57,6 +57,8 @@ from training_v2.cohort.genes import (
 )
 from training_v2.discrete_ppo.bc_pretrain import (
     DiscreteBCPretrainer,
+    build_direction_target_map,
+    load_direction_labels_for_dates,
     load_oracle_samples_for_dates,
     measure_post_bc_entropy,
 )
@@ -131,6 +133,7 @@ _PHASE13_TRAINER_HP_KEYS: frozenset[str] = frozenset({
     "direction_horizon_ticks",
     "direction_threshold_ticks",
     "direction_force_close_seconds",
+    "bc_direction_target_weight",
 })
 
 
@@ -474,6 +477,9 @@ def _build_trainer_hp(
                 hp[name] = int(value)
             else:
                 hp[name] = float(value)
+        # Phase-13 S05 — also pass the gene's own value through if set
+        # (default 0.0). The BC pretrain reads ``hp["bc_direction_
+        # target_weight"]`` to decide whether to load direction labels.
     return hp
 
 
@@ -812,12 +818,66 @@ def train_one_agent(
                 ",".join(days_to_train),
             )
         else:
+            # Phase-13 S05 — direction-targeted BC layered with the
+            # oracle target. Operator-controlled via
+            # ``--reward-overrides bc_direction_target_weight=X``;
+            # defaults to 0.0 (oracle-only, byte-identical to phase-8).
+            bc_dir_w = float(
+                trainer_hp.get("bc_direction_target_weight", 0.0) or 0.0
+            )
+            direction_target_map: dict[tuple[int, int], int] | None = None
+            if bc_dir_w > 0.0:
+                # The direction labels are keyed by tick_index aligned
+                # with the SAME pre-race tick numbering that
+                # ``arb_oracle.scan_day`` uses (verified by both modules
+                # consuming the env's deterministic tick walk). We
+                # collapse the per-day label lists into a single global
+                # ``(tick_index, runner_idx) → action`` map by stitching
+                # them per-day under their offsets — the oracle samples
+                # carry day-local tick indices, NOT global-across-days,
+                # so the map's keys are also day-local. This works
+                # because BC is keyed on a per-day shuffled mini-batch
+                # and each oracle sample comes from one day's cache;
+                # cross-day key collision is benign (same tick index in
+                # different days favouring the same direction is just
+                # the same target action).
+                day_to_labels = load_direction_labels_for_dates(
+                    dates=list(days_to_train),
+                    data_dir=data_dir,
+                    direction_horizon_ticks=int(
+                        trainer_hp.get("direction_horizon_ticks", 60),
+                    ),
+                    direction_threshold_ticks=int(
+                        trainer_hp.get(
+                            "direction_threshold_ticks", 5,
+                        ),
+                    ),
+                    force_close_before_off_seconds=float(
+                        trainer_hp.get(
+                            "direction_force_close_seconds", 60.0,
+                        ),
+                    ),
+                )
+                merged: list = []
+                for _d, labs in day_to_labels.items():
+                    merged.extend(labs)
+                direction_target_map = build_direction_target_map(
+                    merged, shim.action_space,
+                )
+                logger.info(
+                    "Agent %s: direction BC enabled (weight=%.3f, "
+                    "%d unambiguous targets across %d day(s))",
+                    agent_id, bc_dir_w,
+                    len(direction_target_map), len(days_to_train),
+                )
             bc_history = DiscreteBCPretrainer(
                 lr=bc_lr, batch_size=64, seed=int(seed),
             ).pretrain(
                 policy=policy,
                 samples=bc_samples,
                 n_steps=bc_steps,
+                direction_target_map=direction_target_map,
+                direction_target_weight=bc_dir_w,
             )
             post_bc_entropy = measure_post_bc_entropy(policy, bc_samples)
             trainer.set_post_bc_entropy(post_bc_entropy)

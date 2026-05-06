@@ -176,6 +176,12 @@ class CohortGenes:
     direction_horizon_ticks: int = 60
     direction_threshold_ticks: int = 5
     direction_force_close_seconds: float = 60.0
+    # Phase-13 S05 (2026-05-06). Direction-targeted BC pretrain. With
+    # weight 0.0 the BC step runs oracle-only (byte-identical to
+    # phase-8 BC); with weight w > 0 the loss interpolates as
+    # ``(1 - w) * oracle_ce + w * direction_ce``. Operator-controlled
+    # via ``--reward-overrides bc_direction_target_weight=X``.
+    bc_direction_target_weight: float = 0.0
 
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
@@ -212,6 +218,9 @@ class CohortGenes:
             ),
             "direction_force_close_seconds": float(
                 self.direction_force_close_seconds,
+            ),
+            "bc_direction_target_weight": float(
+                self.bc_direction_target_weight,
             ),
         }
 
@@ -275,6 +284,8 @@ def _sample_field(rng: random.Random, field_name: str):
         return 5
     if field_name == "direction_force_close_seconds":
         return 60.0
+    if field_name == "bc_direction_target_weight":
+        return 0.0
     raise KeyError(f"Unknown gene field: {field_name!r}")
 
 

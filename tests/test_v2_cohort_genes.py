@@ -329,12 +329,13 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_25_fields(self):
+    def test_to_dict_serialises_all_26_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
-        # 7 legacy + 11 Phase 5 + 3 Phase 8 BC + 4 Phase-13 direction genes
-        assert len(d) == 25
+        # 7 legacy + 11 Phase 5 + 3 Phase 8 BC + 4 Phase-13 direction
+        # genes + 1 Phase-13 S05 BC direction weight
+        assert len(d) == 26
         for name in PHASE5_GENE_NAMES:
             assert name in d
             assert isinstance(d[name], float)
@@ -351,6 +352,8 @@ class TestPhase5Genes:
         assert d["direction_horizon_ticks"] == 60
         assert d["direction_threshold_ticks"] == 5
         assert d["direction_force_close_seconds"] == 60.0
+        # Phase-13 S05 — direction-targeted BC.
+        assert d["bc_direction_target_weight"] == 0.0
 
     def test_phase5_gene_names_set_size(self):
         assert len(PHASE5_GENE_NAMES) == 11

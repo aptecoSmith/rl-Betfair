@@ -275,7 +275,74 @@ Proceeding to S05.
 
 ## S05 — Direction-targeted BC pretrain
 
-(Append on completion.)
+Landed 2026-05-06. Layered direction BC on phase-8's oracle BC via
+weighted CE: `(1 − w) × oracle_ce + w × direction_ce`. Operator-
+controlled via `--reward-overrides bc_direction_target_weight=X`;
+default `0.0` is byte-identical to phase-8 BC.
+
+**Mechanism:**
+
+- `training_v2/discrete_ppo/bc_pretrain.py`
+  - Added `build_direction_target_map(labels, action_space)` —
+    converts `DirectionLabel` rows into a
+    `{(tick_index, runner_idx): action_idx}` lookup.
+    Disambiguation per S05 D2: `(b=1, l=0)` → `OPEN_BACK`,
+    `(b=0, l=1)` → `OPEN_LAY`, `(b=l)` → omitted (no direction
+    pressure for ambiguous / no-signal rows).
+  - Added `load_direction_labels_for_dates(...)` — multi-day
+    cache load mirroring `load_oracle_samples_for_dates`.
+  - `DiscreteBCPretrainer.pretrain` accepts
+    `direction_target_map` and `direction_target_weight`. Per-
+    minibatch: matches each oracle sample's `(tick, runner)` key
+    against the direction map; rows with a hit contribute to the
+    direction CE, rows without a hit contribute zero (mask-out
+    before reduction). The combined loss interpolates by weight.
+
+- `training_v2/cohort/genes.py::CohortGenes`
+  - Added `bc_direction_target_weight: float = 0.0`. Default
+    pinned at sample / mutate / crossover time (operator-
+    controlled, not GA-evolved).
+
+- `training_v2/cohort/worker.py`
+  - `_PHASE13_TRAINER_HP_KEYS` extended with the new key.
+  - The BC call site in `_train_one_agent` now reads
+    `bc_direction_target_weight` from `trainer_hp`, loads the
+    direction-label cache (with a clear `FileNotFoundError`
+    when missing) when weight > 0, builds the target map, and
+    passes both into `DiscreteBCPretrainer.pretrain`. When
+    weight = 0 the cache is not touched and behaviour is
+    byte-identical to phase-8.
+
+**Tests:** seven new tests in `tests/test_v2_bc_direction.py`:
+- `TestDefaultWeightByteIdentical` — weight=0 produces identical
+  policy parameters to oracle-only with the same seed.
+- `TestBuildDirectionTargetMap` (4 cases) — covers the four
+  label tuples and verifies the map's contents.
+- `TestLayLabelPushesPolicyTowardOpenLay` — direction-only BC
+  (weight=1.0) on a single sample with a lay-side label drives
+  the policy's logits so OPEN_LAY > OPEN_BACK at the target
+  runner. Functional sanity check.
+- `TestEmptyDirectionMapStable` — weight=0.5 with a map that
+  doesn't match any sample's (tick, runner) trains for 10
+  steps without NaN.
+
+All 187 v2 tests pass (including 17 BC tests across phase-8 and
+phase-13).
+
+**Scope concession.** The S05 prompt's D2 mentions a 7-dim per-
+runner action space (`signal`, `arb_spread`, etc.) — that's the
+v1 continuous policy. The v2 stack uses a discrete categorical
+action space (`{NOOP, OPEN_BACK_i, OPEN_LAY_i, CLOSE_i}`), so the
+direction BC target IS the action index, not a continuous signal
+dim. This is the same shape phase-8's oracle BC uses. Tests
+exercise the v2 mapping; v1 BC plumbing is not modified.
+
+**Per-agent guarantee preserved.** Each agent constructs its own
+`DiscreteBCPretrainer` and runs BC against the per-agent oracle
+samples + direction map; nothing crosses agents (mirrors phase-
+8 hard_constraints §16).
+
+Proceeding to S06.
 
 ## S06 — Validation cohort
 

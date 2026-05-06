@@ -43,6 +43,10 @@ from torch.distributions import Categorical
 
 from agents_v2.action_space import ActionType, DiscreteActionSpace
 from training_v2.arb_oracle import OracleSample, load_samples
+from training_v2.direction_label_scan import (
+    DirectionLabel,
+    load_labels as _load_direction_labels,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -51,9 +55,98 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "BCLossHistory",
     "DiscreteBCPretrainer",
+    "build_direction_target_map",
+    "load_direction_labels_for_dates",
     "load_oracle_samples_for_dates",
     "measure_post_bc_entropy",
 ]
+
+
+def load_direction_labels_for_dates(
+    dates: list[str],
+    data_dir,
+    *,
+    direction_horizon_ticks: int,
+    direction_threshold_ticks: int,
+    force_close_before_off_seconds: float,
+    strict: bool = True,
+) -> dict[str, list[DirectionLabel]]:
+    """Concatenate direction-label caches across multiple dates.
+
+    Returns a map ``{date: [DirectionLabel, ...]}``. Days with no
+    cache emit a warning and contribute an empty list — direction
+    BC then has no per-(tick, runner) target for that day's tick
+    indices and the BC loss term collapses to oracle-only on that
+    day.
+
+    Phase-13 S05 deliverable. The strict header check (matching the
+    three label-defining knobs) catches mismatched cache invocations
+    early — cohorts launched at one threshold cannot accidentally
+    consume labels generated at another.
+    """
+    from pathlib import Path
+    out: dict[str, list[DirectionLabel]] = {}
+    for d in dates:
+        try:
+            labels = _load_direction_labels(
+                str(d),
+                Path(data_dir),
+                direction_horizon_ticks=direction_horizon_ticks,
+                direction_threshold_ticks=direction_threshold_ticks,
+                force_close_before_off_seconds=(
+                    force_close_before_off_seconds
+                ),
+                strict=strict,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "Direction-label cache missing for %s; direction BC "
+                "loss will collapse to oracle-only on this day. Run "
+                "`python -m training_v2.direction_label_cli scan "
+                "--date %s ...` to populate.", d, d,
+            )
+            out[d] = []
+            continue
+        out[d] = labels
+    return out
+
+
+def build_direction_target_map(
+    labels: list[DirectionLabel],
+    action_space: DiscreteActionSpace,
+) -> dict[tuple[int, int], int]:
+    """Project a list of :class:`DirectionLabel` rows onto a map
+    ``{(tick_index, runner_idx): target_action_idx}``.
+
+    The target action is determined by the label tuple
+    ``(label_back, label_lay)`` per phase-13 S05 D2:
+
+    - ``(1, 0)`` → ``OPEN_BACK`` at runner_idx (back-first scalp).
+    - ``(0, 1)`` → ``OPEN_LAY`` at runner_idx (lay-first scalp).
+    - ``(0, 0)`` or ``(1, 1)`` → entry omitted (no direction
+      pressure — ambiguous or no signal).
+
+    Rows whose ``runner_idx`` is outside the policy's action space
+    are silently dropped (defensive guard).
+    """
+    out: dict[tuple[int, int], int] = {}
+    max_runners = int(action_space.max_runners)
+    for r in labels:
+        slot = int(r.runner_idx)
+        if slot < 0 or slot >= max_runners:
+            continue
+        b = float(r.label_back) > 0.5
+        l = float(r.label_lay) > 0.5
+        if b and not l:
+            out[(int(r.tick_index), slot)] = action_space.encode(
+                ActionType.OPEN_BACK, slot,
+            )
+        elif l and not b:
+            out[(int(r.tick_index), slot)] = action_space.encode(
+                ActionType.OPEN_LAY, slot,
+            )
+        # else: ambiguous or no signal — entry omitted.
+    return out
 
 
 def load_oracle_samples_for_dates(
@@ -165,6 +258,9 @@ class DiscreteBCPretrainer:
         policy,
         samples: list[OracleSample],
         n_steps: int,
+        *,
+        direction_target_map: dict[tuple[int, int], int] | None = None,
+        direction_target_weight: float = 0.0,
     ) -> BCLossHistory:
         """Run ``n_steps`` BC mini-batches against ``samples``.
 
@@ -217,6 +313,20 @@ class DiscreteBCPretrainer:
         for p in frozen:
             p.requires_grad_(False)
 
+        # Phase-13 S05 — direction-targeted BC layered with the
+        # oracle target. ``direction_target_weight`` interpolates
+        # between the oracle CE (alpha = 1 - w) and the direction
+        # CE (alpha = w). When the (tick, runner) has no direction
+        # entry — both labels 0 OR both 1 — the direction CE is
+        # skipped for that sample and the layered loss collapses to
+        # oracle-only on that row.
+        dir_active = (
+            direction_target_map is not None
+            and direction_target_weight > 0.0
+        )
+        dir_w = float(direction_target_weight) if dir_active else 0.0
+        oracle_w = 1.0 - dir_w if dir_active else 1.0
+
         history = BCLossHistory()
         try:
             opt = torch.optim.Adam(target_params, lr=self.lr)
@@ -229,7 +339,7 @@ class DiscreteBCPretrainer:
                     dtype=torch.float32,
                     device=device,
                 )
-                target_actions = torch.tensor(
+                oracle_target_actions = torch.tensor(
                     [
                         action_space.encode(
                             ActionType.OPEN_BACK, int(s.runner_idx),
@@ -245,7 +355,59 @@ class DiscreteBCPretrainer:
                 # policy to learn a preference for OPEN_BACK on the
                 # oracle's chosen runner regardless of the env-side
                 # mask, which is unavailable / irrelevant here.
-                loss = F.cross_entropy(out.logits, target_actions)
+                oracle_ce = F.cross_entropy(
+                    out.logits, oracle_target_actions,
+                )
+                if dir_active:
+                    # Build a per-row direction-target tensor + a
+                    # boolean mask of rows where the cache had an
+                    # unambiguous direction signal. Rows without a
+                    # direction entry contribute zero to the
+                    # direction CE term (mask out before reduction).
+                    dir_targets_list: list[int] = []
+                    dir_mask_list: list[bool] = []
+                    for s in batch:
+                        key = (int(s.tick_index), int(s.runner_idx))
+                        tgt = direction_target_map.get(key)
+                        if tgt is None:
+                            # No direction signal — placeholder that
+                            # gets masked out before reduction.
+                            dir_targets_list.append(
+                                int(oracle_target_actions[
+                                    len(dir_targets_list)
+                                ].item())
+                            )
+                            dir_mask_list.append(False)
+                        else:
+                            dir_targets_list.append(int(tgt))
+                            dir_mask_list.append(True)
+                    dir_targets = torch.tensor(
+                        dir_targets_list,
+                        dtype=torch.long,
+                        device=device,
+                    )
+                    dir_mask = torch.tensor(
+                        dir_mask_list,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    if float(dir_mask.sum().item()) > 0.0:
+                        per_row_ce = F.cross_entropy(
+                            out.logits, dir_targets, reduction="none",
+                        )
+                        direction_ce = (
+                            (per_row_ce * dir_mask).sum()
+                            / dir_mask.sum().clamp(min=1.0)
+                        )
+                    else:
+                        # Empty match in this mini-batch — no direction
+                        # gradient contribution this step. ``zeros_like``
+                        # keeps the autograd graph attached so the
+                        # combined loss can backprop cleanly.
+                        direction_ce = oracle_ce.detach() * 0.0
+                    loss = oracle_w * oracle_ce + dir_w * direction_ce
+                else:
+                    loss = oracle_ce
 
                 opt.zero_grad()
                 loss.backward()
