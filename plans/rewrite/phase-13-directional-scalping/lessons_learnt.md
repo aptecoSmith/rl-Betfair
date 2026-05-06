@@ -219,7 +219,59 @@ Proceeding to S04.
 
 ## S04 — MTM-loss stop-loss
 
-(Append on completion.)
+Landed 2026-05-06 — **the mechanism was already implemented before
+this session opened**, by `plans/rewrite/phase-3-followups/
+force-close-architecture/Session 02 (2026-05-02)`. Discovery on
+opening the env code: `Bet.stop_close: bool` (set at
+`_attempt_close` time), `BetfairEnv._stop_close_open_pairs`,
+`stop_loss_pnl_threshold` config knob, `arbs_stop_closed` /
+`stop_closed_pnl` counters, and full settlement-side exclusion
+from matured-arb bonus + close-signal +£1 bonus all exist and
+ship.
+
+The S04 prompt's "Variant A — env trigger" matches the existing
+mechanism exactly EXCEPT for the threshold unit:
+
+| Aspect | S04 prompt asked for | What ships today |
+|---|---|---|
+| Trigger field | `mtm_stop_loss_threshold` | `stop_loss_pnl_threshold` |
+| Threshold unit | absolute £ (e.g. 2.0) | fraction of open-leg matched stake (e.g. 0.10) |
+| Default | 0.0 = disabled | 0.0 = disabled |
+| Matcher path | relaxed (force_close-style) | STRICT (LTP required, junk filter, price cap) |
+| Bet flag | `stop_loss_close=True` | `stop_close=True` |
+| Counter | `scalping_arbs_stop_loss_closed` | `arbs_stop_closed` |
+| Excluded from matured-arb bonus | YES | YES |
+| Excluded from `+£1 close_signal` | YES | YES |
+
+**Decision: keep the existing mechanism as-is for S06.** The
+fraction-of-stake unit is empirically better for micro-bets than
+the absolute-£ unit (per-existing-mechanism's lesson — at £5
+stake an absolute £1 trigger needs +25 % adverse drift; the
+fraction unit fires at consistent relative loss across sizes).
+Renaming `stop_loss_pnl_threshold` → `mtm_stop_loss_threshold`
+would break every cohort-level scoreboard row that already
+references the existing key. Not worth the disruption when the
+mechanism is functionally what S04 asked for.
+
+**S06 cohort can use it.** Simply pass
+`--reward-overrides stop_loss_pnl_threshold=0.10` to engage the
+trigger on a probe arm. It flows through
+`_PHASE5_GENES_VIA_REWARD_OVERRIDES` already.
+
+**No code changes in this session.** All deliverables (Bet flag,
+env knob, MTM check, settlement, refusal counters, gene wiring)
+already shipped. Tests for the existing mechanism live across
+the env / bet-manager / settlement test files (the original
+`force-close-architecture` plan landed them).
+
+**Documentation gap.** The S04 prompt asked for a CLAUDE.md
+"MTM stop-loss" section. CLAUDE.md does not currently have one;
+the existing mechanism's docs live under
+`plans/rewrite/phase-3-followups/force-close-architecture/`. Not
+adding it in this session — operator can decide if a CLAUDE.md
+note is wanted as part of plan-13 wrap-up.
+
+Proceeding to S05.
 
 ## S05 — Direction-targeted BC pretrain
 
