@@ -438,4 +438,79 @@ pre-handoff agreement, the autonomous-run policy was:
 - BCE flat / errors → STOP.
 
 Both stop conditions fired (BCE not cleanly trending; PPO
-errors observed). No cohort launched.
+errors observed). No cohort launched. After stop + diagnosis
++ session prompt drafting, autonomous implementation of
+S05 + S06 followed.
+
+## S05 — Capture rollout-time gate mask, reuse at PPO update
+
+Landed 2026-05-07. Implementation followed the session prompt
+exactly; no design surprises.
+
+**Plumbing summary:**
+- `DiscreteLSTMPolicy.forward(..., apply_direction_gate=None)`.
+  When None (default), gate when enabled. When False, skip the
+  in-forward gate recompute (caller has supplied the captured
+  rollout-time mask via `mask=`).
+- `Transition.gate_mask: np.ndarray | None` and
+  `RolloutBatch.gate_mask` — captured per-tick when the policy's
+  gate is active; `None` otherwise.
+- `RolloutCollector._collect` allocates the buffer when the gate
+  is active and writes `isfinite(masked_logits)` per tick.
+  Buffer-grow path extended.
+- `DiscretePPOTrainer._ppo_update` reads `batch.gate_mask`, ANDs
+  with legality per mini-batch, passes
+  `apply_direction_gate=False`. Batches without a gate mask
+  flow through the original code path unchanged (byte-identical
+  to pre-S05 for no-gate runs).
+
+**Tests:** 18/18 in `tests/test_v2_direction_gate.py`. New tests
+cover the apply_direction_gate=False semantics and the supplied-
+mask-AND-with-legality path. Full v2 regression: 213/213.
+
+## S06 — Direction-gate threshold warmup
+
+Landed 2026-05-07. Linear-anneal from
+`DIRECTION_GATE_THRESHOLD_MIN = 0.5` to the agent's gene value
+across the first `direction_gate_warmup_eps` episodes. After
+warmup the gene value applies directly. Mirrors
+`bc_target_entropy_warmup_eps` precedent.
+
+**Mechanism:**
+- `DiscreteLSTMPolicy.set_effective_gate_threshold(value)` —
+  trainer poke. Stores on `_effective_gate_threshold`. Read by
+  `_apply_direction_gate` in place of the gene value when
+  non-None.
+- `DiscretePPOTrainer._effective_direction_gate_threshold()` —
+  helper that computes the annealed value from
+  `_eps_since_gate_start` and `_direction_gate_warmup_eps`.
+- `train_episode` calls `policy.set_effective_gate_threshold(
+  self._effective_direction_gate_threshold())` BEFORE
+  `collect_episode` so the rollout uses the annealed value.
+- `_update_from_batch` increments `_eps_since_gate_start` after
+  each rollout (capped at `warmup_eps + 1`).
+- `direction_gate_warmup_eps: int = 5` added to `CohortGenes`,
+  to_dict, and the worker's `_PHASE14_TRAINER_HP_KEYS`. Operator-
+  controlled (not GA-evolved); cohort-wide knob settable via
+  `--reward-overrides direction_gate_warmup_eps=N`.
+
+**Effective trajectory at default (gene=0.85, warmup=5):**
+
+| eps | frac | effective threshold |
+|---|---|---|
+| 0 | 0.0 | 0.500 |
+| 1 | 0.2 | 0.570 |
+| 2 | 0.4 | 0.640 |
+| 3 | 0.6 | 0.710 |
+| 4 | 0.8 | 0.780 |
+| ≥5 | 1.0 | 0.850 |
+
+At eps=0 the gate is basically a no-op (0.5 floor); by eps 5+
+it's at the gene's strict value. PPO sees opens during cold-
+start and the head's BCE has time to drive sigmoid output
+above the gradually-strengthening threshold.
+
+**Tests:** 5 new in `TestGateThresholdWarmup` + the existing
+`test_set_effective_gate_threshold_overrides_gene` smoke. 24/24
+gate tests pass; 213/213 v2 tests pass overall (gene-count
+expectations updated for the new field).

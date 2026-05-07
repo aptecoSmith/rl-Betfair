@@ -204,6 +204,13 @@ class CohortGenes:
     #  DIRECTION_GATE_THRESHOLD_MAX=0.95]).
     direction_gate_enabled: bool = False
     direction_gate_threshold: float = 0.5
+    # Phase-14 S06 (2026-05-07). Threshold-warmup window in episodes.
+    # The trainer linearly anneals the policy's effective threshold
+    # from 0.5 to the agent's gene value across this many episodes
+    # (mirrors bc_target_entropy_warmup_eps). Default 5 — operator-
+    # controlled, not GA-evolved. Set to 0 to disable warmup
+    # entirely (gene value applies from episode 0).
+    direction_gate_warmup_eps: int = 5
 
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
@@ -247,6 +254,9 @@ class CohortGenes:
             "direction_gate_enabled": bool(self.direction_gate_enabled),
             "direction_gate_threshold": float(
                 self.direction_gate_threshold,
+            ),
+            "direction_gate_warmup_eps": int(
+                self.direction_gate_warmup_eps,
             ),
         }
 
@@ -321,6 +331,10 @@ def _sample_field(rng: random.Random, field_name: str):
     # _PHASE5_RANGES).
     if field_name == "direction_gate_enabled":
         return False
+    # Phase-14 S06 (2026-05-07). Warmup eps is operator-controlled,
+    # never sampled per-agent. Pin to default 5.
+    if field_name == "direction_gate_warmup_eps":
+        return 5
     raise KeyError(f"Unknown gene field: {field_name!r}")
 
 

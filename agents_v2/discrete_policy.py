@@ -468,6 +468,17 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
                 ),
             ),
         )
+        # Phase-14 S06 (2026-05-07). Effective gate threshold —
+        # operator-controlled warmup. The trainer pokes a value in
+        # via ``set_effective_gate_threshold`` once per episode;
+        # absent that call the policy uses the gene value directly.
+        # Mirrors bc_target_entropy_warmup_eps's per-episode poke
+        # pattern. The smoke surfaced the cold-start collapse:
+        # 3 of 4 agents at gate threshold ≥0.88 emitted ZERO bets
+        # because fresh-init head sigmoid sits ~0.5 and T≥0.88
+        # masks everything. Anneal from 0.5 → gene over the first
+        # N updates lets PPO see opens at cold-start.
+        self._effective_gate_threshold: float | None = None
 
     # ── Hidden state ──────────────────────────────────────────────────────
 
@@ -729,6 +740,19 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # tensor allocation is needed (Phase 4 S07, 2026-05-03).
         return logits.masked_fill(~mask, float("-inf"))
 
+    def set_effective_gate_threshold(self, value: float) -> None:
+        """Phase-14 S06: trainer poke for warm-up annealing.
+
+        The trainer computes
+        ``effective = floor + frac × (gene_value - floor)`` per
+        update (where ``floor = DIRECTION_GATE_THRESHOLD_MIN``
+        and ``frac`` linearly ramps from 0 → 1 across the warm-up
+        window) and writes the result here. The policy reads it
+        in ``_apply_direction_gate``; absent this poke the gene
+        value is used directly.
+        """
+        self._effective_gate_threshold = float(value)
+
     def _apply_direction_gate(
         self,
         logits: torch.Tensor,
@@ -755,8 +779,17 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         ``max(P_back, P_lay)`` per runner (NOT per-side) so the agent
         is free to pick whichever side it prefers — the gate filters
         the OPPORTUNITY, not the side.
+
+        Phase-14 S06: when the trainer has poked a warmup-annealed
+        value via :meth:`set_effective_gate_threshold`, that value
+        is used in place of the gene value. Absent the poke, the
+        gene value is used directly (S05 / pre-S06 behaviour).
         """
-        threshold = self.direction_gate_threshold
+        threshold = (
+            self._effective_gate_threshold
+            if self._effective_gate_threshold is not None
+            else self.direction_gate_threshold
+        )
         # Per-runner max confidence — gate-pass is a single bool per
         # (batch, slot).
         direction_max = torch.maximum(

@@ -333,6 +333,27 @@ class TestGateMaskCapturePath:
         no_gate_open = no_gate_out.masked_logits[0, 1: 1 + 2 * R]
         assert torch.isfinite(no_gate_open).all()
 
+    def test_set_effective_gate_threshold_overrides_gene(self):
+        """Phase-14 S06: trainer poke overrides the gene value."""
+        p = _make_policy(enabled=True, threshold=0.95, seed=0)
+        # Default (no poke): uses gene value 0.95.
+        obs = torch.zeros(1, _OBS_DIM)
+        with torch.no_grad():
+            out_strict = p(obs)
+        n_inf_strict = torch.isinf(
+            out_strict.masked_logits[0, 1: 1 + 2 * _MAX_RUNNERS]
+        ).sum().item()
+        # Poke a loose threshold (the warmup-floor). Should mask
+        # fewer (or zero) OPEN slots.
+        p.set_effective_gate_threshold(0.5)
+        with torch.no_grad():
+            out_loose = p(obs)
+        n_inf_loose = torch.isinf(
+            out_loose.masked_logits[0, 1: 1 + 2 * _MAX_RUNNERS]
+        ).sum().item()
+        # Strict should mask MORE positions than loose.
+        assert n_inf_strict > n_inf_loose
+
     def test_supplied_mask_combined_with_apply_direction_gate_false(self):
         """When the trainer passes the captured rollout-time mask
         and ``apply_direction_gate=False``, the policy returns
@@ -357,3 +378,101 @@ class TestGateMaskCapturePath:
         assert finite[0].item() and finite[1].item()
         # Everything else is -inf.
         assert torch.isinf(out.masked_logits[0, 2:]).all()
+
+
+# ── 10. Threshold warmup (S06) ─────────────────────────────────────────────
+
+
+class TestGateThresholdWarmup:
+    """Phase-14 S06 — the trainer linearly anneals the policy's
+    effective gate threshold from the floor (0.5) to the gene value
+    across the first ``direction_gate_warmup_eps`` episodes.
+    Without this, agents that draw strict thresholds (≥0.85) never
+    open at cold start and PPO has no reward gradient to learn from
+    (the smoke surfaced this; see findings.md)."""
+
+    def test_warmup_starts_at_floor(self):
+        """At eps=0, the trainer's _effective_direction_gate_threshold
+        returns the floor (0.5)."""
+        from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+        # Construct a trainer-shaped object indirectly: we need a
+        # policy + a trainer instance. Use a minimal policy and
+        # exercise just the threshold-anneal path via the helper.
+        import unittest.mock as mock
+        # Stub trainer; we just need the method.
+        class _StubTrainer:
+            _direction_gate_warmup_eps = 5
+            _eps_since_gate_start = 0
+            policy = _make_policy(
+                enabled=True, threshold=0.9, seed=0,
+            )
+            _effective_direction_gate_threshold = (
+                DiscretePPOTrainer._effective_direction_gate_threshold
+            )
+        t = _StubTrainer()
+        v = t._effective_direction_gate_threshold()
+        # eps=0, frac=0/5=0 → floor (0.5).
+        assert v == 0.5
+
+    def test_warmup_reaches_gene_value(self):
+        from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+        class _StubTrainer:
+            _direction_gate_warmup_eps = 5
+            _eps_since_gate_start = 5  # at end of warmup
+            policy = _make_policy(
+                enabled=True, threshold=0.9, seed=0,
+            )
+            _effective_direction_gate_threshold = (
+                DiscretePPOTrainer._effective_direction_gate_threshold
+            )
+        t = _StubTrainer()
+        v = t._effective_direction_gate_threshold()
+        assert v == 0.9
+
+    def test_warmup_inactive_when_eps_zero(self):
+        """``direction_gate_warmup_eps=0`` → no warmup, gene value
+        applies from episode 0."""
+        from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+        class _StubTrainer:
+            _direction_gate_warmup_eps = 0
+            _eps_since_gate_start = 0
+            policy = _make_policy(
+                enabled=True, threshold=0.9, seed=0,
+            )
+            _effective_direction_gate_threshold = (
+                DiscretePPOTrainer._effective_direction_gate_threshold
+            )
+        t = _StubTrainer()
+        v = t._effective_direction_gate_threshold()
+        assert v == 0.9
+
+    def test_warmup_inactive_when_gate_disabled(self):
+        from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+        class _StubTrainer:
+            _direction_gate_warmup_eps = 5
+            _eps_since_gate_start = 0
+            policy = _make_policy(
+                enabled=False, threshold=0.9, seed=0,
+            )
+            _effective_direction_gate_threshold = (
+                DiscretePPOTrainer._effective_direction_gate_threshold
+            )
+        t = _StubTrainer()
+        # Gate disabled → returns gene value regardless of eps.
+        assert t._effective_direction_gate_threshold() == 0.9
+
+    def test_warmup_linear_at_midpoint(self):
+        from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+        class _StubTrainer:
+            _direction_gate_warmup_eps = 4
+            _eps_since_gate_start = 2  # halfway
+            policy = _make_policy(
+                enabled=True, threshold=0.9, seed=0,
+            )
+            _effective_direction_gate_threshold = (
+                DiscretePPOTrainer._effective_direction_gate_threshold
+            )
+        t = _StubTrainer()
+        v = t._effective_direction_gate_threshold()
+        # frac=0.5 → 0.5 + 0.5 * (0.9 - 0.5) = 0.5 + 0.2 = 0.7.
+        assert abs(v - 0.7) < 1e-9

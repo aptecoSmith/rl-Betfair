@@ -216,6 +216,9 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             # when operator passes ``--enable-gene
             # direction_gate_threshold``.
             "direction_gate_enabled", "direction_gate_threshold",
+            # Phase-14 S06 (added 2026-05-07). Threshold-warmup
+            # window — operator-controlled, default 5.
+            "direction_gate_warmup_eps",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2

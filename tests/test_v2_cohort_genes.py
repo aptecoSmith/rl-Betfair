@@ -335,14 +335,15 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_28_fields(self):
+    def test_to_dict_serialises_all_29_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
         # 7 legacy + 12 Phase 5 (incl. direction_gate_threshold) +
         # 3 Phase 8 BC + 4 Phase-13 direction + 1 Phase-13 S05 BC +
-        # 1 Phase-14 S03 (direction_gate_enabled).
-        assert len(d) == 28
+        # 1 Phase-14 S03 (direction_gate_enabled) + 1 Phase-14 S06
+        # (direction_gate_warmup_eps).
+        assert len(d) == 29
         for name in PHASE5_GENE_NAMES:
             assert name in d
             assert isinstance(d[name], float)
@@ -367,6 +368,10 @@ class TestPhase5Genes:
         # [0.5, 0.95] range rather than at the default 0.5.
         assert d["direction_gate_enabled"] is False
         assert 0.5 <= d["direction_gate_threshold"] <= 0.95
+        # Phase-14 S06 — threshold warmup window. Operator-controlled,
+        # not GA-evolved; pinned at default 5 even when enabled_set
+        # covers all PHASE5_GENE_NAMES.
+        assert d["direction_gate_warmup_eps"] == 5
 
     def test_phase5_gene_names_set_size(self):
         # Phase-14 S03 added direction_gate_threshold to Phase 5

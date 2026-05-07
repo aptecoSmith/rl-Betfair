@@ -401,6 +401,19 @@ class DiscretePPOTrainer:
             hp.get("per_transition_credit", False)
         )
 
+        # Phase-14 S06 (2026-05-07). Direction-gate threshold warmup.
+        # ``direction_gate_warmup_eps`` is an operator-controlled
+        # cohort knob (default 5). When the gate is enabled, the
+        # trainer linearly anneals the policy's effective threshold
+        # from the floor (DIRECTION_GATE_THRESHOLD_MIN, 0.5) to the
+        # gene value across the first N PPO updates. After that the
+        # gene value applies directly. Mirrors the
+        # bc_target_entropy_warmup_eps precedent.
+        self._direction_gate_warmup_eps = int(
+            hp.get("direction_gate_warmup_eps", 5),
+        )
+        self._eps_since_gate_start: int = 0
+
         # Phase-13 Session 03 (2026-05-06). Direction-prob aux head.
         # Read from ``hp`` ONLY (Path A; Phase 7 lessons-learnt
         # precedence trap). ``direction_prob_loss_weight = 0.0`` is
@@ -498,9 +511,40 @@ class DiscretePPOTrainer:
             + frac * (float(self.entropy_coeff) - float(self._post_bc_entropy))
         )
 
+    def _effective_direction_gate_threshold(self) -> float:
+        """Phase-14 S06: linear-anneal from gate-floor (0.5) to the
+        agent's gene value across the first ``_direction_gate_warmup_eps``
+        episodes. After warmup the gene value is used directly.
+
+        Returns the gene value when:
+        - the gate is disabled (the policy reads it but never uses
+          it via ``apply_direction_gate=None`` skipping the gate),
+        - the warmup window is 0 (operator opt-out of warmup), OR
+        - the warmup window has been exceeded.
+        """
+        gene = float(self.policy.direction_gate_threshold)
+        if not self.policy.direction_gate_enabled:
+            return gene
+        if self._direction_gate_warmup_eps <= 0:
+            return gene
+        if self._eps_since_gate_start >= self._direction_gate_warmup_eps:
+            return gene
+        floor = float(self.policy.DIRECTION_GATE_THRESHOLD_MIN)
+        frac = float(self._eps_since_gate_start) / float(
+            self._direction_gate_warmup_eps,
+        )
+        return floor + frac * (gene - floor)
+
     def train_episode(self) -> EpisodeStats:
         """Run one episode → GAE → PPO update; return per-episode stats."""
         t0 = time.perf_counter()
+        # Phase-14 S06: poke the policy's effective gate threshold
+        # BEFORE the rollout so it sees the annealed value during
+        # action sampling.
+        if self.policy.direction_gate_enabled:
+            self.policy.set_effective_gate_threshold(
+                self._effective_direction_gate_threshold(),
+            )
         batch = self._collector.collect_episode()
         last_info = self._collector.last_info
         return self._update_from_batch(
@@ -644,6 +688,13 @@ class DiscretePPOTrainer:
         # runs).
         if self._post_bc_entropy is not None:
             self._eps_since_bc += 1
+        # Phase-14 S06: tick the gate-warmup counter for the NEXT
+        # episode. Even when the gate is disabled this still increments
+        # — cheap and means any future enable can use a clean counter.
+        # Capped at warmup_eps + 1 to avoid integer overflow on long
+        # training runs.
+        if self._eps_since_gate_start <= self._direction_gate_warmup_eps:
+            self._eps_since_gate_start += 1
         logger.info(
             "DiscretePPOTrainer episode: n_steps=%d n_updates=%d "
             "policy_loss=%.4f value_loss=%.4f entropy=%.4f "

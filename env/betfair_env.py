@@ -689,6 +689,11 @@ class BetfairEnv(gymnasium.Env):
         # unknown-key debug log from firing.
         "direction_gate_enabled",
         "direction_gate_threshold",
+        # Phase-14 S06 (2026-05-07): threshold-warmup window. Trainer-
+        # only knob; env doesn't read it. Whitelisted so the cohort
+        # runner's reward_overrides passthrough doesn't trip the
+        # unknown-key debug log.
+        "direction_gate_warmup_eps",
         # Force-close-architecture Session 02 (2026-05-02): naked-lay
         # carve-out price floor. Stop-close fires unconditionally on
         # naked-back exposures, but for naked-lay exposures only fires

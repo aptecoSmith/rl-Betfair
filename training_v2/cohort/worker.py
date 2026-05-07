@@ -147,6 +147,7 @@ _PHASE13_TRAINER_HP_KEYS: frozenset[str] = frozenset({
 _PHASE14_TRAINER_HP_KEYS: frozenset[str] = frozenset({
     "direction_gate_enabled",
     "direction_gate_threshold",
+    "direction_gate_warmup_eps",
 })
 
 
@@ -529,6 +530,11 @@ def _build_trainer_hp(
         # GA-evolved gene; pull the agent's draw.
         hp["direction_gate_threshold"] = float(
             getattr(genes, "direction_gate_threshold"),
+        )
+    # Phase-14 S06: warmup window (operator-controlled).
+    if "direction_gate_warmup_eps" in overrides:
+        hp["direction_gate_warmup_eps"] = int(
+            overrides["direction_gate_warmup_eps"],
         )
     return hp
 
