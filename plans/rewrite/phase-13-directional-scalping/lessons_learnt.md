@@ -411,3 +411,54 @@ for completeness.
 
 **Status:** purpose.md `status: DRAFT` → `status: NULL`
 (see `purpose.md` header).
+
+## S06 re-run (2026-05-07) — confirmed NULL; head can't learn
+
+After plumbing the direction-BCE diagnostic through the
+scoreboard (commit 7fc3b73), re-launched at the spec'd 12 × 4
+sizing with `force_close_before_off_seconds=60` active. Arm A
+ran to completion (5h 54m). Arm B killed mid-gen-3 (8 of 12
+agents) once the verdict was clear at gen 2 — operator call
+to save the remaining ~2 hours.
+
+**The new run resolves the previous NULL's ambiguity.** All
+three caveats from the first run are now closed:
+
+| Previous caveat | Closed by |
+|---|---|
+| Cannot verify head trained | `train_mean_direction_back_bce` flowing to scoreboard at ~1.04 with non-zero `n_dir_targets ≈ 270k/day` |
+| Cohort under-powered (4 × 2) | 12 agents × 4 generations actually run |
+| `fc=0` in env, naked-rate as proxy | `fc=60` active; `eval_arbs_force_closed` populated |
+
+**Per-gen force-close rate, B vs A:** −0.88, +0.10, −0.28,
+−0.16 pp. All within noise; the 5 pp success bar is not
+remotely approached.
+
+**The actionable new finding:** direction BCE is **flat at
+~1.04 across all four generations**. The head IS supervised
+correctly but is NOT learning the label from the features +
+capacity it has. This contradicts S01's "strong signal already
+there" audit conclusion — the obs vector's velocity /
+microstructure features are not in fact informative about the
+60-tick LTP threshold-crossing label.
+
+**Three actionable hypotheses for any follow-on plan** (see
+`findings.md` §"Three actionable hypotheses"):
+
+1. **Horizon mismatch.** Cheapest to test — re-run S02 with a
+   shorter threshold/horizon (e.g. 15-tick) and check whether
+   BCE drops in a probe cohort.
+2. Capacity too thin — replace single Linear with small MLP.
+3. Label noise — switch to magnitude-Huber target on
+   `tanh(Δprice)`.
+
+Per hard_constraints.md §19: do NOT sweep
+`direction_prob_loss_weight` at the current label spec. Pick
+one hypothesis, validate in a probe before any full validation
+re-run.
+
+**Foot-gun observation surfaced.** Default cohort runner uses
+CPU. The 10h run was on CPU — arm B was on track for ~13h
+wall when GPU would have done it in 3-4h. Saved as memory
+`feedback_always_gpu.md` (default `--device cuda` going
+forward).

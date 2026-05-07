@@ -6,14 +6,20 @@ landed: 2026-05-07
 outcome_summary: >
     S01-S05 implementation shipped (label generator, direction
     head wired into actor_head, BC layered with oracle). S06
-    validation cohort (4x2 sizing, fc=0) returned a NULL/weak-
-    negative result — direction-on arm matured -1.67 pp vs
-    direction-off, non-regression on eval_total_reward passed
-    (-3.9%). Cannot verify the head actually trained because
-    direction_back_bce_mean is not propagated to the scoreboard;
-    re-run with that diagnostic plumbed through, at spec-spec'd
-    12x3 sizing, before escalating per hard_constraints §19.
-    See findings.md / lessons_learnt.md for the full caveats.
+    re-run at spec'd 12x4 sizing with fc=60 and the BCE
+    diagnostic plumbed through to the scoreboard CONFIRMS NULL.
+    Force-close-rate delta on direction-on vs direction-off is
+    <1 pp at every generation (success bar 5 pp). Non-regression
+    on eval_total_reward PASSES. The newly-visible BCE
+    diagnostic shows direction-prob BCE FLAT at ~1.04 across
+    all 4 gens — the head is supervised correctly but cannot
+    learn the 60-tick threshold-crossing label from the obs
+    vector's features + single-Linear capacity. Three actionable
+    hypotheses for follow-on (horizon mismatch / capacity / label
+    noise) — pick one, validate in a probe, before any full
+    re-run. Per hard_constraints §19: do NOT sweep
+    direction_prob_loss_weight on the current label spec. See
+    findings.md S06 re-run section for the full data.
 depends_on: rewrite/phase-12-counterfactual-fill-prob (S03 outcome informs whether
             S03 of THIS plan needs a calibrated fill_prob alongside the new
             direction signal, but the offline label generator and the head wiring
