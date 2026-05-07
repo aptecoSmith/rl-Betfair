@@ -717,6 +717,24 @@ class DiscretePPOTrainer:
         masks = _move_to_device(
             torch.from_numpy(np.ascontiguousarray(batch.mask)), device,
         )
+        # Phase-14 S05 (2026-05-07): rollout-time captured gate mask.
+        # When the policy's gate was active, the rollout collector
+        # populated batch.gate_mask with the COMBINED legality + gate
+        # mask per tick. At update time we AND it with the legality
+        # mask (mb_mask) and pass to the policy as the supplied mask
+        # — the policy's forward sees apply_direction_gate=False so
+        # the in-forward gate recompute is skipped. Without this, the
+        # gate's drifted recompute produces approx_kl=inf because
+        # actions sampled at rollout become masked at update time.
+        # See plans/rewrite/phase-14-direction-gate/findings.md.
+        gate_mask_t: torch.Tensor | None
+        if getattr(batch, "gate_mask", None) is not None:
+            gate_mask_t = _move_to_device(
+                torch.from_numpy(np.ascontiguousarray(batch.gate_mask)),
+                device,
+            )
+        else:
+            gate_mask_t = None
         action_idx = _move_to_device(
             torch.from_numpy(np.ascontiguousarray(action_idx_np)), device,
         )
@@ -913,9 +931,24 @@ class DiscretePPOTrainer:
                         packed_hidden, mb_idx,
                     )
 
-                    out = self.policy(
-                        mb_obs, hidden_state=mb_hidden, mask=mb_mask,
-                    )
+                    # Phase-14 S05: when the rollout captured the
+                    # gate mask, AND it with legality and pass to
+                    # the policy with apply_direction_gate=False
+                    # (the in-forward recompute would drift from
+                    # the rollout-time mask and break PPO's
+                    # log_pi_old/new invariant).
+                    if gate_mask_t is not None:
+                        mb_effective_mask = mb_mask & gate_mask_t[mb_idx]
+                        out = self.policy(
+                            mb_obs,
+                            hidden_state=mb_hidden,
+                            mask=mb_effective_mask,
+                            apply_direction_gate=False,
+                        )
+                    else:
+                        out = self.policy(
+                            mb_obs, hidden_state=mb_hidden, mask=mb_mask,
+                        )
 
                     # Categorical log-prob at the rollout-time action.
                     new_lp_action = out.action_dist.log_prob(mb_action)

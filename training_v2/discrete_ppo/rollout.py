@@ -367,6 +367,21 @@ class RolloutCollector:
         )
         done_arr = np.empty((n_steps_estimate,), dtype=bool)
 
+        # Phase-14 S05 (2026-05-07): rollout-time gate-mask buffer.
+        # Only allocated when the policy's gate is enabled — None
+        # otherwise so the trainer's downstream branch skips
+        # cleanly. The captured mask lets PPO _ppo_update reproduce
+        # the rollout-time effective distribution (legality AND
+        # gate) rather than re-applying the gate from drifted head
+        # outputs at update time. See findings.md.
+        gate_mask_arr: np.ndarray | None
+        if getattr(policy, "direction_gate_enabled", False):
+            gate_mask_arr = np.empty(
+                (n_steps_estimate, action_n), dtype=bool,
+            )
+        else:
+            gate_mask_arr = None
+
         # Phase 4 Session 04: pre-allocated hidden-state capture
         # buffers. Pre-Session-04 each tick did
         # ``tuple(t.detach().clone() for t in hidden_state)`` —
@@ -460,6 +475,15 @@ class RolloutCollector:
                         done_arr=done_arr,
                         n_filled=n_steps,
                     )
+                    # Phase-14 S05: grow gate_mask alongside the
+                    # other buffers when the gate is active.
+                    if gate_mask_arr is not None:
+                        new_gate = np.empty(
+                            (obs_arr.shape[0], gate_mask_arr.shape[1]),
+                            dtype=bool,
+                        )
+                        new_gate[:n_steps] = gate_mask_arr[:n_steps]
+                        gate_mask_arr = new_gate
 
                 # Single write per tick into the contiguous row;
                 # the device buffer copy reads from the same row.
@@ -496,6 +520,24 @@ class RolloutCollector:
 
                 out = policy(obs_t, hidden_state=hidden_state, mask=mask_t)
                 hidden_state = out.new_hidden_state
+
+                # Phase-14 S05: capture the rollout-time effective
+                # action mask (legality AND gate) when the gate is
+                # active. ``masked_logits`` carries finite values at
+                # legal positions and ``-inf`` at gate-blocked or
+                # legality-blocked positions; the bool mask is just
+                # ``isfinite()``. Stored per-tick into the pre-
+                # allocated buffer; the trainer slices by mini-batch
+                # at update time to avoid the in-forward gate
+                # recomputation that produces approx_kl=inf when the
+                # head's outputs drift between rollout and update.
+                if gate_mask_arr is not None:
+                    gate_mask_arr[n_steps] = (
+                        torch.isfinite(out.masked_logits)
+                        .squeeze(0)
+                        .cpu()
+                        .numpy()
+                    )
 
                 # Sample action and stake.
                 if deterministic:
@@ -686,6 +728,14 @@ class RolloutCollector:
             aux_bets, market_to_runner_map, self.max_runners,
         )
 
+        # Phase-14 S05: gate_mask captured per-tick when the policy's
+        # gate is active. ``None`` when disabled — _ppo_update's
+        # downstream branch checks for that and skips the
+        # apply_direction_gate=False path entirely.
+        gate_mask_field: np.ndarray | None = (
+            gate_mask_arr[:n_steps] if gate_mask_arr is not None else None
+        )
+
         batch = RolloutBatch(
             obs=obs_arr[:n_steps],
             hidden_state_in=hidden_state_in,
@@ -700,6 +750,7 @@ class RolloutCollector:
             n_steps=n_steps,
             aux_labels=aux_labels,
             pair_open_records=pair_open_records,
+            gate_mask=gate_mask_field,
         )
 
         self.last_info = last_info

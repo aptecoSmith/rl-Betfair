@@ -534,6 +534,7 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, ...] | None = None,
         mask: torch.Tensor | None = None,
+        apply_direction_gate: bool | None = None,
     ) -> DiscretePolicyOutput:
         if obs.dim() == 2:
             obs = obs.unsqueeze(1)  # (batch, 1, obs_dim)
@@ -649,7 +650,19 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # NOOP and CLOSE_i are NEVER gated. The mask AND-s with
         # the legality mask (both must pass) so the gate never
         # overrides legality. See hard_constraints §11–§15.
-        if self.direction_gate_enabled:
+        #
+        # Phase-14 S05: ``apply_direction_gate`` lets the caller
+        # opt out of the in-forward gate recomputation. When the
+        # caller has supplied a pre-captured rollout-time mask via
+        # ``mask=``, they pass ``apply_direction_gate=False`` so
+        # the logits aren't gated twice (and so the trainer's
+        # ``log_pi_new`` is computed against the SAME distribution
+        # ``log_pi_old`` came from — without this, the in-forward
+        # gate's recompute drifts during PPO weight updates and
+        # produces approx_kl=inf; see findings.md).
+        if apply_direction_gate is None:
+            apply_direction_gate = self.direction_gate_enabled
+        if apply_direction_gate:
             masked_logits = self._apply_direction_gate(
                 masked_logits,
                 direction_back_prob=direction_back_prob,

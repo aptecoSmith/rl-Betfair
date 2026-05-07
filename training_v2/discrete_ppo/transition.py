@@ -139,6 +139,16 @@ class RolloutBatch(NamedTuple):
     n_steps: int
     aux_labels: PerRunnerAuxLabels | None = None
     pair_open_records: list[PairOpenRecord] | None = None
+    # Phase-14 S05 (2026-05-07). Captured rollout-time gate mask.
+    # Shape ``(n_steps, action_space.n)`` bool. ``True`` at action
+    # indices that were legal under the COMBINED legality + direction
+    # gate mask at rollout time. ``None`` when the gate was disabled
+    # for this rollout. The PPO update reuses this so log_pi_new is
+    # computed against the same distribution log_pi_old came from —
+    # without it the gate's in-forward recomputation drifts during
+    # PPO weight updates and produces approx_kl=inf (the bug the
+    # phase-14 smoke surfaced; see findings.md).
+    gate_mask: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

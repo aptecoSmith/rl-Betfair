@@ -301,3 +301,59 @@ class TestGateGeneIsPhase5Evolved:
         # Independent draws should differ on at least one agent
         # most of the time. With seeds 123 / 456 they will.
         assert a.direction_gate_threshold != b.direction_gate_threshold
+
+
+# ── 9. apply_direction_gate kwarg + captured-mask path (S05) ──────────────
+
+
+class TestGateMaskCapturePath:
+    """Phase-14 S05 — the rollout collector captures the effective
+    mask (legality AND gate) per tick; the trainer passes it back to
+    the policy with ``apply_direction_gate=False`` so the in-forward
+    gate recompute is bypassed. Without this, gate-on PPO updates
+    produce ``approx_kl=inf`` (the smoke surfaced this; see
+    findings.md).
+    """
+
+    def test_apply_direction_gate_false_skips_in_forward_recompute(self):
+        """Same policy, same obs: with ``apply_direction_gate=None``
+        (default) the gate masks OPEN slots; with
+        ``apply_direction_gate=False`` it does NOT (caller is
+        responsible for passing the gate via ``mask``)."""
+        p = _make_policy(enabled=True, threshold=0.95, seed=0)
+        obs = torch.zeros(1, _OBS_DIM)
+        with torch.no_grad():
+            default_out = p(obs)
+            no_gate_out = p(obs, apply_direction_gate=False)
+        # With default the OPEN slots are -inf (gate masks them).
+        R = _MAX_RUNNERS
+        default_open = default_out.masked_logits[0, 1: 1 + 2 * R]
+        assert torch.isinf(default_open).all()
+        # With apply_direction_gate=False the OPEN slots are finite.
+        no_gate_open = no_gate_out.masked_logits[0, 1: 1 + 2 * R]
+        assert torch.isfinite(no_gate_open).all()
+
+    def test_supplied_mask_combined_with_apply_direction_gate_false(self):
+        """When the trainer passes the captured rollout-time mask
+        and ``apply_direction_gate=False``, the policy returns
+        masked_logits whose finite-positions exactly match the
+        supplied mask. No extra in-forward gate is added.
+        """
+        p = _make_policy(enabled=True, threshold=0.95, seed=0)
+        obs = torch.zeros(1, _OBS_DIM)
+        # Synthetic "rollout-time" mask: NOOP + first OPEN_BACK
+        # legal, everything else illegal.
+        n = p.action_space.n
+        rollout_mask = torch.zeros(1, n, dtype=torch.bool)
+        rollout_mask[0, 0] = True   # NOOP
+        rollout_mask[0, 1] = True   # OPEN_BACK_0
+        with torch.no_grad():
+            out = p(
+                obs, mask=rollout_mask,
+                apply_direction_gate=False,
+            )
+        finite = torch.isfinite(out.masked_logits[0])
+        # Exactly NOOP + OPEN_BACK_0 are finite.
+        assert finite[0].item() and finite[1].item()
+        # Everything else is -inf.
+        assert torch.isinf(out.masked_logits[0, 2:]).all()
