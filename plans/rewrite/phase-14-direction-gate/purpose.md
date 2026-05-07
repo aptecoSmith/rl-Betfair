@@ -1,10 +1,27 @@
 ---
 plan: rewrite/phase-14-direction-gate
-status: DRAFT
+status: BLOCKED
 opened: 2026-05-07
+last_update: 2026-05-07 (smoke surfaced PPO/gate bug)
 parent: plans/rewrite/phase-13-directional-scalping (NULL)
 depends_on: phase-13 infrastructure (offline label generator,
             direction_prob_head, direction-label cache, BC layering)
+blockers: >
+    Pre-S04 smoke (registry/_phase14_smoke_1778185382/) revealed
+    a structural bug in S03's gate: the mask is recomputed inside
+    DiscreteLSTMPolicy.forward() from the head's CURRENT outputs.
+    At rollout time the head outputs one set of probs and the
+    agent samples accordingly; by update time the head's weights
+    have drifted, the same action becomes masked, and
+    approx_kl = inf trips the per-mini-batch KL early-stop. PPO
+    runs ~1 mini-batch per update instead of 600. 15 of 39 update
+    logs show approx_kl=inf. Fix: capture the gate mask at
+    rollout time and reuse at update (new RolloutBatch.gate_mask
+    field). Plus the threshold range on a fresh-init head leaves
+    3 of 4 agents at T>=0.88 emitting zero bets — needs an anneal
+    to the gene value. New sessions S05 (gate-mask capture) and
+    S06 (threshold cold-start fix) needed before S04 can run.
+    See findings.md for full diagnostic.
 ---
 
 # Phase 14 — Direction-gate selectivity

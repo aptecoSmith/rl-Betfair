@@ -373,6 +373,69 @@ S04 (validation cohort) is operator-driven from here — needs
 oracle + direction-label cache regen at OBS_SCHEMA_VERSION=7
 across the day window first.
 
+## Smoke (pre-S04) — surfaced two blockers
+
+Landed 2026-05-07. 4 agents × 1 generation × 5 days, gate-on,
+GPU. Wall 45m. Registry
+`registry/_phase14_smoke_1778185382/`. Findings doc:
+`findings.md` in this folder.
+
+**Two blockers found that require new sessions before S04:**
+
+### Blocker 1 — gate / PPO incompatibility (`approx_kl = inf`)
+
+The `_apply_direction_gate` helper recomputes the mask inside
+`DiscreteLSTMPolicy.forward()` from the CURRENT head output. This
+means at PPO update time, after weights have drifted, an action
+that was legal at rollout becomes masked → `log_pi_new = -inf` →
+`approx_kl = inf` → KL early-stop fires after 1 mini-batch.
+
+**Quantified impact:** 15 of 39 per-day update logs in the smoke
+show `approx_kl=inf`. The agent that actually traded (agent 2)
+trained on ~1/600th of the budgeted mini-batches across days 2-4.
+
+**Fix scope (new session S05):** capture the rollout-time gate
+mask, store on `RolloutBatch.gate_mask`, reuse at update time
+via a `precomputed_mask` argument to
+`DiscreteLSTMPolicy.forward`. Restores PPO's `log_pi_old /
+log_pi_new` invariant. New regression test:
+`test_gate_mask_captured_at_rollout_reused_at_update` asserts
+`approx_kl` stays finite under multi-step rollout + update with
+gate active.
+
+### Blocker 2 — strict thresholds → NOOP-only on fresh-init
+
+At gate threshold ≥0.88 on a fresh-init head (sigmoid output
+near 0.5), 3 of 4 agents in the smoke emitted ZERO bets across
+the 5-day window. PPO has no reward gradient, the head trains
+via BCE alone but the agent never learns to ACT.
+
+**Quantified impact:** with gene range [0.5, 0.95], any agent
+drawing T ≥ ~0.85 is starved of opens at cold start. That's
+exactly the part of the range the strategy thesis says we WANT
+(strict gates produce profitable behaviour OOS per the
+threshold-sweep probe).
+
+**Fix scope (new session S06):** anneal `direction_gate_threshold`
+from 0.5 to the gene value across the first N PPO updates.
+Mirrors `bc_target_entropy_warmup_eps` precedent. New gene
+`direction_gate_warmup_eps: int = 5`. Operator-controlled, default
+gives 5 generations of warmup before the strict gate fully
+activates.
+
 ## S04 — Validation cohort
 
-(Append on completion.)
+BLOCKED until S05 + S06 land. The architectural premise (per-
+runner head + augmented features + gate-as-selectivity) remains
+sound; the implementation surfaced two scoped fixes that the
+smoke caught early. After S05 + S06 land + a follow-up smoke
+confirms `approx_kl` stays finite AND gate-on agents open
+≥50 pairs/day, S04 launches per the existing prompt.
+
+**Operator was off-call when the smoke result came in.** Per the
+pre-handoff agreement, the autonomous-run policy was:
+- BCE drops → proceed to S04.
+- BCE flat / errors → STOP.
+
+Both stop conditions fired (BCE not cleanly trending; PPO
+errors observed). No cohort launched.
