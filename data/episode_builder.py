@@ -74,6 +74,16 @@ class RunnerSnap:
     removal_date: str | None
     available_to_back: list[PriceSize]
     available_to_lay: list[PriceSize]
+    # Phase-14 S02 (2026-05-07). Per-price traded-volume ladder
+    # parsed from snap_json's ``Prices.TradedVolumeLadder``.
+    # Defaults to empty tuple (the dataclass is frozen+slots so we
+    # can't use ``field(default_factory=list)`` here without a
+    # broader rewrite, and an immutable tuple is a safer default
+    # for a frozen dataclass anyway). Iteration semantics are
+    # identical to a list. ~85% of runner snaps carry a non-empty
+    # ladder; the rest produce zero-fill direction features per
+    # S02 D8.
+    traded_volume_ladder: tuple[PriceSize, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +329,16 @@ def parse_snap_json(json_str: str) -> list[RunnerSnap]:
         # Price ladders: nested (Prices) → flat fallback
         atb_raw = prices.get("AvailableToBack") or r.get("AvailableToBack") or r.get("atb")
         atl_raw = prices.get("AvailableToLay") or r.get("AvailableToLay") or r.get("atl")
+        # Phase-14 S02: per-price traded-volume ladder. Only nested
+        # form is observed in production parquets; flat fallback for
+        # forward-compatibility. Empty list → empty tuple on the
+        # RunnerSnap.
+        tvl_raw = (
+            prices.get("TradedVolumeLadder")
+            or r.get("TradedVolumeLadder")
+            or r.get("tvl")
+        )
+        traded_volume_ladder = tuple(_parse_price_sizes(tvl_raw))
 
         result.append(
             RunnerSnap(
@@ -334,6 +354,7 @@ def parse_snap_json(json_str: str) -> list[RunnerSnap]:
                 removal_date=rd,
                 available_to_back=_parse_price_sizes(atb_raw),
                 available_to_lay=_parse_price_sizes(atl_raw),
+                traded_volume_ladder=traded_volume_ladder,
             )
         )
     return result

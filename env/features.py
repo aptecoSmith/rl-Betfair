@@ -326,3 +326,71 @@ def compute_book_churn(
     if total_vol == 0.0:
         return 0.0
     return abs_delta / total_vol
+
+
+def compute_traded_volume_imbalance(
+    ladder, ltp,
+) -> tuple[float, float, float, float]:
+    """Summarise per-price traded-volume distribution relative to LTP.
+
+    Phase-14 S02. Returns four scalars:
+
+    - ``above_frac`` — fraction of traded size at prices > LTP.
+    - ``below_frac`` — fraction at prices < LTP.
+    - ``imbalance`` — ``(above - below) / (above + below)`` ∈ [-1, 1].
+    - ``weighted_dist`` — size-weighted-average ladder price minus
+      LTP, in the SAME UNITS as ``ltp`` (i.e. price space). The
+      tick-units conversion happens at the feature engineer's call
+      site via ``env.tick_ladder.ticks_between`` (avoids importing
+      tick_ladder here and keeps this module dependency-free).
+
+    Empty ladder, zero total, or non-positive LTP all return
+    ``(0.0, 0.0, 0.0, 0.0)``. ~15% of runner-snaps lack a ladder
+    (per the phase-14 supervised-probe finding); zero-fill is the
+    documented convention.
+
+    Parameters
+    ----------
+    ladder:
+        Iterable of objects with ``.price`` and ``.size`` (any
+        ``PriceLevel``-like dataclass). Empty / None returns zero
+        features.
+    ltp:
+        Last traded price. Must be > 0 for the function to compute
+        anything; otherwise the four features are zero.
+    """
+    if ltp is None or ltp <= 0.0:
+        return 0.0, 0.0, 0.0, 0.0
+    if not ladder:
+        return 0.0, 0.0, 0.0, 0.0
+
+    above = 0.0
+    below = 0.0
+    weighted_price_sum = 0.0
+    total_size = 0.0
+    for level in ladder:
+        size = float(level.size)
+        if size <= 0.0:
+            continue
+        price = float(level.price)
+        total_size += size
+        weighted_price_sum += size * price
+        if price > ltp:
+            above += size
+        elif price < ltp:
+            below += size
+        # price == ltp contributes to the weighted average but
+        # neither above nor below.
+
+    if total_size == 0.0:
+        return 0.0, 0.0, 0.0, 0.0
+    above_frac = above / total_size
+    below_frac = below / total_size
+    denom = above + below
+    if denom > 0.0:
+        imbalance = (above - below) / denom
+    else:
+        imbalance = 0.0
+    weighted_avg_price = weighted_price_sum / total_size
+    weighted_dist = weighted_avg_price - ltp
+    return above_frac, below_frac, imbalance, weighted_dist

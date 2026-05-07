@@ -75,7 +75,15 @@ logger = logging.getLogger(__name__)
 #   Version 6 — scalping-active-management session 01: added
 #               seconds_since_passive_placed and
 #               passive_price_vs_current_ltp_ticks per runner (scalping only)
-OBS_SCHEMA_VERSION: int = 6
+#   Version 7 — phase-14 S02 (2026-05-07): added 10 augmented
+#               direction-prediction features per runner —
+#               ltp_velocity_30 / 60, vol_delta_30 / 60 plus _log
+#               companions, vol_above_ltp_frac / vol_below_ltp_frac
+#               / vol_ladder_imbalance / vol_weighted_price_dist_ticks.
+#               Driven by phase-14 supervised-probe findings:
+#               longer-window pressure + per-price TradedVolumeLadder
+#               summaries lift the head's calibration ~50-70%.
+OBS_SCHEMA_VERSION: int = 7
 
 # ── Action schema version ────────────────────────────────────────────────────
 # Bump this integer whenever the action vector layout changes.
@@ -343,6 +351,26 @@ RUNNER_KEYS: list[str] = [
     "mid_drift",
     # ── P1e features (1, Session 31b) ──
     "book_churn",
+    # ── Phase-14 S02 features (10, 2026-05-07) ──
+    # Longer-window LTP velocity (existing 3 / 5 / 10 cap at ~160s
+    # wall on 16-second-median tick spacing; 30-tick covers ~8 min,
+    # 60-tick covers ~16 min — matching the direction label horizon).
+    "ltp_velocity_30",
+    "ltp_velocity_60",
+    # Longer-window volume deltas + log companions (matching the
+    # vol_delta_3/5/10 + _log pattern; raw scale spans orders of
+    # magnitude, the _log forms keep gradients tractable).
+    "vol_delta_30", "vol_delta_30_log",
+    "vol_delta_60", "vol_delta_60_log",
+    # Per-price TradedVolumeLadder summaries — fraction of traded
+    # size resting above / below current LTP, signed imbalance, and
+    # the size-weighted ladder price's signed tick distance from
+    # current LTP. Captures "where is real money trading vs where is
+    # the market quoted now".
+    "vol_above_ltp_frac",
+    "vol_below_ltp_frac",
+    "vol_ladder_imbalance",
+    "vol_weighted_price_dist_ticks",
 ]
 
 AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
@@ -361,7 +389,7 @@ SCALPING_AGENT_STATE_DIM = 2
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
-RUNNER_DIM = len(RUNNER_KEYS)             # 115 (was 114, +1 book_churn P1e)
+RUNNER_DIM = len(RUNNER_KEYS)             # 125 (was 115, +10 phase-14 S02)
 
 # Action thresholds
 _BACK_THRESHOLD = 0.33

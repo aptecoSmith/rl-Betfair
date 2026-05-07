@@ -705,7 +705,12 @@ class TickHistory:
     Maintains a per-runner LTP, volume, and windowed-feature history.
     """
 
-    max_window: int = 20
+    # Phase-14 S02 (2026-05-07): bumped from 20 to 60 to support
+    # the new 30 / 60-tick lookbacks (ltp_velocity_30/60,
+    # vol_delta_30/60). Per-race per-runner memory cost is
+    # O(max_window) floats; at 60 that's ~480 bytes per runner per
+    # race, negligible.
+    max_window: int = 60
     # ── P1c windowed feature config (Session 21) ────────────────────────────
     # Wall-clock window lengths for traded_delta and mid_drift.
     traded_delta_window_s: float = 60.0
@@ -780,6 +785,16 @@ class TickHistory:
         ltps = self._ltp_history.get(selection_id, [])
         vols = self._vol_history.get(selection_id, [])
 
+        # Phase-14 S02 (2026-05-07): extended (3, 5, 10) → (3, 5, 10,
+        # 30, 60) to give the policy longer-horizon directional
+        # signal. The 30 and 60 windows are NOT included in the
+        # ltp_pct_change family — only the absolute-delta velocity
+        # form lands in RUNNER_KEYS at the new windows. (RUNNER_KEYS
+        # has the matching ltp_velocity_30 / 60 keys; pct_change is
+        # only listed for 3 / 5 / 10.) When the lookback is
+        # unavailable (e.g. tick_idx < 30), emit 0.0 — the
+        # surrounding ``seconds_spanned_*`` and ``tick_count``
+        # features encode lookback availability for the policy.
         for window in (3, 5, 10):
             suffix = f"_{window}"
             if len(ltps) >= window:
@@ -799,6 +814,28 @@ class TickHistory:
             else:
                 feats[f"vol_delta{suffix}"] = NaN
                 feats[f"vol_delta{suffix}_log"] = NaN
+
+        # Phase-14 S02: longer-window velocities (30, 60 ticks).
+        # Emit 0.0 when lookback is unavailable (matches the
+        # zero-fill convention for new features per
+        # `plans/rewrite/phase-14-direction-gate/hard_constraints.md
+        # §7`). We don't extend `ltp_pct_change` to these windows
+        # — RUNNER_KEYS only carries the absolute-delta form for
+        # 30/60.
+        for window in (30, 60):
+            suffix = f"_{window}"
+            if len(ltps) >= window:
+                feats[f"ltp_velocity{suffix}"] = ltps[-1] - ltps[-window]
+            else:
+                feats[f"ltp_velocity{suffix}"] = 0.0
+
+            if len(vols) >= window:
+                vd = vols[-1] - vols[-window]
+                feats[f"vol_delta{suffix}"] = vd
+                feats[f"vol_delta{suffix}_log"] = log_norm(max(0.0, vd))
+            else:
+                feats[f"vol_delta{suffix}"] = 0.0
+                feats[f"vol_delta{suffix}_log"] = 0.0
 
         # Price volatility (std of last N LTPs)
         for window in (5, 10):
@@ -987,6 +1024,36 @@ def engineer_tick(
             )
         else:
             feats["book_churn"] = 0.0
+
+        # ── Phase-14 S02 traded-volume-ladder summaries ────────────────────
+        # Reads `RunnerSnap.traded_volume_ladder` (added in S02). Empty
+        # ladders or unpriceable runners produce zero-fill — same
+        # convention as the existing missing-feature handling
+        # (per `hard_constraints.md §7, §8`). The
+        # `weighted_dist_ticks` value is converted from price-space to
+        # tick-space using `env.tick_ladder.ticks_between` since price
+        # increments are non-uniform across the Betfair ladder.
+        from env.features import compute_traded_volume_imbalance
+        from env.tick_ladder import ticks_between
+        above_frac, below_frac, imbalance, weighted_dist_price = (
+            compute_traded_volume_imbalance(
+                snap.traded_volume_ladder, ltp,
+            )
+        )
+        feats["vol_above_ltp_frac"] = above_frac
+        feats["vol_below_ltp_frac"] = below_frac
+        feats["vol_ladder_imbalance"] = imbalance
+        # Convert price-space weighted distance to signed tick units.
+        # ticks_between returns a non-negative integer; sign comes from
+        # whether the weighted price was above (positive) or below
+        # (negative) LTP.
+        if weighted_dist_price != 0.0 and ltp > 0.0:
+            wap = ltp + weighted_dist_price
+            n_ticks = ticks_between(ltp, wap)
+            sign = 1.0 if weighted_dist_price > 0.0 else -1.0
+            feats["vol_weighted_price_dist_ticks"] = sign * float(n_ticks)
+        else:
+            feats["vol_weighted_price_dist_ticks"] = 0.0
         # Store current ladder for next tick's churn computation.
         tick_history._prev_ladders[sid] = (
             list(snap.available_to_back),

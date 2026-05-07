@@ -186,7 +186,96 @@ construction; operators see a clear `RuntimeError` mentioning
 
 ## S02 — Augmented feature extension
 
-(Append on completion.)
+Landed 2026-05-07. RUNNER_DIM 115 → 125, OBS_SCHEMA_VERSION 6 → 7.
+Ten new per-runner features, all engineered from existing data
+sources (no upstream parquet schema change needed):
+
+- `ltp_velocity_30 / 60` — absolute LTP delta over 30 / 60-tick
+  lookback. Median tick spacing on this data is 16s, so 30-tick
+  ≈ 8 min wall, 60-tick ≈ 16 min — matches the direction label
+  horizon.
+- `vol_delta_30 / 60` + `_log` companions — runner traded-volume
+  delta over the same windows, mirroring the existing
+  `vol_delta_3 / 5 / 10` + `_log` pattern.
+- `vol_above_ltp_frac, vol_below_ltp_frac, vol_ladder_imbalance,
+  vol_weighted_price_dist_ticks` — TradedVolumeLadder summaries.
+
+**Implementation:**
+
+- `data/episode_builder.py::RunnerSnap` gains
+  `traded_volume_ladder: tuple[PriceSize, ...] = ()`. Parse path
+  populates from `snap_json["MarketRunners"][k]["Prices"]
+  ["TradedVolumeLadder"]` via the existing `_parse_price_sizes`
+  helper. Empty default keeps existing fixtures / tests
+  byte-identical.
+- `data/feature_engineer.py::TickHistory.max_window` bumped 20 → 60
+  to support 60-tick lookback. Per-runner memory cost: ~480 bytes
+  per runner per race, negligible.
+- `runner_velocity_features` extended to also emit (30, 60) ltp
+  velocity + vol_delta + vol_delta_log. Lookback-unavailable
+  emits 0.0 (NOT NaN — phase-14 hard_constraints §7).
+- `engineer_tick` calls `compute_traded_volume_imbalance`
+  (new pure function in `env/features.py`) per (tick, runner) and
+  converts the price-space weighted distance to signed tick units
+  via `env.tick_ladder.ticks_between`.
+- `OBS_SCHEMA_VERSION` bumped to 7. Pre-S02 caches refuse load
+  via the existing schema-version check.
+
+**Smoke verification:**
+
+- One real-day full feature engineering pass on 2026-05-03:
+  - 2100 / 2520 = **83 % of runner-snaps carry a non-empty
+    ladder** (matches the probe's 85 % finding within tolerance).
+  - Tick 0 of race 1 lookback features = 0.0 (zero-fill at
+    insufficient history).
+  - Tick 0 of race 1 ladder features computed correctly:
+    96 % traded volume below LTP, imbalance −0.95,
+    weighted price 10 ticks below LTP. Real signal.
+- One-day direction-label re-scan at the new
+  OBS_SCHEMA_VERSION = 7:
+  - `data/direction_labels/2026-05-03/horizon60_thresh5_fc60_header.json`
+    carries `"obs_schema_version": 7`.
+  - Row count 55190 / density_back 0.220 — within 1 % of
+    phase-13's same-day numbers (the labels themselves don't
+    depend on RUNNER_KEYS, but the header's
+    `obs_schema_version` flips so the trainer rejects any
+    pre-S02 load attempt).
+
+**Tests:** 345 / 345 passing across `tests/test_v2_*.py +
+test_feature_engineer.py + test_betfair_env.py`. No
+RUNNER_DIM-aware test broke under the bump.
+
+**Operator action items for full S04 cohort launch:**
+
+```bash
+# Re-scan oracle samples for the cohort's training + eval window.
+python -m training_v2.oracle_cli scan --dates \
+  2026-04-22,2026-04-23,2026-04-24,2026-04-25,2026-04-26,\
+  2026-04-28,2026-04-29,2026-04-30,2026-05-01,2026-05-02,\
+  2026-05-03,2026-05-04
+
+# Re-scan direction labels.
+python -m training_v2.direction_label_cli scan --dates \
+  2026-04-22,2026-04-23,2026-04-24,2026-04-25,2026-04-26,\
+  2026-04-28,2026-04-29,2026-04-30,2026-05-01,2026-05-02,\
+  2026-05-03,2026-05-04 \
+  --horizon-ticks 60 --threshold-ticks 5 \
+  --force-close-before-off-seconds 60
+```
+
+12 days takes ~30 s for direction labels; oracle scan is
+substantially heavier (~1-3 min/day depending on density). Total
+re-scan budget: maybe 30 minutes wall.
+
+**Distribution check note:** the new `ltp_velocity_30 / 60` are
+ABSOLUTE deltas (mirroring the existing `ltp_velocity_3 / 5 / 10`
+naming), NOT percentage changes. The probe used percentage; we
+diverged for naming consistency. The information content is
+nearly identical — at typical pre-race LTP magnitudes the
+absolute delta is approximately ltp × pct_change. If S04
+cohort metrics suggest the head needs the pct-change form, a
+follow-on adds `ltp_pct_change_30 / 60` (would bump RUNNER_DIM
+to 127).
 
 ## S03 — Direction-gate gene + mask
 
