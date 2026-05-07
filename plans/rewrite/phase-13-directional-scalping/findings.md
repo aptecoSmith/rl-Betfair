@@ -94,9 +94,144 @@ significance bar. Note this in the decision write-up.
   on arm B. Calibration check deferred to follow-on (we don't have
   the bin-level histogram tooling stood up in this session).
 
-### Results — TBD
+### Caveat — `force_close_before_off_seconds` was 0 in this run
 
-(To be filled in after both runs complete.)
+The cohort runner did not pass an explicit
+`force_close_before_off_seconds` override, so the env default
+(0 = disabled) applied. With force-close OFF, every pair that
+fails to mature lands in the **naked** bucket rather than the
+force-close bucket. `eval_arbs_force_closed` is 0 for every
+agent in both arms; the meaningful proxy metric is
+**`naked_rate = arbs_naked / pairs_opened`**, which carries the
+same signal (a pair that would have been force-closed under
+fc>0 settles naked under fc=0).
+
+**`naked_rate` ≈ baseline-`force_close_rate` from purpose.md
+(74–78 %).** The 1:1 substitution is valid: the prompt's "force-
+close rate" and this cohort's "naked rate" both measure
+"fraction of opens that did not produce a paired matured outcome".
+
+### Results — final-generation comparison
+
+Both arms ran to completion: 4 agents × 2 generations × 7-day
+window (6 train + 1 eval, eval day = 2026-05-04). Arm A wall:
+54 min. Arm B wall: ~70 min.
+
+**Per-generation matured rate:**
+
+| Arm | Gen 0 matured | Gen 1 matured | Gen→Gen Δ |
+|---|---|---|---|
+| A (direction-off) | 0.2202 ± 0.0040 | 0.2496 ± 0.0025 | +2.94 pp |
+| B (direction-on)  | 0.2273 ± 0.0102 | 0.2329 ± 0.0050 | +0.56 pp |
+
+Both arms learn to mature MORE pairs gen-over-gen. Arm A's
+improvement (+2.94 pp) is ~5× larger than arm B's (+0.56 pp).
+Direction-on training is plausibly INTERFERING with the learning
+that arm A does naturally.
+
+**Final-generation comparison (gen=1):**
+
+| Metric | Arm A (off) | Arm B (on) | Δ (B vs A) |
+|---|---|---|---|
+| matured_rate (gate-proxy) | 0.2496 ± 0.0025 | 0.2329 ± 0.0050 | **−1.67 pp** |
+| naked_rate | 0.7504 ± 0.0025 | 0.7671 ± 0.0050 | +1.67 pp |
+| eval_total_reward | −2120.7 ± 208.2 | −2203.0 ± 232.7 | −82.3 (−3.9 %) |
+| eval_day_pnl | −£374 ± £365 | −£46 ± £346 | +£328 |
+| pairs_opened | 405.5 ± 13.2 | 409.8 ± 30.4 | +4.3 |
+| eval_bet_count | 506.8 | 505.2 | −1.6 |
+
+### Plan-level decision: NULL / weak negative
+
+Per the prompt's decision matrix:
+
+> arm B unchanged or +/−1 pp ⇒ "head trains but policy doesn't
+> respond. ESCALATE per hard_constraints §19; do not sweep
+> weights."
+
+Arm B's matured-rate is **−1.67 pp** vs Arm A. The std on each
+arm is 0.0025–0.0050 (n=4 each), so the delta is roughly 3 σ —
+small effect, statistically real, in the *wrong* direction for
+the plan's hypothesis. The non-regression check on
+`eval_total_reward` PASSES (−3.9 % is within the ±10 % tolerance).
+The `eval_day_pnl` delta is +£328 in arm B's favour, but with a
+single eval day per agent and σ ≈ £350 the signal is dominated
+by per-day naked-luck variance — not a meaningful read.
+
+### Important caveats — re-run before escalating
+
+Three issues qualify the result strongly enough that an
+escalation MUST address them before deciding on a follow-on
+plan:
+
+1. **`direction_back_bce_mean` not surfaced in the scoreboard.**
+   The trainer computes it (S03 wiring confirmed by the 5 unit
+   tests in `tests/test_v2_direction_prob_in_actor.py`) but the
+   cohort runner's `TrainSummary` aggregation doesn't carry it
+   through. **We cannot verify from this scoreboard alone that
+   the direction head was actually training** — the BCE term
+   could be silently dropping out (e.g. cache mis-key) and the
+   weight=0.1 effectively contributing zero gradient. If that's
+   the case, arm B's degradation comes purely from the
+   architecture-hash widening (extra noisy columns in
+   `actor_input`) and a re-run with confirmed BCE-loss flow
+   could show a different result.
+
+   **Mitigation:** add `direction_back_bce_mean` /
+   `direction_lay_bce_mean` to `TrainSummary` (worker.py
+   aggregation) before the next direction cohort.
+
+2. **Cohort under-powered.** 4 × 2 ≠ 12 × 3 the prompt called
+   for. With n=4 agents per arm, ±1 pp deltas have weak
+   confidence even at small std. The prompt's spec'd cohort
+   would have ~3× the power.
+
+3. **`force_close_before_off_seconds = 0` in this run.** The
+   spec's "force-close rate baseline 74–78 %" comes from runs
+   with fc > 0 active. Naked vs force-close are functionally
+   equivalent endpoints (both = "pair didn't mature"), but the
+   training dynamics differ — under fc>0 the env actively
+   flattens the position with a close-leg whose P&L lands in
+   `race_pnl`; under fc=0 the naked side's full settle-time
+   variance lands. The two regimes likely produce different
+   reward gradients and the policy's response to the direction
+   signal could differ.
+
+### Lifecycle decomposition (final gen)
+
+Both arms open ~410 pairs per eval day. Most fail to mature
+(~75 %). The mature pool splits between
+`arbs_completed` (natural) and `arbs_closed` (agent-initiated
+via `close_signal`). Per the agent-level rows the split favours
+"completed" over "closed" by 3–5×, suggesting the policy's
+`close_signal` action is rarely fired even when the direction
+signal would say it should be.
+
+### Surprises
+
+- **Direction-on doesn't speed up gen-over-gen learning** — it
+  slows it. Hypothesis: the unsupervised actor_input column from
+  the direction head adds noise the actor must learn to ignore,
+  costing some of the gen-1 learning budget. If direction BCE
+  weren't actually computing (caveat #1), this is the dominant
+  failure mode.
+
+- **`eval_day_pnl` delta is positive** despite negative
+  matured-rate delta. Direction-on opens slightly different
+  positions; their luck on the single eval day favoured arm B.
+  Single-day variance dominates the mean — not a real signal.
+
+### Decision
+
+NULL result with strong caveats. **Do not promote the
+direction head to a tuning plan yet.** First action: add the
+direction-BCE diagnostic to the scoreboard, re-run a smoke
+cohort to confirm the head is actually training (not silently
+inert), THEN re-decide between (a) escalate to a follow-on
+representational plan, (b) re-run the validation cohort with
+spec-spec'd 12 × 3 sizing and force-close ON.
+
+Operator-controlled choice — surfacing the gap, not committing
+to either path.
 
 ## Notes for S02
 

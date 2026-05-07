@@ -1,7 +1,19 @@
 ---
 plan: rewrite/phase-13-directional-scalping
-status: DRAFT
+status: NULL
 opened: 2026-05-06
+landed: 2026-05-07
+outcome_summary: >
+    S01-S05 implementation shipped (label generator, direction
+    head wired into actor_head, BC layered with oracle). S06
+    validation cohort (4x2 sizing, fc=0) returned a NULL/weak-
+    negative result — direction-on arm matured -1.67 pp vs
+    direction-off, non-regression on eval_total_reward passed
+    (-3.9%). Cannot verify the head actually trained because
+    direction_back_bce_mean is not propagated to the scoreboard;
+    re-run with that diagnostic plumbed through, at spec-spec'd
+    12x3 sizing, before escalating per hard_constraints §19.
+    See findings.md / lessons_learnt.md for the full caveats.
 depends_on: rewrite/phase-12-counterfactual-fill-prob (S03 outcome informs whether
             S03 of THIS plan needs a calibrated fill_prob alongside the new
             direction signal, but the offline label generator and the head wiring

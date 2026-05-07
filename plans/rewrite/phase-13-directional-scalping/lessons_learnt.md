@@ -346,4 +346,68 @@ Proceeding to S06.
 
 ## S06 — Validation cohort
 
-(Append on completion.)
+Landed 2026-05-07. Two-arm cohort (4 × 2 × 7 days each, run in
+parallel) at `registry/_phase13_arm_A_off_1778106901/` and
+`registry/_phase13_arm_B_on_1778106905/`. Detailed write-up in
+`findings.md` (this folder).
+
+**Plan-level outcome: NULL / weak negative.** Final-generation
+matured rate is −1.67 pp on arm B (direction-on, weight=0.1) vs
+arm A (direction-off). Non-regression on `eval_total_reward`
+PASSES (−3.9 %). Direction-on slows gen-over-gen learning
+(+0.56 pp arm B vs +2.94 pp arm A).
+
+**Per the prompt's decision matrix:** "head trains but policy
+doesn't respond ⇒ ESCALATE per hard_constraints §19, do NOT
+sweep `direction_prob_loss_weight`."
+
+**Three caveats qualify the verdict:**
+
+1. **Cannot verify the head actually trained.** The trainer's
+   `direction_back_bce_mean` field is on `EpisodeStats` /
+   `UpdateLog` but is NOT propagated through the cohort runner's
+   `TrainSummary` → scoreboard JSONL. From the scoreboard alone
+   we cannot tell whether the BCE term was contributing real
+   gradient or silently dropping out (cache miss, wrong key,
+   something subtle in the per-step alignment). **If the head
+   wasn't training, the result is uninterpretable** — direction
+   head's actor_input columns become unsupervised noise that
+   the policy must learn to ignore.
+
+2. **Cohort under-powered.** Spec called for 12 agents × 3 gens;
+   we shipped 4 × 2 due to wall-clock budget (~2 hours).
+   ±1.67 pp delta has marginal confidence at n=4.
+
+3. **`force_close_before_off_seconds = 0` in this run.** The
+   spec's 74-78 % force-close-rate baseline is from runs with
+   fc > 0. With fc=0 the proxy metric is `naked_rate` (same
+   intent: "pair didn't mature"); training dynamics under fc=0
+   vs fc>0 may produce different policy responses to the
+   direction signal.
+
+**Recommended next action (operator-controlled):**
+
+1. Plumb `direction_back_bce_mean` /
+   `direction_lay_bce_mean` through `TrainSummary` →
+   `train_per_day` → scoreboard. Smoke-run a single agent at
+   `direction_prob_loss_weight=0.1` and confirm BCE drops
+   gen-over-gen.
+
+2. Once confirmed, re-launch the validation cohort at
+   spec-spec'd sizing (12 × 3) with `--reward-overrides
+   force_close_before_off_seconds=60` to align with the
+   force-close-on baseline.
+
+3. Only after #2 confirms NULL result, escalate per
+   hard_constraints §19 to a follow-on representational plan.
+
+**Diagnostic gap surfaced for the system.** The
+`direction_back_bce_mean` not flowing into the scoreboard is a
+first-class regression — the same gap exists for any other
+trainer-side per-update diagnostic added through a similar code
+path. Worth a small clean-up plan that audits the
+`UpdateLog → EpisodeStats → TrainSummary → scoreboard` pipeline
+for completeness.
+
+**Status:** purpose.md `status: DRAFT` → `status: NULL`
+(see `purpose.md` header).

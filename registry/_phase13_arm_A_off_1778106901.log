@@ -1,0 +1,357 @@
+C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\cuda\__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+2026-05-06 23:35:03,780 reward_overrides: {'direction_prob_loss_weight': 0.0}
+2026-05-06 23:35:03,872 Cohort: 4 agents × 2 generations on 6 training days (eval=2026-05-04); device=cpu output_dir=registry\_phase13_arm_A_off_1778106901
+2026-05-06 23:35:03,872 ── Generation 1/2 ──
+2026-05-06 23:35:03,872 Generation 1 agent 1/4 (id=df6718a0-69f) genes={'learning_rate': 0.00019004375238737127, 'entropy_coeff': 0.00011885905298319073, 'clip_range': 0.15500586367382385, 'gae_lambda': 0.9200889664333941, 'value_coeff': 0.8023534106230092, 'mini_batch_size': 128, 'hidden_size': 256, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-06 23:35:03,872 Generation 1 agent 2/4 (id=d02d8dcd-b3f) genes={'learning_rate': 0.0006086381003274661, 'entropy_coeff': 0.0001823125215866301, 'clip_range': 0.1843843639370541, 'gae_lambda': 0.9026817497494264, 'value_coeff': 0.4139784811027025, 'mini_batch_size': 128, 'hidden_size': 256, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-06 23:35:03,872 Generation 1 agent 3/4 (id=59a75c04-aff) genes={'learning_rate': 1.1299830769305077e-05, 'entropy_coeff': 0.0003949234770631503, 'clip_range': 0.22997688755590465, 'gae_lambda': 0.9490447332542895, 'value_coeff': 0.4153304665305225, 'mini_batch_size': 128, 'hidden_size': 128, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-06 23:35:03,872 Generation 1 agent 4/4 (id=ac3c30fb-5a0) genes={'learning_rate': 0.0004157774327737047, 'entropy_coeff': 0.00010459147291942857, 'clip_range': 0.26116385036656153, 'gae_lambda': 0.9628325455489404, 'value_coeff': 0.5051878873884939, 'mini_batch_size': 32, 'hidden_size': 64, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-06 23:35:03,875 Agent df6718a0-69ff-4768-a784-179072053829: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-06 23:35:05,735 Loaded 2026-05-01: 11338 ticks, 80 races in 1.86s
+2026-05-06 23:35:14,382 Feature engineering (80 races, 11338 ticks) completed in 8.64s
+2026-05-06 23:35:57,690 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-06 23:36:11,448 DiscretePPOTrainer episode: n_steps=11338 n_updates=356 policy_loss=0.1256 value_loss=5.1524 entropy=2.3866 approx_kl=0.0114 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1824.542 wall=53.52s
+2026-05-06 23:36:11,451 Agent df6718a0-69ff-4768-a784-179072053829 day 1/6 [2026-05-01] reward=-1824.542 pnl=-178.59 value_loss=5.1524 approx_kl=0.0114 wall=53.5s
+2026-05-06 23:36:11,451 Agent df6718a0-69ff-4768-a784-179072053829: day 2/6 loading 2026-04-29
+2026-05-06 23:36:13,105 Loaded 2026-04-29: 10462 ticks, 74 races in 1.65s
+2026-05-06 23:36:21,432 Feature engineering (74 races, 10462 ticks) completed in 8.32s
+2026-05-06 23:36:58,852 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-06 23:37:16,062 DiscretePPOTrainer episode: n_steps=10462 n_updates=328 policy_loss=0.0663 value_loss=5.7906 entropy=2.5243 approx_kl=0.0078 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1162.811 wall=53.41s
+2026-05-06 23:37:16,066 Agent df6718a0-69ff-4768-a784-179072053829 day 2/6 [2026-04-29] reward=-1162.811 pnl=+459.27 value_loss=5.7906 approx_kl=0.0078 wall=53.4s
+2026-05-06 23:37:16,067 Agent df6718a0-69ff-4768-a784-179072053829: day 3/6 loading 2026-04-30
+2026-05-06 23:37:17,749 Loaded 2026-04-30: 11362 ticks, 85 races in 1.68s
+2026-05-06 23:37:26,620 Feature engineering (85 races, 11362 ticks) completed in 8.87s
+2026-05-06 23:38:08,761 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-06 23:38:33,191 DiscretePPOTrainer episode: n_steps=11362 n_updates=356 policy_loss=0.0902 value_loss=6.3039 entropy=2.4790 approx_kl=0.0076 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1695.106 wall=65.14s
+2026-05-06 23:38:33,198 Agent df6718a0-69ff-4768-a784-179072053829 day 3/6 [2026-04-30] reward=-1695.106 pnl=+12.18 value_loss=6.3039 approx_kl=0.0076 wall=65.1s
+2026-05-06 23:38:33,198 Agent df6718a0-69ff-4768-a784-179072053829: day 4/6 loading 2026-05-02
+2026-05-06 23:38:38,260 Loaded 2026-05-02: 13428 ticks, 107 races in 5.06s
+2026-05-06 23:39:04,667 Feature engineering (107 races, 13428 ticks) completed in 26.40s
+2026-05-06 23:39:49,937 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-06 23:40:23,374 DiscretePPOTrainer episode: n_steps=13428 n_updates=420 policy_loss=0.1490 value_loss=6.8693 entropy=2.6131 approx_kl=0.0082 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-2135.216 wall=76.80s
+2026-05-06 23:40:23,382 Agent df6718a0-69ff-4768-a784-179072053829 day 4/6 [2026-05-02] reward=-2135.216 pnl=-36.68 value_loss=6.8693 approx_kl=0.0082 wall=76.8s
+2026-05-06 23:40:23,382 Agent df6718a0-69ff-4768-a784-179072053829: day 5/6 loading 2026-04-28
+2026-05-06 23:40:25,045 Loaded 2026-04-28: 9898 ticks, 69 races in 1.66s
+2026-05-06 23:40:32,731 Feature engineering (69 races, 9898 ticks) completed in 7.68s
+2026-05-06 23:41:00,663 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-06 23:41:29,597 DiscretePPOTrainer episode: n_steps=9898 n_updates=312 policy_loss=0.1448 value_loss=5.1854 entropy=2.5157 approx_kl=0.0081 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1502.575 wall=54.97s
+2026-05-06 23:41:29,601 Agent df6718a0-69ff-4768-a784-179072053829 day 5/6 [2026-04-28] reward=-1502.575 pnl=-617.60 value_loss=5.1854 approx_kl=0.0081 wall=55.0s
+2026-05-06 23:41:29,601 Agent df6718a0-69ff-4768-a784-179072053829: day 6/6 loading 2026-05-03
+2026-05-06 23:41:32,418 Loaded 2026-05-03: 7864 ticks, 68 races in 2.82s
+2026-05-06 23:41:43,910 Feature engineering (68 races, 7864 ticks) completed in 11.49s
+2026-05-06 23:42:08,559 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-06 23:42:29,065 DiscretePPOTrainer episode: n_steps=7864 n_updates=248 policy_loss=0.1106 value_loss=5.9576 entropy=2.4186 approx_kl=0.0086 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1250.630 wall=44.11s
+2026-05-06 23:42:29,067 Agent df6718a0-69ff-4768-a784-179072053829 day 6/6 [2026-05-03] reward=-1250.630 pnl=+12.19 value_loss=5.9576 approx_kl=0.0086 wall=44.1s
+2026-05-06 23:42:29,068 Agent df6718a0-69ff-4768-a784-179072053829: eval rollout on held-out day 2026-05-04
+2026-05-06 23:42:30,657 Loaded 2026-05-04: 8925 ticks, 118 races in 1.59s
+2026-05-06 23:42:37,671 Feature engineering (118 races, 8925 ticks) completed in 7.01s
+2026-05-06 23:43:10,285 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-06 23:43:10,320 Agent df6718a0-69ff-4768-a784-179072053829 eval [2026-05-04] reward=-2513.589 pnl=-314.73 bets=500 precision=0.388 arbs=71/320 locked=+235.58 naked=-513.51 wall=41.3s
+2026-05-06 23:43:10,524 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-06 23:43:12,371 Loaded 2026-05-01: 11338 ticks, 80 races in 1.85s
+2026-05-06 23:43:21,096 Feature engineering (80 races, 11338 ticks) completed in 8.72s
+2026-05-06 23:44:02,478 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-06 23:44:29,683 DiscretePPOTrainer episode: n_steps=11338 n_updates=356 policy_loss=0.1394 value_loss=1.7189 entropy=2.3372 approx_kl=0.0215 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1786.334 wall=67.32s
+2026-05-06 23:44:29,687 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200 day 1/6 [2026-05-01] reward=-1786.334 pnl=-585.18 value_loss=1.7189 approx_kl=0.0215 wall=67.3s
+2026-05-06 23:44:29,687 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200: day 2/6 loading 2026-04-29
+2026-05-06 23:44:33,002 Loaded 2026-04-29: 10462 ticks, 74 races in 3.32s
+2026-05-06 23:44:50,518 Feature engineering (74 races, 10462 ticks) completed in 17.51s
+2026-05-06 23:45:31,225 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-06 23:45:56,203 DiscretePPOTrainer episode: n_steps=10462 n_updates=328 policy_loss=0.1126 value_loss=2.1842 entropy=2.4574 approx_kl=0.0140 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1451.691 wall=63.32s
+2026-05-06 23:45:56,205 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200 day 2/6 [2026-04-29] reward=-1451.691 pnl=-117.61 value_loss=2.1842 approx_kl=0.0140 wall=63.3s
+2026-05-06 23:45:56,205 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200: day 3/6 loading 2026-04-30
+2026-05-06 23:45:57,938 Loaded 2026-04-30: 11362 ticks, 85 races in 1.73s
+2026-05-06 23:46:06,835 Feature engineering (85 races, 11362 ticks) completed in 8.89s
+2026-05-06 23:46:48,740 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-06 23:47:14,356 DiscretePPOTrainer episode: n_steps=11362 n_updates=356 policy_loss=0.0149 value_loss=2.3731 entropy=2.4361 approx_kl=0.0137 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1558.891 wall=66.14s
+2026-05-06 23:47:14,358 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200 day 3/6 [2026-04-30] reward=-1558.891 pnl=+147.23 value_loss=2.3731 approx_kl=0.0137 wall=66.1s
+2026-05-06 23:47:14,358 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200: day 4/6 loading 2026-05-02
+2026-05-06 23:47:16,772 Loaded 2026-05-02: 13428 ticks, 107 races in 2.41s
+2026-05-06 23:47:29,783 Feature engineering (107 races, 13428 ticks) completed in 13.01s
+2026-05-06 23:48:19,728 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-06 23:48:42,665 DiscretePPOTrainer episode: n_steps=13428 n_updates=420 policy_loss=0.1074 value_loss=3.1409 entropy=2.5897 approx_kl=0.0118 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-2017.743 wall=71.02s
+2026-05-06 23:48:42,669 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200 day 4/6 [2026-05-02] reward=-2017.743 pnl=+177.53 value_loss=3.1409 approx_kl=0.0118 wall=71.0s
+2026-05-06 23:48:42,669 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200: day 5/6 loading 2026-04-28
+2026-05-06 23:48:45,107 Loaded 2026-04-28: 9898 ticks, 69 races in 2.44s
+2026-05-06 23:48:56,257 Feature engineering (69 races, 9898 ticks) completed in 11.14s
+2026-05-06 23:49:30,434 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-06 23:49:48,620 DiscretePPOTrainer episode: n_steps=9898 n_updates=312 policy_loss=0.1342 value_loss=1.4789 entropy=2.3916 approx_kl=0.0109 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1709.279 wall=50.58s
+2026-05-06 23:49:48,623 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200 day 5/6 [2026-04-28] reward=-1709.279 pnl=-692.23 value_loss=1.4789 approx_kl=0.0109 wall=50.6s
+2026-05-06 23:49:48,623 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200: day 6/6 loading 2026-05-03
+2026-05-06 23:49:51,250 Loaded 2026-05-03: 7864 ticks, 68 races in 2.63s
+2026-05-06 23:50:03,473 Feature engineering (68 races, 7864 ticks) completed in 12.22s
+2026-05-06 23:50:33,316 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-06 23:50:44,659 DiscretePPOTrainer episode: n_steps=7864 n_updates=248 policy_loss=0.1457 value_loss=2.4858 entropy=2.3700 approx_kl=0.0094 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1650.850 wall=39.11s
+2026-05-06 23:50:44,661 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200 day 6/6 [2026-05-03] reward=-1650.850 pnl=-534.98 value_loss=2.4858 approx_kl=0.0094 wall=39.1s
+2026-05-06 23:50:44,661 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200: eval rollout on held-out day 2026-05-04
+2026-05-06 23:50:46,391 Loaded 2026-05-04: 8925 ticks, 118 races in 1.73s
+2026-05-06 23:50:53,396 Feature engineering (118 races, 8925 ticks) completed in 7.00s
+2026-05-06 23:51:25,908 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-06 23:51:25,947 Agent d02d8dcd-b3fe-42f4-9871-d0c2781fe200 eval [2026-05-04] reward=-2275.885 pnl=-87.89 bets=596 precision=0.384 arbs=94/382 locked=+352.12 naked=-413.83 wall=41.3s
+2026-05-06 23:51:26,175 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-06 23:51:27,976 Loaded 2026-05-01: 11338 ticks, 80 races in 1.80s
+2026-05-06 23:51:36,681 Feature engineering (80 races, 11338 ticks) completed in 8.70s
+2026-05-06 23:52:04,825 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-06 23:52:12,274 DiscretePPOTrainer episode: n_steps=11338 n_updates=356 policy_loss=0.1879 value_loss=3.7789 entropy=2.4047 approx_kl=0.0010 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1461.346 wall=34.34s
+2026-05-06 23:52:12,278 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a day 1/6 [2026-05-01] reward=-1461.346 pnl=-43.33 value_loss=3.7789 approx_kl=0.0010 wall=34.3s
+2026-05-06 23:52:12,278 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a: day 2/6 loading 2026-04-29
+2026-05-06 23:52:14,883 Loaded 2026-04-29: 10462 ticks, 74 races in 2.61s
+2026-05-06 23:52:24,047 Feature engineering (74 races, 10462 ticks) completed in 9.16s
+2026-05-06 23:52:58,290 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-06 23:53:03,173 DiscretePPOTrainer episode: n_steps=10462 n_updates=328 policy_loss=0.1506 value_loss=5.5907 entropy=2.5291 approx_kl=0.0005 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1478.848 wall=37.96s
+2026-05-06 23:53:03,176 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a day 2/6 [2026-04-29] reward=-1478.848 pnl=+196.81 value_loss=5.5907 approx_kl=0.0005 wall=38.0s
+2026-05-06 23:53:03,176 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a: day 3/6 loading 2026-04-30
+2026-05-06 23:53:04,933 Loaded 2026-04-30: 11362 ticks, 85 races in 1.76s
+2026-05-06 23:53:13,676 Feature engineering (85 races, 11362 ticks) completed in 8.74s
+2026-05-06 23:53:42,315 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-06 23:53:47,495 DiscretePPOTrainer episode: n_steps=11362 n_updates=356 policy_loss=0.2533 value_loss=6.1017 entropy=2.4888 approx_kl=0.0013 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1813.936 wall=32.39s
+2026-05-06 23:53:47,499 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a day 3/6 [2026-04-30] reward=-1813.936 pnl=+555.10 value_loss=6.1017 approx_kl=0.0013 wall=32.4s
+2026-05-06 23:53:47,499 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a: day 4/6 loading 2026-05-02
+2026-05-06 23:53:50,858 Loaded 2026-05-02: 13428 ticks, 107 races in 3.36s
+2026-05-06 23:54:07,907 Feature engineering (107 races, 13428 ticks) completed in 17.04s
+2026-05-06 23:54:52,561 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-06 23:54:59,331 DiscretePPOTrainer episode: n_steps=13428 n_updates=420 policy_loss=0.2021 value_loss=3.9691 entropy=2.6531 approx_kl=0.0011 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-2387.892 wall=49.47s
+2026-05-06 23:54:59,334 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a day 4/6 [2026-05-02] reward=-2387.892 pnl=-564.01 value_loss=3.9691 approx_kl=0.0011 wall=49.5s
+2026-05-06 23:54:59,334 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a: day 5/6 loading 2026-04-28
+2026-05-06 23:55:01,052 Loaded 2026-04-28: 9898 ticks, 69 races in 1.72s
+2026-05-06 23:55:11,737 Feature engineering (69 races, 9898 ticks) completed in 10.68s
+2026-05-06 23:55:49,208 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-06 23:55:54,179 DiscretePPOTrainer episode: n_steps=9898 n_updates=312 policy_loss=0.1875 value_loss=3.0963 entropy=2.5558 approx_kl=0.0002 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1296.322 wall=39.97s
+2026-05-06 23:55:54,182 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a day 5/6 [2026-04-28] reward=-1296.322 pnl=-191.46 value_loss=3.0963 approx_kl=0.0002 wall=40.0s
+2026-05-06 23:55:54,182 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a: day 6/6 loading 2026-05-03
+2026-05-06 23:55:55,516 Loaded 2026-05-03: 7864 ticks, 68 races in 1.33s
+2026-05-06 23:56:01,505 Feature engineering (68 races, 7864 ticks) completed in 5.99s
+2026-05-06 23:56:28,985 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-06 23:56:33,031 DiscretePPOTrainer episode: n_steps=7864 n_updates=248 policy_loss=0.1584 value_loss=3.4713 entropy=2.4934 approx_kl=0.0007 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1178.208 wall=30.45s
+2026-05-06 23:56:33,032 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a day 6/6 [2026-05-03] reward=-1178.208 pnl=-156.88 value_loss=3.4713 approx_kl=0.0007 wall=30.4s
+2026-05-06 23:56:33,032 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a: eval rollout on held-out day 2026-05-04
+2026-05-06 23:56:34,862 Loaded 2026-05-04: 8925 ticks, 118 races in 1.83s
+2026-05-06 23:56:41,808 Feature engineering (118 races, 8925 ticks) completed in 6.94s
+2026-05-06 23:57:04,208 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-06 23:57:04,234 Agent 59a75c04-aff2-496b-9925-14dcf7fd0e6a eval [2026-05-04] reward=-2062.058 pnl=+586.12 bets=514 precision=0.387 arbs=73/324 locked=+276.17 naked=+348.65 wall=31.2s
+2026-05-06 23:57:04,467 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-06 23:57:06,305 Loaded 2026-05-01: 11338 ticks, 80 races in 1.84s
+2026-05-06 23:57:14,915 Feature engineering (80 races, 11338 ticks) completed in 8.61s
+2026-05-06 23:57:53,489 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-06 23:57:57,909 DiscretePPOTrainer KL early-stop epoch=1 mb_pos=131 approx_kl=0.1541 > threshold=0.1500 (skipping 933 remaining mini-batches across 3 epoch(s))
+2026-05-06 23:57:57,910 DiscretePPOTrainer episode: n_steps=11338 n_updates=487 policy_loss=0.3424 value_loss=8.0096 entropy=2.4285 approx_kl=0.0244 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-2035.999 wall=41.71s
+2026-05-06 23:57:57,913 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae day 1/6 [2026-05-01] reward=-2035.999 pnl=-374.43 value_loss=8.0096 approx_kl=0.0244 wall=41.7s
+2026-05-06 23:57:57,913 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae: day 2/6 loading 2026-04-29
+2026-05-06 23:57:59,627 Loaded 2026-04-29: 10462 ticks, 74 races in 1.71s
+2026-05-06 23:58:12,132 Feature engineering (74 races, 10462 ticks) completed in 12.50s
+2026-05-06 23:58:49,932 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-06 23:58:56,657 DiscretePPOTrainer KL early-stop epoch=1 mb_pos=314 approx_kl=0.1614 > threshold=0.1500 (skipping 666 remaining mini-batches across 3 epoch(s))
+2026-05-06 23:58:56,658 DiscretePPOTrainer episode: n_steps=10462 n_updates=642 policy_loss=0.1081 value_loss=4.5887 entropy=2.4458 approx_kl=0.0197 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1284.093 wall=42.16s
+2026-05-06 23:58:56,661 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae day 2/6 [2026-04-29] reward=-1284.093 pnl=-7.08 value_loss=4.5887 approx_kl=0.0197 wall=42.2s
+2026-05-06 23:58:56,661 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae: day 3/6 loading 2026-04-30
+2026-05-06 23:58:58,563 Loaded 2026-04-30: 11362 ticks, 85 races in 1.90s
+2026-05-06 23:59:07,304 Feature engineering (85 races, 11362 ticks) completed in 8.74s
+2026-05-06 23:59:44,416 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-06 23:59:54,343 DiscretePPOTrainer KL early-stop epoch=2 mb_pos=185 approx_kl=0.1500 > threshold=0.1500 (skipping 526 remaining mini-batches across 2 epoch(s))
+2026-05-06 23:59:54,344 DiscretePPOTrainer episode: n_steps=11362 n_updates=898 policy_loss=0.1331 value_loss=7.2384 entropy=2.4206 approx_kl=0.0242 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1616.307 wall=45.67s
+2026-05-06 23:59:54,348 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae day 3/6 [2026-04-30] reward=-1616.307 pnl=-12.02 value_loss=7.2384 approx_kl=0.0242 wall=45.7s
+2026-05-06 23:59:54,348 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae: day 4/6 loading 2026-05-02
+2026-05-06 23:59:56,924 Loaded 2026-05-02: 13428 ticks, 107 races in 2.58s
+2026-05-07 00:00:09,862 Feature engineering (107 races, 13428 ticks) completed in 12.93s
+2026-05-07 00:00:58,573 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-07 00:01:12,872 DiscretePPOTrainer KL early-stop epoch=2 mb_pos=165 approx_kl=0.1507 > threshold=0.1500 (skipping 674 remaining mini-batches across 2 epoch(s))
+2026-05-07 00:01:12,873 DiscretePPOTrainer episode: n_steps=13428 n_updates=1006 policy_loss=0.0881 value_loss=4.6738 entropy=2.5092 approx_kl=0.0195 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1967.294 wall=60.55s
+2026-05-07 00:01:12,877 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae day 4/6 [2026-05-02] reward=-1967.294 pnl=-383.66 value_loss=4.6738 approx_kl=0.0195 wall=60.5s
+2026-05-07 00:01:12,877 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae: day 5/6 loading 2026-04-28
+2026-05-07 00:01:16,016 Loaded 2026-04-28: 9898 ticks, 69 races in 3.14s
+2026-05-07 00:01:31,747 Feature engineering (69 races, 9898 ticks) completed in 15.73s
+2026-05-07 00:02:06,783 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-07 00:02:11,818 DiscretePPOTrainer KL early-stop epoch=1 mb_pos=177 approx_kl=0.1846 > threshold=0.1500 (skipping 752 remaining mini-batches across 3 epoch(s))
+2026-05-07 00:02:11,819 DiscretePPOTrainer episode: n_steps=9898 n_updates=488 policy_loss=0.1478 value_loss=5.4976 entropy=2.3534 approx_kl=0.0279 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1649.770 wall=37.63s
+2026-05-07 00:02:11,821 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae day 5/6 [2026-04-28] reward=-1649.770 pnl=-619.68 value_loss=5.4976 approx_kl=0.0279 wall=37.6s
+2026-05-07 00:02:11,821 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae: day 6/6 loading 2026-05-03
+2026-05-07 00:02:13,207 Loaded 2026-05-03: 7864 ticks, 68 races in 1.39s
+2026-05-07 00:02:19,311 Feature engineering (68 races, 7864 ticks) completed in 6.10s
+2026-05-07 00:02:44,992 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-07 00:02:51,744 DiscretePPOTrainer KL early-stop epoch=2 mb_pos=162 approx_kl=0.1518 > threshold=0.1500 (skipping 329 remaining mini-batches across 2 epoch(s))
+2026-05-07 00:02:51,745 DiscretePPOTrainer episode: n_steps=7864 n_updates=655 policy_loss=0.0518 value_loss=6.5709 entropy=2.2341 approx_kl=0.0214 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1053.441 wall=31.41s
+2026-05-07 00:02:51,746 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae day 6/6 [2026-05-03] reward=-1053.441 pnl=+162.14 value_loss=6.5709 approx_kl=0.0214 wall=31.4s
+2026-05-07 00:02:51,746 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae: eval rollout on held-out day 2026-05-04
+2026-05-07 00:02:53,456 Loaded 2026-05-04: 8925 ticks, 118 races in 1.71s
+2026-05-07 00:03:00,492 Feature engineering (118 races, 8925 ticks) completed in 7.03s
+2026-05-07 00:03:28,570 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-07 00:03:28,609 Agent ac3c30fb-5a06-441d-93f2-76f602e9f2ae eval [2026-05-04] reward=-2284.620 pnl=+1203.11 bets=580 precision=0.364 arbs=91/374 locked=+330.85 naked=+895.98 wall=36.9s
+2026-05-07 00:03:28,832 Generation 1 complete in 1705.0s. Top-3 by composite_score (maturation_bonus_weight=0.000):
+2026-05-07 00:03:28,833   #1 agent=59a75c04-aff composite=-2062.058 reward=-2062.058 pnl=+586.12 bets=514 matured=73 closed=22 genes={'learning_rate': 1.1299830769305077e-05, 'entropy_coeff': 0.0003949234770631503, 'clip_range': 0.22997688755590465, 'gae_lambda': 0.9490447332542895, 'value_coeff': 0.4153304665305225, 'mini_batch_size': 128, 'hidden_size': 128, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:03:28,833   #2 agent=d02d8dcd-b3f composite=-2275.885 reward=-2275.885 pnl=-87.89 bets=596 matured=94 closed=13 genes={'learning_rate': 0.0006086381003274661, 'entropy_coeff': 0.0001823125215866301, 'clip_range': 0.1843843639370541, 'gae_lambda': 0.9026817497494264, 'value_coeff': 0.4139784811027025, 'mini_batch_size': 128, 'hidden_size': 256, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:03:28,833   #3 agent=ac3c30fb-5a0 composite=-2284.620 reward=-2284.620 pnl=+1203.11 bets=580 matured=91 closed=12 genes={'learning_rate': 0.0004157774327737047, 'entropy_coeff': 0.00010459147291942857, 'clip_range': 0.26116385036656153, 'gae_lambda': 0.9628325455489404, 'value_coeff': 0.5051878873884939, 'mini_batch_size': 32, 'hidden_size': 64, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:03:28,847 ── Generation 2/2 ──
+2026-05-07 00:03:28,847 Generation 2 agent 1/4 (id=5833b3a3-76d) genes={'learning_rate': 1.1299830769305077e-05, 'entropy_coeff': 0.0003949234770631503, 'clip_range': 0.22997688755590465, 'gae_lambda': 0.9490447332542895, 'value_coeff': 0.4153304665305225, 'mini_batch_size': 128, 'hidden_size': 128, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:03:28,847 Generation 2 agent 2/4 (id=b3c9c9c6-221) genes={'learning_rate': 0.0006086381003274661, 'entropy_coeff': 0.0001823125215866301, 'clip_range': 0.1843843639370541, 'gae_lambda': 0.9026817497494264, 'value_coeff': 0.4139784811027025, 'mini_batch_size': 128, 'hidden_size': 256, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:03:28,847 Generation 2 agent 3/4 (id=25d9962f-c99) genes={'learning_rate': 2.856252195909326e-05, 'entropy_coeff': 0.0001823125215866301, 'clip_range': 0.14655817727220605, 'gae_lambda': 0.9490447332542895, 'value_coeff': 0.4153304665305225, 'mini_batch_size': 128, 'hidden_size': 128, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:03:28,847 Generation 2 agent 4/4 (id=92fd6fec-11e) genes={'learning_rate': 1.1299830769305077e-05, 'entropy_coeff': 0.0001823125215866301, 'clip_range': 0.1843843639370541, 'gae_lambda': 0.9026817497494264, 'value_coeff': 0.4139784811027025, 'mini_batch_size': 128, 'hidden_size': 256, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:03:28,849 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-07 00:03:30,779 Loaded 2026-05-01: 11338 ticks, 80 races in 1.93s
+2026-05-07 00:03:39,385 Feature engineering (80 races, 11338 ticks) completed in 8.60s
+2026-05-07 00:04:19,458 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-07 00:04:25,647 DiscretePPOTrainer episode: n_steps=11338 n_updates=356 policy_loss=0.1858 value_loss=4.2321 entropy=2.3649 approx_kl=0.0011 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1898.557 wall=44.97s
+2026-05-07 00:04:25,650 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61 day 1/6 [2026-05-01] reward=-1898.557 pnl=-635.02 value_loss=4.2321 approx_kl=0.0011 wall=45.0s
+2026-05-07 00:04:25,650 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61: day 2/6 loading 2026-04-29
+2026-05-07 00:04:27,438 Loaded 2026-04-29: 10462 ticks, 74 races in 1.79s
+2026-05-07 00:04:35,532 Feature engineering (74 races, 10462 ticks) completed in 8.09s
+2026-05-07 00:05:12,766 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-07 00:05:19,487 DiscretePPOTrainer episode: n_steps=10462 n_updates=328 policy_loss=0.2113 value_loss=4.2974 entropy=2.5230 approx_kl=0.0005 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1642.958 wall=42.77s
+2026-05-07 00:05:19,490 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61 day 2/6 [2026-04-29] reward=-1642.958 pnl=-283.14 value_loss=4.2974 approx_kl=0.0005 wall=42.8s
+2026-05-07 00:05:19,490 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61: day 3/6 loading 2026-04-30
+2026-05-07 00:05:23,506 Loaded 2026-04-30: 11362 ticks, 85 races in 4.02s
+2026-05-07 00:05:37,535 Feature engineering (85 races, 11362 ticks) completed in 14.02s
+2026-05-07 00:06:14,272 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-07 00:06:19,512 DiscretePPOTrainer episode: n_steps=11362 n_updates=356 policy_loss=0.1997 value_loss=5.3039 entropy=2.5194 approx_kl=0.0009 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1991.626 wall=40.58s
+2026-05-07 00:06:19,516 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61 day 3/6 [2026-04-30] reward=-1991.626 pnl=-172.70 value_loss=5.3039 approx_kl=0.0009 wall=40.6s
+2026-05-07 00:06:19,516 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61: day 4/6 loading 2026-05-02
+2026-05-07 00:06:22,045 Loaded 2026-05-02: 13428 ticks, 107 races in 2.53s
+2026-05-07 00:06:34,943 Feature engineering (107 races, 13428 ticks) completed in 12.89s
+2026-05-07 00:07:19,438 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-07 00:07:26,155 DiscretePPOTrainer episode: n_steps=13428 n_updates=420 policy_loss=0.1098 value_loss=4.5075 entropy=2.6572 approx_kl=0.0008 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-2142.457 wall=49.35s
+2026-05-07 00:07:26,160 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61 day 4/6 [2026-05-02] reward=-2142.457 pnl=-148.25 value_loss=4.5075 approx_kl=0.0008 wall=49.3s
+2026-05-07 00:07:26,160 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61: day 5/6 loading 2026-04-28
+2026-05-07 00:07:27,733 Loaded 2026-04-28: 9898 ticks, 69 races in 1.57s
+2026-05-07 00:07:35,452 Feature engineering (69 races, 9898 ticks) completed in 7.72s
+2026-05-07 00:08:10,363 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-07 00:08:15,644 DiscretePPOTrainer episode: n_steps=9898 n_updates=312 policy_loss=0.0652 value_loss=2.3628 entropy=2.5485 approx_kl=0.0008 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-987.405 wall=38.94s
+2026-05-07 00:08:15,647 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61 day 5/6 [2026-04-28] reward=-987.405 pnl=+14.36 value_loss=2.3628 approx_kl=0.0008 wall=38.9s
+2026-05-07 00:08:15,647 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61: day 6/6 loading 2026-05-03
+2026-05-07 00:08:17,088 Loaded 2026-05-03: 7864 ticks, 68 races in 1.44s
+2026-05-07 00:08:23,172 Feature engineering (68 races, 7864 ticks) completed in 6.08s
+2026-05-07 00:08:49,443 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-07 00:08:55,380 DiscretePPOTrainer episode: n_steps=7864 n_updates=248 policy_loss=0.2708 value_loss=4.7331 entropy=2.5076 approx_kl=0.0006 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1493.633 wall=31.12s
+2026-05-07 00:08:55,383 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61 day 6/6 [2026-05-03] reward=-1493.633 pnl=-465.92 value_loss=4.7331 approx_kl=0.0006 wall=31.1s
+2026-05-07 00:08:55,383 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61: eval rollout on held-out day 2026-05-04
+2026-05-07 00:08:57,734 Loaded 2026-05-04: 8925 ticks, 118 races in 2.35s
+2026-05-07 00:09:07,456 Feature engineering (118 races, 8925 ticks) completed in 9.72s
+2026-05-07 00:09:30,074 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-07 00:09:30,099 Agent 5833b3a3-76de-4e3e-a008-6830fab0bb61 eval [2026-05-04] reward=-1852.224 pnl=+129.44 bets=531 precision=0.397 arbs=87/317 locked=+315.24 naked=-152.90 wall=34.7s
+2026-05-07 00:09:30,312 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-07 00:09:34,306 Loaded 2026-05-01: 11338 ticks, 80 races in 3.99s
+2026-05-07 00:09:52,155 Feature engineering (80 races, 11338 ticks) completed in 17.84s
+2026-05-07 00:10:33,895 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-07 00:10:57,761 DiscretePPOTrainer episode: n_steps=11338 n_updates=356 policy_loss=0.0431 value_loss=2.2363 entropy=2.3741 approx_kl=0.0172 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1240.301 wall=63.09s
+2026-05-07 00:10:57,764 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92 day 1/6 [2026-05-01] reward=-1240.301 pnl=+457.54 value_loss=2.2363 approx_kl=0.0172 wall=63.1s
+2026-05-07 00:10:57,764 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92: day 2/6 loading 2026-04-29
+2026-05-07 00:10:59,563 Loaded 2026-04-29: 10462 ticks, 74 races in 1.80s
+2026-05-07 00:11:07,729 Feature engineering (74 races, 10462 ticks) completed in 8.16s
+2026-05-07 00:11:35,001 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-07 00:11:59,435 DiscretePPOTrainer episode: n_steps=10462 n_updates=328 policy_loss=0.0823 value_loss=2.2298 entropy=2.4826 approx_kl=0.0165 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1065.038 wall=50.53s
+2026-05-07 00:11:59,438 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92 day 2/6 [2026-04-29] reward=-1065.038 pnl=+665.09 value_loss=2.2298 approx_kl=0.0165 wall=50.5s
+2026-05-07 00:11:59,438 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92: day 3/6 loading 2026-04-30
+2026-05-07 00:12:02,032 Loaded 2026-04-30: 11362 ticks, 85 races in 2.59s
+2026-05-07 00:12:13,658 Feature engineering (85 races, 11362 ticks) completed in 11.62s
+2026-05-07 00:12:46,230 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-07 00:13:10,541 DiscretePPOTrainer episode: n_steps=11362 n_updates=356 policy_loss=0.1084 value_loss=1.4430 entropy=2.4716 approx_kl=0.0158 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1612.667 wall=55.45s
+2026-05-07 00:13:10,544 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92 day 3/6 [2026-04-30] reward=-1612.667 pnl=-722.87 value_loss=1.4430 approx_kl=0.0158 wall=55.4s
+2026-05-07 00:13:10,544 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92: day 4/6 loading 2026-05-02
+2026-05-07 00:13:12,841 Loaded 2026-05-02: 13428 ticks, 107 races in 2.30s
+2026-05-07 00:13:25,940 Feature engineering (107 races, 13428 ticks) completed in 13.09s
+2026-05-07 00:14:15,327 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-07 00:14:40,349 DiscretePPOTrainer episode: n_steps=13428 n_updates=420 policy_loss=0.0576 value_loss=2.4145 entropy=2.5803 approx_kl=0.0127 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1799.454 wall=72.49s
+2026-05-07 00:14:40,352 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92 day 4/6 [2026-05-02] reward=-1799.454 pnl=+218.10 value_loss=2.4145 approx_kl=0.0127 wall=72.5s
+2026-05-07 00:14:40,352 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92: day 5/6 loading 2026-04-28
+2026-05-07 00:14:42,079 Loaded 2026-04-28: 9898 ticks, 69 races in 1.73s
+2026-05-07 00:14:49,730 Feature engineering (69 races, 9898 ticks) completed in 7.65s
+2026-05-07 00:15:17,486 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-07 00:15:33,810 DiscretePPOTrainer episode: n_steps=9898 n_updates=312 policy_loss=0.1503 value_loss=2.0485 entropy=2.4922 approx_kl=0.0179 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1400.273 wall=42.83s
+2026-05-07 00:15:33,813 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92 day 5/6 [2026-04-28] reward=-1400.273 pnl=-371.62 value_loss=2.0485 approx_kl=0.0179 wall=42.8s
+2026-05-07 00:15:33,813 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92: day 6/6 loading 2026-05-03
+2026-05-07 00:15:35,254 Loaded 2026-05-03: 7864 ticks, 68 races in 1.44s
+2026-05-07 00:15:41,214 Feature engineering (68 races, 7864 ticks) completed in 5.96s
+2026-05-07 00:16:04,142 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-07 00:16:14,619 DiscretePPOTrainer episode: n_steps=7864 n_updates=248 policy_loss=0.0489 value_loss=1.4846 entropy=2.4116 approx_kl=0.0124 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1197.153 wall=32.36s
+2026-05-07 00:16:14,622 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92 day 6/6 [2026-05-03] reward=-1197.153 pnl=-305.85 value_loss=1.4846 approx_kl=0.0124 wall=32.4s
+2026-05-07 00:16:14,622 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92: eval rollout on held-out day 2026-05-04
+2026-05-07 00:16:16,330 Loaded 2026-05-04: 8925 ticks, 118 races in 1.71s
+2026-05-07 00:16:23,336 Feature engineering (118 races, 8925 ticks) completed in 7.00s
+2026-05-07 00:16:55,264 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-07 00:16:55,305 Agent b3c9c9c6-221e-412c-84bd-d0f36ebb6b92 eval [2026-05-04] reward=-2039.408 pnl=-183.38 bets=510 precision=0.418 arbs=77/306 locked=+258.84 naked=-409.25 wall=40.7s
+2026-05-07 00:16:55,511 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-07 00:16:57,392 Loaded 2026-05-01: 11338 ticks, 80 races in 1.88s
+2026-05-07 00:17:06,002 Feature engineering (80 races, 11338 ticks) completed in 8.61s
+2026-05-07 00:17:44,189 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-07 00:17:51,509 DiscretePPOTrainer episode: n_steps=11338 n_updates=356 policy_loss=0.1661 value_loss=5.1160 entropy=2.4260 approx_kl=0.0013 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1848.576 wall=44.23s
+2026-05-07 00:17:51,513 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f day 1/6 [2026-05-01] reward=-1848.576 pnl=-316.93 value_loss=5.1160 approx_kl=0.0013 wall=44.2s
+2026-05-07 00:17:51,513 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f: day 2/6 loading 2026-04-29
+2026-05-07 00:17:55,060 Loaded 2026-04-29: 10462 ticks, 74 races in 3.55s
+2026-05-07 00:18:11,923 Feature engineering (74 races, 10462 ticks) completed in 16.86s
+2026-05-07 00:18:49,261 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-07 00:18:54,453 DiscretePPOTrainer episode: n_steps=10462 n_updates=328 policy_loss=0.1271 value_loss=5.7702 entropy=2.5187 approx_kl=0.0023 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1293.143 wall=40.19s
+2026-05-07 00:18:54,456 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f day 2/6 [2026-04-29] reward=-1293.143 pnl=+719.86 value_loss=5.7702 approx_kl=0.0023 wall=40.2s
+2026-05-07 00:18:54,456 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f: day 3/6 loading 2026-04-30
+2026-05-07 00:18:56,358 Loaded 2026-04-30: 11362 ticks, 85 races in 1.90s
+2026-05-07 00:19:05,120 Feature engineering (85 races, 11362 ticks) completed in 8.76s
+2026-05-07 00:19:44,133 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-07 00:19:49,620 DiscretePPOTrainer episode: n_steps=11362 n_updates=356 policy_loss=0.0708 value_loss=3.2297 entropy=2.5252 approx_kl=0.0016 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1289.569 wall=43.09s
+2026-05-07 00:19:49,624 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f day 3/6 [2026-04-30] reward=-1289.569 pnl=+208.75 value_loss=3.2297 approx_kl=0.0016 wall=43.1s
+2026-05-07 00:19:49,624 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f: day 4/6 loading 2026-05-02
+2026-05-07 00:19:52,112 Loaded 2026-05-02: 13428 ticks, 107 races in 2.49s
+2026-05-07 00:20:06,415 Feature engineering (107 races, 13428 ticks) completed in 14.30s
+2026-05-07 00:20:43,026 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-07 00:20:52,276 DiscretePPOTrainer episode: n_steps=13428 n_updates=420 policy_loss=0.0826 value_loss=3.3625 entropy=2.6815 approx_kl=0.0022 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1620.608 wall=43.99s
+2026-05-07 00:20:52,281 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f day 4/6 [2026-05-02] reward=-1620.608 pnl=-72.12 value_loss=3.3625 approx_kl=0.0022 wall=44.0s
+2026-05-07 00:20:52,281 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f: day 5/6 loading 2026-04-28
+2026-05-07 00:20:56,032 Loaded 2026-04-28: 9898 ticks, 69 races in 3.75s
+2026-05-07 00:21:05,152 Feature engineering (69 races, 9898 ticks) completed in 9.11s
+2026-05-07 00:21:36,049 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-07 00:21:41,463 DiscretePPOTrainer episode: n_steps=9898 n_updates=312 policy_loss=0.1104 value_loss=3.1317 entropy=2.5398 approx_kl=0.0015 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1200.330 wall=35.08s
+2026-05-07 00:21:41,465 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f day 5/6 [2026-04-28] reward=-1200.330 pnl=-29.56 value_loss=3.1317 approx_kl=0.0015 wall=35.1s
+2026-05-07 00:21:41,465 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f: day 6/6 loading 2026-05-03
+2026-05-07 00:21:42,781 Loaded 2026-05-03: 7864 ticks, 68 races in 1.32s
+2026-05-07 00:21:48,769 Feature engineering (68 races, 7864 ticks) completed in 5.99s
+2026-05-07 00:22:16,327 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-07 00:22:20,625 DiscretePPOTrainer episode: n_steps=7864 n_updates=248 policy_loss=0.1064 value_loss=3.8239 entropy=2.4946 approx_kl=0.0018 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1039.452 wall=30.79s
+2026-05-07 00:22:20,628 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f day 6/6 [2026-05-03] reward=-1039.452 pnl=+81.72 value_loss=3.8239 approx_kl=0.0018 wall=30.8s
+2026-05-07 00:22:20,628 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f: eval rollout on held-out day 2026-05-04
+2026-05-07 00:22:22,413 Loaded 2026-05-04: 8925 ticks, 118 races in 1.78s
+2026-05-07 00:22:29,307 Feature engineering (118 races, 8925 ticks) completed in 6.89s
+2026-05-07 00:23:00,341 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-07 00:23:00,379 Agent 25d9962f-c99a-4cd5-b954-f077d74c451f eval [2026-05-04] reward=-2425.178 pnl=-739.80 bets=504 precision=0.379 arbs=79/302 locked=+260.44 naked=-958.60 wall=39.8s
+2026-05-07 00:23:00,598 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2: loading first day 2026-05-01 from C:\Users\jsmit\source\repos\rl-betfair\data\processed
+2026-05-07 00:23:02,339 Loaded 2026-05-01: 11338 ticks, 80 races in 1.74s
+2026-05-07 00:23:12,329 Feature engineering (80 races, 11338 ticks) completed in 9.99s
+2026-05-07 00:23:45,665 RolloutCollector: collected 11338 transitions (terminated)
+2026-05-07 00:23:57,962 DiscretePPOTrainer episode: n_steps=11338 n_updates=356 policy_loss=0.0682 value_loss=2.1992 entropy=2.4219 approx_kl=0.0015 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1604.978 wall=44.38s
+2026-05-07 00:23:57,966 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2 day 1/6 [2026-05-01] reward=-1604.978 pnl=-159.51 value_loss=2.1992 approx_kl=0.0015 wall=44.4s
+2026-05-07 00:23:57,966 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2: day 2/6 loading 2026-04-29
+2026-05-07 00:24:01,478 Loaded 2026-04-29: 10462 ticks, 74 races in 3.51s
+2026-05-07 00:24:18,336 Feature engineering (74 races, 10462 ticks) completed in 16.85s
+2026-05-07 00:24:45,742 RolloutCollector: collected 10462 transitions (terminated)
+2026-05-07 00:24:55,369 DiscretePPOTrainer episode: n_steps=10462 n_updates=328 policy_loss=0.1027 value_loss=2.2340 entropy=2.5611 approx_kl=0.0007 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1206.975 wall=35.82s
+2026-05-07 00:24:55,372 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2 day 2/6 [2026-04-29] reward=-1206.975 pnl=+245.41 value_loss=2.2340 approx_kl=0.0007 wall=35.8s
+2026-05-07 00:24:55,372 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2: day 3/6 loading 2026-04-30
+2026-05-07 00:24:57,399 Loaded 2026-04-30: 11362 ticks, 85 races in 2.03s
+2026-05-07 00:25:06,202 Feature engineering (85 races, 11362 ticks) completed in 8.80s
+2026-05-07 00:25:37,773 RolloutCollector: collected 11362 transitions (terminated)
+2026-05-07 00:25:47,980 DiscretePPOTrainer episode: n_steps=11362 n_updates=356 policy_loss=0.1115 value_loss=1.9816 entropy=2.5368 approx_kl=0.0007 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1397.826 wall=40.39s
+2026-05-07 00:25:47,982 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2 day 3/6 [2026-04-30] reward=-1397.826 pnl=-80.29 value_loss=1.9816 approx_kl=0.0007 wall=40.4s
+2026-05-07 00:25:47,982 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2: day 4/6 loading 2026-05-02
+2026-05-07 00:25:50,574 Loaded 2026-05-02: 13428 ticks, 107 races in 2.59s
+2026-05-07 00:26:03,705 Feature engineering (107 races, 13428 ticks) completed in 13.13s
+2026-05-07 00:26:55,069 RolloutCollector: collected 13428 transitions (terminated)
+2026-05-07 00:27:08,847 DiscretePPOTrainer episode: n_steps=13428 n_updates=420 policy_loss=0.0737 value_loss=2.0939 entropy=2.6537 approx_kl=0.0010 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1909.786 wall=63.23s
+2026-05-07 00:27:08,850 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2 day 4/6 [2026-05-02] reward=-1909.786 pnl=-94.58 value_loss=2.0939 approx_kl=0.0010 wall=63.2s
+2026-05-07 00:27:08,850 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2: day 5/6 loading 2026-04-28
+2026-05-07 00:27:10,419 Loaded 2026-04-28: 9898 ticks, 69 races in 1.57s
+2026-05-07 00:27:18,220 Feature engineering (69 races, 9898 ticks) completed in 7.80s
+2026-05-07 00:27:49,663 RolloutCollector: collected 9898 transitions (terminated)
+2026-05-07 00:27:59,745 DiscretePPOTrainer episode: n_steps=9898 n_updates=312 policy_loss=0.1443 value_loss=1.8925 entropy=2.5584 approx_kl=0.0015 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1437.562 wall=40.31s
+2026-05-07 00:27:59,748 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2 day 5/6 [2026-04-28] reward=-1437.562 pnl=-341.59 value_loss=1.8925 approx_kl=0.0015 wall=40.3s
+2026-05-07 00:27:59,748 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2: day 6/6 loading 2026-05-03
+2026-05-07 00:28:01,215 Loaded 2026-05-03: 7864 ticks, 68 races in 1.47s
+2026-05-07 00:28:09,656 Feature engineering (68 races, 7864 ticks) completed in 8.44s
+2026-05-07 00:28:40,114 RolloutCollector: collected 7864 transitions (terminated)
+2026-05-07 00:28:48,805 DiscretePPOTrainer episode: n_steps=7864 n_updates=248 policy_loss=0.0928 value_loss=1.2320 entropy=2.4901 approx_kl=0.0009 fill_prob_bce_mean=0.0000 mature_prob_bce_mean=0.0000 risk_nll_mean=0.0000 total_reward=-1218.947 wall=37.09s
+2026-05-07 00:28:48,808 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2 day 6/6 [2026-05-03] reward=-1218.947 pnl=-472.66 value_loss=1.2320 approx_kl=0.0009 wall=37.1s
+2026-05-07 00:28:48,808 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2: eval rollout on held-out day 2026-05-04
+2026-05-07 00:28:50,435 Loaded 2026-05-04: 8925 ticks, 118 races in 1.63s
+2026-05-07 00:28:57,507 Feature engineering (118 races, 8925 ticks) completed in 7.07s
+2026-05-07 00:29:29,945 RolloutCollector: collected 8925 transitions (terminated)
+2026-05-07 00:29:29,982 Agent 92fd6fec-11e4-4ed8-abce-1898a50823d2 eval [2026-05-04] reward=-2165.896 pnl=-703.58 bets=482 precision=0.413 arbs=73/292 locked=+257.62 naked=-927.44 wall=41.2s
+2026-05-07 00:29:30,224 Generation 2 complete in 1561.4s. Top-3 by composite_score (maturation_bonus_weight=0.000):
+2026-05-07 00:29:30,224   #1 agent=5833b3a3-76d composite=-1852.224 reward=-1852.224 pnl=+129.44 bets=531 matured=87 closed=20 genes={'learning_rate': 1.1299830769305077e-05, 'entropy_coeff': 0.0003949234770631503, 'clip_range': 0.22997688755590465, 'gae_lambda': 0.9490447332542895, 'value_coeff': 0.4153304665305225, 'mini_batch_size': 128, 'hidden_size': 128, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:29:30,224   #2 agent=b3c9c9c6-221 composite=-2039.408 reward=-2039.408 pnl=-183.38 bets=510 matured=77 closed=25 genes={'learning_rate': 0.0006086381003274661, 'entropy_coeff': 0.0001823125215866301, 'clip_range': 0.1843843639370541, 'gae_lambda': 0.9026817497494264, 'value_coeff': 0.4139784811027025, 'mini_batch_size': 128, 'hidden_size': 256, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:29:30,224   #3 agent=92fd6fec-11e composite=-2165.896 reward=-2165.896 pnl=-703.58 bets=482 matured=73 closed=22 genes={'learning_rate': 1.1299830769305077e-05, 'entropy_coeff': 0.0001823125215866301, 'clip_range': 0.1843843639370541, 'gae_lambda': 0.9026817497494264, 'value_coeff': 0.4139784811027025, 'mini_batch_size': 128, 'hidden_size': 256, 'open_cost': 0.0, 'matured_arb_bonus_weight': 0.0, 'mark_to_market_weight': 0.05, 'naked_loss_scale': 1.0, 'stop_loss_pnl_threshold': 0.0, 'arb_spread_scale': 1.0, 'fill_prob_loss_weight': 0.0, 'mature_prob_loss_weight': 0.0, 'risk_loss_weight': 0.0, 'alpha_lr': 0.01, 'reward_clip': 10.0, 'bc_pretrain_steps': 0, 'bc_learning_rate': 0.0003, 'bc_target_entropy_warmup_eps': 5, 'direction_prob_loss_weight': 0.0, 'direction_horizon_ticks': 60, 'direction_threshold_ticks': 5, 'direction_force_close_seconds': 60.0, 'bc_direction_target_weight': 0.0}
+2026-05-07 00:29:30,227 Cohort complete in 3266.4s. Wrote registry\_phase13_arm_A_off_1778106901\models.db + registry\_phase13_arm_A_off_1778106901\scoreboard.jsonl
