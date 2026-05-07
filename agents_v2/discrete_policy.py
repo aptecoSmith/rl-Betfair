@@ -381,16 +381,36 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         self.risk_head = nn.Linear(
             self.hidden_size, self.max_runners * 2,
         )
-        # Phase-13 S03 (2026-05-06). Per-side direction head — emits
-        # 2 scalars per runner: P(direction_back), P(direction_lay).
-        # BCE-trained on offline threshold-crossing labels (phase-13
-        # S02). Sigmoid output feeds actor_head via column-concat as
-        # TWO new per-runner columns. Architecture-hash break:
-        # ``actor_head[0].weight.shape[1]`` widens by +2 over the
-        # mature-prob-in-actor shape (CLAUDE.md "fill_prob feeds
-        # actor_head" / "mature_prob_head feeds actor_head" pattern).
-        self.direction_prob_head = nn.Linear(
-            self.hidden_size, self.max_runners * 2,
+        # Phase-14 S01 (2026-05-07). Per-runner direction head —
+        # mirrors actor_head's per-runner pattern. Operates on
+        # ``concat([slot_emb_i, lstm_last])`` per slot and emits 2
+        # logits per slot ``(direction_back_logit_i,
+        # direction_lay_logit_i)``. Sigmoid output feeds actor_head
+        # via column-concat (the existing +4 column wiring is
+        # preserved).
+        #
+        # Architecture-hash break vs phase-13: the old single
+        # ``Linear(hidden, max_runners*2)`` weight (shape
+        # ``(R*2, hidden)``) is replaced with a 2-layer MLP whose
+        # first weight is shape ``(actor_mlp_hidden, runner_embed +
+        # hidden)``. Pre-S01 checkpoints fail strict load by design
+        # — same protocol as fill-prob-in-actor / mature-prob-
+        # in-actor / phase-13 S03.
+        #
+        # The per-runner MLP fixes phase-13's NULL: the supervised
+        # probe (``tools/direction_features_probe.py``) showed the
+        # single-shared-Linear pattern cannot extract per-runner
+        # alpha — the per-runner MLP lifts top-quintile calibration
+        # ~10× on identical data. See
+        # ``plans/rewrite/phase-14-direction-gate/lessons_learnt.md``
+        # "Architectural lesson — per-runner head, NOT shared output".
+        self.direction_prob_head = nn.Sequential(
+            nn.Linear(
+                self.runner_embed_dim + self.hidden_size,
+                self.actor_mlp_hidden,
+            ),
+            nn.ReLU(),
+            nn.Linear(self.actor_mlp_hidden, 2),
         )
 
         # Per-runner actor (Phase 7 S01). The flat categorical from
@@ -512,15 +532,36 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         fill_prob = torch.sigmoid(fill_logit)
         mature_prob = torch.sigmoid(mature_logit)
 
-        # Phase-13 S03 — per-side direction head. (batch, R*2) →
-        # (batch, R, 2) → unpack the two columns. Sigmoid feeds
-        # actor_head; raw logits surface for BCE-with-logits (more
-        # stable + accepts pos_weight) at the trainer.
-        direction_logits_flat = self.direction_prob_head(lstm_last)
+        # Phase-14 S01 — per-runner direction head. The head MLP
+        # takes ``concat([slot_emb_i, lstm_last])`` per slot, so we
+        # need the slot embeddings BEFORE the head's forward pass.
+        # We compute them once here and reuse them for actor_input
+        # below (the existing pattern needs them too).
+        slot_idx = torch.arange(self.max_runners, device=lstm_last.device)
+        runner_embs = self.runner_slot_embedding(slot_idx)  # (R, embed)
+        runner_embs_b = runner_embs.unsqueeze(0).expand(
+            batch, -1, -1,
+        )  # (batch, R, embed)
+        lstm_expanded = lstm_last.unsqueeze(1).expand(
+            -1, self.max_runners, -1,
+        )  # (batch, R, hidden)
+
+        # Direction head input per slot: [slot_emb_i, lstm_last].
+        # Flatten to (batch * R, embed + hidden) so the MLP runs
+        # over it as one large batch; reshape to (batch, R, 2).
+        direction_input = torch.cat(
+            [runner_embs_b, lstm_expanded], dim=-1,
+        )  # (batch, R, embed + hidden)
+        direction_input_flat = direction_input.reshape(
+            batch * self.max_runners, -1,
+        )
+        direction_logits_flat = self.direction_prob_head(
+            direction_input_flat,
+        )  # (batch * R, 2)
         direction_logits = direction_logits_flat.view(
             batch, self.max_runners, 2,
         )
-        direction_back_logits = direction_logits[..., 0]   # (batch, R)
+        direction_back_logits = direction_logits[..., 0]
         direction_lay_logits = direction_logits[..., 1]
         direction_back_prob = torch.sigmoid(direction_back_logits)
         direction_lay_prob = torch.sigmoid(direction_lay_logits)
@@ -537,19 +578,16 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
 
         # ── Per-runner actor (Phase 7 S01) ────────────────────────────
         # Build per-runner inputs: [slot_emb_i, lstm_last,
-        # fill_prob_i, mature_prob_i] for each runner i. The two BCE
-        # head outputs are NOT detached — surrogate-loss gradient flows
-        # back through fill_prob_head and mature_prob_head (CLAUDE.md
+        # fill_prob_i, mature_prob_i, direction_back_i, direction_lay_i]
+        # for each runner i. The four BCE head outputs are NOT detached —
+        # surrogate-loss gradient flows back through fill_prob_head,
+        # mature_prob_head, and direction_prob_head (CLAUDE.md
         # "fill_prob feeds actor_head" §"Do not detach").
-        slot_idx = torch.arange(self.max_runners, device=lstm_last.device)
-        runner_embs = self.runner_slot_embedding(slot_idx)  # (R, embed)
-        runner_embs = runner_embs.unsqueeze(0).expand(batch, -1, -1)
-        lstm_expanded = lstm_last.unsqueeze(1).expand(
-            -1, self.max_runners, -1,
-        )
+        # Phase-14 S01: ``runner_embs_b`` and ``lstm_expanded`` are
+        # already computed above for the direction head — reused here.
         actor_input = torch.cat(
             [
-                runner_embs,
+                runner_embs_b,
                 lstm_expanded,
                 fill_prob.unsqueeze(-1),
                 mature_prob.unsqueeze(-1),

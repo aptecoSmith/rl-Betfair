@@ -144,7 +144,45 @@ data).
 
 ## S01 — Per-runner direction head
 
-(Append on completion.)
+Landed 2026-05-07. Single change in
+`agents_v2/discrete_policy.py::DiscreteLSTMPolicy`:
+
+- `direction_prob_head` is now `nn.Sequential(Linear(embed+hidden,
+  actor_mlp_hidden), ReLU, Linear(actor_mlp_hidden, 2))`.
+  Per-slot, mirrors `actor_head`'s pattern.
+- Forward pass computes the slot embedding + lstm-broadcast tensors
+  ONCE and reuses for both `direction_prob_head` and `actor_head`'s
+  per-runner inputs (no duplicate work).
+- Architecture-hash break is enforced via the new state_dict key
+  layout (`direction_prob_head.0.weight` etc) — pre-S01 checkpoints
+  fail strict load.
+
+**Tests:** 7/7 in `tests/test_v2_direction_prob_in_actor.py` pass,
+including:
+- New `test_direction_prob_head_is_per_runner_mlp` pinning the
+  MLP shape.
+- New `test_pre_phase14_direction_head_fails_to_load` enforcing
+  the architecture-hash break.
+- Existing forward-side / backward-side gradient guards updated
+  to walk both MLP layers.
+- Existing `test_direction_outputs_near_05_on_fresh_init` still
+  passes — the new MLP's fresh init produces sigmoid output ~0.46
+  (in the [0.3, 0.7] sanity band).
+
+**Regression:** all 189 v2 tests pass.
+
+**Sanity-check observation:** at `max_runners=5, hidden=64,
+embed=16, mlp_hidden=64`, the new head has
+`64*80 + 64 + 2*64 + 2 = 5,314` weights vs the old single
+`Linear(64, 10)`'s `64*10 + 10 = 650` weights. ~8× more
+parameters in the head — but still tiny relative to the 1792-dim
+input projection (114k weights). The compute cost per forward
+pass increases by ~10% for the head; LSTM still dominates.
+
+**Operator note:** any cohort run launched after S01 invalidates
+phase-13 checkpoints. The strict-load check fires at policy
+construction; operators see a clear `RuntimeError` mentioning
+`direction_prob_head`. No silent failure mode.
 
 ## S02 — Augmented feature extension
 
