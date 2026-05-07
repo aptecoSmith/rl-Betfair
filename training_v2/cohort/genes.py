@@ -65,6 +65,11 @@ MATURE_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (1.0, 5.0)
 RISK_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.30)
 ALPHA_LR_RANGE: tuple[float, float] = (1e-2, 1e-1)
 REWARD_CLIP_RANGE: tuple[float, float] = (1.0, 10.0)
+# Phase-14 S03 (2026-05-07). Direction-gate threshold. Lower bound
+# is the gate's "no-op floor" semantic. Upper bound clamps the
+# strictest gene draw — at 0.99+ an agent never opens, starving
+# PPO of training signal (per phase-14 hard_constraints §10).
+DIRECTION_GATE_THRESHOLD_RANGE: tuple[float, float] = (0.5, 0.95)
 
 
 #: Default value applied to a Phase 5 gene whose name is NOT in the cohort's
@@ -83,6 +88,11 @@ PHASE5_GENE_DEFAULTS: dict[str, float] = {
     "risk_loss_weight": 0.0,
     "alpha_lr": 1e-2,
     "reward_clip": 10.0,
+    # Phase-14 S03 (2026-05-07). Default 0.5 = the gate's no-op
+    # floor: when ``direction_gate_enabled=False`` (the cohort-wide
+    # default) this value is unread; when enabled, 0.5 is the
+    # value at which the gate filters the fewest rows.
+    "direction_gate_threshold": 0.5,
 }
 
 
@@ -105,6 +115,7 @@ _PHASE5_RANGES: dict[str, tuple[float, float]] = {
     "risk_loss_weight": RISK_LOSS_WEIGHT_RANGE,
     "alpha_lr": ALPHA_LR_RANGE,
     "reward_clip": REWARD_CLIP_RANGE,
+    "direction_gate_threshold": DIRECTION_GATE_THRESHOLD_RANGE,
 }
 
 
@@ -183,6 +194,17 @@ class CohortGenes:
     # via ``--reward-overrides bc_direction_target_weight=X``.
     bc_direction_target_weight: float = 0.0
 
+    # Phase-14 S03 (2026-05-07). Direction-confidence gate. The
+    # ``direction_gate_enabled`` flag turns the policy-side hard mask
+    # ON; ``direction_gate_threshold`` controls how strict the gate
+    # is. Defaults: enabled=False (byte-identical to phase-14
+    # S01+S02), threshold=0.5 (the no-op floor when the gate IS
+    # enabled — the policy clamps the actual value into
+    # [DIRECTION_GATE_THRESHOLD_MIN=0.5,
+    #  DIRECTION_GATE_THRESHOLD_MAX=0.95]).
+    direction_gate_enabled: bool = False
+    direction_gate_threshold: float = 0.5
+
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
         return {
@@ -221,6 +243,10 @@ class CohortGenes:
             ),
             "bc_direction_target_weight": float(
                 self.bc_direction_target_weight,
+            ),
+            "direction_gate_enabled": bool(self.direction_gate_enabled),
+            "direction_gate_threshold": float(
+                self.direction_gate_threshold,
             ),
         }
 
@@ -286,6 +312,15 @@ def _sample_field(rng: random.Random, field_name: str):
         return 60.0
     if field_name == "bc_direction_target_weight":
         return 0.0
+    # Phase-14 S03 (2026-05-07). ``direction_gate_enabled`` is a
+    # cohort-wide bool, never sampled per-agent — operator turns it
+    # on via ``--reward-overrides direction_gate_enabled=true``.
+    # Sampling pins it to False; the cohort runner overlays the
+    # operator value before constructing the policy. The threshold
+    # itself IS sampled when in the ``enabled_set`` (it lives in
+    # _PHASE5_RANGES).
+    if field_name == "direction_gate_enabled":
+        return False
     raise KeyError(f"Unknown gene field: {field_name!r}")
 
 

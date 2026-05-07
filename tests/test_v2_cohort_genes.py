@@ -208,6 +208,12 @@ class TestPhase5Genes:
             "risk_loss_weight": 0.0,
             "alpha_lr": 1e-2,
             "reward_clip": 10.0,
+            # Phase-14 S03 (2026-05-07): direction-gate threshold.
+            # Default 0.5 = the gate's no-op floor. The gate only
+            # actually fires when ``direction_gate_enabled=True``
+            # is supplied via --reward-overrides; the default-disabled
+            # cohort-wide flag preserves byte-identity at this default.
+            "direction_gate_threshold": 0.5,
         }
         assert PHASE5_GENE_DEFAULTS == expected
 
@@ -329,13 +335,14 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_26_fields(self):
+    def test_to_dict_serialises_all_28_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
-        # 7 legacy + 11 Phase 5 + 3 Phase 8 BC + 4 Phase-13 direction
-        # genes + 1 Phase-13 S05 BC direction weight
-        assert len(d) == 26
+        # 7 legacy + 12 Phase 5 (incl. direction_gate_threshold) +
+        # 3 Phase 8 BC + 4 Phase-13 direction + 1 Phase-13 S05 BC +
+        # 1 Phase-14 S03 (direction_gate_enabled).
+        assert len(d) == 28
         for name in PHASE5_GENE_NAMES:
             assert name in d
             assert isinstance(d[name], float)
@@ -354,7 +361,16 @@ class TestPhase5Genes:
         assert d["direction_force_close_seconds"] == 60.0
         # Phase-13 S05 — direction-targeted BC.
         assert d["bc_direction_target_weight"] == 0.0
+        # Phase-14 S03 — direction-confidence gate. The threshold
+        # is sampled here because we passed enabled_set=
+        # PHASE5_GENE_NAMES, so the random draw lands in the
+        # [0.5, 0.95] range rather than at the default 0.5.
+        assert d["direction_gate_enabled"] is False
+        assert 0.5 <= d["direction_gate_threshold"] <= 0.95
 
     def test_phase5_gene_names_set_size(self):
-        assert len(PHASE5_GENE_NAMES) == 11
+        # Phase-14 S03 added direction_gate_threshold to Phase 5
+        # (the threshold is GA-evolved when operator passes
+        # --enable-gene direction_gate_threshold).
+        assert len(PHASE5_GENE_NAMES) == 12
         assert PHASE5_GENE_NAMES == frozenset(PHASE5_GENE_DEFAULTS)

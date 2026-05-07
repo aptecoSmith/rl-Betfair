@@ -136,6 +136,19 @@ _PHASE13_TRAINER_HP_KEYS: frozenset[str] = frozenset({
     "bc_direction_target_weight",
 })
 
+# Phase-14 S03 (2026-05-07). Direction-gate keys consumed by the
+# policy at construction time (NOT the trainer). They flow through
+# the same Path-A precedence as Phase 7 / 13 keys: the worker reads
+# them from the per-agent ``hp`` dict, which it pre-merges from
+# cohort-level ``--reward-overrides``. ``direction_gate_enabled`` is
+# a cohort-wide bool; ``direction_gate_threshold`` is a Phase 5
+# gene that evolves per-agent when the operator opts in via
+# ``--enable-gene direction_gate_threshold``.
+_PHASE14_TRAINER_HP_KEYS: frozenset[str] = frozenset({
+    "direction_gate_enabled",
+    "direction_gate_threshold",
+})
+
 
 # ── Public dataclasses ────────────────────────────────────────────────────
 
@@ -495,6 +508,28 @@ def _build_trainer_hp(
         # Phase-13 S05 — also pass the gene's own value through if set
         # (default 0.0). The BC pretrain reads ``hp["bc_direction_
         # target_weight"]`` to decide whether to load direction labels.
+
+    # Phase-14 S03 (2026-05-07). Direction-gate keys.
+    # ``direction_gate_enabled`` is a cohort-wide bool — operator
+    # opts-in via ``--reward-overrides direction_gate_enabled=true``.
+    # The threshold is a Phase 5 gene; if the operator enabled it
+    # via ``--enable-gene direction_gate_threshold`` the per-agent
+    # gene draw lands in ``hp`` already (genes.to_dict path); the
+    # cohort-wide override (if any) takes precedence.
+    if "direction_gate_enabled" in overrides:
+        v = overrides["direction_gate_enabled"]
+        if isinstance(v, str):
+            v = v.lower() in ("1", "true", "yes")
+        hp["direction_gate_enabled"] = bool(v)
+    if "direction_gate_threshold" in overrides:
+        hp["direction_gate_threshold"] = float(
+            overrides["direction_gate_threshold"],
+        )
+    elif "direction_gate_threshold" in enabled_set:
+        # GA-evolved gene; pull the agent's draw.
+        hp["direction_gate_threshold"] = float(
+            getattr(genes, "direction_gate_threshold"),
+        )
     return hp
 
 
@@ -766,10 +801,28 @@ def train_one_agent(
         scalping_overrides=per_agent_scalping_overrides,
     )
 
+    # Phase-14 S03 — direction gate config flows through trainer_hp
+    # (which the cohort runner constructs from CohortGenes +
+    # --reward-overrides). When ``direction_gate_enabled`` isn't in
+    # the override dict, the gene default (False) wins. The
+    # threshold gene evolves per-agent if the operator opted in via
+    # ``--enable-gene direction_gate_threshold``.
+    direction_gate_enabled = bool(
+        trainer_hp.get("direction_gate_enabled", False),
+    )
+    direction_gate_threshold = float(
+        trainer_hp.get(
+            "direction_gate_threshold",
+            getattr(genes, "direction_gate_threshold", 0.5),
+        ),
+    )
+
     policy = DiscreteLSTMPolicy(
         obs_dim=shim.obs_dim,
         action_space=shim.action_space,
         hidden_size=int(genes.hidden_size),
+        direction_gate_enabled=direction_gate_enabled,
+        direction_gate_threshold=direction_gate_threshold,
     )
 
     trainer = DiscretePPOTrainer(

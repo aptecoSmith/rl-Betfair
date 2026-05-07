@@ -683,6 +683,12 @@ class BetfairEnv(gymnasium.Env):
         "direction_threshold_ticks",
         "direction_force_close_seconds",
         "bc_direction_target_weight",
+        # Phase-14 S03 (2026-05-07): direction-gate config. Both keys
+        # are policy-side (not env-side) but flow through the same
+        # reward_overrides passthrough; whitelist prevents the
+        # unknown-key debug log from firing.
+        "direction_gate_enabled",
+        "direction_gate_threshold",
         # Force-close-architecture Session 02 (2026-05-02): naked-lay
         # carve-out price floor. Stop-close fires unconditionally on
         # naked-back exposures, but for naked-lay exposures only fires

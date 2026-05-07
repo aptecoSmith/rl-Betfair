@@ -279,7 +279,99 @@ to 127).
 
 ## S03 — Direction-gate gene + mask
 
-(Append on completion.)
+Landed 2026-05-07. Adds the per-agent `direction_gate_threshold`
+gene (range [0.5, 0.95]) plus the `direction_gate_enabled`
+cohort-wide flag. When the flag is True, the policy applies a
+hard mask on `OPEN_BACK_i` / `OPEN_LAY_i` logits where the
+runner's `max(P_back, P_lay) < threshold`. NOOP and `CLOSE_i`
+are never gated.
+
+**Implementation:**
+
+- `agents_v2/discrete_policy.py::DiscreteLSTMPolicy.__init__`
+  accepts `direction_gate_enabled: bool = False` and
+  `direction_gate_threshold: float = 0.5`. Threshold clamped to
+  [`DIRECTION_GATE_THRESHOLD_MIN=0.5`,
+  `DIRECTION_GATE_THRESHOLD_MAX=0.95`] at construction (callers
+  passing values outside the range are silently re-clamped — same
+  pattern as the existing PPO clip-range guards).
+- `forward()` calls a new `_apply_direction_gate(masked_logits,
+  direction_back_prob, direction_lay_prob)` helper after the
+  legality mask. The helper writes `-inf` at OPEN slot positions
+  where `max(P_back, P_lay) < threshold`. The gate AND-s with
+  the legality mask (both must pass).
+- The mask is applied at logit level so PyTorch's
+  `Categorical(logits=...).softmax` handles `-inf` cleanly.
+  Sampling never returns a masked index.
+
+**Gene + worker plumbing:**
+
+- `training_v2/cohort/genes.py`:
+  - `direction_gate_threshold` added to `PHASE5_GENE_DEFAULTS`
+    (default 0.5), `_PHASE5_RANGES` ([0.5, 0.95]), and
+    `DIRECTION_GATE_THRESHOLD_RANGE` constant.
+  - `direction_gate_enabled` added as a non-Phase-5 field on
+    `CohortGenes` (operator-controlled, never sampled).
+  - `_sample_field` returns `False` for `direction_gate_enabled`;
+    the threshold uses the standard Phase 5 sample path.
+- `training_v2/cohort/worker.py`:
+  - New `_PHASE14_TRAINER_HP_KEYS` set with the two gate keys.
+  - `_build_trainer_hp` parses
+    `--reward-overrides direction_gate_enabled=true` (handles
+    "true"/"yes"/"1" string casts) and respects either an
+    operator override OR a `--enable-gene
+    direction_gate_threshold` GA-evolved value for the threshold.
+  - `_train_one_agent` reads both keys from `trainer_hp` and
+    passes them into `DiscreteLSTMPolicy(...)` at construction.
+- `env/betfair_env.py::_REWARD_OVERRIDE_KEYS` whitelist extended
+  to include both keys (suppresses the unknown-key debug log on
+  cohort launch).
+
+**Tests:** 16/16 in `tests/test_v2_direction_gate.py`:
+- Disabled flag = byte-identical to no-gate.
+- Strict threshold (0.95) on a fresh policy masks every OPEN
+  slot.
+- Synthetic head with forced-high P_back unblocks both
+  OPEN_BACK_0 AND OPEN_LAY_0 (per-runner-max contract).
+- NOOP + CLOSE finite at thresholds {0.5, 0.7, 0.9, 0.95}.
+- Threshold clamping: 0.99 → 0.95, 0.4 → 0.5, valid values
+  pass through.
+- AND with legality mask: legality-blocked positions stay
+  blocked.
+- The threshold gene is in `PHASE5_GENE_NAMES`; two seeded
+  agents draw independent values.
+
+**Regression:** 205/205 v2 tests pass after updating gene-count
+expectations in `test_v2_cohort_genes.py` and
+`test_v2_cohort_runner.py` (Phase 5 gene set grew from 11 to 12;
+gene dict from 26 to 28 fields).
+
+**One subtle behaviour worth flagging:** at `threshold=0.5` on a
+fresh-init policy, sigmoid output sits near 0.5. About half the
+runners have `max(P_back, P_lay) ≥ 0.5` by chance, so 50% of
+OPEN slots stay open. `0.5` is therefore *closer to* a no-op
+than a strict gate but NOT a true no-op. The
+`direction_gate_enabled = False` flag is the proper byte-
+identity switch; `threshold=0.5` is the loosest setting WHEN
+enabled.
+
+**Operator launch recipe (gate-on cohort):**
+
+```bash
+python -m training_v2.cohort.runner \
+  --n-agents 12 --generations 4 \
+  --days 9 --n-eval-days 3 \
+  --output-dir registry/_phase14_s04_arm_B_${TS} \
+  --seed 42 --device cuda \
+  --reward-overrides direction_prob_loss_weight=0.1 \
+  --reward-overrides force_close_before_off_seconds=60 \
+  --reward-overrides direction_gate_enabled=true \
+  --enable-gene direction_gate_threshold
+```
+
+S04 (validation cohort) is operator-driven from here — needs
+oracle + direction-label cache regen at OBS_SCHEMA_VERSION=7
+across the day window first.
 
 ## S04 — Validation cohort
 

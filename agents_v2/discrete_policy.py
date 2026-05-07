@@ -325,6 +325,17 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
     DEFAULT_RUNNER_EMBED_DIM: int = 16
     DEFAULT_ACTOR_MLP_HIDDEN: int = 64
 
+    # Phase-14 S03 (2026-05-07). The direction-gate gene's allowed
+    # range. Lower bound 0.5 = effectively-no-gate (positive-class
+    # density ~22% means few rows have max(P_back, P_lay) ≥ 0.5
+    # at fresh init). Upper bound 0.95 caps the strictest gene draw
+    # at the level where the supervised probe still sees ~233-1554
+    # opens/day — preventing an agent from drawing 0.99+ and
+    # starving PPO of training signal. See phase-14
+    # hard_constraints §10.
+    DIRECTION_GATE_THRESHOLD_MIN: float = 0.5
+    DIRECTION_GATE_THRESHOLD_MAX: float = 0.95
+
     def __init__(
         self,
         obs_dim: int,
@@ -332,6 +343,8 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         hidden_size: int = 128,
         runner_embed_dim: int | None = None,
         actor_mlp_hidden: int | None = None,
+        direction_gate_enabled: bool = False,
+        direction_gate_threshold: float = 0.5,
     ) -> None:
         super().__init__(obs_dim, action_space, hidden_size)
         self.num_layers = 1
@@ -435,6 +448,26 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         self.stake_alpha_head = nn.Linear(self.hidden_size, 1)
         self.stake_beta_head = nn.Linear(self.hidden_size, 1)
         self.value_head = nn.Linear(self.hidden_size, self.max_runners)
+
+        # Phase-14 S03 (2026-05-07). Direction-gate config. Disabled
+        # by default — when False the policy is byte-identical to
+        # phase-14 S01+S02 without S03 (no mask applied). When
+        # enabled, OPEN_BACK_i / OPEN_LAY_i logits are masked
+        # (-inf) where ``max(P_back_i, P_lay_i) < threshold``.
+        # NOOP and CLOSE_i are NEVER gated — see hard_constraints
+        # §14, §15. Threshold clamped to
+        # [DIRECTION_GATE_THRESHOLD_MIN, _MAX] at construction so
+        # callers passing wider values don't bypass the cap.
+        self.direction_gate_enabled = bool(direction_gate_enabled)
+        self.direction_gate_threshold = float(
+            max(
+                self.DIRECTION_GATE_THRESHOLD_MIN,
+                min(
+                    self.DIRECTION_GATE_THRESHOLD_MAX,
+                    float(direction_gate_threshold),
+                ),
+            ),
+        )
 
     # ── Hidden state ──────────────────────────────────────────────────────
 
@@ -610,6 +643,18 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             [noop_logit, ob_logits, ol_logits, cl_logits], dim=-1,
         )  # (batch, 1 + 3 * R)
         masked_logits = self._apply_mask(logits, mask)
+        # Phase-14 S03: direction-confidence gate. When enabled,
+        # blocks OPEN_BACK_i / OPEN_LAY_i actions whose runner's
+        # max(P_back, P_lay) sits below the configured threshold.
+        # NOOP and CLOSE_i are NEVER gated. The mask AND-s with
+        # the legality mask (both must pass) so the gate never
+        # overrides legality. See hard_constraints §11–§15.
+        if self.direction_gate_enabled:
+            masked_logits = self._apply_direction_gate(
+                masked_logits,
+                direction_back_prob=direction_back_prob,
+                direction_lay_prob=direction_lay_prob,
+            )
         dist = Categorical(logits=masked_logits)
 
         # Stake Beta heads — softplus + 1 keeps alpha, beta > 1 (unimodal).
@@ -670,6 +715,60 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # _fill`` accepts a Python float scalar so no per-call ``-inf``
         # tensor allocation is needed (Phase 4 S07, 2026-05-03).
         return logits.masked_fill(~mask, float("-inf"))
+
+    def _apply_direction_gate(
+        self,
+        logits: torch.Tensor,
+        *,
+        direction_back_prob: torch.Tensor,
+        direction_lay_prob: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mask OPEN_BACK_i / OPEN_LAY_i logits where the per-runner
+        direction confidence falls below ``direction_gate_threshold``.
+
+        Phase-14 S03. The action layout is
+        ``[NOOP, OPEN_BACK_0..R-1, OPEN_LAY_0..R-1, CLOSE_0..R-1]``
+        so we slice the OPEN slots out of the flat logits tensor and
+        write `-inf` where ``max(P_back_i, P_lay_i) < threshold``.
+
+        NOOP (index 0) and CLOSE_i (last R indices) are NEVER masked
+        — see ``hard_constraints.md §14, §15``. An agent at a strict
+        threshold with no high-confidence runners simply emits NOOP;
+        it can always still close existing positions.
+
+        ``direction_back_prob`` / ``direction_lay_prob`` are
+        ``(batch, R)`` sigmoid outputs from
+        :attr:`direction_prob_head`. The mask uses
+        ``max(P_back, P_lay)`` per runner (NOT per-side) so the agent
+        is free to pick whichever side it prefers — the gate filters
+        the OPPORTUNITY, not the side.
+        """
+        threshold = self.direction_gate_threshold
+        # Per-runner max confidence — gate-pass is a single bool per
+        # (batch, slot).
+        direction_max = torch.maximum(
+            direction_back_prob, direction_lay_prob,
+        )  # (batch, R)
+        gate_pass = direction_max >= threshold  # (batch, R) bool
+        R = self.max_runners
+        # Locate OPEN slots in the flat layout.
+        open_back_start = 1
+        open_lay_start = 1 + R
+        # Build a per-action gate-pass mask over the full logits.
+        # Default True — only OPEN slots get the gate; other slots
+        # (NOOP, CLOSE) stay legal regardless of threshold.
+        batch = logits.shape[0]
+        gate_mask = torch.ones(
+            batch, logits.shape[-1], dtype=torch.bool,
+            device=logits.device,
+        )
+        gate_mask[:, open_back_start: open_back_start + R] = gate_pass
+        gate_mask[:, open_lay_start: open_lay_start + R] = gate_pass
+        # AND with the existing legality mask (which is already
+        # baked into ``logits`` via -inf at illegal positions). The
+        # gate writes -inf at gate-blocked positions; positions that
+        # were already -inf stay -inf.
+        return logits.masked_fill(~gate_mask, float("-inf"))
 
 
 def make_stake_distribution(
