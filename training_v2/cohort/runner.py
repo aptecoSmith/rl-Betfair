@@ -606,6 +606,29 @@ def _agent_result_to_scoreboard_row(
         "train_mean_approx_kl": result.train.mean_approx_kl,
         "train_wall_time_sec": result.train.wall_time_sec,
         "train_per_day": result.train.per_day_rows,
+        # Phase-13 S06 follow-up (2026-05-07). Aux-head loss
+        # diagnostics on the cohort scoreboard. Default 0.0 means the
+        # corresponding lever was disabled (or the cache was missing
+        # and the head was un-supervised). Non-zero means the trainer
+        # computed real BCE / NLL gradient. The plumbing closes the
+        # gap S06 surfaced — pre-fix scoreboard rows could not
+        # distinguish "head trained but didn't move policy" from
+        # "head silently inert".
+        "train_mean_fill_prob_bce": result.train.mean_fill_prob_bce,
+        "train_mean_mature_prob_bce": result.train.mean_mature_prob_bce,
+        "train_mean_risk_nll": result.train.mean_risk_nll,
+        "train_mean_direction_back_bce": (
+            result.train.mean_direction_back_bce
+        ),
+        "train_mean_direction_lay_bce": (
+            result.train.mean_direction_lay_bce
+        ),
+        "train_total_direction_targets": (
+            result.train.total_direction_targets
+        ),
+        "train_direction_prob_loss_weight_active": (
+            result.train.direction_prob_loss_weight_active
+        ),
         # Eval (held-out day)
         "eval_total_reward": result.eval.total_reward,
         "eval_day_pnl": result.eval.day_pnl,

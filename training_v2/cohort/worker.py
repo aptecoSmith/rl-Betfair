@@ -154,6 +154,21 @@ class TrainSummary:
     mean_approx_kl: float
     wall_time_sec: float
     per_day_rows: list[dict] = field(default_factory=list)
+    # Phase-13 S06 follow-up (2026-05-07). Per-update aux-head loss
+    # diagnostics aggregated across training days. Zero when the
+    # corresponding weight is 0.0 OR the trainer's per-update path
+    # didn't compute the term (e.g. cache missing, head un-supervised).
+    # The plumbing through to the scoreboard is what S06's NULL-result
+    # caveat #1 specifically asked for: without these on disk we can
+    # not verify from a cohort artefact alone whether the head
+    # actually trained.
+    mean_fill_prob_bce: float = 0.0
+    mean_mature_prob_bce: float = 0.0
+    mean_risk_nll: float = 0.0
+    mean_direction_back_bce: float = 0.0
+    mean_direction_lay_bce: float = 0.0
+    total_direction_targets: int = 0
+    direction_prob_loss_weight_active: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -955,13 +970,33 @@ def train_one_agent(
             "approx_kl_mean": float(stats.approx_kl_mean),
             "entropy_mean": float(stats.entropy_mean),
             "wall_time_sec": float(stats.wall_time_sec),
+            # Phase-13 S06 follow-up (2026-05-07). Per-day aux-head BCE
+            # / NLL means and direction-targets count. Surfaces a per-
+            # day curve for the operator to confirm BCE trends down.
+            "fill_prob_bce_mean": float(stats.fill_prob_bce_mean),
+            "mature_prob_bce_mean": float(stats.mature_prob_bce_mean),
+            "risk_nll_mean": float(stats.risk_nll_mean),
+            "direction_back_bce_mean": float(
+                stats.direction_back_bce_mean,
+            ),
+            "direction_lay_bce_mean": float(
+                stats.direction_lay_bce_mean,
+            ),
+            "n_direction_targets": int(stats.n_direction_targets),
+            "direction_prob_loss_weight_active": float(
+                stats.direction_prob_loss_weight_active,
+            ),
         })
         logger.info(
             "Agent %s day %d/%d [%s] reward=%+.3f pnl=%+.2f "
-            "value_loss=%.4f approx_kl=%.4f wall=%.1fs",
+            "value_loss=%.4f approx_kl=%.4f dir_bce_back=%.4f "
+            "dir_bce_lay=%.4f n_dir_targets=%d wall=%.1fs",
             agent_id, day_idx + 1, len(days_to_train), day_str,
             stats.total_reward, stats.day_pnl,
             stats.value_loss_mean, stats.approx_kl_mean,
+            stats.direction_back_bce_mean,
+            stats.direction_lay_bce_mean,
+            stats.n_direction_targets,
             stats.wall_time_sec,
         )
         if event_emitter is not None:
@@ -986,6 +1021,15 @@ def train_one_agent(
 
     train_wall = time.perf_counter() - train_t0
     n_d = max(len(days_to_train), 1)
+    # Phase-13 S06 follow-up — direction-prob weight is constant
+    # across an agent's training days (set once on trainer init), so
+    # the "active" value on the summary is the value the trainer used.
+    # ``trainer_hp`` was built before the loop; reading it here keeps
+    # the summary self-contained even if a future plan starts varying
+    # per-day genes.
+    dir_weight_active = float(
+        trainer_hp.get("direction_prob_loss_weight", 0.0) or 0.0
+    )
     train_summary = TrainSummary(
         n_days=len(days_to_train),
         total_steps=total_steps,
@@ -1003,6 +1047,29 @@ def train_one_agent(
         ),
         wall_time_sec=train_wall,
         per_day_rows=per_day_rows,
+        mean_fill_prob_bce=float(
+            np.mean([r["fill_prob_bce_mean"] for r in per_day_rows])
+        ),
+        mean_mature_prob_bce=float(
+            np.mean([r["mature_prob_bce_mean"] for r in per_day_rows])
+        ),
+        mean_risk_nll=float(
+            np.mean([r["risk_nll_mean"] for r in per_day_rows])
+        ),
+        mean_direction_back_bce=float(
+            np.mean(
+                [r["direction_back_bce_mean"] for r in per_day_rows],
+            )
+        ),
+        mean_direction_lay_bce=float(
+            np.mean(
+                [r["direction_lay_bce_mean"] for r in per_day_rows],
+            )
+        ),
+        total_direction_targets=int(
+            sum(r["n_direction_targets"] for r in per_day_rows)
+        ),
+        direction_prob_loss_weight_active=dir_weight_active,
     )
 
     # ── Eval rollouts (no PPO update) ───────────────────────────────
