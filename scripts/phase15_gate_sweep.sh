@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-for THRESHOLD in 0.70 0.85 0.95; do
+for THRESHOLD in 0.50 0.60 0.70; do
     TS=$(date +%s)
     RUN="phase15_gate${THRESHOLD/./}_${TS}"
     OUT="registry/_${RUN}"
