@@ -35,6 +35,42 @@ V9 vanilla BCE result: agent NOOPs entirely.
 - Confirms: pos_weight=true (v8 config) is correct for T=0.85.
   v10 tests vanilla BCE with T=0.55 (matched gate threshold).
 
+## Freeze validation (00:00)
+
+V9's POST-PPO direction BCE on the SAME oracle pool:
+- agent 1: back=0.4357 lay=0.3811 (== post-BC, byte-identical)
+- agent 2: back=0.4405 lay=0.3706 (~ post-BC, < 0.005 delta)
+
+**Freeze mechanism is mechanically validated.** The user's
+"make it a per-horse feature" architecture is sound.
+
+## Benchmark complete (00:21)
+
+24 combos (4 losses × 2 hidden × 3 depths) on multi-day pooled.
+Headline: BCE/MSE all converge to ~0.46 on full-pop eval; AUC ~0.52,
+top-decile precision ~0.22 (vs marginal 17%). Weak full-pop signal,
+no clear loss/arch winner. v8's BCE+pos_weight config is fine —
+the bottleneck is the data not the model.
+
+## Big run started (00:23)
+
+Cohort `_phase15_big_1778282572`. 8 agents × 2 gens × 5 train + 3
+eval. Gate thresholds drawn 0.57-0.88. Expected wall ~6h, completion
+~06:30.
+
+## Final chain timing
+
+| Stage | Expected completion |
+|---|---|
+| big run | ~06:30 |
+| v10 (low-gate vanilla BCE) | ~07:00 |
+| v11 (gate sweep T=0.5/0.6/0.7) | ~09:00 |
+| v12 (force_close 30/60/90s) | ~11:00 |
+| v13 (single-day BC + freeze) | ~11:15 |
+
+Operator returns ~17:30. 6h buffer post-chain for additional
+iterations.
+
 ## Files committed
 
 - `agents_v2/discrete_policy.py`: phase-15 (LayerNorm + slice + detach)
