@@ -1,8 +1,8 @@
 ---
 plan: rewrite/phase-14-direction-gate
-status: BLOCKED
+status: NULL → escalate to plans/rewrite/phase-15-direction-head-feature-slice/
 opened: 2026-05-07
-last_update: 2026-05-07 (smoke surfaced PPO/gate bug)
+last_update: 2026-05-08 (probeAB returned NULL — see findings.md)
 parent: plans/rewrite/phase-13-directional-scalping (NULL)
 depends_on: phase-13 infrastructure (offline label generator,
             direction_prob_head, direction-label cache, BC layering)

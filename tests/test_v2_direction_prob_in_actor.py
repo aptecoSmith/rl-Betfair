@@ -62,25 +62,29 @@ class TestDirectionProbInActor:
         )
 
     def test_direction_prob_head_is_per_runner_mlp(self):
-        """Phase-15 S01: head is a 2-layer MLP per slot fed the
-        runner's RAW feature slice.
+        """Phase-15 S01: head is LayerNorm + 2-layer MLP per slot
+        fed the runner's RAW feature slice.
 
-        First Linear: ``(actor_mlp_hidden, RUNNER_DIM)``.
-        Second Linear: ``(2, actor_mlp_hidden)`` — emits
+        Layer 0: LayerNorm(RUNNER_DIM) — squashes raw obs scale
+        (vol features in the [10², 10³] range) before the first
+        Linear, preventing sigmoid saturation seen in the smoke.
+        Layer 1: Linear(RUNNER_DIM, actor_mlp_hidden).
+        Layer 2: ReLU.
+        Layer 3: Linear(actor_mlp_hidden, 2) — emits
         ``[direction_back_logit, direction_lay_logit]`` per slot.
-        Replaces phase-14's
-        ``Linear(actor_mlp_hidden, runner_embed + hidden)`` first-
-        layer shape — the bottleneck-bypass fix.
         """
         p = _build_policy()
-        # First layer: input dim is RUNNER_DIM (the runner's raw
+        # LayerNorm normalises across RUNNER_DIM features.
+        assert isinstance(p.direction_prob_head[0], torch.nn.LayerNorm)
+        assert p.direction_prob_head[0].normalized_shape == (RUNNER_DIM,)
+        # First Linear: input dim is RUNNER_DIM (the runner's raw
         # feature slice), NOT runner_embed + hidden.
-        assert p.direction_prob_head[0].weight.shape == (
+        assert p.direction_prob_head[1].weight.shape == (
             p.actor_mlp_hidden, RUNNER_DIM,
         )
-        # ReLU at index 1 (no weights).
-        # Second layer: 2 outputs per slot.
-        assert p.direction_prob_head[2].weight.shape == (
+        # ReLU at index 2 (no weights).
+        # Second Linear: 2 outputs per slot.
+        assert p.direction_prob_head[3].weight.shape == (
             2, p.actor_mlp_hidden,
         )
 
@@ -93,14 +97,17 @@ class TestDirectionProbInActor:
         with torch.no_grad():
             out_a = p(obs)
             logits_a = out_a.logits.detach().clone()
-            # Perturb the direction head's first-layer weight and
-            # re-run. Phase-14 S01: the head is a 2-layer MLP, so
-            # we perturb the first Linear.
-            p.direction_prob_head[0].weight.add_(0.5)
+            # Phase-15 amendment: perturb by SCALING the first
+            # Linear's weights (LayerNorm at [0] normalises out
+            # uniform shifts, so .add_(0.5) becomes invisible
+            # because LayerNorm output has zero mean — `mul_`
+            # survives because LayerNorm preserves relative
+            # magnitudes / std=1 inputs).
+            p.direction_prob_head[1].weight.mul_(2.0)
             out_b = p(obs)
             logits_b = out_b.logits.detach().clone()
         assert not torch.allclose(logits_a, logits_b), (
-            "Perturbing direction_prob_head[0].weight did not change "
+            "Perturbing direction_prob_head[1].weight did not change "
             "actor logits — the head's output is not feeding "
             "actor_head."
         )
@@ -114,10 +121,11 @@ class TestDirectionProbInActor:
         out = p(obs)
         loss = out.logits.sum()
         loss.backward()
-        # Phase-14 S01: direction_prob_head is a Sequential MLP.
-        # Both layers' weights must receive gradient (path is not
+        # Phase-15 amendment: LayerNorm at [0], first Linear at
+        # [1], second Linear at [3]. Both Linear weights AND the
+        # LayerNorm gamma must receive gradient (path is not
         # detached).
-        for i in (0, 2):
+        for i in (0, 1, 3):
             grad = p.direction_prob_head[i].weight.grad
             assert grad is not None, (
                 f"direction_prob_head[{i}].weight has no gradient — "
@@ -172,13 +180,14 @@ class TestDirectionProbInActor:
         # Phase-13 had direction_prob_head as a single Linear:
         # ``direction_prob_head.weight`` of shape ``(R*2, hidden)``.
         # Phase-14 / phase-15 have direction_prob_head as
-        # nn.Sequential, so the state_dict keys are
-        # ``direction_prob_head.0.weight`` etc. Pre-S01 state_dicts
-        # will have the OLD ``.weight`` key (no index).
-        del sd["direction_prob_head.0.weight"]
-        del sd["direction_prob_head.0.bias"]
-        del sd["direction_prob_head.2.weight"]
-        del sd["direction_prob_head.2.bias"]
+        # nn.Sequential. Phase-15 amendment: LayerNorm at .0,
+        # Linear at .1, ReLU at .2 (no weights), Linear at .3.
+        # Pre-S01 state_dicts will have the OLD ``.weight`` key
+        # (no index) — clean out the new keys and substitute the
+        # legacy single-Linear shape.
+        for key in list(sd.keys()):
+            if key.startswith("direction_prob_head."):
+                del sd[key]
         sd["direction_prob_head.weight"] = torch.zeros(
             p.max_runners * 2, p.hidden_size,
         )
@@ -200,35 +209,47 @@ class TestDirectionProbInActor:
     # 4c. cross-load failure: pre-phase-15 (LSTM-bottleneck input) -----------
 
     def test_pre_phase15_direction_head_fails_to_load(self):
-        """Phase-15 S01 changed ``direction_prob_head[0]``'s input
-        dim from ``runner_embed + hidden`` (phase-14) to
-        ``RUNNER_DIM`` (phase-15). A pre-phase-15 state_dict has
-        the wider first-layer weight; strict load must reject it.
+        """Phase-15 S01 changed ``direction_prob_head``'s
+        layout: pre-phase-15 was Linear at .0 + Linear at .2;
+        phase-15 is LayerNorm at .0 + Linear at .1 + Linear
+        at .3. A pre-phase-15 state_dict has the old keys with
+        a Linear-shaped tensor at .0 — strict load must reject
+        it because the live module has LayerNorm at .0
+        (different parameter shape) and missing keys at .1 and
+        .3.
 
         This is the load-bearing arch-hash guard for phase 15 —
-        the variant identity is carried by the weight shape, not
-        an explicit version field. Same protocol as phase-7
-        (fill-prob), phase-13 (direction-prob), phase-14
-        (per-runner direction MLP).
+        the variant identity is carried by the weight shape /
+        key layout, not an explicit version field. Same protocol
+        as phase-7 (fill-prob), phase-13 (direction-prob),
+        phase-14 (per-runner direction MLP).
         """
         p = _build_policy()
         sd = {k: v.detach().clone() for k, v in p.state_dict().items()}
-        # Pre-phase-15 first-layer weight had input dim
-        # ``runner_embed_dim + hidden_size``. Substitute in a
-        # tensor of that older width.
+        # Wipe phase-15 keys, substitute pre-phase-15 keys.
+        for key in list(sd.keys()):
+            if key.startswith("direction_prob_head."):
+                del sd[key]
+        # Pre-phase-15 had Linear at .0 with input dim
+        # ``runner_embed_dim + hidden_size`` and Linear at .2.
         old_in = p.runner_embed_dim + p.hidden_size
         sd["direction_prob_head.0.weight"] = torch.zeros(
             p.actor_mlp_hidden, old_in,
         )
+        sd["direction_prob_head.0.bias"] = torch.zeros(p.actor_mlp_hidden)
+        sd["direction_prob_head.2.weight"] = torch.zeros(
+            2, p.actor_mlp_hidden,
+        )
+        sd["direction_prob_head.2.bias"] = torch.zeros(2)
         with pytest.raises((RuntimeError, ValueError)) as excinfo:
             p.load_state_dict(sd, strict=True)
         msg = str(excinfo.value).lower()
         assert (
             "direction_prob_head" in msg or "size mismatch" in msg
-            or "shape" in msg
+            or "shape" in msg or "missing" in msg or "unexpected" in msg
         ), (
-            f"Expected a shape-mismatch on "
-            f"direction_prob_head.0.weight, got: {excinfo.value}"
+            f"Expected a shape/key mismatch on direction_prob_head, "
+            f"got: {excinfo.value}"
         )
 
     # 5. default-weight byte-identity to ~0.5 (sanity) ---------------------
@@ -277,14 +298,20 @@ class TestPhase15FeatureSliceInput:
             out_a = p(obs_a)
             back_a = out_a.direction_back_logits_per_runner.clone()
 
-            # Perturb runner 0's feature slice only.
+            # Perturb runner 0's feature slice only. Phase-15
+            # amendment: LayerNorm at [0] normalises out uniform
+            # shifts, so a constant additive offset (e.g. +1.5)
+            # would be invisible — instead REPLACE the slice with
+            # a fresh random vector to change the relative pattern
+            # LayerNorm preserves.
             i = 0
             j = 2
             obs_b = obs_a.clone()
             run_off = p._runner_block_offset
             i_start = run_off + i * RUNNER_DIM
             i_end = i_start + RUNNER_DIM
-            obs_b[:, i_start:i_end] += 1.5  # large perturbation
+            torch.manual_seed(7)
+            obs_b[:, i_start:i_end] = torch.randn(RUNNER_DIM)
 
             out_b = p(obs_b)
             back_b = out_b.direction_back_logits_per_runner
@@ -345,13 +372,14 @@ class TestPhase15FeatureSliceInput:
                 "constraints §2 violation)."
             )
 
-    # First-layer weight shape pinned to RUNNER_DIM. Belt-and-
+    # First-Linear weight shape pinned to RUNNER_DIM. Belt-and-
     # braces complement to test_direction_prob_head_is_per_runner_mlp.
+    # Phase-15 amendment: LayerNorm at [0], first Linear at [1].
     def test_direction_head_first_layer_input_dim_is_runner_dim(self):
         p = _build_policy()
-        assert p.direction_prob_head[0].weight.shape[1] == RUNNER_DIM, (
-            f"direction_prob_head[0] input dim must be RUNNER_DIM "
-            f"({RUNNER_DIM}), got {p.direction_prob_head[0].weight.shape[1]}"
+        assert p.direction_prob_head[1].weight.shape[1] == RUNNER_DIM, (
+            f"direction_prob_head[1] input dim must be RUNNER_DIM "
+            f"({RUNNER_DIM}), got {p.direction_prob_head[1].weight.shape[1]}"
         )
 
     # obs_dim layout: production-sized obs picks the natural

@@ -1,16 +1,17 @@
 ---
 plan: rewrite/phase-15-direction-head-feature-slice
-status: STAGED (do not start until phase-14 probeAB lands)
+status: ACTIVE — S01 landed (commit b1bed67); S02 smoke next
 opened: 2026-05-08
+activated: 2026-05-08 (probeAB returned NULL; trigger fired)
 parent: plans/rewrite/phase-14-direction-gate
 depends_on: phase-14 (per-runner head, augmented features, gate
             mechanism, S05 mask-capture, S06 threshold warmup —
             all merged and stable)
-trigger: phase-14 S04 / probeAB validation cohort returns
-         eval mature_rate < 35% on the gate-on arm OR
-         mean direction BCE remains flat on arm A across
-         gens 1-2 (the smoking gun pre-staged in
-         phase-14 sense_check.md item 3).
+trigger: FIRED — phase-14 probeAB direction BCE flat 1.00-1.10
+         across all 8 agents and both generations; mean mature
+         rate 27.5% (below 35% bar); 0/8 positive eval_day_pnl.
+         See plans/rewrite/phase-14-direction-gate/findings.md
+         "ProbeAB final readout" section.
 ---
 
 # Phase 15 — Feed `direction_prob_head` the per-runner feature slice

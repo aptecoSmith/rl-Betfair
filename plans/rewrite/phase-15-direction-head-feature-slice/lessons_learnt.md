@@ -63,3 +63,77 @@ any one of them. Phase 15 changes ONE thing: which input the
 direction head reads. If S03 delivers, the input pathway is
 the load-bearing fix. If S03 doesn't, the residual is a
 known-bounded gap to chase in one more plan.
+
+## Saturation from raw obs scales — LayerNorm was needed (S02, 2026-05-08)
+
+The first S02 smoke (cohort
+``_phase15_smoke_1778273750``, 2 agents × 1 train + 1 eval
+day, gate on T=0.85, direction_prob_loss_weight=0.1) returned
+**direction BCE 4-12** — much WORSE than phase-14's 1.04
+baseline. The sigmoid saturated against truth: with BCE 12.4,
+``p ≈ exp(-12.4) ≈ 4e-6`` — confidently wrong predictions
+across the board.
+
+**Root cause:** the head reads the runner's RAW
+``RUNNER_KEYS`` slice (~125 dims) directly out of obs. Other
+v2 heads (fill / mature / risk / value) read ``lstm_last``,
+which is post-``input_proj``'s learned linear scaling, so they
+never see the raw heavy-tail features. The direction head
+post-S01 saw raw values where ``vol_delta_60`` sits in
+[10², 10³] — kaiming-init weights × those magnitudes pushed
+pre-activations into the thousands and the sigmoid saturated.
+
+**Fix:** prepend ``nn.LayerNorm(RUNNER_DIM)`` to
+``direction_prob_head``. LayerNorm normalises each example to
+zero mean / unit std across the feature dim — the same squash
+the supervised probe achieved with per-day ``pd.std`` but
+without dataset-stats bookkeeping. Sense_check.md item 2 had
+flagged feature-scale mismatch as a documented risk; LayerNorm
+is the cleanest mitigation.
+
+**Re-smoke (cohort ``_phase15_smoke_1778274494``):** BCE drops
+to [1.05, 1.12] — back to the phase-14 baseline, no longer
+saturated. KL healthy (0.008-0.014), full PPO budget runs
+(n_updates=364), agent 1 emits 375 bets and posts the first
+positive eval_day_pnl (+£24.40) seen in this sequence. The
+input pathway is now sound; BCE is just back to "head not
+clearly learning yet" rather than "head trained against
+truth."
+
+**Lesson for any future per-runner head fed raw obs:** LayerNorm
+or some equivalent input normalisation is mandatory. Don't rely
+on the optimiser to eat the scale mismatch — kaiming-init plus
+[10², 10³]-scale inputs saturates the first layer's outputs
+faster than gradients can recover.
+
+**Test maintenance:** LayerNorm normalises out uniform shifts,
+so test perturbations like ``obs[:, slice] += 1.5`` or
+``weight.add_(0.5)`` become INVISIBLE post-normalisation. The
+phase-15 regression tests now use multiplicative perturbations
+(``weight.mul_(2.0)``) and full-replacement perturbations
+(``obs[:, slice] = torch.randn(...)``) so the per-runner-
+consumption and gradient-through guards survive LayerNorm.
+
+## BCE flat at baseline after S02 amendment — escalating to weight sweep
+
+Even with LayerNorm and the input-pathway fix, the head's
+end-of-day BCE sits at the phase-14 1.04 baseline rather than
+the probe's 0.4-0.6 range. With
+``direction_prob_loss_weight=0.1`` the cohort sees 0.1 ×
+364 PPO updates ≈ 36 effective BCE updates of strength 0.1
+— ~17× weaker than the probe's 600 dedicated supervised steps.
+
+Two competing hypotheses for why BCE doesn't drop:
+1. **Gradient strength insufficient at weight 0.1.** Bumping
+   to 3.0 should give ~10× more effective BCE pull and
+   conclusively test this.
+2. **PPO surrogate fights BCE.** ``direction_prob_head`` feeds
+   ``actor_head`` so policy-loss gradient flows back through
+   it; if policy_loss gradient dominates the BCE pull, the
+   head drifts to whatever helps actor selection rather than
+   to calibrated direction probabilities.
+
+S02 follow-on: re-smoke at ``direction_prob_loss_weight=3.0``.
+If BCE drops cleanly → S03 cohort's gene range needs to be
+biased toward higher weights. If BCE stays flat → escalate to
+investigating PPO/BCE gradient interplay (a separate plan).

@@ -418,7 +418,24 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # ``RUNNER_DIM``. Pre-S01 checkpoints fail strict load by
         # design — see ``plans/rewrite/phase-15-direction-head-
         # feature-slice/hard_constraints.md §1``.
+        #
+        # Phase-15 S01 (amendment 2026-05-08): prepend a LayerNorm
+        # over the per-runner feature slice before the first
+        # Linear. The S02 smoke surfaced direction BCE saturating
+        # at 4-12 (vs the probe's 0.4-0.6) because raw obs values
+        # for vol_delta_60 sit in the [10², 10³] range — kaiming-
+        # init weights on the first Linear push pre-activations
+        # into the thousands and the sigmoid saturates against
+        # truth. Other v2 heads (fill / mature / risk / value)
+        # read ``lstm_last``, which is post-``input_proj``'s
+        # learned linear scaling, so they don't see the raw
+        # heavy-tail scales. The probe used per-day pd.std
+        # normalisation; LayerNorm here achieves the equivalent
+        # squash without dataset-stats bookkeeping
+        # (sense_check.md item 2 spec correction; see also
+        # lessons_learnt.md "Saturation from raw obs scales").
         self.direction_prob_head = nn.Sequential(
+            nn.LayerNorm(RUNNER_DIM),
             nn.Linear(RUNNER_DIM, self.actor_mlp_hidden),
             nn.ReLU(),
             nn.Linear(self.actor_mlp_hidden, 2),

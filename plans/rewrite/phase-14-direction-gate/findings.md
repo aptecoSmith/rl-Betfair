@@ -295,3 +295,68 @@ this autonomously — it's a meaningful compute commitment.
 
 Plan status remains BLOCKED until probe C runs OR the
 operator chooses a different next step.
+
+---
+
+## ProbeAB final readout (2026-05-08)
+
+Cohort `_phase14_probeAB_1778264995` (8 agents = 4 per gen × 2
+gens, all gate-on via reward-overrides, 4 train + 1 eval day).
+Wall: ~3h 30m on GPU.
+
+### Direction BCE — flat across gens
+
+Per-agent end-of-train BCE (back side) sits in [1.00, 1.10]
+across all 8 agents AND across gens 0→1. No agent shows a
+monotonic decrease day-over-day; no clean drop generation-
+over-generation. This is the SAME failure-mode signature as
+phase-13 S06's NULL: the per-runner head architecture (S01)
+is not extracting per-runner direction signal from
+``lstm_last``.
+
+### Mature rate — below the bar
+
+| Agent | Gate T | bets | matured | force-closed | mature_rate |
+|---|---|---|---|---|---|
+| g0/0 | 0.90 | 79 | 19+9=28 | 48 | 35.4% |
+| g0/1 | 0.59 | 165 | 32+9=41 | 119 | 24.8% |
+| g0/2 | 0.81 | 152 | 29+6=35 | 114 | 23.0% |
+| g0/3 | 0.88 | 112 | 30+5=35 | 73 | 31.3% |
+| g1/0 | 0.88 | 115 | 23+8=31 | 84 | 27.0% |
+| g1/1 | 0.90 | 84 | 15+6=21 | 60 | 25.0% |
+| g1/2 | 0.90 | 122 | 26+5=31 | 87 | 25.4% |
+| g1/3 | 0.88 | 135 | 32+6=38 | 95 | 28.1% |
+
+Mean: **27.5%** (bar 35%; only 1/8 hits bar, by 0.4 pp).
+
+### eval_day_pnl — all negative
+
+8/8 agents negative. Range: −£28.5 to −£169.9, mean ~−£73.
+
+### Verdict — phase-14 success bar NOT met
+
+- Primary gate (mature rate ≥ 35%): 1/8, mean below bar.
+- Secondary gate (eval_day_pnl positive): 0/8.
+- Direction BCE trajectory: flat (the smoking gun
+  pre-staged in `sense_check.md` item 3).
+
+The direction BCE flatness IS the diagnostic — phase 14's
+S01 fixed the head's OUTPUT (single Linear → per-runner MLP)
+but the head's INPUT pathway (`(slot_emb_i, lstm_last)` —
+the LSTM's compressed shared state plus a learned slot tag)
+remains the bottleneck. The 24-94× supervised-probe lift
+that motivated phase 14 was measured on raw per-runner
+feature slices, not on `lstm_last`.
+
+### Plan status — NULL → escalate to phase-15
+
+`purpose.md status: BLOCKED` → `NULL → escalate to
+plans/rewrite/phase-15-direction-head-feature-slice/`.
+
+Phase 15 was scaffolded in advance specifically for this
+trigger condition (sense_check item 3). It rewires
+`direction_prob_head`'s INPUT to the runner's raw
+``RUNNER_KEYS`` feature slice, reproducing the probe's
+input regime inside the cohort. S01 has landed (commit
+`b1bed67`); S02 (smoke) and S03 (validation cohort) are
+the next steps.
