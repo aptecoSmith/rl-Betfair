@@ -26,8 +26,8 @@ echo "Launching ${RUN_NAME}; output: ${OUT_DIR}"
 python -m training_v2.cohort.runner \
     --n-agents 8 \
     --generations 2 \
-    --days 6 \
-    --n-eval-days 1 \
+    --days 8 \
+    --n-eval-days 3 \
     --device cuda \
     --output-dir "${OUT_DIR}" \
     --bc-pretrain-steps 2000 \
