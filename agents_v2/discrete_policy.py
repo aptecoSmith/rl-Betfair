@@ -703,20 +703,42 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # ── Per-runner actor (Phase 7 S01) ────────────────────────────
         # Build per-runner inputs: [slot_emb_i, lstm_last,
         # fill_prob_i, mature_prob_i, direction_back_i, direction_lay_i]
-        # for each runner i. The four BCE head outputs are NOT detached —
-        # surrogate-loss gradient flows back through fill_prob_head,
-        # mature_prob_head, and direction_prob_head (CLAUDE.md
-        # "fill_prob feeds actor_head" §"Do not detach").
-        # Phase-14 S01: ``runner_embs_b`` and ``lstm_expanded`` are
-        # already computed above for the direction head — reused here.
+        # for each runner i.
+        #
+        # ``fill_prob`` / ``mature_prob`` are NOT detached — surrogate-
+        # loss gradient flows back through fill_prob_head /
+        # mature_prob_head (CLAUDE.md "fill_prob feeds actor_head"
+        # §"Do not detach"). Those heads do not gate actions, so the
+        # actor's "learn to use the prediction" pathway is benign.
+        #
+        # Phase-15 S01 (amendment 2026-05-08): ``direction_back_prob``
+        # / ``direction_lay_prob`` ARE detached when feeding actor_input.
+        # The direction head's output also drives the gate — masking
+        # OPEN_BACK/OPEN_LAY logits below threshold — which creates a
+        # self-referential loop: PPO learns "high direction_prob keeps
+        # OPEN actions legal" and pulls the head's outputs high
+        # regardless of truth. BCE pulls toward (mostly zero) labels.
+        # The two pulls reach an equilibrium near p≈0.65 with
+        # end-of-day BCE ≈ -log(0.35) ≈ 1.05 — observed in S02 smoke
+        # v3 where 30× more BCE weight produced only 0.003 BCE delta.
+        # Detaching breaks the self-referential loop: BCE becomes the
+        # SOLE training signal for direction_prob_head, mirroring the
+        # supervised probe's regime. The gate still reads the
+        # un-detached values for masking (no loss flows through the
+        # mask), but the actor's surrogate-loss gradient terminates at
+        # the detach. Reverse this when / if direction head calibrates
+        # to the probe's 0.4-0.6 BCE — at that point the actor's
+        # "learn to use the prediction" pathway has value to add. See
+        # ``plans/rewrite/phase-15-direction-head-feature-slice/
+        # lessons_learnt.md`` "PPO/BCE self-referential gate loop".
         actor_input = torch.cat(
             [
                 runner_embs_b,
                 lstm_expanded,
                 fill_prob.unsqueeze(-1),
                 mature_prob.unsqueeze(-1),
-                direction_back_prob.unsqueeze(-1),
-                direction_lay_prob.unsqueeze(-1),
+                direction_back_prob.detach().unsqueeze(-1),
+                direction_lay_prob.detach().unsqueeze(-1),
             ],
             dim=-1,
         )  # (batch, R, embed + hidden + 4)

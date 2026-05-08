@@ -90,48 +90,94 @@ class TestDirectionProbInActor:
 
     # 2. forward-side gradient guard ----------------------------------------
 
-    def test_action_logits_depend_on_direction_prob_head_weights(self):
+    def test_actor_logits_value_dependence_via_detach_not_removed(self):
+        """Phase-15 S01 amendment: ``direction_back_prob`` /
+        ``direction_lay_prob`` are ``.detach()``-ed before going into
+        actor_input. Detach severs the GRADIENT graph, NOT the
+        forward value — actor_head still receives the same
+        direction-prob numbers each step, so perturbing the head's
+        weights still changes the values fed to the actor and thus
+        the raw logits.
+
+        The load-bearing detach guard is on GRADIENT flow:
+        ``test_actor_loss_does_NOT_route_grad_through_direction_prob_head``.
+        This test stays here as documentation that the actor
+        forward continues to consume the head's value (so it can
+        in principle learn to USE the direction signal at inference)
+        while the gradient pathway back into the head is severed.
+        """
         p = _build_policy()
         torch.manual_seed(0)
         obs = torch.randn(2, _OBS_DIM)
         with torch.no_grad():
             out_a = p(obs)
             logits_a = out_a.logits.detach().clone()
-            # Phase-15 amendment: perturb by SCALING the first
-            # Linear's weights (LayerNorm at [0] normalises out
-            # uniform shifts, so .add_(0.5) becomes invisible
-            # because LayerNorm output has zero mean — `mul_`
-            # survives because LayerNorm preserves relative
-            # magnitudes / std=1 inputs).
             p.direction_prob_head[1].weight.mul_(2.0)
             out_b = p(obs)
             logits_b = out_b.logits.detach().clone()
+        # Forward values change (head produces different outputs;
+        # actor reads them). The detach only matters at backward.
         assert not torch.allclose(logits_a, logits_b), (
-            "Perturbing direction_prob_head[1].weight did not change "
-            "actor logits — the head's output is not feeding "
-            "actor_head."
+            "Perturbing the head's weights produced byte-identical "
+            "actor logits — actor is no longer reading direction "
+            "values at all (detach went too far / value path broken)."
         )
 
     # 3. backward-side guard ------------------------------------------------
 
-    def test_actor_loss_routes_grad_through_direction_prob_head(self):
+    def test_actor_loss_does_NOT_route_grad_through_direction_prob_head(self):
+        """Phase-15 S01 amendment (2026-05-08): the actor pathway is
+        detached. ``out.logits.sum().backward()`` must NOT produce
+        gradient on ``direction_prob_head``. BCE on
+        ``direction_back_logits_per_runner`` must STILL produce
+        gradient (verified in
+        ``test_bce_loss_DOES_route_grad_through_direction_prob_head``
+        below). Pre-amendment this test asserted the surrogate did
+        flow through; the inversion is the load-bearing guard for
+        the detach.
+        """
         p = _build_policy()
         torch.manual_seed(0)
         obs = torch.randn(2, _OBS_DIM)
         out = p(obs)
         loss = out.logits.sum()
         loss.backward()
-        # Phase-15 amendment: LayerNorm at [0], first Linear at
-        # [1], second Linear at [3]. Both Linear weights AND the
-        # LayerNorm gamma must receive gradient (path is not
-        # detached).
+        # All three direction_prob_head learnable layers must have
+        # ZERO grad (or None — same effect) from the actor pathway.
         for i in (0, 1, 3):
             grad = p.direction_prob_head[i].weight.grad
-            assert grad is not None, (
-                f"direction_prob_head[{i}].weight has no gradient — "
-                "surrogate path appears detached."
+            if grad is not None:
+                assert grad.abs().max().item() == 0.0, (
+                    f"direction_prob_head[{i}].weight got non-zero "
+                    f"gradient from out.logits.sum().backward() — "
+                    f"phase-15 detach is not in effect "
+                    f"(max grad {grad.abs().max().item():.6f})."
+                )
+
+    def test_bce_loss_DOES_route_grad_through_direction_prob_head(self):
+        """Complement to the actor-loss-no-grad test: BCE on
+        ``direction_back_logits_per_runner`` MUST still produce
+        gradient on ``direction_prob_head``. The detach severs only
+        the actor pathway — the supervised pathway is the head's
+        sole remaining trainer.
+        """
+        p = _build_policy()
+        torch.manual_seed(0)
+        obs = torch.randn(2, _OBS_DIM)
+        out = p(obs)
+        # Synthetic BCE on the direction back logits.
+        labels = torch.zeros_like(out.direction_back_logits_per_runner)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            out.direction_back_logits_per_runner, labels,
+        )
+        loss.backward()
+        for i in (0, 1, 3):
+            grad = p.direction_prob_head[i].weight.grad
+            assert grad is not None and grad.abs().max() > 0.0, (
+                f"direction_prob_head[{i}].weight got NO gradient "
+                f"from BCE on direction_back_logits — supervised "
+                f"path is broken (detach went too far)."
             )
-            assert grad.abs().max() > 0.0
 
     # 4. cross-load failure: pre-phase-13 (single-Linear-on-actor) ----------
 

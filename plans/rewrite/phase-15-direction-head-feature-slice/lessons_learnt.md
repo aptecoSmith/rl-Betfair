@@ -137,3 +137,87 @@ S02 follow-on: re-smoke at ``direction_prob_loss_weight=3.0``.
 If BCE drops cleanly → S03 cohort's gene range needs to be
 biased toward higher weights. If BCE stays flat → escalate to
 investigating PPO/BCE gradient interplay (a separate plan).
+
+## S02 weight-sweep verdict (smoke v3, w=3.0)
+
+Cohort ``_phase15_smoke_w3_1778275097``. Same shape as smoke
+v2 but ``direction_prob_loss_weight=3.0`` (30× stronger BCE
+pull). Result: **BCE essentially identical** to weight=0.1
+(agent 1 dir_bce_back 1.1193 vs 1.1215 — Δ=0.002, lay
+1.0526 vs 1.0544). Plumbing verified via the scoreboard's
+``direction_prob_loss_weight_active=3.0`` field; isolation
+probe confirmed BCE gradient flows cleanly through
+``direction_prob_head[1].weight`` (norm 0.29 on a synthetic
+batch). The weight is reaching the loss; the loss is reaching
+the head; yet 30× weight produces no change.
+
+**Initial (wrong) diagnosis: gate self-reference loop.** I
+hypothesised the head's output drove BOTH the gate (masking
+``OPEN_*`` actions when ``max(P_back, P_lay) < threshold``)
+AND ``actor_input`` via the +4 column wiring, creating a PPO
+pull "high direction_prob keeps OPEN actions legal" that
+fought the BCE pull toward truth. Implemented a ``.detach()``
+on direction_back_prob / direction_lay_prob before
+``actor_input`` and re-smoked at w=3.0
+(``_phase15_smoke_w3_detach_1778276053``). Result: identical
+BCE again (agent 1 dir_bce_back 1.1201 vs 1.1193 pre-detach —
+Δ=0.001). The gate hypothesis was wrong, OR detaching was
+insufficient.
+
+## Real root cause: Adam ate the weight scaling
+
+PPO uses Adam (or AdamW). Adam's per-parameter update is
+approximately ``learning_rate × m / sqrt(v)`` where m and v
+are first/second-moment EMAs. The CRUCIAL property: this
+update is **scale-invariant in the gradient magnitude** —
+multiplying every gradient by 30× scales m and sqrt(v) by 30×
+each, and m/sqrt(v) stays the same. Adam tries to normalise
+to a unit-step-size optimiser. Multiplying the BCE loss by
+30× doesn't change the per-param Adam step size on
+``direction_prob_head``.
+
+So weight=0.1 and weight=3.0 produce the same effective
+update trajectory on the head. They differ only in how long
+the warmup phase of Adam's variance EMA takes — minor for our
+364-update window.
+
+End-of-day BCE 1.05 ≈ ``-log(0.35)`` = the balanced no-skill
+baseline (head sits at the positive-class marginal rate, roughly
+35%). The probe got to BCE 0.4-0.6 in 600 dedicated SGD steps;
+the cohort with Adam at 3e-4 LR can't escape the no-skill
+basin in 364 mixed PPO+BCE updates regardless of BCE weight.
+
+**Lesson: don't expect aux-loss weight to drive convergence
+speed when the optimiser is Adam.** Weight matters in the
+BCE/PPO trade-off direction (more BCE pull vs more PPO pull
+per gradient step) but Adam ratios away the magnitude
+contribution. To get the head to converge, EITHER:
+- Run for many more update steps (Adam is slow but eventually
+  gets there).
+- Use a SEPARATE optimiser for the head with its own
+  learning rate.
+- BC-pretrain the head before PPO starts (the closest analogue
+  to the probe's regime).
+
+## Detach kept, BC pretrain next
+
+The S01 detach amendment (commit
+``[ next ]``) stays in place even though it produced no
+measurable change in this smoke. Rationale: the detach
+doesn't help yet because the head is at no-skill baseline
+anyway, but if BC pretrain DOES land a calibrated head, the
+detach prevents PPO from immediately corrupting that
+calibration via the actor pathway. Removing the detach later
+is trivial if the actor's "learn to use direction signal"
+pathway becomes useful.
+
+Next experiment: re-smoke with ``bc_pretrain_steps=2000``
++ ``bc_direction_target_weight=1.0`` (phase-13 gene wiring,
+default 0/0). Pre-PPO supervised BC of direction_prob_head on
+the cached labels at ``bc_learning_rate=3e-4`` is the closest
+analogue to the probe's 600-step regime. If post-BC BCE
+sits at 0.4-0.7 (probe range) the head is genuinely
+calibrated; PPO + detach should preserve that state through
+the rollout. If BC also gets stuck at 1.05, the labels or the
+features carry less signal than the probe demonstrated, and
+the residual gap is somewhere upstream.

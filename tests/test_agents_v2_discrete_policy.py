@@ -205,6 +205,11 @@ class TestBackwardGradients:
         always fail since risk_head doesn't feed any other output).
         """
         out = policy(torch.randn(3, policy.obs_dim))
+        # Phase-15 S01 amendment (2026-05-08): direction_prob_head's
+        # actor pathway is detached, so out.logits.sum() no longer
+        # reaches it. Include the direction logits directly to mirror
+        # what the trainer's BCE auxiliary actually drives — the
+        # supervised pathway is the head's sole training signal.
         loss = (
             out.logits.sum()
             + out.value_per_runner.sum()
@@ -212,6 +217,8 @@ class TestBackwardGradients:
             + out.stake_beta.sum()
             + out.predicted_locked_pnl_per_runner.sum()
             + out.predicted_locked_log_var_per_runner.sum()
+            + out.direction_back_logits_per_runner.sum()
+            + out.direction_lay_logits_per_runner.sum()
         )
         loss.backward()
         for name, p in policy.named_parameters():
