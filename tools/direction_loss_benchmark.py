@@ -52,14 +52,26 @@ _HIDDEN = 64
 _DEFAULT_LR = 3e-4
 
 
-def _build_predictor() -> nn.Sequential:
-    """Mirror direction_prob_head per agents_v2/discrete_policy.py."""
-    return nn.Sequential(
-        nn.LayerNorm(RUNNER_DIM),
-        nn.Linear(RUNNER_DIM, _HIDDEN),
-        nn.ReLU(),
-        nn.Linear(_HIDDEN, 2),
-    )
+def _build_predictor(hidden: int = _HIDDEN, depth: int = 1) -> nn.Sequential:
+    """Build a per-runner direction predictor.
+
+    depth=1: LayerNorm + Linear(D, H) + ReLU + Linear(H, 2)  (default,
+             mirrors agents_v2/discrete_policy.py:direction_prob_head)
+    depth=2: LayerNorm + Linear(D, H) + ReLU + Linear(H, H) + ReLU
+             + Linear(H, 2)
+    depth=0: LayerNorm + Linear(D, 2)  (probe-style direct linear)
+    """
+    layers: list[nn.Module] = [nn.LayerNorm(RUNNER_DIM)]
+    if depth == 0:
+        layers.append(nn.Linear(RUNNER_DIM, 2))
+    else:
+        layers.append(nn.Linear(RUNNER_DIM, hidden))
+        for _ in range(depth - 1):
+            layers.append(nn.ReLU())
+            layers.append(nn.Linear(hidden, hidden))
+        layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden, 2))
+    return nn.Sequential(*layers)
 
 
 def _build_pool(date: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -235,11 +247,13 @@ def train_one(
     lr: float,
     device: torch.device,
     seed: int = 42,
+    hidden: int = _HIDDEN,
+    depth: int = 1,
 ) -> dict:
     """Train a fresh predictor with the named loss; report metrics."""
     torch.manual_seed(seed)
     np.random.seed(seed)
-    model = _build_predictor().to(device)
+    model = _build_predictor(hidden=hidden, depth=depth).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     Xt = torch.tensor(X_train, dtype=torch.float32, device=device)
@@ -319,6 +333,11 @@ def main():
     parser.add_argument("--lr", type=float, default=_DEFAULT_LR)
     parser.add_argument("--losses", nargs="+",
                         default=["bce", "bce_pos", "focal", "mse"])
+    parser.add_argument("--hidden-sizes", nargs="+", type=int, default=[64],
+                        help="Hidden sizes to sweep. Default [64].")
+    parser.add_argument("--depths", nargs="+", type=int, default=[1],
+                        help=("MLP depths to sweep. 0=direct Linear, "
+                              "1=H-MLP (default), 2=H-H-MLP."))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -340,20 +359,34 @@ def main():
     print("Loading eval pool...")
     X_eval, yb_eval, yl_eval = _build_pool(args.eval_date)
 
-    print(f"\nRunning {len(args.losses)} loss variant(s) for {args.steps} steps each:")
-    print(f"{'loss':<10} {'bce_b':>8} {'bce_l':>8} {'auc_b':>7} {'auc_l':>7} {'td_b':>6} {'td_l':>6} {'wall':>6}")
-    for loss_name in args.losses:
-        m = train_one(
-            loss_name, X_train, yb_train, yl_train,
-            X_eval, yb_eval, yl_eval,
-            n_steps=args.steps, lr=args.lr, device=device, seed=args.seed,
-        )
-        print(
-            f"{loss_name:<10} {m['bce_back']:>8.4f} {m['bce_lay']:>8.4f} "
-            f"{m['auc_back']:>7.4f} {m['auc_lay']:>7.4f} "
-            f"{m['td_prec_back']:>6.3f} {m['td_prec_lay']:>6.3f} "
-            f"{m['wall_s']:>5.1f}s"
-        )
+    n_combos = len(args.losses) * len(args.hidden_sizes) * len(args.depths)
+    print(
+        f"\nRunning {n_combos} combination(s) "
+        f"({len(args.losses)} loss × {len(args.hidden_sizes)} hidden × "
+        f"{len(args.depths)} depth) for {args.steps} steps each:"
+    )
+    print(
+        f"{'loss':<10} {'h':>4} {'d':>2} "
+        f"{'bce_b':>8} {'bce_l':>8} {'auc_b':>7} {'auc_l':>7} "
+        f"{'td_b':>6} {'td_l':>6} {'wall':>6}"
+    )
+    for hidden in args.hidden_sizes:
+        for depth in args.depths:
+            for loss_name in args.losses:
+                m = train_one(
+                    loss_name, X_train, yb_train, yl_train,
+                    X_eval, yb_eval, yl_eval,
+                    n_steps=args.steps, lr=args.lr, device=device,
+                    seed=args.seed, hidden=hidden, depth=depth,
+                )
+                print(
+                    f"{loss_name:<10} {hidden:>4} {depth:>2} "
+                    f"{m['bce_back']:>8.4f} {m['bce_lay']:>8.4f} "
+                    f"{m['auc_back']:>7.4f} {m['auc_lay']:>7.4f} "
+                    f"{m['td_prec_back']:>6.3f} {m['td_prec_lay']:>6.3f} "
+                    f"{m['wall_s']:>5.1f}s",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":
