@@ -221,3 +221,90 @@ calibrated; PPO + detach should preserve that state through
 the rollout. If BC also gets stuck at 1.05, the labels or the
 features carry less signal than the probe demonstrated, and
 the residual gap is somewhere upstream.
+
+## BREAKTHROUGH — v8 lands positive eval pnl (2026-05-08)
+
+Cohort ``_phase15_smoke_md_1778279309``. 2 agents × 1 gen × 3
+train + 1 eval days. ``bc_direction_target_weight=1.0``,
+``direction_bce_use_pos_weight=true`` (default), gate enabled
+T=0.85, BC pretrains direction_prob_head AND actor_head, head
+FROZEN post-BC.
+
+### Eval results (held-out 2026-05-06)
+
+| Agent | Bets | Matured | mat% | Eval pnl |
+|---|---|---|---|---|
+| 1 (lr=0.00019) | 36 | 13 | 72.2% | **+£20.04** |
+| 2 (lr=0.00061) | 94 | 28 | ~30% | **+£39.80** |
+
+**Both agents POSITIVE.** Phase-14 baseline mean was -£73; phase-15
+v7 (single-day BC, no freeze) was -£3 mean. v8 mean = +£30.
+
+### What works
+
+The full pipeline is:
+
+1. **LayerNorm prepended to direction_prob_head**: the runner's
+   raw feature slice has vol features in [10², 10³] — LayerNorm
+   normalises per-example so the kaiming-init Linear doesn't
+   saturate the sigmoid against truth.
+2. **BC trains direction_prob_head AND actor_head**: the
+   pre-existing BC pretrainer trained ONLY actor_head; phase-15
+   S02 amendment expanded `_BC_TARGET_NAMES` to include
+   `direction_prob_head`. BCE-with-logits on cached binary
+   labels feeds the head's params through 2000 supervised steps.
+3. **Multi-day pooled BC** (3 days here, 4-5 in big run):
+   density of unambiguous (1,0) and (0,1) labels jumps from
+   ~24K (single day) to ~55K-110K, giving the head more diverse
+   data to fit.
+4. **Freeze post-BC**: `direction_prob_head` parameters get
+   ``requires_grad_(False)`` after BC. PPO gradients can't
+   modify them. The auxiliary BCE during PPO is effectively a
+   no-op because gradients flow but don't update.
+5. **Gate threshold 0.85 + warmup**: the calibrated head's
+   sigmoid output rarely exceeds 0.85 except for genuine
+   high-confidence opportunities → 10× drop in bet count vs
+   pre-phase-15 (400 → 36-94). Selective bets are profitable.
+6. **Detach direction_prob from actor_input**: prevents PPO
+   surrogate from corrupting the head (defensive — freeze is
+   the load-bearing fix, but detach is belt-and-braces).
+
+### Why pos_weight works here despite the math
+
+`pos_weight` shifts the loss surface optimum away from the
+true conditional probability toward a rebalanced one. In v8
+this manifests as post-BC BCE 0.75/0.79 (vs v7 single-day no
+pos_weight 0.26/0.35). HOWEVER: the head's outputs being
+biased UP slightly seems to align with the gate's strict
+threshold — the rebalanced operating point puts more genuine
+positives ABOVE 0.85 while the marginal-density-true-negatives
+stay below. v9 (vanilla BCE) tests whether this is a happy
+accident or whether without pos_weight the calibration is
+even better.
+
+### Mature rate vs phase-14 break-even
+
+Phase-14 empirical break-even = 34.8% (£3.37 mat / £1.80 force).
+v8 agent 1 = 72.2% (2× above break-even). v8 agent 2 = ~30%
+(below break-even on rate, but profitable due to high count of
+opens at locked spreads averaging higher than the ratio).
+
+### Force-close rate
+
+Pre-phase-15 cohorts had 70-80% force-close rate (most opens
+bailed by env at T-N). v8 agent 1: 5/18 = 28%. The selective
+gate + calibrated head skip most "this won't mature" opens at
+decision time, dropping the force-close rate by 2-3×.
+
+### Strategic implication
+
+Phase-14's NULL was driven by the inability to extract the
+direction signal from the LSTM-bottlenecked input pathway.
+Phase-15 fixed that by feeding raw features directly. v8
+shows that, with the predictor properly trained AND
+preserved (freeze), the gate mechanism does what the
+strategic thesis predicted: selective opens, high mature
+rate, positive eval pnl.
+
+Big run queued (8 agents × 2 gen × 5 train + 3 eval) to
+validate at scale.
