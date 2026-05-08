@@ -19,11 +19,21 @@ v7 was -£3; v8 is +£30 mean.
 
 | Task | Description | Expected completion |
 |---|---|---|
-| bygpgdm23 | v8 → v9 (auto-launch when v8 done) | done |
+| bygpgdm23 | v8 → v9 (auto-launch when v8 done) | running v9 |
 | b3sen31lb | benchmark (24 loss×arch combos) when v9 done | ~00:30 |
 | b5rb6oyfa | scan 04-29/04-30 + big run when benchmark done | ~06:30 |
-| bpihwjpy8 | analyse big run when done | ~06:30 |
-| bd2p54gu4 | summary v9 when v9 done | ~00:15 |
+| b02lnai0z | analyse big run + v10 (low-gate) when big run done | ~07:00 |
+| blnrz7uj8 | v11 gate sweep (T=0.5/0.6/0.7) after v10 | ~09:00 |
+| b2dcvnj0v | v12 force_close sweep (30/60/90s) after v11 | ~11:00 |
+
+## v9 update (00:00)
+
+V9 vanilla BCE result: agent NOOPs entirely.
+- post_bc_dir_bce_back=0.4357 (probe-range calibration)
+- BUT: head outputs natural distribution (~0.22 mean), gate at
+  0.85 blocks everything → 0 bets → 0 pnl
+- Confirms: pos_weight=true (v8 config) is correct for T=0.85.
+  v10 tests vanilla BCE with T=0.55 (matched gate threshold).
 
 ## Files committed
 
