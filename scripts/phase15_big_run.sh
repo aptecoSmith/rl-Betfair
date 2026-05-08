@@ -33,7 +33,6 @@ python -m training_v2.cohort.runner \
     --bc-pretrain-steps 2000 \
     --enable-gene direction_gate_threshold \
     --reward-overrides bc_direction_target_weight=1.0 \
-    --reward-overrides direction_bce_use_pos_weight=false \
     --reward-overrides direction_prob_loss_weight=0.1 \
     --reward-overrides direction_gate_enabled=true \
     --reward-overrides matured_arb_bonus_weight=2.0 \
