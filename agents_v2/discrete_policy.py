@@ -39,6 +39,7 @@ import torch.nn as nn
 from torch.distributions import Beta, Categorical
 
 from agents_v2.action_space import DiscreteActionSpace
+from env.betfair_env import MARKET_DIM, RUNNER_DIM, VELOCITY_DIM
 
 
 __all__ = [
@@ -394,37 +395,65 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         self.risk_head = nn.Linear(
             self.hidden_size, self.max_runners * 2,
         )
-        # Phase-14 S01 (2026-05-07). Per-runner direction head —
-        # mirrors actor_head's per-runner pattern. Operates on
-        # ``concat([slot_emb_i, lstm_last])`` per slot and emits 2
-        # logits per slot ``(direction_back_logit_i,
-        # direction_lay_logit_i)``. Sigmoid output feeds actor_head
-        # via column-concat (the existing +4 column wiring is
-        # preserved).
+        # Phase-15 S01 (2026-05-08). Per-runner direction head fed
+        # the runner's RAW per-runner FEATURE SLICE rather than
+        # ``concat([slot_emb_i, lstm_last])``. The supervised
+        # ``tools/direction_features_probe.py`` extracted 24-94×
+        # top-quintile lift on raw per-runner inputs, vs phase-14's
+        # LSTM-bottlenecked pathway which the smoke + probeAB
+        # showed could not learn at cohort scale (BCE flat ~1.04
+        # across all generations). See
+        # ``plans/rewrite/phase-15-direction-head-feature-slice/
+        # purpose.md`` for the diagnosis.
         #
-        # Architecture-hash break vs phase-13: the old single
-        # ``Linear(hidden, max_runners*2)`` weight (shape
-        # ``(R*2, hidden)``) is replaced with a 2-layer MLP whose
-        # first weight is shape ``(actor_mlp_hidden, runner_embed +
-        # hidden)``. Pre-S01 checkpoints fail strict load by design
-        # — same protocol as fill-prob-in-actor / mature-prob-
-        # in-actor / phase-13 S03.
+        # Input shape per slot: ``(RUNNER_DIM,)`` — the raw
+        # ``RUNNER_KEYS`` block for that runner, sliced from obs.
+        # Output: 2 logits per slot ``(direction_back_logit_i,
+        # direction_lay_logit_i)``. Sigmoid feeds actor_head via
+        # column-concat (the existing +4 wiring is preserved —
+        # actor_head's input dim is unchanged).
         #
-        # The per-runner MLP fixes phase-13's NULL: the supervised
-        # probe (``tools/direction_features_probe.py``) showed the
-        # single-shared-Linear pattern cannot extract per-runner
-        # alpha — the per-runner MLP lifts top-quintile calibration
-        # ~10× on identical data. See
-        # ``plans/rewrite/phase-14-direction-gate/lessons_learnt.md``
-        # "Architectural lesson — per-runner head, NOT shared output".
+        # Architecture-hash break vs phase-14: the first Linear's
+        # input dim shrinks from ``runner_embed + hidden`` to
+        # ``RUNNER_DIM``. Pre-S01 checkpoints fail strict load by
+        # design — see ``plans/rewrite/phase-15-direction-head-
+        # feature-slice/hard_constraints.md §1``.
         self.direction_prob_head = nn.Sequential(
-            nn.Linear(
-                self.runner_embed_dim + self.hidden_size,
-                self.actor_mlp_hidden,
-            ),
+            nn.Linear(RUNNER_DIM, self.actor_mlp_hidden),
             nn.ReLU(),
             nn.Linear(self.actor_mlp_hidden, 2),
         )
+
+        # Phase-15 S01: precompute the obs-slice offsets for the
+        # per-runner feature block. The env's static obs is laid
+        # out as ``[market_vec, vel_vec, runner_vec, agent_state,
+        # position_vec]``; the runner block starts at
+        # ``MARKET_DIM + VELOCITY_DIM`` and spans
+        # ``max_runners * RUNNER_DIM`` floats.
+        #
+        # ``_runner_block_full_size`` is always
+        # ``max_runners * RUNNER_DIM`` — the head's per-slot
+        # input dim. If ``obs_dim`` is smaller than the env's
+        # natural layout (typically a test placeholder), the
+        # forward path zero-pads the available slice up to that
+        # size so the head still receives a well-shaped tensor.
+        # Real production callers pass obs_dim derived from
+        # ``env.observation_space``, which is always >= the
+        # layout requirement; the pad only activates in unit
+        # tests that build a minimal LSTM without caring about
+        # feature semantics. The strict phase-15 regression
+        # tests use a properly-sized obs (see
+        # ``tests/test_v2_direction_prob_in_actor.py``).
+        natural_offset = MARKET_DIM + VELOCITY_DIM
+        natural_size = self.max_runners * RUNNER_DIM
+        self._runner_block_full_size = natural_size
+        if natural_offset + natural_size <= self.obs_dim:
+            self._runner_block_offset = natural_offset
+            self._runner_block_size = natural_size
+        else:
+            # Test-mode fallback: anchor at 0, take whatever fits.
+            self._runner_block_offset = 0
+            self._runner_block_size = max(0, min(self.obs_dim, natural_size))
 
         # Per-runner actor (Phase 7 S01). The flat categorical from
         # Phase 1 is now produced by stitching: NOOP from noop_head + a
@@ -577,11 +606,11 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         fill_prob = torch.sigmoid(fill_logit)
         mature_prob = torch.sigmoid(mature_logit)
 
-        # Phase-14 S01 — per-runner direction head. The head MLP
-        # takes ``concat([slot_emb_i, lstm_last])`` per slot, so we
-        # need the slot embeddings BEFORE the head's forward pass.
-        # We compute them once here and reuse them for actor_input
-        # below (the existing pattern needs them too).
+        # Phase-14 S01 / phase-15 S01 — per-runner direction head.
+        # Slot embeddings are still computed here because actor_head
+        # uses them below; the direction head no longer reads them
+        # (phase-15 feeds the head the runner's raw feature slice
+        # instead — see hard_constraints §2).
         slot_idx = torch.arange(self.max_runners, device=lstm_last.device)
         runner_embs = self.runner_slot_embedding(slot_idx)  # (R, embed)
         runner_embs_b = runner_embs.unsqueeze(0).expand(
@@ -591,14 +620,47 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             -1, self.max_runners, -1,
         )  # (batch, R, hidden)
 
-        # Direction head input per slot: [slot_emb_i, lstm_last].
-        # Flatten to (batch * R, embed + hidden) so the MLP runs
-        # over it as one large batch; reshape to (batch, R, 2).
-        direction_input = torch.cat(
-            [runner_embs_b, lstm_expanded], dim=-1,
-        )  # (batch, R, embed + hidden)
-        direction_input_flat = direction_input.reshape(
-            batch * self.max_runners, -1,
+        # Phase-15 S01: slice the per-runner feature block out of
+        # obs and feed it to the direction head DIRECTLY. We use
+        # the LAST timestep's obs (``obs[:, -1, :]``) because the
+        # head's forecast is "given current state, where is price
+        # going?" — past timesteps are encoded in lstm_last for
+        # actor_head's use, but the direction head wants only the
+        # current per-runner numbers, matching the supervised
+        # probe's regime.
+        #
+        # ``runner_feats_raw`` shape: (batch, R, RUNNER_DIM). Same
+        # block v1's policies extract for their actor pathway —
+        # see ``agents/policy_network.py:691-706``.
+        obs_last = obs[:, -1, :]  # (batch, obs_dim)
+        runners_flat = obs_last[
+            :,
+            self._runner_block_offset:
+            self._runner_block_offset + self._runner_block_size,
+        ]
+        # Zero-pad if obs is smaller than the env's natural layout
+        # (test-mode fallback). Production-sized obs hits the
+        # ``size == full_size`` fast path.
+        if self._runner_block_size < self._runner_block_full_size:
+            pad_width = (
+                self._runner_block_full_size - self._runner_block_size
+            )
+            pad = torch.zeros(
+                batch, pad_width,
+                dtype=runners_flat.dtype,
+                device=runners_flat.device,
+            )
+            runners_flat = torch.cat([runners_flat, pad], dim=-1)
+        runner_feats_raw = runners_flat.view(
+            batch, self.max_runners, RUNNER_DIM,
+        )
+
+        # Direction head reads the per-runner feature slice
+        # directly. NO concat with slot_emb / lstm_last — the
+        # whole point of phase 15 is to bypass that bottleneck
+        # (hard_constraints §2).
+        direction_input_flat = runner_feats_raw.reshape(
+            batch * self.max_runners, RUNNER_DIM,
         )
         direction_logits_flat = self.direction_prob_head(
             direction_input_flat,
