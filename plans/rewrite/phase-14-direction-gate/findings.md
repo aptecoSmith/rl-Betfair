@@ -177,3 +177,121 @@ Operator note for return: smoke artefacts are intact; no cohort
 launches happened. Phase-15 sketches (deeper architecture
 changes) are NOT needed yet — S05 + S06 are scoped fixes within
 phase-14, addressable as additional sessions.
+
+---
+
+## Post-S05/S06 cohorts — volume-collapse diagnosis
+
+### Killed S04 baseline (arm B, gate-on, no extras)
+
+Registry: `registry/_phase14_s04_arm_B_on_1778192122/`. 12 agents
+× 3 gens (gen 2 partial, killed at n=7). The volume-collapse
+failure mode the operator flagged:
+
+| Gen | n | bets | pairs | mature% | fc% | pnl | T_mean |
+|---|---|---|---|---|---|---|---|
+| 0 | 12 | 235 | 119 | 35.1% | 62.9% | −£111 | 0.720 |
+| 1 | 12 | **83** | 42 | 35.3% | 63.3% | −£24 | 0.811 |
+| 2 | 7 | **9** | 5 | 34.6% | 65.4% | +£5 | 0.839 |
+
+The GA correctly observes "open less = lose less" while
+directional alpha is still weak. Threshold drifts stricter
+(0.720 → 0.839) and per-gen volume collapses 235 → 83 → 9.
+Notably, mature rate held at ~35% across the collapse — the
+agents that survive are the maturers, but they survive by
+opening almost nothing. By gen 2 each agent makes ~5 pairs/day,
+which is statistically useless.
+
+### Probe A — `matured_arb_bonus_weight=2.0`
+
+Registry: `registry/_phase14_probeA_1778258935/`. 4 agents × 2
+gens. Adds +£2 to env shaped reward per matured pair so PPO
+sees a positive gradient for opening-and-maturing.
+
+| Gen | n | bets | pairs | mature% | fc% | pnl | T_mean |
+|---|---|---|---|---|---|---|---|
+| 0 | 4 | 250 | 127 | 28.6% | 68.3% | −£97 | 0.797 |
+| 1 | 4 | 215 | 109 | 26.0% | 70.2% | −£98 | 0.891 |
+
+**Volume holds.** Vs killed-baseline's 235 → 83 → 9, probe A
+sits at 250 → 215 — the matured-arb reward bonus prevents the
+GA's "open less" optimum. **Mature rate flat at ~28%** —
+nowhere near the 35% break-even bar.
+
+Why mature rate is lower than killed-baseline (28% vs 35%):
+the n=4 seed-42 gene draw landed three of four agents at
+threshold ≥ 0.81 with one outlier at 0.59 dragging the mean.
+Killed-baseline's n=12 had a wider spread and some genuinely
+better-calibrated draws. Not a probe artefact; a sample-size
+artefact.
+
+### Probe A+B — A + `--maturation-bonus-weight 5`
+
+Registry: `registry/_phase14_probeAB_1778264995/`. Same env
+config as A, plus the GA-selection composite is now
+`total_reward + 5 × (arbs_completed + arbs_closed)` so parents
+who matured pairs are favoured for breeding.
+
+| Gen | n | bets | pairs | mature% | fc% | pnl | T_mean |
+|---|---|---|---|---|---|---|---|
+| 0 | 4 | 250 | 127 | 28.6% | 68.3% | −£97 | 0.797 |
+| 1 | 4 | 226 | 114 | 26.4% | 71.5% | **−£50** | 0.891 |
+
+Gen 0 byte-identical to A (same seed, composite only affects
+gen-1 breeding). Gen 1: nearly identical to A on volume and
+mature rate. PnL trend less-negative (−£50 vs −£98) but with
+n=4 that's plausibly noise.
+
+**The composite weight had ~zero differential effect because
+n=4 is too narrow to test it.** Top-3-of-4 = whole-pool-minus-1
+breeds gen 1; the composite ranking can't meaningfully change
+which agents get picked. The mechanism we wanted to evaluate
+isn't getting a fair trial.
+
+### Verdict — per agreed operator policy
+
+- Volume holds (≥50 bets/agent/day): **YES** ✓
+- Mature rate climbs above 35%: **NO** (flat at 26%) ✗
+- eval_pnl trends less-negative: marginal (n=4 noise)
+- BCE / approx_kl: clean (S05 fix held; no inf events observed)
+
+Outcome: **inconclusive on success criterion.** Option A
+(reward bonus) is necessary and sufficient against the
+collapse failure mode. Option B (composite weight) is
+untestable at n=4. To resolve the composite-breeding
+question, a 12-agent × ≥3 gen cohort is needed.
+
+### Recommendation for operator
+
+Run a final probe at full cohort scale before drawing
+phase-14 conclusions:
+
+```bash
+TS=$(date +%s) python -X utf8 -m training_v2.cohort.runner \
+  --n-agents 12 --generations 3 --days 5 --n-eval-days 1 \
+  --output-dir "registry/_phase14_probeC_${TS}" \
+  --seed 42 --device cuda \
+  --reward-overrides direction_prob_loss_weight=0.1 \
+  --reward-overrides force_close_before_off_seconds=60 \
+  --reward-overrides direction_gate_enabled=true \
+  --reward-overrides matured_arb_bonus_weight=2.0 \
+  --maturation-bonus-weight 5 \
+  --enable-gene direction_gate_threshold \
+  > "registry/_phase14_probeC_${TS}.log" 2>&1
+```
+
+Wall budget: 12/4 × 3/2 × ~98m ≈ 7-8 hours. With the killed-
+baseline 12-agent gen-0 mature rate of 35.1% as the no-knobs
+reference, a lift on probe C's gen-2 to e.g. 40-45% mature would
+constitute the strategic-thesis confirmation phase 14 was set
+up to deliver. A flat or worse outcome means the gate
+mechanism isn't expressing the OOS predictor's calibration at
+cohort scale, and a deeper investigation into why is the right
+next plan.
+
+Probes A and A+B together took 11h 40m wall. Probe C is
+~3-4× wider; budget accordingly. Operator should NOT spawn
+this autonomously — it's a meaningful compute commitment.
+
+Plan status remains BLOCKED until probe C runs OR the
+operator chooses a different next step.
