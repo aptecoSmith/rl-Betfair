@@ -55,11 +55,29 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "BCLossHistory",
     "DiscreteBCPretrainer",
+    "build_direction_bce_label_map",
     "build_direction_target_map",
     "load_direction_labels_for_dates",
     "load_oracle_samples_for_dates",
     "measure_post_bc_entropy",
 ]
+
+
+# Phase-15 S02 amendment (2026-05-08): the BC pretrainer was
+# training ONLY ``actor_head``. ``direction_prob_head`` and its
+# LayerNorm were frozen, so the cached direction labels never
+# pulled the predictor toward calibration — the head sat at the
+# balanced no-skill baseline (BCE ~1.05) regardless of how
+# aggressively we set ``direction_prob_loss_weight`` during PPO.
+# This name list expands the BC-trainable set to include the
+# direction predictor + its LayerNorm so direct supervised
+# BCE-with-logits gradient lands on those weights during BC.
+# Pre-amendment behaviour is preserved when
+# ``direction_bce_weight == 0`` — only actor_head sees gradient.
+_BC_TARGET_NAMES: tuple[str, ...] = (
+    "actor_head",
+    "direction_prob_head",
+)
 
 
 def load_direction_labels_for_dates(
@@ -108,6 +126,39 @@ def load_direction_labels_for_dates(
             out[d] = []
             continue
         out[d] = labels
+    return out
+
+
+def build_direction_bce_label_map(
+    labels: list[DirectionLabel],
+    action_space: DiscreteActionSpace,
+) -> dict[tuple[int, int], tuple[float, float]]:
+    """Project DirectionLabel rows onto a map
+    ``{(tick_index, runner_idx): (label_back, label_lay)}``.
+
+    Phase-15 S02 amendment (2026-05-08). Whereas
+    :func:`build_direction_target_map` collapses the binary labels
+    into a single action choice (and silently drops ambiguous
+    rows), this function preserves the raw 2-channel labels
+    needed to compute BCE-with-logits on
+    ``direction_back_logits_per_runner`` and
+    ``direction_lay_logits_per_runner`` separately. ALL rows
+    contribute (including ambiguous ``(0, 0)`` and ``(1, 1)`` —
+    those are valid targets for the predictor, just not for an
+    actor action choice).
+
+    Rows whose ``runner_idx`` is outside the policy's action
+    space are silently dropped (defensive guard).
+    """
+    out: dict[tuple[int, int], tuple[float, float]] = {}
+    max_runners = int(action_space.max_runners)
+    for r in labels:
+        slot = int(r.runner_idx)
+        if slot < 0 or slot >= max_runners:
+            continue
+        out[(int(r.tick_index), slot)] = (
+            float(r.label_back), float(r.label_lay),
+        )
     return out
 
 
@@ -201,16 +252,19 @@ class BCLossHistory:
 
 
 def _is_bc_target_param(name: str) -> bool:
-    """True for ``actor_head`` parameters only.
+    """True for parameters BC is allowed to update.
 
-    The v2 :class:`DiscreteLSTMPolicy` exposes the per-runner head as
-    ``self.actor_head`` (``nn.Sequential``). Other heads
-    (``noop_head``, ``stake_alpha_head``, ``stake_beta_head``,
-    ``value_head``, ``fill_prob_head``, ``mature_prob_head``,
-    ``risk_head``) live alongside it under different attribute names
-    and stay frozen during BC.
+    Phase-8 S02 (original): ``actor_head`` only — all other heads
+    stayed frozen during BC. Phase-15 S02 amendment expands the
+    target set to also cover ``direction_prob_head`` (LayerNorm +
+    2-layer MLP) so direct BCE-with-logits supervised gradient on
+    the cached direction labels can calibrate the predictor before
+    PPO starts. Other heads (``noop_head``, ``stake_alpha_head``,
+    ``stake_beta_head``, ``value_head``, ``fill_prob_head``,
+    ``mature_prob_head``, ``risk_head``) and the LSTM backbone /
+    ``input_proj`` / ``runner_slot_embedding`` stay frozen.
     """
-    return "actor_head" in name
+    return any(t in name for t in _BC_TARGET_NAMES)
 
 
 def _sample_batch(
@@ -261,6 +315,10 @@ class DiscreteBCPretrainer:
         *,
         direction_target_map: dict[tuple[int, int], int] | None = None,
         direction_target_weight: float = 0.0,
+        direction_bce_label_map: (
+            dict[tuple[int, int], tuple[float, float]] | None
+        ) = None,
+        direction_bce_weight: float = 0.0,
     ) -> BCLossHistory:
         """Run ``n_steps`` BC mini-batches against ``samples``.
 
@@ -326,6 +384,66 @@ class DiscreteBCPretrainer:
         )
         dir_w = float(direction_target_weight) if dir_active else 0.0
         oracle_w = 1.0 - dir_w if dir_active else 1.0
+
+        # Phase-15 S02 amendment: direct BCE-with-logits on
+        # direction_prob_head against the cached binary labels.
+        # Trains the predictor itself (independent of any actor-CE
+        # signal). Default off (weight=0) → byte-identical to
+        # phase-13 S05.
+        dir_bce_active = (
+            direction_bce_label_map is not None
+            and direction_bce_weight > 0.0
+        )
+        dir_bce_w = (
+            float(direction_bce_weight) if dir_bce_active else 0.0
+        )
+
+        # Phase-15 S02 amendment 2: per-class pos_weight to rebalance
+        # the imbalanced labels. The PPO-time aux BCE in trainer.py
+        # already uses pos_weight; the BC pretrain didn't. Standard
+        # BCE on ~22% positive labels biases the predictor toward
+        # "always 0" because the loss is dominated by easy negatives.
+        # ``pos_weight = N_neg / N_pos`` rebalances. Computed once
+        # over the entire label pool to avoid per-step recomputation.
+        dir_bce_pos_weight_back: torch.Tensor | None = None
+        dir_bce_pos_weight_lay: torch.Tensor | None = None
+        if dir_bce_active:
+            n_pos_back = 0
+            n_neg_back = 0
+            n_pos_lay = 0
+            n_neg_lay = 0
+            for _back, _lay in direction_bce_label_map.values():
+                if _back > 0.5:
+                    n_pos_back += 1
+                else:
+                    n_neg_back += 1
+                if _lay > 0.5:
+                    n_pos_lay += 1
+                else:
+                    n_neg_lay += 1
+            # Cap pos_weight to avoid extreme values when one class is
+            # almost empty (e.g. ratio 100+ would over-amplify a
+            # handful of positives into a noisy loss).
+            pw_back = min(
+                10.0,
+                float(n_neg_back) / max(float(n_pos_back), 1.0),
+            )
+            pw_lay = min(
+                10.0,
+                float(n_neg_lay) / max(float(n_pos_lay), 1.0),
+            )
+            dir_bce_pos_weight_back = torch.tensor(
+                pw_back, dtype=torch.float32, device=device,
+            )
+            dir_bce_pos_weight_lay = torch.tensor(
+                pw_lay, dtype=torch.float32, device=device,
+            )
+            logger.info(
+                "BC direction-BCE pos_weight: back=%.2f (pos=%d/neg=%d) "
+                "lay=%.2f (pos=%d/neg=%d)",
+                pw_back, n_pos_back, n_neg_back,
+                pw_lay, n_pos_lay, n_neg_lay,
+            )
 
         history = BCLossHistory()
         try:
@@ -408,6 +526,66 @@ class DiscreteBCPretrainer:
                     loss = oracle_w * oracle_ce + dir_w * direction_ce
                 else:
                     loss = oracle_ce
+
+                # Phase-15 S02: direct supervised BCE on
+                # direction_prob_head against the cached binary
+                # direction labels. Layered ON TOP of oracle / direction
+                # action CE — they pull actor_head; this term pulls
+                # direction_prob_head.
+                if dir_bce_active:
+                    bb_logits = out.direction_back_logits_per_runner  # (mb, R)
+                    bl_logits = out.direction_lay_logits_per_runner   # (mb, R)
+                    label_back_list: list[float] = []
+                    label_lay_list: list[float] = []
+                    bce_mask_list: list[bool] = []
+                    sample_runner_idx: list[int] = []
+                    for s in batch:
+                        key = (int(s.tick_index), int(s.runner_idx))
+                        labels = direction_bce_label_map.get(key)
+                        if labels is None:
+                            label_back_list.append(0.0)
+                            label_lay_list.append(0.0)
+                            bce_mask_list.append(False)
+                        else:
+                            label_back_list.append(float(labels[0]))
+                            label_lay_list.append(float(labels[1]))
+                            bce_mask_list.append(True)
+                        sample_runner_idx.append(int(s.runner_idx))
+                    bce_mask_t = torch.tensor(
+                        bce_mask_list, dtype=torch.float32, device=device,
+                    )
+                    n_bce = float(bce_mask_t.sum().item())
+                    if n_bce > 0.0:
+                        runner_idx_t = torch.tensor(
+                            sample_runner_idx, dtype=torch.long,
+                            device=device,
+                        )
+                        rows = torch.arange(len(batch), device=device)
+                        # Pick the per-sample runner's logits.
+                        bb_per_sample = bb_logits[rows, runner_idx_t]  # (mb,)
+                        bl_per_sample = bl_logits[rows, runner_idx_t]  # (mb,)
+                        target_back = torch.tensor(
+                            label_back_list, dtype=torch.float32,
+                            device=device,
+                        )
+                        target_lay = torch.tensor(
+                            label_lay_list, dtype=torch.float32,
+                            device=device,
+                        )
+                        bce_back = F.binary_cross_entropy_with_logits(
+                            bb_per_sample, target_back, reduction="none",
+                            pos_weight=dir_bce_pos_weight_back,
+                        )
+                        bce_lay = F.binary_cross_entropy_with_logits(
+                            bl_per_sample, target_lay, reduction="none",
+                            pos_weight=dir_bce_pos_weight_lay,
+                        )
+                        denom = bce_mask_t.sum().clamp(min=1.0)
+                        dir_bce_term = (
+                            ((bce_back + bce_lay) * bce_mask_t).sum()
+                            / denom
+                        )
+                        loss = loss + dir_bce_w * dir_bce_term
 
                 opt.zero_grad()
                 loss.backward()

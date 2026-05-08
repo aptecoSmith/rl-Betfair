@@ -57,6 +57,7 @@ from training_v2.cohort.genes import (
 )
 from training_v2.discrete_ppo.bc_pretrain import (
     DiscreteBCPretrainer,
+    build_direction_bce_label_map,
     build_direction_target_map,
     load_direction_labels_for_dates,
     load_oracle_samples_for_dates,
@@ -938,12 +939,22 @@ def train_one_agent(
                 direction_target_map = build_direction_target_map(
                     merged, shim.action_space,
                 )
+                # Phase-15 S02 amendment: also build the raw binary
+                # label map so BC can train direction_prob_head
+                # directly via BCE-with-logits.
+                direction_bce_label_map = build_direction_bce_label_map(
+                    merged, shim.action_space,
+                )
                 logger.info(
                     "Agent %s: direction BC enabled (weight=%.3f, "
-                    "%d unambiguous targets across %d day(s))",
+                    "%d unambiguous targets across %d day(s); "
+                    "direction-head BCE pool: %d entries)",
                     agent_id, bc_dir_w,
                     len(direction_target_map), len(days_to_train),
+                    len(direction_bce_label_map),
                 )
+            else:
+                direction_bce_label_map = None
             bc_history = DiscreteBCPretrainer(
                 lr=bc_lr, batch_size=64, seed=int(seed),
             ).pretrain(
@@ -952,17 +963,112 @@ def train_one_agent(
                 n_steps=bc_steps,
                 direction_target_map=direction_target_map,
                 direction_target_weight=bc_dir_w,
+                # Phase-15 S02: re-use bc_dir_w as the direction-
+                # head BCE weight too. Until/unless we split it into
+                # a separate gene, the same knob controls both the
+                # actor-CE pull (toward the direction-derived action)
+                # and the predictor-BCE pull (toward calibrated
+                # binary outputs). Both are useful supervision; the
+                # second is the load-bearing one for the gate.
+                direction_bce_label_map=direction_bce_label_map,
+                direction_bce_weight=bc_dir_w,
             )
             post_bc_entropy = measure_post_bc_entropy(policy, bc_samples)
             trainer.set_post_bc_entropy(post_bc_entropy)
+            # Phase-15 S02 diagnostic: measure post-BC direction
+            # BCE so we can see whether BC actually calibrated
+            # direction_prob_head. Without this measurement we
+            # only see end-of-day BCE (post-PPO), which can't
+            # distinguish "BC didn't move the head" from "BC
+            # moved it then PPO un-calibrated it".
+            post_bc_dir_bce_str = ""
+            if direction_bce_label_map and bc_dir_w > 0.0:
+                import torch as _torch
+                _device = next(policy.parameters()).device
+                _back_total = 0.0
+                _lay_total = 0.0
+                _n_total = 0
+                # Eval in batches of 256 for memory.
+                _n_eval = min(2048, len(bc_samples))
+                _eval_idx = list(range(_n_eval))
+                with _torch.no_grad():
+                    for _start in range(0, _n_eval, 256):
+                        _chunk = bc_samples[_start:_start + 256]
+                        _obs = _torch.tensor(
+                            np.stack([s.obs for s in _chunk], axis=0),
+                            dtype=_torch.float32,
+                            device=_device,
+                        )
+                        _out = policy(_obs)
+                        _bb = _out.direction_back_logits_per_runner
+                        _bl = _out.direction_lay_logits_per_runner
+                        for _i, _s in enumerate(_chunk):
+                            _key = (
+                                int(_s.tick_index),
+                                int(_s.runner_idx),
+                            )
+                            _labels = direction_bce_label_map.get(_key)
+                            if _labels is None:
+                                continue
+                            _runner = int(_s.runner_idx)
+                            _lb = float(_labels[0])
+                            _ll = float(_labels[1])
+                            _bb_logit = float(_bb[_i, _runner].item())
+                            _bl_logit = float(_bl[_i, _runner].item())
+                            # BCE-with-logits: log(1+exp(-x)) if y=1
+                            # else log(1+exp(x)). Stable form:
+                            #   max(x, 0) - x*y + log(1+exp(-|x|))
+                            import math as _math
+                            def _bce(x: float, y: float) -> float:
+                                return (
+                                    max(x, 0.0) - x * y
+                                    + _math.log1p(_math.exp(-abs(x)))
+                                )
+                            _back_total += _bce(_bb_logit, _lb)
+                            _lay_total += _bce(_bl_logit, _ll)
+                            _n_total += 1
+                if _n_total > 0:
+                    _bb_mean = _back_total / _n_total
+                    _bl_mean = _lay_total / _n_total
+                    post_bc_dir_bce_str = (
+                        f" post_bc_dir_bce_back={_bb_mean:.4f} "
+                        f"lay={_bl_mean:.4f} (n={_n_total})"
+                    )
             logger.info(
                 "Agent %s: BC pretrain done — steps=%d samples=%d "
                 "final_ce=%.4f post_entropy=%.3f (warmup_eps=%d, "
-                "bc_lr=%g)",
+                "bc_lr=%g)%s",
                 agent_id, bc_steps, len(bc_samples),
                 bc_history.final_ce_loss, post_bc_entropy,
                 bc_warmup_eps, bc_lr,
+                post_bc_dir_bce_str,
             )
+            # Phase-15 S02 amendment 3: freeze direction_prob_head
+            # AFTER BC so PPO cannot drift the calibrated state.
+            # Smoke v7 (registry/_phase15_smoke_bcv2_*) showed BC
+            # achieves direction BCE 0.26/0.35 (better than the
+            # supervised probe's 0.4-0.6 target), but 364 PPO updates
+            # with the 0.1-weighted auxiliary BCE drag the head back
+            # to the no-skill baseline ~1.05. The detach prevented
+            # actor-pathway gradient from touching the head; the
+            # auxiliary BCE itself was found to drift it. Freezing
+            # eliminates both as a corruption source — the head is
+            # treated as a fixed predictor (the operator's literal
+            # "make it a per-horse feature" framing). LayerNorm gamma
+            # / beta are also frozen so the input normalisation stays
+            # at its BC-fitted values.
+            if direction_bce_label_map and bc_dir_w > 0.0:
+                _frozen_count = 0
+                for _name, _p in policy.named_parameters():
+                    if "direction_prob_head" in _name:
+                        _p.requires_grad_(False)
+                        _frozen_count += 1
+                logger.info(
+                    "Agent %s: direction_prob_head frozen post-BC "
+                    "(%d parameter tensors); PPO cannot drift the "
+                    "calibrated predictor.",
+                    agent_id, _frozen_count,
+                )
 
     arch_name = arch_name_for_genes(genes)
     if event_emitter is not None:
@@ -1130,6 +1236,64 @@ def train_one_agent(
         ),
         direction_prob_loss_weight_active=dir_weight_active,
     )
+
+    # Phase-15 S02 diagnostic: measure direction BCE on the SAME
+    # oracle pool used by the post-BC measurement, AFTER all PPO
+    # updates. If the freeze worked, this should be ~identical to
+    # the post-BC value. If it drifted upward, freeze failed (or
+    # is bypassed by some Adam quirk).
+    if (
+        direction_bce_label_map
+        and bc_dir_w > 0.0
+        and bc_samples
+    ):
+        import torch as _torch
+        _device2 = next(policy.parameters()).device
+        _back_total2 = 0.0
+        _lay_total2 = 0.0
+        _n_total2 = 0
+        _n_eval2 = min(2048, len(bc_samples))
+        with _torch.no_grad():
+            for _start2 in range(0, _n_eval2, 256):
+                _chunk2 = bc_samples[_start2:_start2 + 256]
+                _obs2 = _torch.tensor(
+                    np.stack([s.obs for s in _chunk2], axis=0),
+                    dtype=_torch.float32,
+                    device=_device2,
+                )
+                _out2 = policy(_obs2)
+                _bb2 = _out2.direction_back_logits_per_runner
+                _bl2 = _out2.direction_lay_logits_per_runner
+                for _i2, _s2 in enumerate(_chunk2):
+                    _key2 = (
+                        int(_s2.tick_index),
+                        int(_s2.runner_idx),
+                    )
+                    _labels2 = direction_bce_label_map.get(_key2)
+                    if _labels2 is None:
+                        continue
+                    _runner2 = int(_s2.runner_idx)
+                    _lb2 = float(_labels2[0])
+                    _ll2 = float(_labels2[1])
+                    _bb_logit2 = float(_bb2[_i2, _runner2].item())
+                    _bl_logit2 = float(_bl2[_i2, _runner2].item())
+                    import math as _math2
+                    def _bce2(x: float, y: float) -> float:
+                        return (
+                            max(x, 0.0) - x * y
+                            + _math2.log1p(_math2.exp(-abs(x)))
+                        )
+                    _back_total2 += _bce2(_bb_logit2, _lb2)
+                    _lay_total2 += _bce2(_bl_logit2, _ll2)
+                    _n_total2 += 1
+        if _n_total2 > 0:
+            _bb_mean2 = _back_total2 / _n_total2
+            _bl_mean2 = _lay_total2 / _n_total2
+            logger.info(
+                "Agent %s: POST-PPO direction BCE on BC oracle pool: "
+                "back=%.4f lay=%.4f (n=%d)",
+                agent_id, _bb_mean2, _bl_mean2, _n_total2,
+            )
 
     # ── Eval rollouts (no PPO update) ───────────────────────────────
     # When ``eval_days`` has more than one date, we run an eval rollout
