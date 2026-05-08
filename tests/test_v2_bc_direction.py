@@ -27,6 +27,7 @@ from training_v2.arb_oracle import OracleSample
 from training_v2.direction_label_scan import DirectionLabel
 from training_v2.discrete_ppo.bc_pretrain import (
     DiscreteBCPretrainer,
+    build_direction_bce_label_map,
     build_direction_target_map,
 )
 
@@ -208,3 +209,159 @@ class TestEmptyDirectionMapStable:
         assert all(
             np.isfinite(loss) for loss in history.ce_losses
         ), "BC loss became NaN with empty direction map"
+
+
+# ── 5. Phase-15 S02: direction-head BCE training ───────────────────────────
+
+
+class TestPhase15DirectionBceLabelMap:
+    """``build_direction_bce_label_map`` preserves binary (b, l) tuples
+    (vs ``build_direction_target_map`` which collapses ambiguous rows
+    to no-entry).
+    """
+
+    def _label(self, b: float, l: float) -> DirectionLabel:
+        return DirectionLabel(
+            tick_index=3, runner_idx=1,
+            label_back=b, label_lay=l,
+            ltp_at_open=5.0, threshold_back=4.5, threshold_lay=5.5,
+            first_back_fav_tick=-1, first_lay_fav_tick=-1,
+        )
+
+    def test_all_four_label_combinations_preserved(self):
+        space = DiscreteActionSpace(max_runners=_MAX_RUNNERS)
+        labels = [
+            DirectionLabel(
+                tick_index=t, runner_idx=1,
+                label_back=b, label_lay=l,
+                ltp_at_open=5.0, threshold_back=4.5, threshold_lay=5.5,
+                first_back_fav_tick=-1, first_lay_fav_tick=-1,
+            )
+            for t, (b, l) in enumerate([
+                (0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0),
+            ])
+        ]
+        m = build_direction_bce_label_map(labels, space)
+        # All 4 entries kept (unlike build_direction_target_map which
+        # drops (0,0) and (1,1)).
+        assert len(m) == 4
+        assert m[(0, 1)] == (0.0, 0.0)
+        assert m[(1, 1)] == (1.0, 0.0)
+        assert m[(2, 1)] == (0.0, 1.0)
+        assert m[(3, 1)] == (1.0, 1.0)
+
+
+class TestPhase15DirectionBceTrainsHead:
+    """With ``direction_bce_weight > 0``, BC trains
+    ``direction_prob_head`` directly (not just actor_head).
+    """
+
+    def test_direction_prob_head_weights_change(self):
+        policy = _make_policy(seed=11)
+        # Snapshot the head's weights BEFORE BC.
+        before = {
+            k: v.detach().clone()
+            for k, v in policy.named_parameters()
+            if "direction_prob_head" in k
+        }
+
+        samples = _make_oracle_samples(50)
+        # Build a label map that has entries matching samples' keys.
+        bce_map = {
+            (s.tick_index, s.runner_idx): (1.0, 0.0)
+            for s in samples
+        }
+
+        DiscreteBCPretrainer(lr=1e-2, batch_size=8, seed=0).pretrain(
+            policy=policy, samples=samples, n_steps=50,
+            direction_bce_label_map=bce_map,
+            direction_bce_weight=1.0,
+        )
+
+        # Some direction_prob_head param must have changed.
+        any_changed = False
+        for k, p_after in policy.named_parameters():
+            if "direction_prob_head" in k:
+                if not torch.allclose(before[k], p_after, atol=1e-6):
+                    any_changed = True
+                    break
+        assert any_changed, (
+            "direction_prob_head weights unchanged after BC with "
+            "direction_bce_weight=1.0 — supervised pathway not wired."
+        )
+
+    def test_direction_prob_head_unchanged_when_weight_zero(self):
+        policy = _make_policy(seed=11)
+        before = {
+            k: v.detach().clone()
+            for k, v in policy.named_parameters()
+            if "direction_prob_head" in k
+        }
+        samples = _make_oracle_samples(50)
+        bce_map = {
+            (s.tick_index, s.runner_idx): (1.0, 0.0)
+            for s in samples
+        }
+
+        DiscreteBCPretrainer(lr=1e-2, batch_size=8, seed=0).pretrain(
+            policy=policy, samples=samples, n_steps=50,
+            direction_bce_label_map=bce_map,
+            direction_bce_weight=0.0,  # disabled
+        )
+
+        # Phase-15 S02 amendment: when bce weight is 0, the head
+        # might still get a tiny gradient via the BC oracle CE
+        # path through actor_head reading the head's columns.
+        # However, with the .detach() in discrete_policy.py
+        # (phase-15 S01 amendment), the actor pathway is severed,
+        # so the head MUST be unchanged.
+        any_changed = False
+        for k, p_after in policy.named_parameters():
+            if "direction_prob_head" in k:
+                if not torch.allclose(before[k], p_after, atol=1e-6):
+                    any_changed = True
+        assert not any_changed, (
+            "direction_prob_head weights changed at "
+            "direction_bce_weight=0 — leak in the supervised path."
+        )
+
+
+class TestPhase15PosWeightKnob:
+    """``direction_bce_use_pos_weight=False`` produces different
+    training trajectory than the default True, on imbalanced data.
+    """
+
+    def test_pos_weight_knob_changes_trajectory(self):
+        torch.manual_seed(0)
+        policy_a = _make_policy(seed=42)
+        policy_b = _make_policy(seed=42)
+        samples = _make_oracle_samples(50)
+        # Imbalanced labels: only first 10 samples positive on back.
+        bce_map = {}
+        for i, s in enumerate(samples):
+            lb = 1.0 if i < 10 else 0.0
+            bce_map[(s.tick_index, s.runner_idx)] = (lb, 0.0)
+
+        DiscreteBCPretrainer(lr=1e-2, batch_size=8, seed=0).pretrain(
+            policy=policy_a, samples=samples, n_steps=50,
+            direction_bce_label_map=bce_map,
+            direction_bce_weight=1.0,
+            direction_bce_use_pos_weight=True,
+        )
+        DiscreteBCPretrainer(lr=1e-2, batch_size=8, seed=0).pretrain(
+            policy=policy_b, samples=samples, n_steps=50,
+            direction_bce_label_map=bce_map,
+            direction_bce_weight=1.0,
+            direction_bce_use_pos_weight=False,
+        )
+
+        # The two trained heads should differ noticeably.
+        diffs = []
+        for k, p_a in policy_a.named_parameters():
+            if "direction_prob_head" in k:
+                p_b = dict(policy_b.named_parameters())[k]
+                diffs.append(float((p_a - p_b).abs().max().item()))
+        assert any(d > 1e-4 for d in diffs), (
+            "pos_weight True vs False produced byte-identical heads — "
+            "pos_weight knob is not wired."
+        )
