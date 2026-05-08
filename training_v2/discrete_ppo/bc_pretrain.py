@@ -319,6 +319,7 @@ class DiscreteBCPretrainer:
             dict[tuple[int, int], tuple[float, float]] | None
         ) = None,
         direction_bce_weight: float = 0.0,
+        direction_bce_use_pos_weight: bool = True,
     ) -> BCLossHistory:
         """Run ``n_steps`` BC mini-batches against ``samples``.
 
@@ -407,7 +408,7 @@ class DiscreteBCPretrainer:
         # over the entire label pool to avoid per-step recomputation.
         dir_bce_pos_weight_back: torch.Tensor | None = None
         dir_bce_pos_weight_lay: torch.Tensor | None = None
-        if dir_bce_active:
+        if dir_bce_active and direction_bce_use_pos_weight:
             n_pos_back = 0
             n_neg_back = 0
             n_pos_lay = 0
@@ -443,6 +444,10 @@ class DiscreteBCPretrainer:
                 "lay=%.2f (pos=%d/neg=%d)",
                 pw_back, n_pos_back, n_neg_back,
                 pw_lay, n_pos_lay, n_neg_lay,
+            )
+        elif dir_bce_active:
+            logger.info(
+                "BC direction-BCE pos_weight DISABLED (vanilla BCE).",
             )
 
         history = BCLossHistory()

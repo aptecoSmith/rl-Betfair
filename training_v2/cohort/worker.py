@@ -135,6 +135,9 @@ _PHASE13_TRAINER_HP_KEYS: frozenset[str] = frozenset({
     "direction_threshold_ticks",
     "direction_force_close_seconds",
     "bc_direction_target_weight",
+    # Phase-15 S02: BC direction-BCE pos_weight on/off knob.
+    # Default True; can be toggled via reward-overrides.
+    "direction_bce_use_pos_weight",
 })
 
 # Phase-14 S03 (2026-05-07). Direction-gate keys consumed by the
@@ -505,6 +508,12 @@ def _build_trainer_hp(
                 "direction_horizon_ticks", "direction_threshold_ticks",
             ):
                 hp[name] = int(value)
+            elif name == "direction_bce_use_pos_weight":
+                # Phase-15 S02: bool knob.
+                if isinstance(value, str):
+                    hp[name] = value.lower() in ("1", "true", "yes")
+                else:
+                    hp[name] = bool(value)
             else:
                 hp[name] = float(value)
         # Phase-13 S05 — also pass the gene's own value through if set
@@ -972,6 +981,17 @@ def train_one_agent(
                 # second is the load-bearing one for the gate.
                 direction_bce_label_map=direction_bce_label_map,
                 direction_bce_weight=bc_dir_w,
+                # Phase-15 S02 amendment: pos_weight defaults TRUE
+                # but can be turned off via reward_overrides
+                # ``direction_bce_use_pos_weight=false``. v8 smoke
+                # showed pos_weight may bias the predictor away
+                # from true calibration (the loss optimum shifts
+                # under pos_weight); v9 tests vanilla BCE.
+                direction_bce_use_pos_weight=bool(
+                    trainer_hp.get(
+                        "direction_bce_use_pos_weight", True,
+                    )
+                ),
             )
             post_bc_entropy = measure_post_bc_entropy(policy, bc_samples)
             trainer.set_post_bc_entropy(post_bc_entropy)

@@ -683,6 +683,10 @@ class BetfairEnv(gymnasium.Env):
         "direction_threshold_ticks",
         "direction_force_close_seconds",
         "bc_direction_target_weight",
+        # Phase-15 S02: BC pretrain knob — controls whether BCE
+        # uses pos_weight class rebalancing. Default True (v8
+        # behaviour). Trainer-side; env doesn't read it.
+        "direction_bce_use_pos_weight",
         # Phase-14 S03 (2026-05-07): direction-gate config. Both keys
         # are policy-side (not env-side) but flow through the same
         # reward_overrides passthrough; whitelist prevents the
