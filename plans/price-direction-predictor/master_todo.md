@@ -107,20 +107,43 @@ yet — just the harness.
 ## Session 03 — architecture sweep
 
 Goal: candidate architectures evaluated head-to-head with
-everything else held constant.
+everything else held constant. Each architecture family is run at
+**three sizes** so we explore the capacity-vs-capability tradeoff
+within each family, not just across families. A small model with
+strong inductive bias may beat a large model from a worse family,
+and vice versa — we measure rather than assume.
 
 - Held constant: V3 features (V1 + window + TVL),
   horizons {3m, 7m, 15m}, pinball-3 quantile output, raw smoothing,
   TVL-required corpus.
-- Swept: `architecture ∈ {mlp, gbm, lstm, transformer, conv1d}`.
-- Param-count cap: 1M parameters per candidate. GBM cap: 500
-  trees, depth ≤ 6.
-- Each architecture trained with 3 seeds → 15 scoreboard rows.
-- [ ] Configs land in `configs/predictor/S03/`.
+- Swept: `architecture × size`, where:
+
+| Family | Small | Medium | Large |
+|---|---|---|---|
+| `mlp` | hidden 64, depth 2 | hidden 128, depth 3 | hidden 256, depth 4 |
+| `gbm` | 100 trees, depth 4 | 300 trees, depth 5 | 500 trees, depth 6 |
+| `lstm` | hidden 32, layers 1 | hidden 64, layers 2 | hidden 128, layers 2 |
+| `transformer` | d 32, L 2, H 2, ctx 32 | d 64, L 3, H 4, ctx 32 | d 128, L 4, H 4, ctx 64 |
+| `conv1d` | 2 layers, 32ch, k=3 | 4 layers, 64ch, k=5 | 6 layers, 128ch, k=5 |
+
+- Param-count cap: 1M trainable parameters at the LARGE size
+  (the cap is intentional — keeps wall-clock comparable and
+  prevents one giant model winning by capacity alone). Sizes
+  scale roughly 5-10× between adjacent rungs.
+- Each (family, size) cell trained with 3 seeds → **5 × 3 × 3 =
+  45 scoreboard rows**. The median wall-clock should be ~10–20
+  min on GPU per row; full session ~10–15 hours of compute.
+- [ ] Configs land in `configs/predictor/S03/{family}_{size}_seed{n}.yaml`.
 - [ ] Run `run_matrix.py configs/predictor/S03/`.
-- [ ] Acceptance: ALL 15 rows complete. NO downselection — record
+- [ ] Acceptance: ALL 45 rows complete. NO downselection — record
       results, move on. Operator-friendly summary printed:
-      per-architecture median across seeds for each metric.
+      per-(family, size) median across seeds for each metric, plus
+      a per-family scaling curve (does the large variant beat the
+      small one, and by how much?).
+- [ ] Note for downstream sessions: S04 inherits the **top-2
+      (family, size) cells** by val MAE, not the top-2 families.
+      A medium-LSTM beating a large-Transformer is a valid
+      outcome and propagates that way.
 
 ## Session 04 — feature variant sweep
 

@@ -123,7 +123,9 @@ After each sweep session, the autonomous agent (or operator):
 
 The "downselect criterion" per session, summarised:
 
-- S03 (arch): median val MAE across horizons. Top 2.
+- S03 (arch × size): median val MAE across horizons. Top 2 cells
+  (family, size combinations). A medium-LSTM beating a
+  large-Transformer is a valid outcome.
 - S04 (features): val directional accuracy at k=5 ticks, 7m. Top 1.
 - S05 (output): same as S04. Top 1.
 - S06 (horizons): no downselect — outcome is a per-horizon table.
