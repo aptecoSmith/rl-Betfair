@@ -65,11 +65,22 @@ quantiles is invalid.
 
 ## §7 — Param-count cap per architecture
 
-Each candidate model has ≤ 1M trainable parameters (GBM caps:
-≤ 500 trees, depth ≤ 6). This is a deliberate budget — without
-it a giant Transformer could win on capacity alone and we would
-learn nothing about the comparison. Sessions that breach the cap
-are invalid.
+Architecture sweeps run at THREE sizes per family (small / medium
+/ large — see `master_todo.md` S03 for the matrix). The LARGE
+size has ≤ 1M trainable parameters (GBM caps: ≤ 500 trees, depth
+≤ 6). Small and medium sizes are intentionally below the cap —
+the point is to span the capacity range within a family so we
+can read the per-family scaling curve. Sessions that:
+
+- Breach the cap at LARGE size, or
+- Add sizes outside small/medium/large without updating
+  `master_todo.md`, or
+- Compare a LARGE-of-one-family to a SMALL-of-another and call
+  the difference a "family" effect
+
+…are invalid. The cap exists so capacity is held roughly
+constant across the LARGE row; cross-family comparisons must
+match sizes.
 
 ## §8 — Calibration is a first-class metric
 
