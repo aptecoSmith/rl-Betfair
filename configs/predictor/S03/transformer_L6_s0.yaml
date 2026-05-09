@@ -1,0 +1,30 @@
+session: S03
+seed: 0
+dataset:
+  feature_variant: V3
+  train_corpus: tvl_required_10d
+  horizons:
+  - 3m
+  - 7m
+  - 15m
+architecture:
+  family: transformer
+  variant_label: L6
+  kwargs:
+    depth: 6
+    d_model: 64
+    heads: 4
+    ctx_ticks: 32
+    dropout: 0.1
+output:
+  formulation: pinball3
+  quantiles:
+  - 0.1
+  - 0.5
+  - 0.9
+training:
+  batch_size: 512
+  learning_rate: 0.0005
+  max_epochs: 20
+  early_stopping_patience: 3
+device: cuda
