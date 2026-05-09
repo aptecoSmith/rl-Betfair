@@ -107,43 +107,67 @@ yet — just the harness.
 ## Session 03 — architecture sweep
 
 Goal: candidate architectures evaluated head-to-head with
-everything else held constant. Each architecture family is run at
-**three sizes** so we explore the capacity-vs-capability tradeoff
-within each family, not just across families. A small model with
-strong inductive bias may beat a large model from a worse family,
-and vice versa — we measure rather than assume.
+everything else held constant. Each family is run at **three
+architectural variants** that span the family's distinctive
+structural hyperparameter — the LSTM's time window, the
+Transformer's depth, etc. The point is to read each family's
+own axis of variation, not impose a uniform "small / medium /
+large" capacity ladder on architectures that don't share one.
+Within each family, all OTHER hyperparameters are held at a
+sensible default so the variation is clean.
+
+All non-architecture axes (features, output formulation, horizons,
+smoothing, corpus) are held constant in this session — we sweep
+those in S04–S07. Sweep one thing at a time.
 
 - Held constant: V3 features (V1 + window + TVL),
   horizons {3m, 7m, 15m}, pinball-3 quantile output, raw smoothing,
   TVL-required corpus.
-- Swept: `architecture × size`, where:
+- Swept: `architecture × variant`, where the variant axis is
+  family-specific:
 
-| Family | Small | Medium | Large |
+| Family | Distinctive axis | Variants | Defaults held |
 |---|---|---|---|
-| `mlp` | hidden 64, depth 2 | hidden 128, depth 3 | hidden 256, depth 4 |
-| `gbm` | 100 trees, depth 4 | 300 trees, depth 5 | 500 trees, depth 6 |
-| `lstm` | hidden 32, layers 1 | hidden 64, layers 2 | hidden 128, layers 2 |
-| `transformer` | d 32, L 2, H 2, ctx 32 | d 64, L 3, H 4, ctx 32 | d 128, L 4, H 4, ctx 64 |
-| `conv1d` | 2 layers, 32ch, k=3 | 4 layers, 64ch, k=5 | 6 layers, 128ch, k=5 |
+| `mlp` | depth | 2, 3, 4 layers | width 128 |
+| `gbm` | tree count × depth | (100, d4), (300, d5), (500, d6) | LR 0.05 |
+| `lstm` | time window (input ticks) | 16, 32, 64 | hidden 64, layers 2 |
+| `transformer` | depth (layers) | 2, 4, 6 | d_model 64, heads 4, ctx 32 |
+| `conv1d` | kernel size (receptive field) | 3, 5, 7 | 4 layers, 64ch |
 
-- Param-count cap: 1M trainable parameters at the LARGE size
-  (the cap is intentional — keeps wall-clock comparable and
-  prevents one giant model winning by capacity alone). Sizes
-  scale roughly 5-10× between adjacent rungs.
-- Each (family, size) cell trained with 3 seeds → **5 × 3 × 3 =
-  45 scoreboard rows**. The median wall-clock should be ~10–20
-  min on GPU per row; full session ~10–15 hours of compute.
-- [ ] Configs land in `configs/predictor/S03/{family}_{size}_seed{n}.yaml`.
+  Rationale per family:
+  - **MLP** — depth is the structural knob; width is just capacity.
+  - **GBM** — tree count and depth interact non-trivially; the
+    three rungs trace a "shallow many" → "deep few" tradeoff at
+    matched cumulative split count.
+  - **LSTM** — time window is what the model actually *sees*;
+    16 ticks ≈ 1.6 min, 32 ≈ 3.2 min, 64 ≈ 6.4 min of polled
+    history. This directly tests "how much past matters?".
+  - **Transformer** — depth is the distinctive lever; ctx is held
+    at the LSTM-medium-equivalent so the depth comparison isn't
+    confounded by attention horizon.
+  - **1D Conv** — kernel size sets the per-layer receptive field;
+    larger kernels at fixed depth see more local context per
+    layer.
+
+- Param-count cap: 1M trainable parameters at the largest variant
+  per family (GBM cap 500 trees, depth 6). Smaller variants are
+  intentionally under the cap. Cross-family comparisons should
+  prefer matched-cap candidates to avoid confounding capacity
+  with architecture.
+- Each (family, variant) cell trained with 3 seeds → **5 × 3 × 3
+  = 45 scoreboard rows**. Median wall-clock ~10–20 min on GPU per
+  row; full session ~10–15 hours of compute.
+- [ ] Configs land in `configs/predictor/S03/{family}_v{variant}_seed{n}.yaml`.
 - [ ] Run `run_matrix.py configs/predictor/S03/`.
 - [ ] Acceptance: ALL 45 rows complete. NO downselection — record
       results, move on. Operator-friendly summary printed:
-      per-(family, size) median across seeds for each metric, plus
-      a per-family scaling curve (does the large variant beat the
-      small one, and by how much?).
+      per-(family, variant) median across seeds for each metric,
+      plus a per-family within-axis curve (does an LSTM with
+      time-window 64 beat one with 16, and by how much?).
 - [ ] Note for downstream sessions: S04 inherits the **top-2
-      (family, size) cells** by val MAE, not the top-2 families.
-      A medium-LSTM beating a large-Transformer is a valid
-      outcome and propagates that way.
+      (family, variant) cells** by val MAE — not the top-2
+      families. An LSTM with 64-tick window beating a Transformer
+      with 6 layers is a valid outcome and propagates that way.
 
 ## Session 04 — feature variant sweep
 

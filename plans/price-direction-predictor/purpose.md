@@ -140,12 +140,14 @@ These are NOT search axes — they're fixed.
 ## Search axes (these ARE explored, not pre-decided)
 
 1. **Architecture:** MLP, GBM (XGBoost / LightGBM), LSTM,
-   Transformer (ctx 32–64), 1D conv. Each family run at THREE
-   sizes (small / medium / large) so we can read the
-   per-family scaling curve as well as the cross-family
-   comparison. Large-size cap is ~1M trainable parameters
-   (GBM cap 500 trees, depth 6) to keep training cheap and to
-   avoid one giant model winning by capacity alone.
+   Transformer, 1D conv. Each family run with THREE variants
+   along its own distinctive structural axis (LSTM time window,
+   Transformer depth, MLP depth, GBM tree count × depth, conv1d
+   kernel size) so we can read the per-family within-axis curve
+   AS WELL AS the cross-family comparison. Largest-variant cap
+   is ~1M trainable parameters (GBM cap 500 trees, depth 6) to
+   keep training cheap and to avoid one giant model winning by
+   capacity alone.
 2. **Output formulation:** quantile regression with pinball loss
    (3-quantile and 5-quantile variants), parametric Gaussian
    (mean+log-var with NLL), parametric Student-t (heavier tail),
