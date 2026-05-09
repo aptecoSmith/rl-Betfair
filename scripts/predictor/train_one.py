@@ -361,21 +361,34 @@ def evaluate_predictions(
 
 
 def append_scoreboard_row(
-    scoreboard_path: Path, row: dict[str, Any],
+    scoreboard_path: Path,
+    row: dict[str, Any],
+    *,
+    overwrite_existing: bool = False,
 ) -> None:
+    """Append a row, or replace it if `overwrite_existing` is set
+    (only set this from a `--rebuild` code path; never silently).
+    """
     scoreboard_path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = scoreboard_path.exists()
     if file_exists:
         existing = pd.read_csv(scoreboard_path)
-        # Hard_constraints sec 12: append-only. Refuse if id collision.
-        if "experiment_id" in existing.columns and row["experiment_id"] in set(existing["experiment_id"]):
-            raise RuntimeError(
-                f"experiment_id {row['experiment_id']} already in scoreboard "
-                f"-- refuse to overwrite (sec 12). Use --rebuild to force.",
-            )
+        if (
+            "experiment_id" in existing.columns
+            and row["experiment_id"] in set(existing["experiment_id"])
+        ):
+            if not overwrite_existing:
+                # hard_constraints sec 12.
+                raise RuntimeError(
+                    f"experiment_id {row['experiment_id']} already in "
+                    f"scoreboard -- refuse to overwrite (sec 12). Use "
+                    f"--rebuild to force.",
+                )
+            existing = existing[
+                existing["experiment_id"] != row["experiment_id"]
+            ].copy()
         all_cols = list(dict.fromkeys(list(existing.columns) + list(row.keys())))
         df_new = pd.DataFrame([row])
-        # Reindex existing to share union of columns.
         existing = existing.reindex(columns=all_cols)
         df_new = df_new.reindex(columns=all_cols)
         out = pd.concat([existing, df_new], ignore_index=True)
@@ -665,7 +678,9 @@ def main() -> int:
         "config_hash": hash_config(cfg),
         **metrics,
     }
-    append_scoreboard_row(scoreboard_path, row)
+    append_scoreboard_row(
+        scoreboard_path, row, overwrite_existing=bool(args.rebuild),
+    )
     logger.info("scoreboard row written")
 
     # Model card.
@@ -683,6 +698,27 @@ def main() -> int:
         },
     )
     logger.info("model card written")
+
+    # Defensive teardown to avoid Windows STATUS_STACK_BUFFER_OVERRUN
+    # (0xC0000409) on LSTM cuDNN cleanup. All 9 S03 LSTM runs landed
+    # their scoreboard rows successfully then crashed on process exit;
+    # without this the matrix runner counts those as exit-1 failures
+    # even though the data is good. See S03_findings.md.
+    try:
+        import gc
+        del_targets = [name for name in (
+            "model", "boosters", "train_loader", "val_loader", "train_ds",
+            "val_ds", "seq_train", "seq_val", "X_train", "X_val", "y_train",
+            "y_val", "mask_train", "mask_val", "df_train", "df_val",
+        ) if name in locals()]
+        for name in del_targets:
+            del locals()[name]
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
     return 0
 
 
