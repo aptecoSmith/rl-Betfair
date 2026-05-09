@@ -1,0 +1,28 @@
+session: S04
+seed: 1
+dataset:
+  feature_variant: V1
+  train_corpus: tvl_mask_29d
+  horizons:
+  - 3m
+  - 7m
+  - 15m
+architecture:
+  family: gbm
+  variant_label: t100d4
+  kwargs:
+    n_trees: 100
+    max_depth: 4
+    learning_rate: 0.05
+output:
+  formulation: pinball3
+  quantiles:
+  - 0.1
+  - 0.5
+  - 0.9
+training:
+  batch_size: 1024
+  learning_rate: 0.05
+  max_epochs: 1
+  early_stopping_patience: 1
+device: cpu

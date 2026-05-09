@@ -1,0 +1,29 @@
+session: S06_neural
+seed: 2
+dataset:
+  feature_variant: V4
+  train_corpus: tvl_mask_29d
+  horizons:
+  - 15m
+architecture:
+  family: conv1d
+  variant_label: k3
+  kwargs:
+    kernel: 3
+    layers: 4
+    channels: 64
+    dropout: 0.1
+output:
+  formulation: pinball5
+  quantiles:
+  - 0.1
+  - 0.3
+  - 0.5
+  - 0.7
+  - 0.9
+training:
+  batch_size: 1024
+  learning_rate: 0.001
+  max_epochs: 20
+  early_stopping_patience: 3
+device: cuda
