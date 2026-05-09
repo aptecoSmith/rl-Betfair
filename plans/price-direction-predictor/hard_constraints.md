@@ -63,24 +63,35 @@ classification candidates derive them from the cumulative bin
 probabilities. A median-only candidate that cannot produce
 quantiles is invalid.
 
-## §7 — Param-count cap per architecture
+## §7 — Param-count cap and architectural variants
 
-Architecture sweeps run at THREE sizes per family (small / medium
-/ large — see `master_todo.md` S03 for the matrix). The LARGE
-size has ≤ 1M trainable parameters (GBM caps: ≤ 500 trees, depth
-≤ 6). Small and medium sizes are intentionally below the cap —
-the point is to span the capacity range within a family so we
-can read the per-family scaling curve. Sessions that:
+Architecture sweeps (S03) run THREE variants per family along
+the family's distinctive structural axis (LSTM time window,
+Transformer depth, GBM tree count × depth, MLP depth, conv1d
+kernel size — see `master_todo.md` S03 table). The largest
+variant per family has ≤ 1M trainable parameters (GBM cap 500
+trees, depth 6). Smaller variants are intentionally below the cap.
 
-- Breach the cap at LARGE size, or
-- Add sizes outside small/medium/large without updating
+Within a family, all NON-distinctive hyperparameters are held
+at a fixed default so variation is clean:
+
+- mlp varies depth → width fixed at 128
+- gbm varies tree count × depth → LR fixed at 0.05
+- lstm varies time window → hidden 64, layers 2
+- transformer varies depth → d_model 64, heads 4, ctx 32
+- conv1d varies kernel size → 4 layers, 64 channels
+
+A session that:
+
+- Breaches the cap at the largest variant, or
+- Adds a variant outside the S03 table without updating
   `master_todo.md`, or
-- Compare a LARGE-of-one-family to a SMALL-of-another and call
-  the difference a "family" effect
+- Mixes the family's distinctive axis with non-distinctive axes
+  in the same sweep (e.g., changing LSTM hidden size AND time
+  window in S03)
 
-…are invalid. The cap exists so capacity is held roughly
-constant across the LARGE row; cross-family comparisons must
-match sizes.
+…is invalid. Cross-family comparisons should prefer matched-cap
+candidates to avoid confounding capacity with architecture.
 
 ## §8 — Calibration is a first-class metric
 
