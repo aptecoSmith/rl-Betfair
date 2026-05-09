@@ -1,0 +1,4 @@
+experiment_id,session,architecture,variant_label,feature_variant,train_corpus,output_formulation,horizons,seed,mean_mae,mae_7m,dir_acc_k5_7m,dir_fires_k5_7m,backtest_pnl_k5_7m,backtest_winrate_k5_7m
+conv1d_k3_s1_9924c18ea944,S06_neural,conv1d,k3,V2,tvl_mask_29d,pinball3,"1m,7m,15m",1,3.557969,2.842197,0.7432,1032.0,874.4247,0.7432
+conv1d_k3_s1_3952e600e57b,S06_neural,conv1d,k3,V4,tvl_mask_29d,pinball5,"1m,3m,7m",1,2.309406,2.817541,0.7165,716.0,809.5401,0.7165
+conv1d_k3_s1_3fc8e2c22c9c,S06_neural,conv1d,k3,V4,tvl_mask_29d,pinball5,"1m,7m,15m",1,3.549944,2.837461,0.788,764.0,755.9861,0.788
