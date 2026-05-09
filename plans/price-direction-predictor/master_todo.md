@@ -2,116 +2,264 @@
 plan: price-direction-predictor
 ---
 
-# Master TODO
+# Master TODO — matrix-of-experiments + scoreboard
 
-Ordered roughly by dependency. Each section has a session prompt
-under `session_prompts/` once it's the next one up.
+The plan runs as a sequence of **sweep sessions**, each emitting
+multiple rows into a shared `scoreboard.csv`. Sessions are designed
+so that an operator (or an autonomous agent) can run them
+unattended: each session's config is a small enumerated set of
+candidates, each candidate's training+evaluation+model-card is a
+self-contained subprocess, and the next session's choices are
+derived from the scoreboard.
 
-## Session 01 — labelling pipeline + tractability check
+The plan does not commit to a single architecture, output
+formulation, feature set, or horizon set in advance — it explores,
+records, and decides on data.
 
-- [ ] Build a function `extract_examples(date) -> DataFrame` that
-      reads one day's parquet and emits one row per
-      (market_id, selection_id, tick_idx) with:
-      - All input feature columns (ladder, LTP, TVL, time-to-off, etc.)
-      - Future-LTP labels at the chosen horizons (1/3/7 min)
-      - Future-LTP-ticks (signed) computed via
-        `env.tick_ladder.tick_offset` / `ticks_between`
-      - Filter: pre-off only (§1)
-- [ ] Run on one day, eyeball:
-      - Distribution of Δprice in ticks per horizon
-      - Fraction of (runner, tick) examples where horizon-future LTP
-        exists (some near-off ticks have no future)
-      - Per-runner LTP-stable fraction (how often is Δticks = 0?
-        an all-zero label distribution would mean the prediction
-        target is too quiet to be useful)
-- [ ] Decide horizon set based on the distribution. If 1-min Δprice
-      is essentially always zero, drop it. If 7-min has too many NaN
-      labels (truncated by race off), shorten it.
-- [ ] Stretch the prototype to the full corpus: scan 29 days, count
-      total examples, estimate label-distribution stability across
-      dates.
+## The scoreboard is the durable artefact
 
-## Session 02 — feature engineering + dataset assembly
+Each candidate writes one row to
+`registry/predictor_scoreboard.csv` (or equivalent path) with at
+minimum:
 
-- [ ] Define the input feature vector (per (market, runner, tick)):
-      - Ladder features: top-3 back/lay (price, size) per side
-      - LTP, total runner traded volume
-      - TVL features: e.g. cumulative volume bucketed by ticks
-        from LTP at +1 / +3 / +5 / etc., plus total
-      - Time-to-off in seconds
-      - Per-runner trailing window (last 16/32 ticks of LTP, ladder
-        midprice, TVL)
-      - Per-market context: number of runners, in-play imminent flag
-- [ ] Implement two feature variants:
-      - **A (no-TVL)** — works on full 29-day corpus
-      - **B (with-TVL)** — works on 10-day corpus
-- [ ] Persist examples to a fast format (parquet shard per date)
-      with deterministic column order so multiple training runs
-      don't re-extract.
-- [ ] Verify §9 (zero/mask handling on no-TVL rows).
+- `experiment_id` (timestamp + hash of config)
+- `session` (e.g., `S03_arch_sweep`)
+- `architecture` (`mlp` / `gbm` / `lstm` / `transformer` / `conv1d`)
+- `output_formulation` (`pinball3` / `pinball5` / `gaussian` /
+  `student_t` / `classification`)
+- `feature_variant` (`V1` … `V5`)
+- `horizon_set` (e.g., `3m_7m_15m`)
+- `smoothing` (`raw` / `ema_post` / `temporal_loss`)
+- `train_corpus` (`tvl_required_10d` / `tvl_mask_29d`)
+- `param_count`
+- `train_seconds`
+- `infer_us_per_tick`
+- `val_mae_per_horizon` (one column per horizon)
+- `val_calibration_gap_per_horizon` (target 0; abs deviation)
+- `val_directional_accuracy_at_k5` (per horizon)
+- `val_stability_lag1_autocorr` (per horizon)
+- `val_backtest_pnl_per_market` (one number — naïve rule, val
+  dates only, never test)
+- `notes` (any anomalies)
 
-## Session 03 — baseline models
+Test-set columns are added ONLY in S09 (the final test pass) and
+are blank otherwise.
 
-Train and evaluate on the val set. NO TEST-SET ACCESS YET (§5).
+## Session 01 — labelling pipeline (multi-horizon, multi-feature)
 
-- [ ] Pinball-loss MLP on flattened features (no temporal context).
-      Cheapest baseline.
-- [ ] Pinball-loss small LSTM over recent-tick window.
-- [ ] Pinball-loss small Transformer (ctx 32) over recent-tick window.
-- [ ] All three trained on variant A and variant B.
-- [ ] Tabulate val metrics: MAE-per-horizon, calibration gap (10th-
-      90th coverage vs nominal 80%), directional accuracy at
-      thresholds k = 3, 5, 10 ticks, stability (lag-1 prediction
-      autocorrelation).
-- [ ] Ship a model card per run.
+Goal: produce one persisted dataset that every subsequent session
+reads. No model training in this session.
 
-## Session 04 — smoothing variants
+- [ ] Promote the prototype at `scripts/predictor/extract_labels_
+      prototype.py` into a production pipeline at
+      `scripts/predictor/build_dataset.py` that:
+      - Iterates over all 29 days of parquet
+      - Emits one parquet shard per (date, feature_variant) under
+        `data/predictor_dataset/{variant}/{date}.parquet`
+      - Includes labels for the union of all horizons we plan to
+        explore: 1m, 3m, 7m, 15m, 30m. We do not have to use all
+        of them in every model — but having them available keeps
+        the labelling cheap and prevents re-extractions later.
+      - Computes all five feature variants (V1..V5) so each
+        experiment chooses what to read at training time.
+      - Idempotent: re-running on a date that already has shards
+        skips it unless `--rebuild` is set.
+- [ ] Define the train/val/test date split in
+      `scripts/predictor/splits.py`:
+      - Train: 2026-04-06 → 2026-04-30 (25 days)
+      - Val: 2026-05-01 → 2026-05-03 (3 days)
+      - Test: 2026-05-04 → 2026-05-06 (3 days, sealed until S09)
+      The split must be importable so every session uses the same
+      one.
+- [ ] Sanity-check report: print example counts per horizon, per
+      variant, per split. Catch any zero-count cells before any
+      model trains.
+- [ ] Acceptance: ≥ 1M training examples in the V1 variant; ≥ 500K
+      in V3 (TVL required). If either is short, investigate before
+      proceeding.
 
-Pick the best Session-03 architecture (likely sequence). Sweep:
+## Session 02 — experiment harness + scoreboard
 
-- [ ] Raw output, no smoothing (baseline).
-- [ ] Raw + post-hoc EMA at decision time (no model change).
-- [ ] Temporal-consistency loss baked in (penalty on
-      `|prediction_t - prediction_{t-1}|`).
-- [ ] Compare on stability metric AND directional accuracy.
-      Stability without losing accuracy is the goal.
+Goal: a small training-and-evaluation runner that takes one config
+file and produces one scoreboard row + one model card. No matrix
+yet — just the harness.
 
-## Session 05 — final test-set evaluation
+- [ ] `scripts/predictor/train_one.py` — reads
+      `--config path/to/config.yaml`, returns exit code 0 on
+      success. Trains, evaluates on val, computes all metrics in
+      the scoreboard schema, appends a row.
+- [ ] `scripts/predictor/eval_metrics.py` — pure, testable functions
+      for: pinball MAE, calibration gap (per quantile), directional
+      accuracy at threshold k, lag-1 autocorrelation, backtest P&L
+      under a fixed naïve rule.
+- [ ] `scripts/predictor/run_matrix.py` — reads a YAML enumerating
+      configs (one per candidate), runs `train_one.py` for each
+      sequentially or in parallel via subprocess, returns when all
+      have completed. Idempotent on re-run (skips configs whose
+      experiment_id already appears in the scoreboard).
+- [ ] Smoke-test: configure ONE candidate (smallest MLP, V1
+      features, 3m/7m horizons, raw output, pinball-3), run end to
+      end, verify scoreboard row + model card written. Time should
+      be < 10 minutes on the dev box GPU.
+- [ ] Tests: `tests/test_predictor_metrics.py` for the scoring
+      functions. Synthetic data; no parquet I/O.
 
-- [ ] Pick one or two candidate models from Session 04.
-- [ ] Run ONCE on the held-out test date range (§5).
-- [ ] Produce the final model card. Decide pass/fail against the
-      acceptance criteria in `purpose.md`.
-- [ ] If fail: write a `findings.md`, do not retry on the test set.
-      Loop back to Session 04 with a fresh test split.
+## Session 03 — architecture sweep
 
-## Session 06 — RL observation handoff (opt-in, behind flag)
+Goal: candidate architectures evaluated head-to-head with
+everything else held constant.
 
-Only runs if Session 05 passes acceptance.
+- Held constant: V3 features (V1 + window + TVL),
+  horizons {3m, 7m, 15m}, pinball-3 quantile output, raw smoothing,
+  TVL-required corpus.
+- Swept: `architecture ∈ {mlp, gbm, lstm, transformer, conv1d}`.
+- Param-count cap: 1M parameters per candidate. GBM cap: 500
+  trees, depth ≤ 6.
+- Each architecture trained with 3 seeds → 15 scoreboard rows.
+- [ ] Configs land in `configs/predictor/S03/`.
+- [ ] Run `run_matrix.py configs/predictor/S03/`.
+- [ ] Acceptance: ALL 15 rows complete. NO downselection — record
+      results, move on. Operator-friendly summary printed:
+      per-architecture median across seeds for each metric.
 
-- [ ] Add `config.observations.use_price_direction_predictor: false`
-      gate. When true, env loads the frozen predictor and exposes
-      its quantile outputs as additional per-runner observation
-      features.
-- [ ] Update the policy variants to accept the wider observation;
-      the addition is column-wise and the architecture-hash check
-      at `registry/model_store.py` already handles new feature
-      shapes (cf. `fill-prob-in-actor` precedent).
-- [ ] Smoke-test a single training run: with the flag on vs off, on
-      a tiny cohort, confirm no crashes and confirm reward
-      distributions are not catastrophically broken.
-- [ ] Real cohort comparison runs are out of scope here; queued as
-      a follow-on plan.
+## Session 04 — feature variant sweep
 
-## Session 07 — non-RL decision-rule backtest (parallel to 06)
+Goal: test the value of incremental feature complexity on the
+top-2 architectures from S03.
 
-Independent of RL. Build a simple decision rule that consumes the
-predictor:
+- Held constant: top-2 architectures from S03 (by val MAE
+  averaged across horizons), horizons {3m, 7m, 15m}, pinball-3,
+  raw smoothing.
+- Swept: `feature_variant ∈ {V1, V2, V3, V4, V5}`,
+  `train_corpus ∈ {tvl_required_10d, tvl_mask_29d}` for variants
+  V3+ (V1, V2 don't depend on TVL so always 29d).
+- Crosses: 2 architectures × 5 variants × applicable corpus per
+  variant ≈ 16 candidates × 3 seeds = 48 rows.
+- [ ] Acceptance: all rows complete; the V1→V5 progression is
+      monotone for the winning architecture, OR a clear plateau
+      is observed (which is informative — tells us where
+      additional features stop paying).
 
-- [ ] For each pre-off tick, if `q50 ≥ +5 ticks AND q10 ≥ 0`, open
-      a back at LTP, close at horizon at LTP.
-- [ ] Measure realised P&L on test dates (with commission).
-- [ ] Compare to a do-nothing baseline.
-- [ ] Document as a "predictor-as-strategy" note. This is the
-      operator's safety net — even if the RL handoff fails, the
-      predictor may already be a usable signal end-to-end.
+## Session 05 — output formulation sweep
+
+Goal: how do we predict, given we know what features and which
+architecture work?
+
+- Held constant: best architecture × best feature variant from S04.
+  Horizons {3m, 7m, 15m}.
+- Swept: `output_formulation ∈ {pinball3, pinball5, gaussian,
+  student_t, classification}`.
+- Each candidate must still emit at least q10/q50/q90 (potentially
+  derived from its own parametric form) so the metric suite stays
+  comparable.
+- 5 candidates × 3 seeds = 15 rows.
+- [ ] Acceptance: all rows complete; pick the formulation that
+      maximises directional accuracy at the operator-relevant
+      threshold (k=5 ticks at the 7m horizon).
+
+## Session 06 — horizon-set sweep
+
+Goal: which horizons are predictable, and is multi-horizon
+multi-task helping or hurting?
+
+- Held constant: best architecture × best features × best output.
+- Swept: `horizon_set ∈ {1m_3m_7m, 3m_7m_15m, 7m_only,
+  3m_7m_15m_30m}`. Plus per-horizon-only ablations: train one
+  model per horizon individually for the best horizon-set, compare
+  to the multi-task version.
+- ~6 candidates × 3 seeds = 18 rows.
+- [ ] Acceptance: all rows complete; explicit per-horizon table
+      showing where a horizon meets the calibration target.
+
+## Session 07 — smoothing sweep
+
+Goal: solve (or confirm we don't have) the oscillation failure
+mode the operator flagged.
+
+- Held constant: everything from prior sessions.
+- Swept: `smoothing ∈ {raw, ema_post, temporal_loss}`. EMA spans
+  {3, 5, 10}. Temporal loss weights {0.0, 0.1, 0.5, 1.0} (0.0 is
+  raw — already covered, included as control).
+- ~10 candidates × 3 seeds = 30 rows.
+- [ ] Acceptance: all rows complete; stability-vs-accuracy
+      Pareto frontier plotted. The winner is the most accurate
+      candidate above the 0.7 lag-1 autocorrelation threshold.
+
+## Session 08 — non-RL backtest harness
+
+Goal: standalone trading signal evaluation. Independent of any
+later RL handoff.
+
+- [ ] `scripts/predictor/backtest_naive.py` — for each pre-off
+      tick in the val date range, apply the rule "open a back at
+      LTP if q50_at_horizon ≥ +K ticks AND q10_at_horizon ≥ 0;
+      close at horizon at then-current LTP". Apply the symmetric
+      rule for lay opens. Report realised P&L per market, per
+      runner, total, after 5% commission.
+- [ ] Sweep K ∈ {3, 5, 10, 20} per horizon.
+- [ ] Output a `backtest_summary.csv` keyed by candidate
+      experiment_id, plus per-market P&L distributions for the
+      top 3.
+- [ ] Acceptance: at least one K-horizon combination has positive
+      val-set P&L on the winning candidate (sanity bar, not the
+      tuning target).
+
+## Session 09 — held-out test evaluation (touched ONCE)
+
+Goal: produce the final, defensible numbers.
+
+- Pick the top 3 candidates from the val-set leaderboard
+  (composite ranking: directional accuracy at k=5 + calibration
+  gap + stability + backtest P&L). Document the picks BEFORE
+  running.
+- Run each on the test date range. ONE shot per candidate.
+- [ ] Final scoreboard rows include the `test_*` columns.
+- [ ] Final model cards in
+      `plans/price-direction-predictor/models/{candidate_id}.md`.
+- [ ] Acceptance: at least one candidate passes all four success
+      criteria from `purpose.md` on the test set.
+
+## Session 10 — visualisation tool
+
+Goal: an inspection tool the operator can use to eyeball any
+candidate prediction trajectory. Catches failure modes the
+metrics miss.
+
+- [ ] `scripts/predictor/plot_trajectory.py` — given a
+      candidate id and a (market_id, selection_id), produces a
+      figure: x-axis time-to-off, y-axis price (LTP), overlaid
+      band for the predicted q10/q50/q90 of "Δticks-from-now over
+      the configured horizon" projected forward.
+- [ ] Generate plots for ~20 hand-picked (market, runner) pairs
+      including: large drifters, large shorteners, flat-stayers,
+      one with a known late move.
+- [ ] Drop into
+      `plans/price-direction-predictor/inspection/{candidate_id}/`.
+
+## Session 11 — RL handoff (opt-in, behind config flag)
+
+Only runs after S09 produces at least one passing candidate.
+
+- [ ] Add `config.observations.use_price_direction_predictor:
+      false` (default false → byte-identical to today's runs).
+- [ ] When true, env loads the frozen predictor weights from
+      `registry/predictor/{candidate_id}.pt`, runs inference at
+      every observation step, exposes q10/q50/q90 per (runner,
+      horizon) as additional observation columns.
+- [ ] Update the architecture-hash check at
+      `registry/model_store.py` to include the predictor flag
+      so old/new agents don't cross-load incorrectly.
+- [ ] Smoke test: tiny cohort, one day, flag-on vs flag-off; no
+      crashes; observation shape diff matches the per-runner
+      column count we expect.
+- [ ] Real cohort comparison runs are out of scope here. They go
+      in a follow-on plan when there's training time available.
+
+## Session 12 — closure
+
+- [ ] Write `findings.md` summarising scoreboard outcomes by
+      session and the final candidate's model card.
+- [ ] Write `lessons_learnt.md` covering anything that surprised us
+      (oscillation behaviour, TVL value, horizon predictability,
+      etc.).
+- [ ] Update `plans/INDEX.md` with the predictor plan's outcome.
