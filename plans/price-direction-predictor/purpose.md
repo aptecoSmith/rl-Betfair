@@ -2,14 +2,30 @@
 plan: price-direction-predictor
 status: draft
 created: 2026-05-09
+revised: 2026-05-09 (matrix exploration restructure)
 motivated_by: discussion 2026-05-09 — split RL training from market prediction
 related:
   - plans/fill-prob-in-actor/ (in-policy aux head, the precedent we're stepping back from)
   - plans/per-runner-credit/findings.md (root cause: fill_prob label conflated force-close with maturation)
   - plans/arb-curriculum/session_prompts/01_oracle_scan.md (existing labelling pipeline shape)
+note: this plan is STANDALONE — it does not depend on, supersede, or
+  coordinate with `plans/rewrite/phase-16-ensemble-market-state/`.
+  That phase upgrades the in-policy aux-head pipeline; this plan
+  builds a separate, frozen, supervised model OUTSIDE the RL loop.
+  Both can coexist; neither is a prerequisite for the other.
 ---
 
 # Purpose — train a standalone price-direction predictor, then feed it to RL
+
+## End goal — the deliverable in one sentence
+
+A signal that says, on a specific horse at a specific tick:
+
+> "the price for runner R is going to move IN/OUT by approximately X
+> ticks (with confidence Y%) over the next N minutes."
+
+Per-runner, per-tick, multiple horizons N, quantile-style confidence,
+**pre-off only**, computed from polled-feed observations.
 
 ## Observation that motivated this plan
 
@@ -18,136 +34,186 @@ The current policy stack has three auxiliary supervised heads
 with the PPO actor on per-cohort RL data. Each predicts a different
 flavour of "what will happen if I trade this runner" and feeds its
 output back into `actor_head`. This is an **advisor architecture**
-grafted onto an RL loop:
-
-- The aux heads are supervised forecasters.
-- Their outputs become per-runner features for the policy.
-- They co-train with the policy on the same small RL dataset.
-
-Two problems with the joint formulation:
+grafted onto an RL loop, with two structural problems:
 
 1. **Label provenance is awkward.** `fill_prob` and `mature_prob`
    labels require the simulator to run hypothetical orders on real
-   ladders (the oracle-scan pipeline), then BCE against the simulator
-   output. Sim/reality gap is a confound; labels can only be generated
-   for ticks the simulator can replay.
-2. **Co-training confounds two distinct ML problems.** A predictor that
-   helps PPO converge faster is not the same as a predictor that is
-   well-calibrated on its own task. We can't measure either cleanly
-   because the gradient pathway entangles them.
+   ladders (the oracle-scan pipeline). Sim/reality gap is a confound
+   and labels can only be generated for ticks the simulator can
+   replay.
+2. **Co-training confounds two distinct ML problems.** A predictor
+   that helps PPO converge faster is not the same as a predictor
+   that is well-calibrated on its own task. We can't measure either
+   cleanly because the gradient pathway entangles them.
 
-A separately-trained, frozen, well-evaluated predictor sidesteps both.
+A separately-trained, frozen, well-evaluated predictor sidesteps
+both, and is also useful as a trading signal in its own right
+without needing an RL agent on top.
 
-## What this plan builds
+## Operating principle for this plan — explore, don't lock in
 
-A standalone supervised model that predicts **signed Δprice in
-Betfair price ticks over horizon N**, per runner, per tick, on
-**pre-off** snapshots only. Output is a quantile prediction
-(10th/50th/90th) so the consumer has confidence directly. Inputs come
-straight from parquet — top-3 ladder, LTP, `TradedVolumeLadder`,
-time-to-off, plus a short window of recent history for sequence
-context. No simulator in the labelling loop.
+The operator's standing instruction (2026-05-09):
 
-Once trained, the predictor is:
-- **Frozen** — its weights are fixed; no joint optimisation.
-- **Reusable** — RL agents read it as additional observation features,
-  but a non-RL decision rule (open if median-Δprice ≥ k AND 10th-
-  percentile-Δprice ≥ 0) is also a valid consumer.
-- **Evaluable on its own terms** — MAE/calibration/directional
-  accuracy on a held-out date range, independent of any RL run.
+> "make sure that in your plan you are trying different things and
+> generating enough data to make decisions — don't just lock yourself
+> into one path"
 
-## Why this is the right cut
+This plan therefore runs as a **matrix of experiments anchored on a
+shared scoreboard**, not as a linear "build the v1" pipeline. Every
+session emits scoreboard rows; downselection happens late and is
+based on data, not premature commitment. The scoreboard is the
+durable artefact that informs every decision.
 
-1. **Self-supervised label.** Δprice over N ticks is read directly
-   from `LastTradedPrice` at tick `t+N`. No simulator, no oracle, no
-   BCE-against-counterfactual. Cheap to relabel any time we want a
-   different horizon.
-2. **Cheap iteration.** The 29 days of parquet data we already have
-   gives ~5,000 markets × ~150 pre-off ticks × ~7 runners ≈ 5M label
-   examples. A small sequence model trains in minutes on that.
-3. **Independent evaluability.** Held-out dates → train/val/test
-   splits with no simulator coupling. A bad predictor fails MAE on
-   the val set; we know immediately, without burning an RL run.
-4. **Composable handoff.** The frozen predictor's outputs are extra
-   observation features. The RL agent doesn't change shape; it just
-   sees richer state. Pre-existing aux-head wiring can be deprecated
-   gradually.
-5. **Useful even without RL.** A calibrated price-direction predictor
-   is a trading signal end-to-end — it does not require an RL agent
-   to extract value. RL remains the long-term automation goal but is
-   no longer on the critical path for proving the predictor works.
+Concretely:
+
+- Multiple **architectures** are tried in parallel (MLP baseline,
+  GBM baseline, LSTM, small Transformer, 1D conv) — picking one
+  upfront would foreclose options the data hasn't ruled out.
+- Multiple **output formulations** are tried (quantile regression,
+  parametric distributional, signed-magnitude classification).
+- Multiple **feature variants** are tried (top-3 ladder only,
+  + TVL, + cross-runner z-scores, + market-state aggregates).
+- Multiple **horizon sets** are tried ({3m,7m,15m},
+  {1m,3m,7m}, {7m only}, {3m,7m,15m,30m}).
+- Multiple **smoothing strategies** are tried (raw, post-hoc EMA,
+  temporal-consistency loss).
+
+Each cross is evaluated on the same val set with the same metric
+suite, so candidates are directly comparable. The held-out test
+date range is touched ONCE per candidate at the end (§5).
+
+## Scope — what this plan builds, and what it does not
+
+### Builds
+
+1. A multi-horizon, multi-feature-variant labelling pipeline.
+   Self-supervised: labels are read straight from future
+   `LastTradedPrice` in the parquet. Persisted to disk so all
+   experiments share the same (features, labels) data.
+2. An experiment harness with a scoreboard CSV. Config-driven.
+   One config file → one row in the scoreboard.
+3. A matrix of training experiments across the axes above, all
+   landing in the scoreboard.
+4. A non-RL backtest harness that runs candidate predictors
+   through a simple decision rule and reports realised P&L
+   on val dates. The operator's safety net — even if RL handoff
+   later fails, the predictor may already be a usable signal.
+5. A visualisation tool: per-race, per-runner prediction
+   trajectory over time. Catches the "oscillates wildly" failure
+   mode by inspection in addition to the stability metric.
+6. A frozen-handoff path: the winning predictor exposed as
+   per-runner observation features behind a config flag for the
+   RL env (opt-in, behind a flag — no global default change).
+
+### Does not
+
+- Change PPO training. Cohort runs continue unchanged on the
+  existing aux-head architecture during this plan's duration.
+- Deprecate `fill_prob_head` / `mature_prob_head` / `risk_head`.
+  Those decisions wait until the standalone predictor has
+  measured its win on its own terms AND the RL handoff has shown
+  measurable improvement.
+- Touch live-feed inference. The `ai-betfair` repo can consume
+  the frozen model later via a separate handoff plan.
 
 ## Hard scope decisions (operator confirmed 2026-05-09)
 
-- **Single target type:** Δprice over N ticks. No fill-prob, no
-  mature-prob, no locked-P&L variance — those stay on the in-policy
-  heads (and are not addressed by this plan).
-- **Multiple horizons:** model emits predictions at several horizons
-  (recommended: 1 min, 3 min, 7 min) sharing a backbone. Cost is
-  ~3× the output dim, ~zero extra training cost.
-- **Quantile output:** model emits 10th / 50th / 90th percentile of
-  Δprice per (runner, horizon). Quantile regression with pinball
-  loss, three quantiles per output. Confidence is read off the
-  quantile spread (90th − 10th).
-- **`TradedVolumeLadder` is mandatory input.** Per-runner cumulative
-  traded volume per price level, available from 2026-04-26 onwards
-  (10 days of training corpus). The 19 earlier days remain available
-  for an ablation arm without TVL features.
-- **Pre-off only.** `in_play=False` AND `timestamp < market_start_time`.
-  In-play prediction is a different problem.
-- **Build a matrix, evaluate, pick.** Recommend trying:
-  - Architectures: small LSTM, small Transformer (ctx 32–64), 1D conv
-    over recent ticks, bag-of-features MLP baseline.
-  - Smoothing: raw output vs. EMA-smoothed output vs. temporal-
-    consistency loss. Raw + post-hoc EMA is the operator-friendly
-    default; the loss-baked variant is the principled comparator.
-  - With/without TVL features (10-day vs 29-day corpus tradeoff).
+These are NOT search axes — they're fixed.
 
-## What this plan does NOT do
+- **Target type:** signed Δprice in Betfair price ticks, per
+  (runner, tick), at multiple horizons. No fill-prob. No
+  mature-prob. No locked-P&L variance.
+- **Pre-off only:** `in_play=False` AND
+  `timestamp < market_start_time`. In-play is a different problem.
+- **Output is quantile-style:** even when we explore parametric
+  distributional outputs, every candidate emits at minimum the
+  10th / 50th / 90th percentile of Δprice per (runner, horizon)
+  for like-for-like comparison.
+- **`TradedVolumeLadder` mandatory in at least one feature
+  variant.** Available from 2026-04-26 onwards (10 days of
+  training corpus).
+- **Frozen handoff to RL.** When wired in, predictor weights are
+  fixed. No joint optimisation.
+- **Test date range is touched ONCE per candidate.** Hyperparameter
+  search and architecture comparison happen on the val set.
 
-- No changes to PPO training. The current cohort runs continue
-  unchanged on the existing aux-head architecture during this plan's
-  duration; this plan is a parallel build, not a refactor.
-- No deprecation of `fill_prob_head` / `mature_prob_head` / `risk_head`.
-  Those decisions wait until the standalone predictor has a measured
-  win on its own terms.
-- No live-feed integration. The `ai-betfair` repo can consume the
-  frozen model later via a separate handoff plan.
+## Search axes (these ARE explored, not pre-decided)
 
-## Success criteria (predictor stage)
+1. **Architecture:** MLP, GBM (XGBoost / LightGBM), small LSTM,
+   small Transformer (ctx 32–64), 1D conv. Per-architecture
+   parameter count capped (~1M params) to keep training cheap and
+   to avoid one giant model winning by capacity alone.
+2. **Output formulation:** quantile regression with pinball loss
+   (3-quantile and 5-quantile variants), parametric Gaussian
+   (mean+log-var with NLL), parametric Student-t (heavier tail),
+   signed-magnitude classification (drift-large/drift-small/flat/
+   shorten-small/shorten-large bins).
+3. **Feature variants:**
+   - V1: top-3 ladder (back+lay) + LTP + time-to-off only
+   - V2: V1 + per-runner trailing window (last 32 ticks of LTP,
+     ladder mid, total volume)
+   - V3: V2 + `TradedVolumeLadder` features (cumulative volume
+     bucketed by ticks-from-LTP)
+   - V4: V3 + cross-runner features (rank, share, z-score within
+     market) — borrowed conceptually from phase-16's session 03
+     but built independently
+   - V5: V4 + market-state features (vol estimate, depth, spread)
+4. **Horizon sets:** {3m,7m,15m} (recommended default),
+   {1m,3m,7m}, {7m only}, {3m,7m,15m,30m}.
+5. **Smoothing:** raw output, post-hoc EMA on quantile outputs,
+   temporal-consistency loss baked into training.
+6. **Training-data scope:** TVL-required (10 days post-2026-04-26)
+   vs TVL-mask (29 days, mask the TVL features when missing).
 
-A predictor passes if all of the following hold on a held-out test
+The matrix is large but most cells are cheap. We do NOT run every
+combination — Sessions 03–07 stage the search so that each session's
+sweep is informed by the previous session's scoreboard rows.
+
+## Success criteria — how a candidate "wins"
+
+A candidate is a viable predictor if all hold on the held-out test
 date range:
 
-1. **Calibration.** 80 % of realised Δprice values fall within the
-   model's 10th–90th percentile band (target ±5 pp). Over- or under-
-   confident predictions are equally bad.
-2. **Directional accuracy at confidence threshold.** When the median
-   prediction is ≥ K ticks shorten AND the 10th percentile is ≥ 0,
-   the realised Δprice is the same sign ≥ 70 % of the time at the
-   matching frequency where the threshold actually fires (ie: the
-   model has to BOTH be confident often enough AND right when
-   confident).
-3. **Stability.** Cross-correlation of predictions at consecutive
-   ticks is ≥ 0.7. (Catches the "oscillates wildly" failure mode the
-   operator flagged.) A sequence model should pass this trivially;
-   a stateless MLP probably will not.
-4. **Backtest sanity.** A naïve strategy "open back when median
-   prediction ≥ +5 ticks AND 10th percentile ≥ 0; close at horizon"
-   has positive realised P&L on the held-out test dates. This is a
-   sanity check, not a tuning target.
+1. **Calibration.** 80% of realised Δprice values fall within the
+   10th–90th percentile band (target ±5pp). Equally-bad failure
+   modes: over- and under-confident.
+2. **Directional accuracy at confidence threshold.** When `q50 ≥ K
+   ticks shorten AND q10 ≥ 0`, realised Δprice has the same sign
+   ≥ 70% of the time at a frequency where the threshold actually
+   fires. Both halves matter — the model has to be confident often
+   enough AND right when confident.
+3. **Stability.** Lag-1 prediction autocorrelation ≥ 0.7. Catches
+   the "oscillates wildly" failure mode the operator flagged.
+4. **Backtest sanity.** A naïve "act on top-K confident
+   predictions" rule has positive realised P&L on val dates after
+   commission. Sanity check, not a tuning target.
 
-## Open questions for the design phase
+A candidate that passes (1)–(3) but fails (4) is recorded as a
+"calibrated-but-not-actionable" result and kept on the bench — a
+later decision rule may extract value the naïve rule cannot.
 
-- Quantile spacing — are 10/50/90 enough, or should we predict more
-  (5/25/50/75/95) to support different decision rules?
-- Per-runner vs. per-market normalisation — Δprice in ticks is
-  already comparable across runners (the tick ladder normalises),
-  but is there a runner-specific volatility scaling that helps?
-- How long is "recent history" — 16, 32, or 64 ticks?
-- One model for all horizons (multi-head) or one model per horizon
-  (separate training runs)? Multi-head is the recommendation, but
-  worth confirming on a small ablation.
+## Why this matters even before any RL handoff
 
-These get resolved by the labelling-pipeline prototype + first
-model-training pass (Session 02).
+Two operating modes the predictor enables, in order of immediacy:
+
+1. **Trading signal in its own right.** A calibrated multi-horizon
+   price-direction predictor + a simple decision rule is itself a
+   trading strategy. We can paper-trade it the day it's frozen.
+2. **Richer observation features for the RL loop.** Once frozen,
+   the predictor's quantile outputs become per-runner observation
+   features. The RL agent gets to learn against a richer state
+   without us ever co-training a supervised head with PPO again.
+
+## Open questions resolved by experiments, not by argument
+
+- Does TVL meaningfully help, or is the top-3 ladder sufficient?
+- Are sequence models worth the complexity vs a strong tabular
+  GBM on engineered features?
+- Is a single multi-horizon backbone better than one model per
+  horizon?
+- Where is the calibration vs. accuracy tradeoff sitting?
+- Does the operator-flagged "oscillation" failure mode actually
+  appear in our raw outputs, or is it solved for free by a
+  sequence model with built-in memory?
+
+These are answered by scoreboard rows, not by debate.
