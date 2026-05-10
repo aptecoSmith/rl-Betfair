@@ -1020,6 +1020,9 @@ class BetManager:
         *,
         pair_id: str | None = None,
         force_close: bool = False,
+        each_way: bool = False,
+        each_way_divisor: float | None = None,
+        number_of_places: int | None = None,
     ) -> Bet | None:
         """Place a back bet via the :class:`ExchangeMatcher`.
 
@@ -1092,8 +1095,30 @@ class BetManager:
             available_at_price=result.top_level_size,
             pair_id=pair_id,
         )
-        # Back bets: the stake is the cost (paid up-front).
-        self.budget -= result.matched_stake
+        # Predictor-integration Session 04: each-way action surface.
+        # When the caller asks for an EW bet, set the EW fields on the
+        # placed bet so settle_race takes the existing EW path.
+        # Settlement is unchanged (hard_constraints §6 — don't re-derive
+        # EW). Refuse silently (return None) if the EW fields can't be
+        # supplied — the env-side caller is responsible for masking
+        # non-EW races before reaching here, but a caller that asks for
+        # EW on a non-EW race shouldn't crash settle_race downstream.
+        if each_way:
+            if each_way_divisor is None or number_of_places is None:
+                return None
+            bet.is_each_way = True
+            bet.each_way_divisor = float(each_way_divisor)
+            bet.number_of_places = int(number_of_places)
+            bet.effective_place_odds = (
+                (bet.average_price - 1.0) / float(each_way_divisor) + 1.0
+            )
+        # Back bets: the stake is the cost (paid up-front). EW back bets
+        # double the stake (half on win + half on place legs); reserve
+        # accordingly so the budget tracks real exposure.
+        if bet.is_each_way:
+            self.budget -= 2.0 * result.matched_stake
+        else:
+            self.budget -= result.matched_stake
         self.bets.append(bet)
         key = (runner.selection_id, BetSide.BACK, result.average_price)
         self._matched_at_level[key] = self._matched_at_level.get(key, 0.0) + result.matched_stake
@@ -1108,6 +1133,9 @@ class BetManager:
         *,
         pair_id: str | None = None,
         force_close: bool = False,
+        each_way: bool = False,
+        each_way_divisor: float | None = None,
+        number_of_places: int | None = None,
     ) -> Bet | None:
         """Place a lay bet via the :class:`ExchangeMatcher`.
 
@@ -1195,8 +1223,27 @@ class BetManager:
             available_at_price=result.top_level_size,
             pair_id=pair_id,
         )
-        # Reserve the liability from the budget.
-        self._open_liability += liability
+        # Predictor-integration Session 04: each-way action surface
+        # (lay-side EW). Lays on EW markets settle correctly per
+        # plans/ew-settlement Session 01; back-only EW is the
+        # value_each_way smoke-cohort default per the autonomous
+        # operator-decision recommendation, but the lay path is
+        # symmetric and tested for completeness.
+        if each_way:
+            if each_way_divisor is None or number_of_places is None:
+                return None
+            bet.is_each_way = True
+            bet.each_way_divisor = float(each_way_divisor)
+            bet.number_of_places = int(number_of_places)
+            bet.effective_place_odds = (
+                (bet.average_price - 1.0) / float(each_way_divisor) + 1.0
+            )
+        # Reserve the liability from the budget. EW lays double the
+        # liability (each leg takes its own slice).
+        if bet.is_each_way:
+            self._open_liability += 2.0 * liability
+        else:
+            self._open_liability += liability
         self.bets.append(bet)
         key = (runner.selection_id, BetSide.LAY, result.average_price)
         self._matched_at_level[key] = self._matched_at_level.get(key, 0.0) + result.matched_stake
