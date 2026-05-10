@@ -221,6 +221,31 @@ def test_env_refuses_flag_on_without_bundle():
         )
 
 
+def test_old_checkpoint_refuses_to_load():
+    """Hard_constraints §13 + integration_contract.md §5: a v7 checkpoint
+    refuses to load against the v8 env. The existing
+    `validate_obs_schema` is the load-bearing guard; this test cross-checks
+    it trips on the specific v7 → v8 transition this plan introduces.
+    """
+    from env.betfair_env import OBS_SCHEMA_VERSION, validate_obs_schema
+
+    assert OBS_SCHEMA_VERSION == 8
+
+    # v7 checkpoint (the schema right before this plan)
+    v7_checkpoint = {"obs_schema_version": 7, "weights": {}}
+    with pytest.raises(ValueError, match="obs_schema_version"):
+        validate_obs_schema(v7_checkpoint)
+
+    # Pre-schema-bump checkpoints (no key) also refuse.
+    pre_schema = {"weights": {}}
+    with pytest.raises(ValueError, match="obs_schema_version"):
+        validate_obs_schema(pre_schema)
+
+    # A v8 checkpoint passes through.
+    v8_checkpoint = {"obs_schema_version": 8, "weights": {}}
+    validate_obs_schema(v8_checkpoint)  # no raise
+
+
 def test_predictor_keys_default_to_zero_with_no_bundle():
     """Hard_constraints §1: with no predictor bundle attached, the new
     predictor keys MUST default to 0.0 in the runner obs slice.
