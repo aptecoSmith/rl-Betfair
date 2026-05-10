@@ -117,6 +117,36 @@ with `use_race_outcome_predictor=True`, and asserts the runner
 obs slice has non-zero values at the predictor-key indices for
 at least one runner.
 
+## Adjacent items also gated on this follow-on (added 2026-05-10)
+
+After completing predictor-integration Session 03 (strategy-mode +
+genes), three additional items were identified as gated on the
+PredictorBundle being instantiated by the trainer/worker:
+
+1. **Trainer registry record extension** — `model_store.create_model`
+   should capture `strategy_mode` + `predictor_champion_experiment_id`
+   + `predictor_ranker_experiment_id` +
+   `predictor_direction_experiment_id` per
+   integration_contract.md §5 + hard_constraints.md §7. The
+   experiment_ids only exist when a bundle is constructed; no bundle
+   is constructed today (predictor flags default off; flag-on path is
+   data-bridging-blocked). Easiest landing once the bridging plan
+   instantiates bundles.
+
+2. **`tools/reevaluate_cohort.py` predictor experiment_id read** —
+   refuse re-eval when the bundle on disk doesn't match the cohort
+   row's recorded experiment_ids. Trivial once (1) lands.
+
+3. **`registry/model_store.py::purge_incompatible` extension** —
+   refuse a checkpoint whose recorded predictor experiment_ids
+   don't match the live bundle. Same dependency.
+
+The schema-migration / JSON-blob approach for (1) is a design
+question for the follow-on plan; suggested default: append the
+`strategy_mode` + 3 experiment_ids into the existing
+`hyperparameters` JSON column rather than adding 4 new SQL columns.
+That sidesteps a schema migration and stays Pythonic.
+
 ## Out of scope for this follow-on
 
 - Direction-predictor per-tick injection cost profiling
