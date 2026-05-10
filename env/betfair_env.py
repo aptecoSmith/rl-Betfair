@@ -83,7 +83,19 @@ logger = logging.getLogger(__name__)
 #               Driven by phase-14 supervised-probe findings:
 #               longer-window pressure + per-price TradedVolumeLadder
 #               summaries lift the head's calibration ~50-70%.
-OBS_SCHEMA_VERSION: int = 7
+#   Version 8 — predictor-integration Session 02 (2026-05-10): added
+#               18 predictor-output features per runner — 6 race-level
+#               from `betfair-predictors` champion + ranker (champion
+#               p_win / p_placed / segment_strong, ranker softmax_share
+#               / top1_flag / top1_high_conf_flag) and 12 per-tick
+#               from the direction predictor (3 horizons × 3 quantiles
+#               + 3 fire-direction one-hots). All 18 keys are ALWAYS
+#               present regardless of `observations.use_*_predictor`
+#               flag state — flag-off populates them with 0.0 sentinel.
+#               This decision is intentional (integration_contract.md §2):
+#               keeping RUNNER_DIM constant per schema version keeps
+#               the architecture-hash check tractable.
+OBS_SCHEMA_VERSION: int = 8
 
 # ── Action schema version ────────────────────────────────────────────────────
 # Bump this integer whenever the action vector layout changes.
@@ -371,6 +383,24 @@ RUNNER_KEYS: list[str] = [
     "vol_below_ltp_frac",
     "vol_ladder_imbalance",
     "vol_weighted_price_dist_ticks",
+    # ── predictor-integration Session 02 features (18, 2026-05-10) ──
+    # 6 race-level outputs from `betfair-predictors` champion + ranker.
+    # Always present in the obs slice — when both
+    # `observations.use_race_outcome_predictor` AND
+    # `observations.use_direction_predictor` are off, populated with
+    # 0.0 sentinel (data/feature_engineer.py default-zero floor).
+    "champion_p_win",
+    "champion_p_placed",
+    "champion_segment_strong",
+    "ranker_softmax_share",
+    "ranker_top1_flag",
+    "ranker_top1_high_conf_flag",
+    # 12 per-tick outputs from the direction predictor — 3 horizons
+    # × 3 quantiles + 3 fire-direction one-hots.
+    "dir_q10_1m", "dir_q50_1m", "dir_q90_1m",
+    "dir_q10_3m", "dir_q50_3m", "dir_q90_3m",
+    "dir_q10_7m", "dir_q50_7m", "dir_q90_7m",
+    "dir_fire_drift", "dir_fire_shorten", "dir_fire_no_signal",
 ]
 
 AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, races_norm, day_pnl_norm
@@ -389,7 +419,7 @@ SCALPING_AGENT_STATE_DIM = 2
 # Derived constants
 MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market type/EW)
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
-RUNNER_DIM = len(RUNNER_KEYS)             # 125 (was 115, +10 phase-14 S02)
+RUNNER_DIM = len(RUNNER_KEYS)             # 143 (was 125, +18 predictor-integration S02)
 
 # Action thresholds
 _BACK_THRESHOLD = 0.33

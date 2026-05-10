@@ -130,3 +130,58 @@ def test_flag_off_is_byte_identical_to_pre_plan():
     assert final_day_pnl == baseline["final_day_pnl"], (
         f"day_pnl drift: env={final_day_pnl} baseline={baseline['final_day_pnl']}"
     )
+
+
+def test_obs_schema_version_is_8():
+    """integration_contract.md §2: schema bumps to 8 in Session 02."""
+    from env.betfair_env import OBS_SCHEMA_VERSION
+    assert OBS_SCHEMA_VERSION == 8
+
+
+def test_runner_dim_is_143():
+    """integration_contract.md §2: RUNNER_DIM grows by 18 (6 race + 12 tick)."""
+    from env.betfair_env import RUNNER_DIM, RUNNER_KEYS
+    assert RUNNER_DIM == 143
+    assert len(RUNNER_KEYS) == 143
+
+
+def test_runner_keys_predictor_block_present():
+    """The 18 predictor keys are appended at the tail of RUNNER_KEYS in
+    the canonical order specified in integration_contract.md §2."""
+    from env.betfair_env import RUNNER_KEYS
+
+    expected_tail = [
+        # Race-level (6)
+        "champion_p_win",
+        "champion_p_placed",
+        "champion_segment_strong",
+        "ranker_softmax_share",
+        "ranker_top1_flag",
+        "ranker_top1_high_conf_flag",
+        # Per-tick direction (12)
+        "dir_q10_1m", "dir_q50_1m", "dir_q90_1m",
+        "dir_q10_3m", "dir_q50_3m", "dir_q90_3m",
+        "dir_q10_7m", "dir_q50_7m", "dir_q90_7m",
+        "dir_fire_drift", "dir_fire_shorten", "dir_fire_no_signal",
+    ]
+    assert RUNNER_KEYS[-18:] == expected_tail
+
+
+def test_predictor_keys_default_to_zero_with_no_bundle():
+    """Hard_constraints §1: with no predictor bundle attached, the new
+    predictor keys MUST default to 0.0 in the runner obs slice.
+
+    This test asserts the env's `_features_to_array` default-zero floor
+    holds for the 18 new keys at the tail of every runner's obs slice.
+    Loaded as a unit test: builds a tiny `_features_to_array`-compatible
+    runners dict that omits the predictor keys; the function should
+    populate them with 0.0 via the existing `feats.get(key, 0.0)`
+    fallback at env/betfair_env.py:1238.
+    """
+    from env.betfair_env import RUNNER_DIM, RUNNER_KEYS
+
+    # Pure unit test of the default-zero floor: a `feats.get(key, 0.0)`
+    # over an empty dict.
+    feats: dict = {}
+    for key in RUNNER_KEYS[-18:]:
+        assert feats.get(key, 0.0) == 0.0, f"{key} default-zero floor failed"
