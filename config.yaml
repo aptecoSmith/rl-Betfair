@@ -337,3 +337,17 @@ features:
 training_worker:
   host: localhost
   port: 8002
+
+# Predictor integration (plans/predictor-integration/)
+# Manifest paths the PredictorBundle loader reads at trainer startup.
+# Paths are evaluated relative to repo root and assume the
+# `betfair-predictors` repo lives as a sibling to `rl-betfair`. The
+# loader appends that sibling repo to `sys.path` for inference-code
+# resolution; see `predictors/loader.py::_ensure_betfair_predictors_on_path`.
+# Flag plumbing (`observations.use_race_outcome_predictor`,
+# `observations.use_direction_predictor`, `training.strategy_mode`)
+# lands in Session 02; Session 01 ships only the loader + manifest paths.
+predictors:
+  champion_manifest: ../betfair-predictors/production/race-outcome/manifest.json
+  ranker_manifest: ../betfair-predictors/production/race-outcome-ranker/manifest.json
+  direction_manifest: ../betfair-predictors/production/direction-predictor/manifest.json
