@@ -1169,6 +1169,30 @@ class BetfairEnv(gymnasium.Env):
             # in the mapping below.
             self._arb_spread_scale = 1.0
 
+        # Predictor-integration Session 02 (early-resolved): the flag
+        # state + bundle reference must be set BEFORE `_precompute`
+        # runs, because `_precompute` calls
+        # `_compute_race_predictor_outputs` which reads
+        # `self._predictor_bundle` / `self._use_race_outcome_predictor`.
+        observations_cfg = config.get("observations", {}) if isinstance(config, dict) else {}
+        if use_race_outcome_predictor is None:
+            use_race_outcome_predictor = bool(
+                observations_cfg.get("use_race_outcome_predictor", False)
+            )
+        if use_direction_predictor is None:
+            use_direction_predictor = bool(
+                observations_cfg.get("use_direction_predictor", False)
+            )
+        if (use_race_outcome_predictor or use_direction_predictor) and predictor_bundle is None:
+            raise ValueError(
+                "BetfairEnv: at least one of use_race_outcome_predictor / "
+                "use_direction_predictor is True but predictor_bundle is None. "
+                "The trainer must construct a PredictorBundle and pass it through."
+            )
+        self._predictor_bundle = predictor_bundle
+        self._use_race_outcome_predictor = bool(use_race_outcome_predictor)
+        self._use_direction_predictor = bool(use_direction_predictor)
+
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
 
@@ -1190,27 +1214,6 @@ class BetfairEnv(gymnasium.Env):
             shape=(self.max_runners * self._actions_per_runner,),
             dtype=np.float32,
         )
-
-        # Predictor-integration Session 02: resolve flag defaults from config,
-        # then refuse loudly if a flag is True without a bundle (hard_constraints §10).
-        observations_cfg = config.get("observations", {}) if isinstance(config, dict) else {}
-        if use_race_outcome_predictor is None:
-            use_race_outcome_predictor = bool(
-                observations_cfg.get("use_race_outcome_predictor", False)
-            )
-        if use_direction_predictor is None:
-            use_direction_predictor = bool(
-                observations_cfg.get("use_direction_predictor", False)
-            )
-        if (use_race_outcome_predictor or use_direction_predictor) and predictor_bundle is None:
-            raise ValueError(
-                "BetfairEnv: at least one of use_race_outcome_predictor / "
-                "use_direction_predictor is True but predictor_bundle is None. "
-                "The trainer must construct a PredictorBundle and pass it through."
-            )
-        self._predictor_bundle = predictor_bundle
-        self._use_race_outcome_predictor = bool(use_race_outcome_predictor)
-        self._use_direction_predictor = bool(use_direction_predictor)
 
         # Runtime state (initialised in reset)
         self.bet_manager: BetManager | None = None
@@ -1325,9 +1328,24 @@ class BetfairEnv(gymnasium.Env):
             self._runner_maps.append(runner_map)
             self._slot_maps.append(slot_map)
 
+            # Predictor-integration Session 02 + data-bridging follow-on:
+            # Compute per-race predictor outputs ONCE per race, broadcast
+            # across all ticks. When both predictor flags are off, this
+            # is a no-op (returns empty dict). When at least one flag is
+            # on, the bundle's `predict_race(df)` is called, cached by
+            # market_id, and the outputs land in
+            # ``feat_dict["runners"][sid]`` for the env's
+            # ``_features_to_array`` to read into the obs slice.
+            predictor_outputs_per_runner = self._compute_race_predictor_outputs(race)
+
             # Build static observation array per tick
             race_obs: list[np.ndarray] = []
             for feat_dict in race_features:
+                if predictor_outputs_per_runner:
+                    runners_dict = feat_dict.get("runners", {})
+                    for sid, predictor_keys in predictor_outputs_per_runner.items():
+                        if sid in runners_dict:
+                            runners_dict[sid].update(predictor_keys)
                 race_obs.append(self._features_to_array(feat_dict, runner_map))
             self._static_obs.append(race_obs)
 
@@ -1339,6 +1357,88 @@ class BetfairEnv(gymnasium.Env):
             else:
                 span = 1.0
             self._race_durations.append(max(span, 1.0))
+
+    def _compute_race_predictor_outputs(
+        self,
+        race: Race,
+    ) -> dict[int, dict[str, float]]:
+        """Compute per-runner predictor outputs for one race, ONCE.
+
+        Returns ``{selection_id: {predictor_key: value}}`` to be merged
+        into the per-tick ``feat_dict["runners"][sid]`` so the env's
+        ``_features_to_array`` populates the obs slice's predictor
+        columns. When both ``use_*_predictor`` flags are off, returns
+        an empty dict — the env's existing default-zero floor handles
+        the predictor keys.
+
+        Cached on the bundle by ``market_id`` (predict_race itself is
+        idempotent), so the per-race compute is one bundle call even
+        across days that revisit the same market.
+
+        Race-level flag (``use_race_outcome_predictor=True``) populates
+        the 6 race-level keys (champion p_win/p_placed,
+        segment_strong_flag, ranker_softmax_share, ranker_top1_flag,
+        ranker_top1_high_conf_flag).
+
+        Per-tick direction flag is gated separately — the per-tick
+        Conv1D is too expensive for static-obs precompute and lands in
+        a follow-on iteration that wires the predict_tick path into
+        the env's per-step obs construction.
+        """
+        if (
+            self._predictor_bundle is None
+            or not self._use_race_outcome_predictor
+        ):
+            return {}
+
+        # Lazy imports to keep env startup cheap when predictors are off.
+        from data.predictor_features import build_predict_race_dataframe
+
+        # ``as_of_date`` for the no-leakage F2 strict-< filter is the day
+        # this env is training on. ``self.day.date`` is the canonical
+        # source; parse to ``date`` once.
+        from datetime import datetime as _datetime
+
+        try:
+            as_of = _datetime.strptime(self.day.date[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            logger.warning(
+                "predictor injection: could not parse day.date=%r as ISO; "
+                "skipping predictor injection for race %s",
+                self.day.date, race.market_id,
+            )
+            return {}
+
+        try:
+            df = build_predict_race_dataframe(race, as_of_date=as_of)
+            outputs = self._predictor_bundle.predict_race(df)
+        except Exception:
+            logger.exception(
+                "predictor_bundle.predict_race failed for market %s; "
+                "skipping injection (env will fall through to default-zero)",
+                race.market_id,
+            )
+            return {}
+
+        per_runner: dict[int, dict[str, float]] = {}
+        for sid in race.runner_metadata:
+            per_runner[sid] = {
+                "champion_p_win": float(outputs.p_win.get(sid, 0.0)),
+                "champion_p_placed": float(outputs.p_placed.get(sid, 0.0)),
+                "champion_segment_strong": float(
+                    outputs.segment_strong_flag.get(sid, False)
+                ),
+                "ranker_softmax_share": float(
+                    outputs.ranker_softmax_share.get(sid, 0.0)
+                ),
+                "ranker_top1_flag": float(
+                    outputs.ranker_top1_flag.get(sid, False)
+                ),
+                "ranker_top1_high_conf_flag": float(
+                    outputs.ranker_top1_high_confidence_flag.get(sid, False)
+                ),
+            }
+        return per_runner
 
     def _features_to_array(
         self,

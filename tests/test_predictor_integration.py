@@ -402,27 +402,96 @@ def test_value_mode_forces_scalping_false():
     assert env.scalping_mode is False
 
 
-@pytest.mark.skip(
-    reason=(
-        "Depends on the data-bridging follow-on "
-        "(incoming/predictor-integration-data-bridging.md): the GBM "
-        "champion + ranker need F2/F5 numeric matrices that rl-betfair "
-        "doesn't yet construct from its Race/RunnerMetadata objects. "
-        "Session 02 ships the env wiring + flag plumbing + default-zero "
-        "floor; the actual injection-when-flag-on lands in the follow-on "
-        "plan. This test will be implemented and un-skipped there."
-    )
-)
 def test_flag_on_populates_predictor_keys():
-    """Placeholder: with `use_race_outcome_predictor=True` and a real
-    `PredictorBundle`, the runner obs slice carries non-zero values
-    at the predictor-key indices for at least one runner.
+    """Hard_constraints §1 + Session 02 success bar: with
+    `use_race_outcome_predictor=True` and a real `PredictorBundle`,
+    the runner obs slice carries non-zero values at the predictor-key
+    indices for at least one runner.
 
-    Implementation deferred to the data-bridging follow-on plan
-    (`incoming/predictor-integration-data-bridging.md`). The
-    integration_contract.md §2 sketch of `_inject_predictor_outputs`
-    presumes a `race_card: pandas.DataFrame` with the F2/F5 column
-    union — that DataFrame's construction from rl-betfair's
-    `Race`/`RunnerMetadata` is the load-bearing remaining piece.
+    Cross-checks the data-bridging integration end-to-end:
+    `data/predictor_features.py::build_predict_race_dataframe` →
+    `PredictorBundle.predict_race(df)` →
+    `env._compute_race_predictor_outputs` →
+    `feat_dict["runners"][sid]` →
+    `_features_to_array` → obs slice.
     """
-    pass  # pragma: no cover — skipped above.
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import (  # type: ignore[import-not-found]
+        RUNNER_DIM,
+        RUNNER_KEYS,
+        BetfairEnv,
+    )
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+
+    # Predictor bundle: real production weights via sibling repo.
+    sibling_repo = Path(__file__).resolve().parents[1].parent / "betfair-predictors"
+    if not (
+        sibling_repo / "production" / "race-outcome" / "manifest.json"
+    ).exists():
+        pytest.skip("sibling betfair-predictors repo not present")
+    from predictors import PredictorBundle  # type: ignore[import-not-found]
+    bundle = PredictorBundle.from_manifests(
+        champion_manifest=str(
+            sibling_repo / "production" / "race-outcome" / "manifest.json"
+        ),
+        ranker_manifest=str(
+            sibling_repo / "production" / "race-outcome-ranker" / "manifest.json"
+        ),
+        direction_manifest=str(
+            sibling_repo / "production" / "direction-predictor" / "manifest.json"
+        ),
+    )
+
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    env = BetfairEnv(
+        day,
+        cfg,
+        predictor_bundle=bundle,
+        use_race_outcome_predictor=True,
+        use_direction_predictor=False,  # per-tick path not wired yet
+    )
+
+    # Predictor-key indices in the runner obs slice.
+    predictor_key_indices = [
+        i for i, k in enumerate(RUNNER_KEYS)
+        if k.startswith("champion_") or k.startswith("ranker_")
+    ]
+    assert len(predictor_key_indices) == 6, (
+        "expected 6 race-level predictor keys at the tail of RUNNER_KEYS"
+    )
+
+    # Inspect the first race's first tick obs. Find runner slot 0's
+    # obs slice and check that the predictor indices have at least one
+    # non-zero value (the champion's p_win is in [0, 1] and varies per
+    # runner — at least one non-zero is essentially guaranteed).
+    race_idx = 0
+    tick_idx = 0
+    static = env._static_obs[race_idx][tick_idx]
+    runner_offset = 0  # MARKET + VELOCITY come first; we'll find runner_0 below
+    from env.betfair_env import MARKET_DIM, VELOCITY_DIM
+    runner_start = MARKET_DIM + VELOCITY_DIM
+
+    found_nonzero = False
+    runner_map = env._runner_maps[race_idx]
+    for slot in range(env.max_runners):
+        slot_offset = runner_start + slot * RUNNER_DIM
+        slot_slice = static[slot_offset:slot_offset + RUNNER_DIM]
+        for idx in predictor_key_indices:
+            if slot_slice[idx] != 0.0:
+                found_nonzero = True
+                break
+        if found_nonzero:
+            break
+
+    assert found_nonzero, (
+        f"Expected at least one runner slot's predictor-key indices "
+        f"(slots 0..{env.max_runners-1}, indices {predictor_key_indices} "
+        f"into the per-runner obs slice) to carry non-zero predictor output, "
+        f"but all were zero — the predict_race injection didn't land. "
+        f"runner_map for race {race_idx}: {runner_map}"
+    )
