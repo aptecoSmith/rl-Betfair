@@ -891,6 +891,14 @@ def train_one_agent(
         if bc_pretrain_steps_override is not None
         else int(getattr(genes, "bc_pretrain_steps", 0))
     )
+    # Pre-existing scoping fix (caught by predictor-integration smoke
+    # 2026-05-10): `direction_bce_label_map` is only assigned inside
+    # the `if bc_steps > 0:` branch but referenced unconditionally at
+    # line 1308 in the post-PPO direction-BCE diagnostic. Default to
+    # None up-front so the diagnostic short-circuits cleanly when BC
+    # is off.
+    direction_bce_label_map = None
+    bc_samples = None
     if bc_steps > 0:
         bc_lr = (
             float(bc_learning_rate_override)
