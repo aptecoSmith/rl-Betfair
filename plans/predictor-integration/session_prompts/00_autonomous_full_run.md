@@ -92,25 +92,45 @@ Loop ends (do NOT schedule next wake) when ANY of:
 
 1. **Session 07 findings.md is written and committed.** Plan
    is complete.
-2. **An operator-decision point is hit** (per
-   `master_todo.md`'s "After Session NN" sections — e.g. after
-   Session 01 the sibling-import vs install-package decision;
-   after Session 05 the reward-shape escalation if smoke
-   produces zero gradient signal). Surface the decision
-   explicitly to the operator and stop.
-3. **The byte-identical regression test fails** and the cause
+2. **The byte-identical regression test fails** and the cause
    is non-obvious. Stop. Do NOT silence the test or weaken its
    assertion. Log the failure, summarise to the operator, and
    await guidance.
-4. **A hard_constraint is about to be violated** to make
+3. **A hard_constraint is about to be violated** to make
    progress (e.g. Session 05 smoke produces no gradient signal
    and the temptation is to add shaping per §3 — that's a stop
    condition, not a unilateral fix).
-5. **The cohort runs in Sessions 05/06/07 require GPU time the
-   operator hasn't committed.** Surface the wall-clock estimate
-   and stop; the operator launches the cohort.
-6. **Three iterations on the same sub-step without progress.**
+4. **A smoke cohort fails its success bar** in a way that
+   indicates the integration is genuinely broken (e.g. zero
+   bets across all 12 agents on Session 05's value-win smoke;
+   `is_each_way == True` on < 50% of bets in Session 06 paired
+   with zero P&L signal). The cohort completed, but the
+   verdict is "the wiring is broken." Stop and diagnose; do
+   NOT proceed to the next mode's cohort or to Session 07.
+5. **Three iterations on the same sub-step without progress.**
    Stop and ask. Do not fight a problem indefinitely.
+
+**NOTE — operator-decision points are NOT stop conditions.**
+Per the operator's autonomous-run mandate, default to the
+recommendation in `master_todo.md`'s "After Session NN"
+sections, log the choice in `autonomous_run_log.md`, and
+continue. The recommendations:
+
+- After 01: sibling-import via `sys.path.insert` (don't
+  invest in installable package yet).
+- After 02: `use_direction_predictor` opt-in per cohort,
+  default off until per-tick cost is profiled.
+- After 03: new genes always present at default 0 in
+  `CohortGenes.to_dict()` (Path A pattern).
+- After 04: back-only EW for the smoke (lay-EW is a follow-on).
+- After 05: no shaping added even if signal looks sparse —
+  that's a hard_constraints §3 violation, escalate via stop
+  condition §3 above.
+- After 06: same — no place-specific reward.
+
+If a decision point genuinely demands operator input (i.e. the
+recommendation doesn't apply because reality diverged from the
+plan's assumptions), THAT triggers stop condition §3 above.
 
 ## Pacing
 
@@ -119,18 +139,65 @@ Loop ends (do NOT schedule next wake) when ANY of:
 - **60–270s (cache-warm)** — when actively iterating on code
   and tests; the next iteration is doing the next file edit
   or running the next test.
-- **1200–1800s (idle window)** — when waiting on a real cohort
-  run (Sessions 05, 06, 07) to finish on the GPU host. The
-  cohort emits log files; the next iteration reads the latest
-  log and decides whether to continue.
-- **Operator-asleep windows** — never schedule across an
-  expected operator-asleep window (typical UK overnight).
-  Sessions 05/06/07 cohorts are operator-launched; they run
-  while the operator is awake to monitor.
+- **1200–1800s (idle window)** — when waiting on a cohort run
+  (Sessions 05, 06, 07) to make progress. The cohort emits log
+  files; the next iteration tails the latest log, checks
+  process state, and decides whether to continue waiting or
+  the cohort has completed.
+- **3600s (max)** — only when a cohort is mid-generation and
+  the next interesting log line is known to be > 30 minutes
+  away. Don't burn iterations on dead-air.
 
 Pass the **same /loop input** verbatim back to ScheduleWakeup
 each iteration:
 `/loop @plans/predictor-integration/session_prompts/00_autonomous_full_run.md`.
+
+## Cohort run discipline (Sessions 05, 06, 07)
+
+The loop launches cohorts directly. **No operator sign-off
+required** — the operator has authorised autonomous training
+runs for this plan. Discipline:
+
+1. **Launch via the existing CLI.** Look at
+   `run_phase8_overnight.sh`, `training_v2/discrete_ppo/train.py`,
+   and `training_v2/cohort/worker.py` for the canonical
+   invocation. Use `--device cuda` (per the operator's
+   memory: always GPU for cohorts). Tee the launch log into
+   `registry/<cohort_tag>.log` so the next iteration can tail
+   it.
+2. **Run in background.** Launch via `run_in_background=True`
+   on the Bash tool (or a Monitor task arm if it suits).
+   Don't block on the cohort; schedule a 1200s wakeup.
+3. **Monitor by tailing the log.** Each iteration:
+   - Tail the last ~200 lines of the cohort log.
+   - Check whether the latest generation marker has advanced
+     since the previous iteration.
+   - Check for crash markers (`Traceback`, `CUDA out of
+     memory`, `Process exited with code`).
+   - If still running and no crash: schedule next wakeup;
+     log "gen N/6 in progress" and stop the iteration.
+   - If completed cleanly: read the registry row + episode
+     JSONL; evaluate against the smoke success bar from
+     `session_prompts/0N_*.md`; commit findings; move on.
+   - If crashed: stop (this is stop condition §4 — verify
+     it's a real failure, log the trace, await operator).
+4. **Wall-clock estimates.** Smokes are ~4 hours each on
+   GPU. Real cohorts (Session 07's three concurrent runs)
+   are ~6–12 hours total. The loop can absorb either at the
+   1200–3600s wake cadence; don't try to compress.
+5. **Concurrent cohorts (Session 07).** Launch all three
+   modes' cohorts in parallel as separate background processes
+   (the operator's GPU host has the headroom — see Phase 8's
+   parallel-cohort precedent in `run_phase8_overnight.sh`).
+   Each iteration tails all three logs.
+6. **Crash recovery.** If one of three Session-07 cohorts
+   crashes, stop ALL three (don't let the survivors finish
+   and produce a misleading two-mode comparison). Diagnose;
+   surface to operator.
+
+## What to commit, when
+
+Commit at clean session boundaries:
 
 ## What to commit, when
 
@@ -214,12 +281,17 @@ CLAUDE.md when the plan exits.
   the cause; if it's a real failure, stop and surface to the
   operator. The byte-identical regression test is the
   load-bearing one.
-- Do NOT run cohorts (Sessions 05/06/07) without operator
-  go-ahead. Cohort runs cost GPU-hours.
 - Do NOT push to `origin master` mid-loop. Commit locally;
   the operator pushes when they review the work.
 - Do NOT modify `data/extractor.py` or `data/episode_builder.py`
   in this plan. EW data is already in the parquet pipeline.
+- Do NOT add new shaping terms to value modes if signal looks
+  sparse. That's a hard_constraints §3 violation; stop and
+  escalate.
+- Do NOT proceed to Session 06 if Session 05's smoke fails its
+  success bar, or to Session 07 if Session 06's smoke fails.
+  A failed smoke means the integration is broken; cascading
+  to the next mode wastes GPU and produces misleading data.
 
 ## First iteration: bootstrap
 
