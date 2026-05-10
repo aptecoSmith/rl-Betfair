@@ -73,13 +73,13 @@ def test_flag_off_is_byte_identical_to_pre_plan():
 
     cfg = _scalping_train_config(max_runners=baseline["max_runners"])
     day = load_day(baseline["day"], data_dir=DATA_DIR)
-    env_kwargs = {}
-    # Session 02 will add `use_race_outcome_predictor` /
-    # `use_direction_predictor` kwargs; tolerate their absence pre-Session-02.
-    try:
-        env = BetfairEnv(day, cfg, **env_kwargs)
-    except TypeError:
-        env = BetfairEnv(day, cfg)
+    env = BetfairEnv(
+        day,
+        cfg,
+        predictor_bundle=None,
+        use_race_outcome_predictor=False,
+        use_direction_predictor=False,
+    )
 
     obs, _info = env.reset(seed=baseline["seed"])
     action_dim = int(env.action_space.shape[0])
@@ -165,6 +165,60 @@ def test_runner_keys_predictor_block_present():
         "dir_fire_drift", "dir_fire_shorten", "dir_fire_no_signal",
     ]
     assert RUNNER_KEYS[-18:] == expected_tail
+
+
+def test_env_constructs_with_flags_off_and_no_bundle():
+    """Sanity: env constructs with predictor flags off + bundle=None."""
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    env = BetfairEnv(
+        day,
+        cfg,
+        predictor_bundle=None,
+        use_race_outcome_predictor=False,
+        use_direction_predictor=False,
+    )
+    # Internal state surfaced for downstream wiring.
+    assert env._predictor_bundle is None
+    assert env._use_race_outcome_predictor is False
+    assert env._use_direction_predictor is False
+
+
+def test_env_refuses_flag_on_without_bundle():
+    """Hard_constraints §10: silent fallback forbidden. A flag set True
+    without a PredictorBundle is a configuration error and must raise."""
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    with pytest.raises(ValueError, match="predictor_bundle is None"):
+        BetfairEnv(
+            day,
+            cfg,
+            predictor_bundle=None,
+            use_race_outcome_predictor=True,
+            use_direction_predictor=False,
+        )
+    with pytest.raises(ValueError, match="predictor_bundle is None"):
+        BetfairEnv(
+            day,
+            cfg,
+            predictor_bundle=None,
+            use_race_outcome_predictor=False,
+            use_direction_predictor=True,
+        )
 
 
 def test_predictor_keys_default_to_zero_with_no_bundle():

@@ -760,6 +760,18 @@ class BetfairEnv(gymnasium.Env):
         market_type_filter: str = "BOTH",
         scalping_mode: bool | None = None,
         scalping_overrides: dict | None = None,
+        # Predictor-integration Session 02 (plans/predictor-integration/).
+        # `predictor_bundle` is constructed once per worker process and
+        # passed in by the trainer. Both `use_*_predictor` flags default
+        # to None — when None, the env reads
+        # `config["observations"]["use_*_predictor"]` (default False).
+        # When at least one flag resolves True, `predictor_bundle` MUST
+        # be non-None or __init__ raises. When BOTH flags resolve False,
+        # the bundle is unused and the new RUNNER_KEYS default to 0.0
+        # via the env's `feats.get(key, 0.0)` floor.
+        predictor_bundle: object | None = None,
+        use_race_outcome_predictor: bool | None = None,
+        use_direction_predictor: bool | None = None,
     ) -> None:
         super().__init__()
         self.day = day
@@ -1113,6 +1125,27 @@ class BetfairEnv(gymnasium.Env):
             shape=(self.max_runners * self._actions_per_runner,),
             dtype=np.float32,
         )
+
+        # Predictor-integration Session 02: resolve flag defaults from config,
+        # then refuse loudly if a flag is True without a bundle (hard_constraints §10).
+        observations_cfg = config.get("observations", {}) if isinstance(config, dict) else {}
+        if use_race_outcome_predictor is None:
+            use_race_outcome_predictor = bool(
+                observations_cfg.get("use_race_outcome_predictor", False)
+            )
+        if use_direction_predictor is None:
+            use_direction_predictor = bool(
+                observations_cfg.get("use_direction_predictor", False)
+            )
+        if (use_race_outcome_predictor or use_direction_predictor) and predictor_bundle is None:
+            raise ValueError(
+                "BetfairEnv: at least one of use_race_outcome_predictor / "
+                "use_direction_predictor is True but predictor_bundle is None. "
+                "The trainer must construct a PredictorBundle and pass it through."
+            )
+        self._predictor_bundle = predictor_bundle
+        self._use_race_outcome_predictor = bool(use_race_outcome_predictor)
+        self._use_direction_predictor = bool(use_direction_predictor)
 
         # Runtime state (initialised in reset)
         self.bet_manager: BetManager | None = None

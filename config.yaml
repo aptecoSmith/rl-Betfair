@@ -344,10 +344,16 @@ training_worker:
 # `betfair-predictors` repo lives as a sibling to `rl-betfair`. The
 # loader appends that sibling repo to `sys.path` for inference-code
 # resolution; see `predictors/loader.py::_ensure_betfair_predictors_on_path`.
-# Flag plumbing (`observations.use_race_outcome_predictor`,
-# `observations.use_direction_predictor`, `training.strategy_mode`)
-# lands in Session 02; Session 01 ships only the loader + manifest paths.
 predictors:
   champion_manifest: ../betfair-predictors/production/race-outcome/manifest.json
   ranker_manifest: ../betfair-predictors/production/race-outcome-ranker/manifest.json
   direction_manifest: ../betfair-predictors/production/direction-predictor/manifest.json
+
+# Predictor-integration observation flags (Session 02). Both default OFF
+# so flag-off behaviour is byte-identical to pre-plan
+# (hard_constraints.md §1, regression test
+# tests/test_predictor_integration.py::test_flag_off_is_byte_identical_to_pre_plan).
+# Per-cohort cohorts opt in by overriding these in their hp/reward_overrides.
+observations:
+  use_race_outcome_predictor: false
+  use_direction_predictor: false
