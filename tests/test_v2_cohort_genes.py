@@ -214,6 +214,16 @@ class TestPhase5Genes:
             # is supplied via --reward-overrides; the default-disabled
             # cohort-wide flag preserves byte-identity at this default.
             "direction_gate_threshold": 0.5,
+            # Predictor-integration Session 03 (2026-05-10). Defaults
+            # per integration_contract.md §4. Cross-mode breeding-
+            # friendly: every gene present at default in to_dict;
+            # env / trainer reads only those relevant to the active
+            # strategy_mode.
+            "predictor_feature_gain": 1.0,
+            "value_edge_threshold": 0.05,
+            "value_kelly_fraction": 0.25,
+            "each_way_edge_threshold": 0.05,
+            "each_way_kelly_fraction": 0.25,
         }
         assert PHASE5_GENE_DEFAULTS == expected
 
@@ -335,15 +345,15 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_29_fields(self):
+    def test_to_dict_serialises_all_34_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
-        # 7 legacy + 12 Phase 5 (incl. direction_gate_threshold) +
+        # 7 legacy + 17 Phase 5 (12 prior + 5 predictor-integration) +
         # 3 Phase 8 BC + 4 Phase-13 direction + 1 Phase-13 S05 BC +
         # 1 Phase-14 S03 (direction_gate_enabled) + 1 Phase-14 S06
         # (direction_gate_warmup_eps).
-        assert len(d) == 29
+        assert len(d) == 34
         for name in PHASE5_GENE_NAMES:
             assert name in d
             assert isinstance(d[name], float)
@@ -374,8 +384,9 @@ class TestPhase5Genes:
         assert d["direction_gate_warmup_eps"] == 5
 
     def test_phase5_gene_names_set_size(self):
-        # Phase-14 S03 added direction_gate_threshold to Phase 5
-        # (the threshold is GA-evolved when operator passes
-        # --enable-gene direction_gate_threshold).
-        assert len(PHASE5_GENE_NAMES) == 12
+        # 12 Phase 5 genes + 5 predictor-integration Session 03 genes
+        # (predictor_feature_gain, value_edge_threshold,
+        # value_kelly_fraction, each_way_edge_threshold,
+        # each_way_kelly_fraction) = 17.
+        assert len(PHASE5_GENE_NAMES) == 17
         assert PHASE5_GENE_NAMES == frozenset(PHASE5_GENE_DEFAULTS)

@@ -71,6 +71,32 @@ REWARD_CLIP_RANGE: tuple[float, float] = (1.0, 10.0)
 # PPO of training signal (per phase-14 hard_constraints §10).
 DIRECTION_GATE_THRESHOLD_RANGE: tuple[float, float] = (0.5, 0.95)
 
+# Predictor-integration Session 03 (plans/predictor-integration/
+# integration_contract.md §4). Five new genes:
+#   predictor_feature_gain   — scalar 0..1 scaling the predictor obs
+#                              columns in actor_input. 0 = ignore
+#                              predictors entirely; 1 = full strength.
+#                              Cross-mode (arb / value_*).
+#   value_edge_threshold     — value_win mode only. Minimum
+#                              (champion_p_win - implied_p_win) for
+#                              the policy to consider a bet.
+#                              Manifest's value_spotting_at_inference_time
+#                              recommends 0.05.
+#   value_kelly_fraction     — value_win mode only. Fraction of full
+#                              Kelly the agent stakes at. 0 ≈ ignore
+#                              edge; 1 = full-Kelly.
+#   each_way_edge_threshold  — value_each_way mode only.
+#   each_way_kelly_fraction  — value_each_way mode only.
+# Non-applicable-to-mode genes are still present (zero-effect when
+# the env's reward gate doesn't read them) so cross-mode breeding
+# stays trivial. Path A pattern from CLAUDE.md §"v2 stack consumes
+# aux-head loss weights" §"v2-specific worker plumbing".
+PREDICTOR_FEATURE_GAIN_RANGE: tuple[float, float] = (0.0, 1.0)
+VALUE_EDGE_THRESHOLD_RANGE: tuple[float, float] = (0.02, 0.10)
+VALUE_KELLY_FRACTION_RANGE: tuple[float, float] = (0.0, 1.0)
+EACH_WAY_EDGE_THRESHOLD_RANGE: tuple[float, float] = (0.02, 0.10)
+EACH_WAY_KELLY_FRACTION_RANGE: tuple[float, float] = (0.0, 1.0)
+
 
 #: Default value applied to a Phase 5 gene whose name is NOT in the cohort's
 #: ``enabled_set``. Each value matches the pre-Phase-5 cohort-wide default
@@ -93,6 +119,16 @@ PHASE5_GENE_DEFAULTS: dict[str, float] = {
     # default) this value is unread; when enabled, 0.5 is the
     # value at which the gate filters the fewest rows.
     "direction_gate_threshold": 0.5,
+    # Predictor-integration Session 03 (2026-05-10). Defaults per
+    # integration_contract.md §4. Cross-mode breeding-friendly: every
+    # mode's CohortGenes.to_dict() carries all 5 keys at the documented
+    # defaults; the env's reward gate / action surface decides which
+    # ones are read.
+    "predictor_feature_gain": 1.0,
+    "value_edge_threshold": 0.05,
+    "value_kelly_fraction": 0.25,
+    "each_way_edge_threshold": 0.05,
+    "each_way_kelly_fraction": 0.25,
 }
 
 
@@ -116,6 +152,11 @@ _PHASE5_RANGES: dict[str, tuple[float, float]] = {
     "alpha_lr": ALPHA_LR_RANGE,
     "reward_clip": REWARD_CLIP_RANGE,
     "direction_gate_threshold": DIRECTION_GATE_THRESHOLD_RANGE,
+    "predictor_feature_gain": PREDICTOR_FEATURE_GAIN_RANGE,
+    "value_edge_threshold": VALUE_EDGE_THRESHOLD_RANGE,
+    "value_kelly_fraction": VALUE_KELLY_FRACTION_RANGE,
+    "each_way_edge_threshold": EACH_WAY_EDGE_THRESHOLD_RANGE,
+    "each_way_kelly_fraction": EACH_WAY_KELLY_FRACTION_RANGE,
 }
 
 
@@ -212,6 +253,20 @@ class CohortGenes:
     # entirely (gene value applies from episode 0).
     direction_gate_warmup_eps: int = 5
 
+    # Predictor-integration Session 03 (added 2026-05-10).
+    # Per integration_contract.md §4. Cross-mode (arb / value_win /
+    # value_each_way) breeding-friendly: every gene carries a
+    # default value, every mode's CohortGenes.to_dict() emits all 5
+    # keys, the env / trainer reads only the ones relevant to the
+    # active strategy_mode. See `plans/predictor-integration/
+    # session_prompts/03_strategy_mode_switch.md` §"New CohortGenes
+    # fields" for the per-mode usage map.
+    predictor_feature_gain: float = 1.0
+    value_edge_threshold: float = 0.05
+    value_kelly_fraction: float = 0.25
+    each_way_edge_threshold: float = 0.05
+    each_way_kelly_fraction: float = 0.25
+
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
         return {
@@ -258,6 +313,11 @@ class CohortGenes:
             "direction_gate_warmup_eps": int(
                 self.direction_gate_warmup_eps,
             ),
+            "predictor_feature_gain": float(self.predictor_feature_gain),
+            "value_edge_threshold": float(self.value_edge_threshold),
+            "value_kelly_fraction": float(self.value_kelly_fraction),
+            "each_way_edge_threshold": float(self.each_way_edge_threshold),
+            "each_way_kelly_fraction": float(self.each_way_kelly_fraction),
         }
 
 
