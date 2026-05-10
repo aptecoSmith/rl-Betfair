@@ -421,12 +421,18 @@ def _build_env_for_day(
     scorer_dir: Path,
     reward_overrides: dict | None = None,
     scalping_overrides: dict | None = None,
+    predictor_bundle: object | None = None,
+    use_race_outcome_predictor: bool | None = None,
+    use_direction_predictor: bool | None = None,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     day = load_day(day_str, data_dir=data_dir)
     env = BetfairEnv(
         day, cfg,
         reward_overrides=reward_overrides,
         scalping_overrides=scalping_overrides,
+        predictor_bundle=predictor_bundle,
+        use_race_outcome_predictor=use_race_outcome_predictor,
+        use_direction_predictor=use_direction_predictor,
     )
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
@@ -703,6 +709,7 @@ def train_one_agent(
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
     arb_spread_scale_override: float | None = None,
+    predictor_bundle: object | None = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -815,6 +822,7 @@ def train_one_agent(
         day_str=first_day, data_dir=data_dir, cfg=cfg, scorer_dir=scorer_dir,
         reward_overrides=per_agent_reward_overrides,
         scalping_overrides=per_agent_scalping_overrides,
+        predictor_bundle=predictor_bundle,
     )
 
     # Phase-14 S03 — direction gate config flows through trainer_hp
@@ -1105,12 +1113,33 @@ def train_one_agent(
             logger.exception("event_emitter raised on agent_training_started; continuing")
 
     # ── Registry: create model row up-front so we have a model_id ────
+    # Predictor-integration Session 03 / data-bridging follow-on
+    # (hard_constraints.md §7): the cohort row captures the
+    # `strategy_mode` + the 3 predictor `experiment_id`s when a
+    # bundle is in play, so re-eval tooling can refuse on mismatch.
+    # Stuffed into the existing `hyperparameters` JSON column rather
+    # than added as new SQL columns (avoids schema migration; see
+    # `incoming/predictor-integration-data-bridging.md` recommendation).
+    hp_for_registry = dict(genes.to_dict())
+    hp_for_registry["strategy_mode"] = str(
+        cfg.get("training", {}).get("strategy_mode", "arb")
+    )
+    if predictor_bundle is not None:
+        hp_for_registry["predictor_champion_experiment_id"] = str(
+            getattr(predictor_bundle, "champion_experiment_id", "")
+        )
+        hp_for_registry["predictor_ranker_experiment_id"] = str(
+            getattr(predictor_bundle, "ranker_experiment_id", "")
+        )
+        hp_for_registry["predictor_direction_experiment_id"] = str(
+            getattr(predictor_bundle, "direction_experiment_id", "")
+        )
     if model_store is not None:
         model_id = model_store.create_model(
             generation=int(generation),
             architecture_name=arch_name,
             architecture_description=_ARCH_DESCRIPTION,
-            hyperparameters=genes.to_dict(),
+            hyperparameters=hp_for_registry,
             parent_a_id=parent_a_id,
             parent_b_id=parent_b_id,
             model_id=str(agent_id),
@@ -1136,6 +1165,7 @@ def train_one_agent(
                 scorer_dir=scorer_dir,
                 reward_overrides=per_agent_reward_overrides,
                 scalping_overrides=per_agent_scalping_overrides,
+                predictor_bundle=predictor_bundle,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -1333,6 +1363,7 @@ def train_one_agent(
             scorer_dir=scorer_dir,
             reward_overrides=per_agent_reward_overrides,
             scalping_overrides=per_agent_scalping_overrides,
+            predictor_bundle=predictor_bundle,
         )
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policy, device=device,

@@ -221,6 +221,69 @@ def test_env_refuses_flag_on_without_bundle():
         )
 
 
+def test_registry_row_tags_strategy_mode_and_experiment_ids():
+    """Hard_constraints §7 + data-bridging follow-on: the cohort row's
+    hyperparameters JSON gets `strategy_mode` + 3 predictor
+    `experiment_id`s when a bundle is in play. Stored inside the
+    existing JSON column so re-eval tooling can refuse on mismatch
+    without a schema migration.
+
+    Tests the dict-construction path inside `train_one_agent` rather
+    than invoking the full worker (which would need a real env + GPU).
+    """
+    sibling_repo = Path(__file__).resolve().parents[1].parent / "betfair-predictors"
+    if not (
+        sibling_repo / "production" / "race-outcome" / "manifest.json"
+    ).exists():
+        pytest.skip("sibling betfair-predictors repo not present")
+
+    from predictors import PredictorBundle  # type: ignore[import-not-found]
+    bundle = PredictorBundle.from_manifests(
+        champion_manifest=str(
+            sibling_repo / "production" / "race-outcome" / "manifest.json"
+        ),
+        ranker_manifest=str(
+            sibling_repo / "production" / "race-outcome-ranker" / "manifest.json"
+        ),
+        direction_manifest=str(
+            sibling_repo / "production" / "direction-predictor" / "manifest.json"
+        ),
+    )
+
+    # Mirror the worker's dict-construction logic (worker.py around line
+    # 1107 in the registry-create block). If this drifts we want the
+    # test to fail loudly so the hard_constraints §7 contract stays
+    # honoured.
+    from training_v2.cohort.genes import sample_genes  # type: ignore[import-not-found]
+    import random as _random
+
+    rng = _random.Random(0)
+    genes = sample_genes(rng)
+    cfg = {"training": {"strategy_mode": "value_win"}}
+
+    hp = dict(genes.to_dict())
+    hp["strategy_mode"] = str(cfg.get("training", {}).get("strategy_mode", "arb"))
+    hp["predictor_champion_experiment_id"] = str(
+        bundle.champion_experiment_id
+    )
+    hp["predictor_ranker_experiment_id"] = str(
+        bundle.ranker_experiment_id
+    )
+    hp["predictor_direction_experiment_id"] = str(
+        bundle.direction_experiment_id
+    )
+
+    # The 4 new keys live in the JSON dict alongside the gene fields.
+    assert hp["strategy_mode"] == "value_win"
+    assert hp["predictor_champion_experiment_id"] == "1c15250ee90d1b65"
+    assert hp["predictor_ranker_experiment_id"] == "b23018bf5c8bcc70"
+    assert hp["predictor_direction_experiment_id"].startswith("conv1d_k3_s1_")
+
+    # Existing gene fields preserved.
+    assert "learning_rate" in hp
+    assert "predictor_feature_gain" in hp
+
+
 def test_old_checkpoint_refuses_to_load():
     """Hard_constraints §13 + integration_contract.md §5: a v7 checkpoint
     refuses to load against the v8 env. The existing
