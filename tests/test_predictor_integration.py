@@ -266,6 +266,74 @@ def test_predictor_keys_default_to_zero_with_no_bundle():
         assert feats.get(key, 0.0) == 0.0, f"{key} default-zero floor failed"
 
 
+def test_strategy_mode_default_arb():
+    """Default config (training.strategy_mode = arb) → env derives
+    scalping_mode = True. Backward-compat check."""
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    env = BetfairEnv(day, cfg)
+    assert env._strategy_mode == "arb"
+    assert env.scalping_mode is True
+
+
+def test_strategy_mode_value_win_disables_scalping():
+    """strategy_mode=value_win sets scalping_mode False."""
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    env = BetfairEnv(day, cfg, strategy_mode="value_win")
+    assert env._strategy_mode == "value_win"
+    assert env.scalping_mode is False
+
+
+def test_strategy_mode_unknown_raises():
+    """An unrecognised strategy_mode raises loudly (hard_constraints §10)."""
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    with pytest.raises(ValueError, match="unknown strategy_mode"):
+        BetfairEnv(day, cfg, strategy_mode="not_a_mode")
+
+
+def test_strategy_mode_legacy_scalping_mode_kwarg_still_works():
+    """Backward compat: passing scalping_mode=False with no strategy_mode
+    derives strategy_mode='value_win'."""
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    # Override config strategy_mode so the legacy scalping_mode kwarg
+    # is the load-bearing source.
+    cfg["training"].pop("strategy_mode", None)
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    env = BetfairEnv(day, cfg, scalping_mode=False)
+    assert env._strategy_mode == "value_win"
+    assert env.scalping_mode is False
+
+
 @pytest.mark.skip(
     reason=(
         "Depends on the data-bridging follow-on "

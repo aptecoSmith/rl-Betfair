@@ -421,6 +421,23 @@ MARKET_DIM = len(MARKET_KEYS)            # 37 (25 + 6 race status + 6 market typ
 VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change + 4 time deltas)
 RUNNER_DIM = len(RUNNER_KEYS)             # 143 (was 125, +18 predictor-integration S02)
 
+
+# ── Strategy modes (predictor-integration Session 03) ────────────────────────
+# Three strategies share the env, matcher, bet manager, and policy class;
+# only the action-surface and reward-gate differ.
+#   arb            — pair-trade with auto-passive counter-leg (existing
+#                    scalping_mode=True behaviour). 7-dim per-runner action.
+#   value_win      — single-shot back/lay on a runner whose champion p_win
+#                    has positive edge vs market-implied. Hold to settle.
+#                    4-dim per-runner action (legacy non-scalping shape).
+#   value_each_way — same as value_win but EW bet (half-stake on win +
+#                    half-stake on place at fractional odds). Action surface
+#                    gains an `each_way` signal — wired in Session 04.
+# Default `arb`. The legacy `scalping_mode` kwarg + config key remain
+# accepted for backward-compat; when strategy_mode is unset, the env
+# derives it from scalping_mode (True → arb, False → value_win).
+_STRATEGY_MODES: tuple[str, ...] = ("arb", "value_win", "value_each_way")
+
 # Action thresholds
 _BACK_THRESHOLD = 0.33
 _LAY_THRESHOLD = -0.33
@@ -772,6 +789,15 @@ class BetfairEnv(gymnasium.Env):
         predictor_bundle: object | None = None,
         use_race_outcome_predictor: bool | None = None,
         use_direction_predictor: bool | None = None,
+        # Predictor-integration Session 03 (plans/predictor-integration/).
+        # Selects between `arb` (pair-trade scalping), `value_win`
+        # (single-shot back/lay), `value_each_way` (single-shot EW).
+        # When None, defaults to `config["training"]["strategy_mode"]`
+        # (default `arb`). The legacy `scalping_mode` kwarg + config key
+        # remain accepted; when strategy_mode is unset and only
+        # scalping_mode is provided, the env derives strategy_mode
+        # (True → arb, False → value_win) for backward compat.
+        strategy_mode: str | None = None,
     ) -> None:
         super().__init__()
         self.day = day
@@ -891,9 +917,32 @@ class BetfairEnv(gymnasium.Env):
         # fill auto-generates a passive counter-order N ticks away (the
         # agent's 5th action dim picks N). Off by default → action/obs
         # layouts are byte-identical to pre-session code.
-        if scalping_mode is None:
-            scalping_mode = bool(config["training"].get("scalping_mode", False))
-        self.scalping_mode: bool = bool(scalping_mode)
+        # Strategy-mode resolution (predictor-integration Session 03).
+        # Precedence: explicit strategy_mode kwarg > config strategy_mode
+        # > legacy scalping_mode kwarg > legacy config scalping_mode > default arb.
+        # `scalping_mode` becomes a derived value (single source of truth:
+        # strategy_mode); legacy callers continue to work because
+        # scalping_mode=True → arb and scalping_mode=False → value_win
+        # produce identical reward / action behaviour to pre-plan.
+        training_cfg_for_strategy = config.get("training", {})
+        if strategy_mode is None:
+            strategy_mode = training_cfg_for_strategy.get("strategy_mode")
+        if strategy_mode is None:
+            if scalping_mode is not None:
+                strategy_mode = "arb" if bool(scalping_mode) else "value_win"
+            else:
+                legacy_scalping = bool(
+                    training_cfg_for_strategy.get("scalping_mode", False)
+                )
+                strategy_mode = "arb" if legacy_scalping else "value_win"
+        if strategy_mode not in _STRATEGY_MODES:
+            raise ValueError(
+                f"unknown strategy_mode {strategy_mode!r}; "
+                f"expected one of {_STRATEGY_MODES}"
+            )
+        self._strategy_mode: str = strategy_mode
+        # Derive scalping_mode from strategy_mode (single source of truth).
+        self.scalping_mode: bool = strategy_mode == "arb"
         self._actions_per_runner: int = (
             SCALPING_ACTIONS_PER_RUNNER if self.scalping_mode else ACTIONS_PER_RUNNER
         )

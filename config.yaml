@@ -124,6 +124,15 @@ training:
   # dimension per runner (arb_spread) and the observation gains arb
   # state features. Off by default — legacy behaviour is byte-identical.
   scalping_mode: true
+  # Strategy mode (predictor-integration Session 03). Selects between
+  # `arb` (pair-trade, scalping_mode=True), `value_win` (single-shot,
+  # scalping_mode=False), and `value_each_way` (single-shot EW; needs
+  # the Session 04 each-way action surface). Default `arb`.
+  # `scalping_mode` above is now a legacy alias — strategy_mode is
+  # the canonical source of truth and `scalping_mode` is derived
+  # (`scalping_mode = (strategy_mode == "arb")`). When BOTH keys are
+  # set, strategy_mode wins.
+  strategy_mode: arb
   # Arb-curriculum Session 05 (2026-04-19). Per-agent training-day ordering
   # derived from oracle density. Every day is still seen exactly once per
   # epoch; only the order changes. Default random = pre-change behaviour.
