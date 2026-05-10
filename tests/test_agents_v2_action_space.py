@@ -265,3 +265,86 @@ class TestComputeMask:
         mask = compute_mask(space, env)
         assert mask[0]
         assert not mask[1:].any()
+
+
+# ─── Each-way action space (predictor-integration Session 04) ────────────────
+
+
+class TestEachWayActionSpace:
+    """`DiscreteActionSpace(each_way=True)` extends the discrete head
+    with `OPEN_BACK_EACH_WAY` + `OPEN_LAY_EACH_WAY` per runner. Used by
+    `value_each_way` strategy_mode (plans/predictor-integration/
+    session_prompts/04_each_way_action_surface.md).
+
+    Default `each_way=False` keeps the action space byte-identical to
+    pre-plan — existing call sites unchanged.
+    """
+
+    def test_default_each_way_false_keeps_n_unchanged(self):
+        n_legacy = DiscreteActionSpace(max_runners=4).n
+        n_explicit_off = DiscreteActionSpace(max_runners=4, each_way=False).n
+        assert n_legacy == n_explicit_off == 1 + 3 * 4
+
+    def test_each_way_true_extends_n(self):
+        space = DiscreteActionSpace(max_runners=4, each_way=True)
+        # 1 + 5 * max_runners (NOOP + OPEN_BACK + OPEN_LAY + CLOSE +
+        # OPEN_BACK_EW + OPEN_LAY_EW per runner)
+        assert space.n == 1 + 5 * 4
+        assert space.each_way is True
+
+    def test_encode_each_way_back(self):
+        space = DiscreteActionSpace(max_runners=3, each_way=True)
+        # CLOSE block ends at index 1 + 3 * 3 = 10. OPEN_BACK_EACH_WAY
+        # starts there.
+        assert space.encode(ActionType.OPEN_BACK_EACH_WAY, 0) == 10
+        assert space.encode(ActionType.OPEN_BACK_EACH_WAY, 2) == 12
+
+    def test_encode_each_way_lay(self):
+        space = DiscreteActionSpace(max_runners=3, each_way=True)
+        # OPEN_LAY_EACH_WAY follows immediately after the BACK_EW block.
+        assert space.encode(ActionType.OPEN_LAY_EACH_WAY, 0) == 13
+        assert space.encode(ActionType.OPEN_LAY_EACH_WAY, 2) == 15
+
+    def test_decode_each_way_back(self):
+        space = DiscreteActionSpace(max_runners=3, each_way=True)
+        kind, slot = space.decode(10)
+        assert kind is ActionType.OPEN_BACK_EACH_WAY
+        assert slot == 0
+        kind, slot = space.decode(12)
+        assert kind is ActionType.OPEN_BACK_EACH_WAY
+        assert slot == 2
+
+    def test_decode_each_way_lay(self):
+        space = DiscreteActionSpace(max_runners=3, each_way=True)
+        kind, slot = space.decode(13)
+        assert kind is ActionType.OPEN_LAY_EACH_WAY
+        assert slot == 0
+        kind, slot = space.decode(15)
+        assert kind is ActionType.OPEN_LAY_EACH_WAY
+        assert slot == 2
+
+    def test_round_trip_all_each_way_actions(self):
+        space = DiscreteActionSpace(max_runners=5, each_way=True)
+        for kind in (
+            ActionType.NOOP,
+            ActionType.OPEN_BACK,
+            ActionType.OPEN_LAY,
+            ActionType.CLOSE,
+            ActionType.OPEN_BACK_EACH_WAY,
+            ActionType.OPEN_LAY_EACH_WAY,
+        ):
+            slots = [None] if kind is ActionType.NOOP else range(5)
+            for slot in slots:
+                idx = space.encode(kind, slot)
+                k2, s2 = space.decode(idx)
+                assert k2 is kind
+                assert s2 == slot
+
+    def test_encode_each_way_when_disabled_raises(self):
+        """Hard_constraints §10: silent fallback forbidden. Encoding an
+        each-way type against a non-EW space must raise loudly."""
+        space = DiscreteActionSpace(max_runners=4, each_way=False)
+        with pytest.raises(ValueError, match="each_way=False"):
+            space.encode(ActionType.OPEN_BACK_EACH_WAY, 0)
+        with pytest.raises(ValueError, match="each_way=False"):
+            space.encode(ActionType.OPEN_LAY_EACH_WAY, 0)

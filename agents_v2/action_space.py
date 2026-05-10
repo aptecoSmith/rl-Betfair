@@ -44,6 +44,12 @@ class ActionType(IntEnum):
     OPEN_BACK = 1
     OPEN_LAY = 2
     CLOSE = 3
+    # Predictor-integration Session 04 — each-way action types. Only
+    # encodable when DiscreteActionSpace is constructed with
+    # `each_way=True` (value_each_way mode). Existing arb / value_win
+    # call sites stay at `each_way=False` and never see these types.
+    OPEN_BACK_EACH_WAY = 4
+    OPEN_LAY_EACH_WAY = 5
 
 
 class DiscreteActionSpace:
@@ -55,12 +61,13 @@ class DiscreteActionSpace:
     shim and tests can build it on the fly.
     """
 
-    def __init__(self, max_runners: int) -> None:
+    def __init__(self, max_runners: int, each_way: bool = False) -> None:
         if max_runners <= 0:
             raise ValueError(
                 f"max_runners must be positive, got {max_runners!r}",
             )
         self._max_runners = int(max_runners)
+        self._each_way = bool(each_way)
         # Range boundaries are derived once and cached as plain ints —
         # decode/encode hit them on every action.
         self._open_back_lo = 1
@@ -69,15 +76,40 @@ class DiscreteActionSpace:
         self._open_lay_hi = self._open_lay_lo + max_runners        # exclusive
         self._close_lo = self._open_lay_hi
         self._close_hi = self._close_lo + max_runners              # exclusive
+        # Predictor-integration Session 04: when each_way=True, two new
+        # ranges follow CLOSE — OPEN_BACK_EACH_WAY then
+        # OPEN_LAY_EACH_WAY. When each_way=False (default), n is
+        # unchanged from pre-plan (1 + 3 * max_runners).
+        if self._each_way:
+            self._open_back_ew_lo = self._close_hi
+            self._open_back_ew_hi = self._open_back_ew_lo + max_runners
+            self._open_lay_ew_lo = self._open_back_ew_hi
+            self._open_lay_ew_hi = self._open_lay_ew_lo + max_runners
+        else:
+            self._open_back_ew_lo = self._close_hi
+            self._open_back_ew_hi = self._close_hi
+            self._open_lay_ew_lo = self._close_hi
+            self._open_lay_ew_hi = self._close_hi
 
     @property
     def max_runners(self) -> int:
         return self._max_runners
 
     @property
+    def each_way(self) -> bool:
+        return self._each_way
+
+    @property
     def n(self) -> int:
-        """Total number of discrete actions (incl. no-op)."""
-        return 1 + 3 * self._max_runners
+        """Total number of discrete actions (incl. no-op).
+
+        With ``each_way=False`` (default): ``1 + 3 * max_runners``
+        (NOOP + OPEN_BACK + OPEN_LAY + CLOSE per runner). With
+        ``each_way=True`` (value_each_way mode): ``1 + 5 * max_runners``
+        (adds OPEN_BACK_EACH_WAY + OPEN_LAY_EACH_WAY per runner).
+        """
+        per_runner = 5 if self._each_way else 3
+        return 1 + per_runner * self._max_runners
 
     def decode(self, idx: int) -> tuple[ActionType, int | None]:
         """Map an integer action index to ``(kind, runner_idx)``.
@@ -95,7 +127,11 @@ class DiscreteActionSpace:
             return ActionType.OPEN_BACK, idx - self._open_back_lo
         if idx < self._open_lay_hi:
             return ActionType.OPEN_LAY, idx - self._open_lay_lo
-        return ActionType.CLOSE, idx - self._close_lo
+        if idx < self._close_hi:
+            return ActionType.CLOSE, idx - self._close_lo
+        if idx < self._open_back_ew_hi:
+            return ActionType.OPEN_BACK_EACH_WAY, idx - self._open_back_ew_lo
+        return ActionType.OPEN_LAY_EACH_WAY, idx - self._open_lay_ew_lo
 
     def encode(self, kind: ActionType, runner_idx: int | None) -> int:
         """Inverse of :meth:`decode`. Raises on invalid combos."""
@@ -119,8 +155,18 @@ class DiscreteActionSpace:
             return self._open_back_lo + runner_idx
         if kind is ActionType.OPEN_LAY:
             return self._open_lay_lo + runner_idx
-        # ActionType.CLOSE — IntEnum is closed, no else needed.
-        return self._close_lo + runner_idx
+        if kind is ActionType.CLOSE:
+            return self._close_lo + runner_idx
+        # Each-way action types are only encodable when each_way=True.
+        if not self._each_way:
+            raise ValueError(
+                f"{kind.name} not encodable: DiscreteActionSpace was "
+                f"constructed with each_way=False"
+            )
+        if kind is ActionType.OPEN_BACK_EACH_WAY:
+            return self._open_back_ew_lo + runner_idx
+        # ActionType.OPEN_LAY_EACH_WAY — IntEnum is closed.
+        return self._open_lay_ew_lo + runner_idx
 
 
 def compute_mask(
