@@ -264,3 +264,29 @@ def test_predictor_keys_default_to_zero_with_no_bundle():
     feats: dict = {}
     for key in RUNNER_KEYS[-18:]:
         assert feats.get(key, 0.0) == 0.0, f"{key} default-zero floor failed"
+
+
+@pytest.mark.skip(
+    reason=(
+        "Depends on the data-bridging follow-on "
+        "(incoming/predictor-integration-data-bridging.md): the GBM "
+        "champion + ranker need F2/F5 numeric matrices that rl-betfair "
+        "doesn't yet construct from its Race/RunnerMetadata objects. "
+        "Session 02 ships the env wiring + flag plumbing + default-zero "
+        "floor; the actual injection-when-flag-on lands in the follow-on "
+        "plan. This test will be implemented and un-skipped there."
+    )
+)
+def test_flag_on_populates_predictor_keys():
+    """Placeholder: with `use_race_outcome_predictor=True` and a real
+    `PredictorBundle`, the runner obs slice carries non-zero values
+    at the predictor-key indices for at least one runner.
+
+    Implementation deferred to the data-bridging follow-on plan
+    (`incoming/predictor-integration-data-bridging.md`). The
+    integration_contract.md §2 sketch of `_inject_predictor_outputs`
+    presumes a `race_card: pandas.DataFrame` with the F2/F5 column
+    union — that DataFrame's construction from rl-betfair's
+    `Race`/`RunnerMetadata` is the load-bearing remaining piece.
+    """
+    pass  # pragma: no cover — skipped above.
