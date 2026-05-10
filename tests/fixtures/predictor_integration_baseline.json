@@ -1,0 +1,300 @@
+{
+  "captured_at": "pre-Session-02",
+  "obs_schema_version": 7,
+  "runner_dim": 125,
+  "obs_dim": 1904,
+  "action_dim": 98,
+  "day": "2026-04-23",
+  "seed": 42,
+  "max_runners": 14,
+  "n_steps": 11872,
+  "final_day_pnl": 0.0,
+  "final_total_pnl": 0.0,
+  "races_completed": 77,
+  "sum_reward": 0.0,
+  "sum_raw_pnl_reward": 0.0,
+  "sum_shaped_bonus": 0.0,
+  "per_step_digest": "bab600d344600260790486abee518d54351016a4465cf204d649311040d669c0",
+  "sampled_steps": [
+    {
+      "step": 0,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 1,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 2,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 3,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 4,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 5,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 6,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 7,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 8,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 9,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 0
+    },
+    {
+      "step": 593,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 2
+    },
+    {
+      "step": 1186,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 6
+    },
+    {
+      "step": 1779,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 10
+    },
+    {
+      "step": 2372,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 15
+    },
+    {
+      "step": 2965,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 19
+    },
+    {
+      "step": 3558,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 23
+    },
+    {
+      "step": 4151,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 27
+    },
+    {
+      "step": 4744,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 32
+    },
+    {
+      "step": 5337,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 36
+    },
+    {
+      "step": 5930,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 41
+    },
+    {
+      "step": 6523,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 47
+    },
+    {
+      "step": 7116,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 52
+    },
+    {
+      "step": 7709,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 56
+    },
+    {
+      "step": 8302,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 59
+    },
+    {
+      "step": 8895,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 62
+    },
+    {
+      "step": 9488,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 65
+    },
+    {
+      "step": 10081,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 68
+    },
+    {
+      "step": 10674,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 71
+    },
+    {
+      "step": 11267,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 74
+    },
+    {
+      "step": 11860,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11862,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11863,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11864,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11865,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11866,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11867,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11868,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11869,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11870,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 76
+    },
+    {
+      "step": 11871,
+      "reward": 0.0,
+      "raw_pnl_reward": 0.0,
+      "shaped_bonus": 0.0,
+      "race_idx": 77
+    }
+  ]
+}
