@@ -122,6 +122,9 @@ def run_cohort(
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
     arb_spread_scale_override: float | None = None,
+    predictor_bundle: object | None = None,
+    strategy_mode: str | None = None,
+    use_race_outcome_predictor: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -334,6 +337,9 @@ def run_cohort(
                             bc_target_entropy_warmup_eps_override
                         ),
                         arb_spread_scale_override=arb_spread_scale_override,
+                        predictor_bundle=predictor_bundle,
+                        strategy_mode=strategy_mode,
+                        use_race_outcome_predictor=use_race_outcome_predictor,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -938,6 +944,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "and risk_nll stay on the per-slot path."
         ),
     )
+    # Predictor-integration (plans/predictor-integration/).
+    p.add_argument(
+        "--strategy-mode", default=None,
+        choices=["arb", "value_win", "value_each_way"],
+        help=(
+            "Strategy mode (predictor-integration Session 03). "
+            "`arb` = pair-trade scalping (default + byte-identical "
+            "to pre-plan). `value_win` = single-shot back/lay "
+            "informed by champion's calibrated p_win. "
+            "`value_each_way` = single-shot EW (Session 06; needs "
+            "Session 04 part 3+ env shim translation)."
+        ),
+    )
+    p.add_argument(
+        "--predictor-bundle-manifests", nargs=3, default=None,
+        metavar=("CHAMPION", "RANKER", "DIRECTION"),
+        help=(
+            "Three paths to the betfair-predictors manifest.json "
+            "files. When supplied, the runner constructs a "
+            "PredictorBundle, threads it through to every agent, "
+            "and tags the cohort row with the 3 experiment_ids "
+            "(hard_constraints §7). Only useful when "
+            "--use-race-outcome-predictor is also true."
+        ),
+    )
+    p.add_argument(
+        "--use-race-outcome-predictor", action="store_true",
+        help=(
+            "Inject champion+ranker outputs into the runner obs "
+            "slice (predictor-integration data-bridging). Requires "
+            "--predictor-bundle-manifests to be supplied. Default "
+            "False; flag-off behaviour is byte-identical to pre-plan."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1010,6 +1050,35 @@ def main(argv: list[str] | None = None) -> int:
                 "per knob per run).",
             )
 
+    # Predictor bundle (predictor-integration data-bridging).
+    predictor_bundle = None
+    if args.predictor_bundle_manifests is not None:
+        if not args.use_race_outcome_predictor:
+            logger.warning(
+                "--predictor-bundle-manifests supplied but "
+                "--use-race-outcome-predictor not set; bundle will be "
+                "loaded for registry tagging but env will not consume "
+                "predictor obs.",
+            )
+        from predictors import PredictorBundle
+        champ, rank, dirm = args.predictor_bundle_manifests
+        predictor_bundle = PredictorBundle.from_manifests(
+            champion_manifest=champ,
+            ranker_manifest=rank,
+            direction_manifest=dirm,
+        )
+        logger.info(
+            "predictor bundle loaded: champion=%s ranker=%s direction=%s",
+            predictor_bundle.champion_experiment_id,
+            predictor_bundle.ranker_experiment_id,
+            predictor_bundle.direction_experiment_id,
+        )
+    elif args.use_race_outcome_predictor:
+        raise SystemExit(
+            "--use-race-outcome-predictor requires "
+            "--predictor-bundle-manifests CHAMPION RANKER DIRECTION",
+        )
+
     try:
         run_cohort(
             n_agents=args.n_agents,
@@ -1046,6 +1115,9 @@ def main(argv: list[str] | None = None) -> int:
                 float(args.arb_spread_scale)
                 if args.arb_spread_scale is not None else None
             ),
+            predictor_bundle=predictor_bundle,
+            strategy_mode=args.strategy_mode,
+            use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
         )
     finally:
         if server is not None:

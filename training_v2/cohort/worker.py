@@ -710,6 +710,8 @@ def train_one_agent(
     bc_target_entropy_warmup_eps_override: int | None = None,
     arb_spread_scale_override: float | None = None,
     predictor_bundle: object | None = None,
+    strategy_mode: str | None = None,
+    use_race_outcome_predictor: bool = False,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -774,6 +776,16 @@ def train_one_agent(
     cfg = scalping_train_config()
     cfg["training"]["starting_budget"] = float(starting_budget)
     max_runners = int(cfg["training"]["max_runners"])
+
+    # Predictor-integration: inject strategy_mode + observations flag
+    # into cfg so the env's resolution path picks them up. Both are
+    # optional kwargs at the agent level — the runner threads them
+    # through from CLI (`--strategy-mode`, `--use-race-outcome-predictor`).
+    if strategy_mode is not None:
+        cfg["training"]["strategy_mode"] = strategy_mode
+    if use_race_outcome_predictor:
+        cfg.setdefault("observations", {})
+        cfg["observations"]["use_race_outcome_predictor"] = True
 
     # Phase 5 (2026-05-03): combine cohort-level overrides with this
     # agent's enabled-gene values. Disabled genes contribute nothing,
