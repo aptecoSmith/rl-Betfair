@@ -1968,3 +1968,61 @@ worth pursuing. If no, diagnose before committing more code.
 
 **ScheduleWakeup intentionally omitted; loop ends here (#2).**
 
+## 2026-05-10 (later) — Operator says "do it" — launching Session 05 smoke
+
+Operator authorised the smoke launch. Wired the cohort runner CLI:
+
+- `--strategy-mode {arb|value_win|value_each_way}`
+- `--predictor-bundle-manifests CHAMPION RANKER DIRECTION`
+- `--use-race-outcome-predictor`
+
+Threaded through `run_cohort` → `train_one_agent` →
+`_build_env_for_day` → `BetfairEnv`. Cfg-injection in worker.py
+sets `cfg["training"]["strategy_mode"]` +
+`cfg["observations"]["use_race_outcome_predictor"]` so the env's
+resolution path picks them up. Committed as `d610572`.
+
+**Architectural blocker found on first launch attempt:**
+`agents_v2.env_shim.DiscreteActionShim.__init__` (line 147)
+refuses environments where `scalping_mode=False`. The v2
+trainer's discrete action space is built around the 7-dim
+scalping layout. But the predictor-integration plan's
+`value_win` mode forces `scalping_mode=False`. Direct
+collision — `value_win` cannot run through the v2 trainer
+without a shim extension.
+
+This is "reality diverged from plan assumptions" per the
+autonomous prompt's stop-condition note. Recovery options:
+- (A) Extend `DiscreteActionShim` to support a 4-dim
+  non-scalping action layout. Substantial, multi-layer.
+- (B) Use the v1 trainer for value modes. Different stack;
+  has its own integration gaps.
+- (C) Pivot the smoke to **arb mode + predictor obs ON**.
+  Tests data-bridging at training scale without hitting the
+  shim constraint. NOT a true value_win test, but proves
+  predictor obs are non-disruptive at training scale.
+
+**Pivoted to (C)** — re-launched as
+`--strategy-mode arb --use-race-outcome-predictor`. Same data
+flow (champion + ranker → 6 race-level obs keys per runner)
+but scalping_mode stays True so the v2 shim is happy. Tests:
+- Whether the env can complete `_precompute` end-to-end with
+  bundle.predict_race firing per race (~71-77 races per day).
+- Whether the policy / PPO digests the new RUNNER_DIM=143
+  obs without exploding gradients (the byte-identical guarantee
+  is for ZERO predictor obs; non-zero obs are a behavioural
+  delta, not byte-identical, but should still train stably).
+- Whether the registry row carries the 3 experiment_ids.
+
+Cohort: 4 agents × 1 gen × 2 days × 1 eval day. RTX 3090.
+Output: `registry/_predictor_arb_obs_smoke_1778428672/`.
+Log: `registry/_predictor_arb_obs_smoke_1778428672.log`.
+
+**Next iteration's focus:** Tail the cohort log; if it
+crashes mid-rollout, diagnose. If it completes, inspect the
+scoreboard.jsonl for: (a) cohort row carries
+predictor_*_experiment_id values, (b) total_reward / total_pnl
+sane (not NaN, not exploded), (c) bet_count > 0 per agent.
+That confirms the data-bridging is non-disruptive at training
+scale.
+
