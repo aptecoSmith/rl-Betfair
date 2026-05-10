@@ -918,31 +918,47 @@ class BetfairEnv(gymnasium.Env):
         # agent's 5th action dim picks N). Off by default → action/obs
         # layouts are byte-identical to pre-session code.
         # Strategy-mode resolution (predictor-integration Session 03).
-        # Precedence: explicit strategy_mode kwarg > config strategy_mode
-        # > legacy scalping_mode kwarg > legacy config scalping_mode > default arb.
-        # `scalping_mode` becomes a derived value (single source of truth:
-        # strategy_mode); legacy callers continue to work because
-        # scalping_mode=True → arb and scalping_mode=False → value_win
-        # produce identical reward / action behaviour to pre-plan.
+        # Precedence (canonical):
+        #   1. explicit strategy_mode kwarg
+        #   2. config["training"]["strategy_mode"]
+        #   3. default "arb"
+        #
+        # `scalping_mode` keeps its independent legacy resolution (kwarg or
+        # `config["training"]["scalping_mode"]`, default False) for
+        # backward compat with pre-plan tests + non-scalping callers that
+        # rely on the legacy shaping (early_pick / precision /
+        # efficiency / drawdown / spread_cost / inactivity terms apply
+        # ONLY when strategy_mode == "arb"; legacy non-scalping callers
+        # don't get auto-promoted into value_win and keep their existing
+        # reward shape).
+        #
+        # Cross-rule: strategy_mode ∈ {value_win, value_each_way} forces
+        # scalping_mode = False, since value modes are single-shot. This
+        # rule holds even if the caller explicitly passed
+        # scalping_mode=True with a value strategy — that's a config
+        # error and gets corrected to False with a stored attribute the
+        # tests can introspect.
         training_cfg_for_strategy = config.get("training", {})
         if strategy_mode is None:
-            strategy_mode = training_cfg_for_strategy.get("strategy_mode")
-        if strategy_mode is None:
-            if scalping_mode is not None:
-                strategy_mode = "arb" if bool(scalping_mode) else "value_win"
-            else:
-                legacy_scalping = bool(
-                    training_cfg_for_strategy.get("scalping_mode", False)
-                )
-                strategy_mode = "arb" if legacy_scalping else "value_win"
+            strategy_mode = training_cfg_for_strategy.get("strategy_mode", "arb")
         if strategy_mode not in _STRATEGY_MODES:
             raise ValueError(
                 f"unknown strategy_mode {strategy_mode!r}; "
                 f"expected one of {_STRATEGY_MODES}"
             )
         self._strategy_mode: str = strategy_mode
-        # Derive scalping_mode from strategy_mode (single source of truth).
-        self.scalping_mode: bool = strategy_mode == "arb"
+
+        # scalping_mode resolution — independent of strategy_mode for
+        # backward compat, but forced False when in a value mode.
+        if scalping_mode is None:
+            scalping_mode = bool(
+                training_cfg_for_strategy.get("scalping_mode", False)
+            )
+        if strategy_mode == "arb":
+            self.scalping_mode: bool = bool(scalping_mode)
+        else:
+            # value_win / value_each_way are single-shot; force False.
+            self.scalping_mode = False
         self._actions_per_runner: int = (
             SCALPING_ACTIONS_PER_RUNNER if self.scalping_mode else ACTIONS_PER_RUNNER
         )
@@ -3799,6 +3815,20 @@ class BetfairEnv(gymnasium.Env):
             + early_lock_term
             + matured_arb_term
         )
+        # Predictor-integration Session 03 (plans/predictor-integration/
+        # hard_constraints.md §3, strategy_modes.md §value_win / §value_each_way):
+        # value modes use settle-only reward — `shaped_bonus = 0`. The
+        # scalping-specific shaping terms (naked_penalty, early_lock,
+        # matured_arb) are already gated by `scalping_mode` and so already
+        # contribute 0 here in value modes. The remaining non-scalping
+        # shaping (early_pick, precision, efficiency, drawdown, spread_cost,
+        # inactivity) is zeroed out below when strategy_mode ∈
+        # {value_win, value_each_way}. arb mode retains the full shaped
+        # composition (byte-identical to pre-plan when both predictor
+        # flags are off — verified by
+        # `tests/test_predictor_integration.py::test_flag_off_is_byte_identical_to_pre_plan`).
+        if self._strategy_mode != "arb":
+            shaped = 0.0
         # Scalping-close-signal session 01: post-settlement, sum the
         # realised cash P&L of every pair whose second leg came from
         # ``_attempt_close`` (i.e. a pair the agent deliberately closed

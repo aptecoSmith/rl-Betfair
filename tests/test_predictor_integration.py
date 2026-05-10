@@ -314,9 +314,17 @@ def test_strategy_mode_unknown_raises():
         BetfairEnv(day, cfg, strategy_mode="not_a_mode")
 
 
-def test_strategy_mode_legacy_scalping_mode_kwarg_still_works():
-    """Backward compat: passing scalping_mode=False with no strategy_mode
-    derives strategy_mode='value_win'."""
+def test_value_mode_reward_is_settle_only():
+    """Hard_constraints §3 + strategy_modes.md §value_win: value modes
+    use `shaped_bonus = 0`. arb mode retains the full shaping composition.
+
+    Replays the deterministic zero-action rollout in `value_win` mode,
+    sums `info["shaped_bonus"]` across every step, and asserts the
+    cumulative shaped bonus is exactly 0.0. (Zero-action policy doesn't
+    bet, so the difference between modes wouldn't show up in
+    `raw_pnl_reward` either way — but `shaped_bonus` exposes the gate
+    directly.)
+    """
     from data.episode_builder import load_day  # type: ignore[import-not-found]
     from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
     from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
@@ -325,11 +333,71 @@ def test_strategy_mode_legacy_scalping_mode_kwarg_still_works():
 
     baseline = _require_fixture_and_data()
     cfg = _scalping_train_config(max_runners=baseline["max_runners"])
-    # Override config strategy_mode so the legacy scalping_mode kwarg
-    # is the load-bearing source.
-    cfg["training"].pop("strategy_mode", None)
     day = load_day(baseline["day"], data_dir=DATA_DIR)
-    env = BetfairEnv(day, cfg, scalping_mode=False)
+    env = BetfairEnv(day, cfg, strategy_mode="value_win")
+    obs, _info = env.reset(seed=baseline["seed"])
+    action_dim = int(env.action_space.shape[0])
+    zero_action = np.zeros(action_dim, dtype=np.float32)
+
+    cumulative_shaped = 0.0
+    n_steps = 0
+    while True:
+        obs, reward, terminated, truncated, info = env.step(zero_action)
+        cumulative_shaped += float(info.get("shaped_bonus", 0.0))
+        n_steps += 1
+        if terminated or truncated:
+            break
+        if n_steps >= 30_000:
+            break
+
+    assert cumulative_shaped == 0.0, (
+        f"value_win shaped_bonus should be 0 (settle-only reward); "
+        f"got cumulative shaped={cumulative_shaped}"
+    )
+
+
+def test_strategy_mode_legacy_scalping_mode_independent():
+    """Backward compat: legacy `scalping_mode=False` callers (no
+    explicit strategy_mode anywhere) keep their pre-plan reward shape.
+
+    The strategy_mode and scalping_mode axes are INDEPENDENT for
+    backward compat — legacy non-scalping callers (pre-plan tests,
+    directional-mode runs) stay on `strategy_mode=arb` (the default)
+    so their `early_pick / precision / efficiency` shaping continues
+    to apply. Only when the operator explicitly opts INTO a value
+    mode does the shaped=0 gate kick in.
+    """
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    cfg["training"].pop("strategy_mode", None)
+    cfg["training"]["scalping_mode"] = False
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    env = BetfairEnv(day, cfg)  # no strategy_mode → defaults to "arb"
+    assert env._strategy_mode == "arb"
+    # scalping_mode is independent: stays False as the legacy config asked.
+    assert env.scalping_mode is False
+
+
+def test_value_mode_forces_scalping_false():
+    """A value strategy_mode forces scalping_mode False regardless of
+    the legacy kwarg / config — single-shot semantics are mode-defined."""
+    from data.episode_builder import load_day  # type: ignore[import-not-found]
+    from env.betfair_env import BetfairEnv  # type: ignore[import-not-found]
+    from training_v2.discrete_ppo.train import (  # type: ignore[import-not-found]
+        _scalping_train_config,
+    )
+
+    baseline = _require_fixture_and_data()
+    cfg = _scalping_train_config(max_runners=baseline["max_runners"])
+    day = load_day(baseline["day"], data_dir=DATA_DIR)
+    # Even with scalping_mode=True in config + kwarg, value_win forces False.
+    env = BetfairEnv(day, cfg, strategy_mode="value_win", scalping_mode=True)
     assert env._strategy_mode == "value_win"
     assert env.scalping_mode is False
 
