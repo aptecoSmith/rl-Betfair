@@ -84,6 +84,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "reeval_mode='argmax' when active."
         ),
     )
+    # Predictor-integration data-bridging: if the cohort was trained
+    # with predictors on, the cohort row's hyperparameters JSON
+    # carries 3 `predictor_*_experiment_id` strings. Re-eval against
+    # a different bundle is forbidden by hard_constraints.md §7.
+    # When `--predictor-bundle-manifests` is supplied, the tool loads
+    # the bundle and calls `bundle.validate_compatibility(hp)` per
+    # agent row; mismatch raises `PredictorLoaderError`.
+    p.add_argument(
+        "--predictor-bundle-manifests", nargs=3, default=None,
+        metavar=("CHAMPION", "RANKER", "DIRECTION"),
+        help=(
+            "Optional. Three paths to the manifest.json files for "
+            "champion / ranker / direction predictors. When supplied, "
+            "re-eval refuses if the cohort row's recorded "
+            "predictor_*_experiment_id doesn't match the live bundle."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -132,6 +149,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     output_path = cohort_dir / output_name
 
+    # Predictor-bundle for compatibility validation (hard_constraints §7).
+    predictor_bundle = None
+    if args.predictor_bundle_manifests is not None:
+        from predictors import PredictorBundle
+        champion_m, ranker_m, direction_m = args.predictor_bundle_manifests
+        predictor_bundle = PredictorBundle.from_manifests(
+            champion_manifest=champion_m,
+            ranker_manifest=ranker_m,
+            direction_manifest=direction_m,
+        )
+        logger.info(
+            "loaded predictor bundle: champion=%s ranker=%s direction=%s",
+            predictor_bundle.champion_experiment_id,
+            predictor_bundle.ranker_experiment_id,
+            predictor_bundle.direction_experiment_id,
+        )
+
     rows = []
     for line in scoreboard.read_text(encoding="utf-8").splitlines():
         if line.strip():
@@ -172,6 +206,14 @@ def main(argv: list[str] | None = None) -> int:
             agent_id = row["agent_id"]
             model_id = row["model_id"]
             hp = row.get("hyperparameters", {})
+
+            # Predictor-integration: refuse re-eval against a divergent
+            # bundle (hard_constraints §7). Cohort rows that pre-date
+            # the contract or were trained flag-off carry empty/missing
+            # ids and pass through; live-bundle / cohort-row mismatch
+            # raises `PredictorLoaderError`.
+            if predictor_bundle is not None:
+                predictor_bundle.validate_compatibility(hp)
 
             # Reconstruct the gene dataclass from the stored hp dict.
             try:
