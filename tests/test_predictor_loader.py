@@ -161,6 +161,71 @@ def test_weights_missing_raises(tmp_path):
         )
 
 
+def test_validate_compatibility_passes_on_matching_ids():
+    """Hard_constraints §7: a cohort row whose recorded
+    `predictor_*_experiment_id`s match the live bundle is accepted."""
+    _require_sibling_repo()
+    bundle = PredictorBundle.from_manifests(_CHAMP_M, _RANK_M, _DIR_M)
+    bundle.validate_compatibility({
+        "predictor_champion_experiment_id": bundle.champion_experiment_id,
+        "predictor_ranker_experiment_id": bundle.ranker_experiment_id,
+        "predictor_direction_experiment_id": bundle.direction_experiment_id,
+    })
+
+
+def test_validate_compatibility_passes_on_empty_strings():
+    """A flag-off cohort that landed POST-contract carries empty
+    strings; those should pass through."""
+    _require_sibling_repo()
+    bundle = PredictorBundle.from_manifests(_CHAMP_M, _RANK_M, _DIR_M)
+    bundle.validate_compatibility({
+        "predictor_champion_experiment_id": "",
+        "predictor_ranker_experiment_id": "",
+        "predictor_direction_experiment_id": "",
+    })
+
+
+def test_validate_compatibility_passes_on_pre_contract_rows():
+    """Pre-contract cohort rows (no experiment_id keys at all) are
+    legacy "this cohort didn't use predictors" — pass through."""
+    _require_sibling_repo()
+    bundle = PredictorBundle.from_manifests(_CHAMP_M, _RANK_M, _DIR_M)
+    bundle.validate_compatibility({"learning_rate": 0.001})
+
+
+def test_validate_compatibility_refuses_on_champion_mismatch():
+    _require_sibling_repo()
+    bundle = PredictorBundle.from_manifests(_CHAMP_M, _RANK_M, _DIR_M)
+    with pytest.raises(PredictorLoaderError, match="champion experiment_id mismatch"):
+        bundle.validate_compatibility({
+            "predictor_champion_experiment_id": "stale_old_id",
+            "predictor_ranker_experiment_id": bundle.ranker_experiment_id,
+            "predictor_direction_experiment_id": bundle.direction_experiment_id,
+        })
+
+
+def test_validate_compatibility_refuses_on_ranker_mismatch():
+    _require_sibling_repo()
+    bundle = PredictorBundle.from_manifests(_CHAMP_M, _RANK_M, _DIR_M)
+    with pytest.raises(PredictorLoaderError, match="ranker experiment_id mismatch"):
+        bundle.validate_compatibility({
+            "predictor_champion_experiment_id": bundle.champion_experiment_id,
+            "predictor_ranker_experiment_id": "stale_old_id",
+            "predictor_direction_experiment_id": bundle.direction_experiment_id,
+        })
+
+
+def test_validate_compatibility_refuses_on_direction_mismatch():
+    _require_sibling_repo()
+    bundle = PredictorBundle.from_manifests(_CHAMP_M, _RANK_M, _DIR_M)
+    with pytest.raises(PredictorLoaderError, match="direction experiment_id mismatch"):
+        bundle.validate_compatibility({
+            "predictor_champion_experiment_id": bundle.champion_experiment_id,
+            "predictor_ranker_experiment_id": bundle.ranker_experiment_id,
+            "predictor_direction_experiment_id": "stale_old_id",
+        })
+
+
 def test_experiment_ids_captured_for_registry():
     """Hard_constraints §7 — every cohort row must capture predictor
     experiment_ids; the bundle must surface them as plain strings."""

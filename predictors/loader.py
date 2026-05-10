@@ -486,6 +486,52 @@ class PredictorBundle:
     def direction_experiment_id(self) -> str:
         return self.direction_manifest.experiment_id
 
+    def validate_compatibility(
+        self,
+        cohort_hp: dict,
+    ) -> None:
+        """Refuse loudly if a stored cohort row's predictor
+        experiment_ids don't match this live bundle.
+
+        Honours `hard_constraints.md §7`: two cohort runs with different
+        predictor `experiment_id`s are NOT cross-comparable. Re-eval
+        tooling reads the cohort row's stored ids and calls this method
+        to refuse a re-eval where the operator's current bundle
+        diverges from the cohort's recorded versions.
+
+        Cohort rows that pre-date this contract (no
+        `predictor_*_experiment_id` keys in `hp`) pass through cleanly —
+        the legacy interpretation is "this cohort didn't use predictors".
+
+        Cohort rows whose stored experiment_id is empty string also pass
+        (a flag-off cohort that landed AFTER this contract carries empty
+        strings; that's still compatible with any live bundle).
+        """
+        for label, attr, key in (
+            ("champion",
+             "champion_experiment_id",
+             "predictor_champion_experiment_id"),
+            ("ranker",
+             "ranker_experiment_id",
+             "predictor_ranker_experiment_id"),
+            ("direction",
+             "direction_experiment_id",
+             "predictor_direction_experiment_id"),
+        ):
+            stored = cohort_hp.get(key)
+            if stored is None or stored == "":
+                continue
+            live = getattr(self, attr)
+            if str(stored) != str(live):
+                raise PredictorLoaderError(
+                    f"predictor {label} experiment_id mismatch: cohort row "
+                    f"recorded {stored!r}, live bundle has {live!r}. "
+                    f"hard_constraints.md §7 forbids cross-comparing cohorts "
+                    f"trained against different predictor versions. "
+                    f"Re-pin the live bundle (or re-train the cohort) before "
+                    f"re-evaluating."
+                )
+
     @classmethod
     def from_manifests(
         cls,
