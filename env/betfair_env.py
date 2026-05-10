@@ -1390,14 +1390,25 @@ class BetfairEnv(gymnasium.Env):
             # ``_features_to_array`` to read into the obs slice.
             predictor_outputs_per_runner = self._compute_race_predictor_outputs(race)
 
+            # Per-tick direction-predictor outputs (advisor #2). Computed
+            # once per race in batched form. Returns a dict
+            # {(tick_idx, sid): {dir_q*, dir_fire_*}} or empty when
+            # use_direction_predictor=False.
+            tick_predictor_outputs = self._compute_tick_predictor_outputs(race)
+
             # Build static observation array per tick
             race_obs: list[np.ndarray] = []
-            for feat_dict in race_features:
+            for tick_idx, feat_dict in enumerate(race_features):
+                runners_dict = feat_dict.get("runners", {})
                 if predictor_outputs_per_runner:
-                    runners_dict = feat_dict.get("runners", {})
                     for sid, predictor_keys in predictor_outputs_per_runner.items():
                         if sid in runners_dict:
                             runners_dict[sid].update(predictor_keys)
+                if tick_predictor_outputs:
+                    for sid in list(runners_dict.keys()):
+                        keys = tick_predictor_outputs.get((tick_idx, sid))
+                        if keys is not None:
+                            runners_dict[sid].update(keys)
                 race_obs.append(self._features_to_array(feat_dict, runner_map))
             self._static_obs.append(race_obs)
 
@@ -1491,6 +1502,84 @@ class BetfairEnv(gymnasium.Env):
                 ),
             }
         return per_runner
+
+    def _compute_tick_predictor_outputs(
+        self,
+        race: Race,
+    ) -> dict[tuple[int, int], dict[str, float]]:
+        """Compute per-(tick_idx, sid) direction predictor outputs.
+
+        Returns ``{(tick_idx, sid): {dir_q*, dir_fire_*}}`` keyed by
+        (tick_idx, selection_id). Empty dict when
+        `use_direction_predictor=False`.
+
+        Builds all 32x26 V2 windows for the race upfront then forwards
+        them through the bundle's batched `predict_tick_batch`. Far
+        cheaper than per-call: a 100-tick / 9-runner race produces
+        ~900 windows (~115 KB), forwarded in one or two chunks
+        through the Conv1D in single-digit ms.
+
+        The 12 per-tick obs keys (`dir_q10_1m`...`dir_q90_7m`,
+        `dir_fire_drift`/`shorten`/`no_signal`) are populated in
+        the per-tick feat_dict["runners"][sid] dicts by the caller.
+        """
+        if (
+            self._predictor_bundle is None
+            or not self._use_direction_predictor
+        ):
+            return {}
+
+        # Lazy import to keep env startup cheap when off.
+        from data.predictor_features import build_direction_windows_for_race
+
+        try:
+            windows, indices = build_direction_windows_for_race(race)
+        except Exception:
+            logger.exception(
+                "build_direction_windows_for_race failed for market %s; "
+                "skipping per-tick predictor injection",
+                race.market_id,
+            )
+            return {}
+        if windows.shape[0] == 0:
+            return {}
+
+        try:
+            quantiles, fires = self._predictor_bundle.predict_tick_batch(
+                windows,
+            )
+        except Exception:
+            logger.exception(
+                "predict_tick_batch failed for market %s; "
+                "skipping per-tick predictor injection",
+                race.market_id,
+            )
+            return {}
+
+        # Map back. Manifest: 3 horizons × 3 quantiles. Order from the
+        # bundle's `direction.horizons` (1m, 3m, 7m) and `direction.quantiles`
+        # (0.1, 0.5, 0.9).
+        per_tick: dict[tuple[int, int], dict[str, float]] = {}
+        h_idx = {h: i for i, h in enumerate(self._predictor_bundle.direction.horizons)}
+        q_idx = {q: i for i, q in enumerate(self._predictor_bundle.direction.quantiles)}
+        for n, (t_idx, sid) in enumerate(indices):
+            row_q = quantiles[n]
+            row_f = fires[n]
+            per_tick[(t_idx, sid)] = {
+                "dir_q10_1m": float(row_q[h_idx["1m"], q_idx[0.1]]),
+                "dir_q50_1m": float(row_q[h_idx["1m"], q_idx[0.5]]),
+                "dir_q90_1m": float(row_q[h_idx["1m"], q_idx[0.9]]),
+                "dir_q10_3m": float(row_q[h_idx["3m"], q_idx[0.1]]),
+                "dir_q50_3m": float(row_q[h_idx["3m"], q_idx[0.5]]),
+                "dir_q90_3m": float(row_q[h_idx["3m"], q_idx[0.9]]),
+                "dir_q10_7m": float(row_q[h_idx["7m"], q_idx[0.1]]),
+                "dir_q50_7m": float(row_q[h_idx["7m"], q_idx[0.5]]),
+                "dir_q90_7m": float(row_q[h_idx["7m"], q_idx[0.9]]),
+                "dir_fire_drift": float(row_f[0]),
+                "dir_fire_shorten": float(row_f[1]),
+                "dir_fire_no_signal": float(row_f[2]),
+            }
+        return per_tick
 
     def _features_to_array(
         self,

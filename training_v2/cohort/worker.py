@@ -715,6 +715,7 @@ def train_one_agent(
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
     predictor_lean_obs: bool = False,
+    use_direction_predictor: bool = False,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -789,6 +790,9 @@ def train_one_agent(
     if use_race_outcome_predictor:
         cfg.setdefault("observations", {})
         cfg["observations"]["use_race_outcome_predictor"] = True
+    if use_direction_predictor:
+        cfg.setdefault("observations", {})
+        cfg["observations"]["use_direction_predictor"] = True
 
     # Phase 5 (2026-05-03): combine cohort-level overrides with this
     # agent's enabled-gene values. Disabled genes contribute nothing,

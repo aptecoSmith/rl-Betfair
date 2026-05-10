@@ -727,6 +727,78 @@ class PredictorBundle:
 
     # ------------------------------------------------------------------ predict_tick
 
+    def predict_tick_batch(
+        self,
+        ladder_windows: Any,
+        *,
+        chunk_size: int = 4096,
+    ) -> tuple[Any, Any]:
+        """Batched per-tick direction prediction.
+
+        ``ladder_windows`` is a ``np.ndarray`` of shape ``(N, 32, 26)``
+        float32 — N (tick, runner) pairs. Returns
+        ``(quantiles, fires)`` where:
+
+        - ``quantiles`` has shape ``(N, 3, 3)`` — [horizon][quantile].
+          Horizons are ``self.direction.horizons`` (1m, 3m, 7m);
+          quantiles are ``self.direction.quantiles`` (q10, q50, q90).
+        - ``fires`` has shape ``(N, 3)`` boolean —
+          [drift, shorten, no_signal] per row, mutually exclusive +
+          exhaustive (sum across the 3 = 1).
+
+        Far cheaper than calling :meth:`predict_tick` per (tick, runner)
+        — the env's ``_compute_tick_predictor_outputs`` builds all
+        windows for a race upfront then forwards them through this
+        batched path with chunking to bound peak memory.
+        """
+        import numpy as np
+        import torch
+
+        arr = np.asarray(ladder_windows, dtype=np.float32)
+        if arr.ndim != 3:
+            raise ValueError(
+                f"ladder_windows must be 3-D (N, 32, 26); got shape {arr.shape}"
+            )
+        n, t, f = arr.shape
+        if t != self.direction.time_window or f != self.direction.n_features:
+            raise ValueError(
+                f"ladder_windows trailing dims {arr.shape[1:]} != expected "
+                f"({self.direction.time_window}, {self.direction.n_features})"
+            )
+        if n == 0:
+            return (
+                np.zeros((0, self.direction.n_horizons, self.direction.n_quantiles), dtype=np.float32),
+                np.zeros((0, 3), dtype=bool),
+            )
+
+        # Forward in chunks to bound peak GPU memory.
+        out_q = np.empty(
+            (n, self.direction.n_horizons, self.direction.n_quantiles),
+            dtype=np.float32,
+        )
+        # The Conv1D model lives on CPU per the loader's eval mode; keep
+        # it there so we don't fight per-call device shuttle.
+        with torch.no_grad():
+            for start in range(0, n, chunk_size):
+                end = min(n, start + chunk_size)
+                x = torch.from_numpy(arr[start:end])
+                y = self.direction.model(x)  # (chunk, n_h, n_q)
+                out_q[start:end] = y.numpy()
+
+        # Derive fire flags from the 7m horizon's q10/q50/q90 — use the
+        # manifest's `signal_description` thresholds.
+        h_idx = {h: i for i, h in enumerate(self.direction.horizons)}
+        q_idx = {q: i for i, q in enumerate(self.direction.quantiles)}
+        i_7m = h_idx["7m"]
+        q10_7m = out_q[:, i_7m, q_idx[0.1]]
+        q50_7m = out_q[:, i_7m, q_idx[0.5]]
+        q90_7m = out_q[:, i_7m, q_idx[0.9]]
+        fire_drift = (q50_7m >= 5.0) & (q10_7m >= 0.0)
+        fire_shorten = (q50_7m <= -5.0) & (q90_7m <= 0.0)
+        fire_no_signal = ~(fire_drift | fire_shorten)
+        fires = np.stack([fire_drift, fire_shorten, fire_no_signal], axis=1)
+        return out_q, fires
+
     def predict_tick(self, ladder_window: Any) -> TickLevelOutputs:
         """Per-tick directional quantiles + fire flags.
 

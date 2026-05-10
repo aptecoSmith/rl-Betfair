@@ -126,6 +126,7 @@ def run_cohort(
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
     predictor_lean_obs: bool = False,
+    use_direction_predictor: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -342,6 +343,7 @@ def run_cohort(
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
                         predictor_lean_obs=predictor_lean_obs,
+                        use_direction_predictor=use_direction_predictor,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -991,6 +993,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "experiment. Default False = full 143-col obs."
         ),
     )
+    p.add_argument(
+        "--use-direction-predictor", action="store_true",
+        help=(
+            "Inject per-tick direction predictor outputs (price-mover "
+            "advisor) into the obs slice. Adds ~6s per env "
+            "construction (V2 ladder window construction + batched "
+            "Conv1D forward) — minimal overhead. Requires "
+            "--predictor-bundle-manifests. Most useful for scalping/"
+            "arb mode (per the predictor's `signal_description`)."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1132,6 +1145,7 @@ def main(argv: list[str] | None = None) -> int:
             strategy_mode=args.strategy_mode,
             use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
             predictor_lean_obs=bool(args.predictor_lean_obs),
+            use_direction_predictor=bool(args.use_direction_predictor),
         )
     finally:
         if server is not None:

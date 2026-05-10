@@ -189,6 +189,154 @@ def compute_f2_aggregates_for_runners(
 
 
 # ---------------------------------------------------------------------------
+# V2 ladder window — direction predictor (per-tick) advisor
+# ---------------------------------------------------------------------------
+
+
+# Column order MUST match the predictor repo's
+# `scripts/predictor/datasets.py::feature_columns('V2')` exactly. Order
+# is locked: V1_COLS (16) + V2_EXTRA (10) = 26.
+DIR_V2_COLS: tuple[str, ...] = (
+    # V1 (16): per-tick raw ladder + market state.
+    "ltp",
+    "back_p1", "back_p2", "back_p3",
+    "back_s1", "back_s2", "back_s3",
+    "lay_p1", "lay_p2", "lay_p3",
+    "lay_s1", "lay_s2", "lay_s3",
+    "traded_volume_runner",
+    "num_active_runners",
+    "time_to_off_sec",
+    # V2 extra (10): trailing window stats over LTP series.
+    "ltp_lag_1", "ltp_lag_5", "ltp_lag_10", "ltp_lag_30",
+    "ltp_w32_mean", "ltp_w32_std", "ltp_w32_min", "ltp_w32_max",
+    "ltp_w32_first", "ltp_w32_n",
+)
+DIR_V2_DIM: int = len(DIR_V2_COLS)  # 26
+DIR_WINDOW: int = 32
+
+
+def build_direction_windows_for_race(
+    race: object,
+) -> tuple[object, list[tuple[int, int]]]:
+    """Build all (32, 26) V2 windows for a race, one per (tick_idx, sid).
+
+    Returns ``(windows, indices)`` where:
+    - ``windows`` is a ``np.ndarray`` of shape ``(N, 32, 26)`` float32 — N
+      = total active (tick_idx, sid) pairs across the race.
+    - ``indices`` is a list of ``(tick_idx, selection_id)`` tuples
+      aligned to the first dim of ``windows``.
+
+    Design: precompute per-runner (n_ticks, 26) feature matrices ONCE
+    per race (V1 from raw ladder + V2 stats from LTP series), then slice
+    32-tick windows from them. Newest tick at index -1; left-pad with
+    zeros when fewer than 32 ticks of history are available — matches
+    `betfair-predictors/scripts/predictor/datasets.py::build_sequence_examples`.
+
+    Skips runner / tick pairs where the runner has no snapshot at that
+    tick (REMOVED, etc.) — caller can map outputs back via the
+    ``indices`` list.
+    """
+    import numpy as np
+
+    n_ticks = len(race.ticks)
+    if n_ticks == 0:
+        return np.zeros((0, DIR_WINDOW, DIR_V2_DIM), dtype=np.float32), []
+
+    market_start_ts = race.market_start_time
+
+    # Discover active sids across the race.
+    all_sids: set[int] = set()
+    for tick in race.ticks:
+        for r in tick.runners:
+            all_sids.add(r.selection_id)
+    if not all_sids:
+        return np.zeros((0, DIR_WINDOW, DIR_V2_DIM), dtype=np.float32), []
+
+    # Per-runner (n_ticks, 26) feature matrix. Default zero so missing
+    # snapshots stay neutral (the predictor's training data also
+    # zero-pads).
+    per_runner: dict[int, "np.ndarray"] = {}
+    # Track which (tick, sid) pairs have a real snapshot — only those
+    # become windows.
+    has_snap: dict[int, list[bool]] = {sid: [False] * n_ticks for sid in all_sids}
+
+    for sid in all_sids:
+        feat = np.zeros((n_ticks, DIR_V2_DIM), dtype=np.float32)
+        per_runner[sid] = feat
+
+    for t_idx, tick in enumerate(race.ticks):
+        n_active = float(tick.number_of_active_runners or 0)
+        # `time_to_off_sec` from market_start_time MINUS current tick
+        # timestamp; positive = pre-off, negative = in-play.
+        try:
+            tto = (market_start_ts - tick.timestamp).total_seconds()
+        except Exception:
+            tto = 0.0
+        for r in tick.runners:
+            sid = r.selection_id
+            feat = per_runner[sid]
+            ltp = float(r.last_traded_price or 0.0)
+            feat[t_idx, 0] = ltp
+            atb = list(r.available_to_back)[:3]
+            atl = list(r.available_to_lay)[:3]
+            for i in range(3):
+                if i < len(atb):
+                    feat[t_idx, 1 + i] = float(atb[i].price)
+                    feat[t_idx, 4 + i] = float(atb[i].size)
+                if i < len(atl):
+                    feat[t_idx, 7 + i] = float(atl[i].price)
+                    feat[t_idx, 10 + i] = float(atl[i].size)
+            feat[t_idx, 13] = float(getattr(r, "total_matched", 0.0))
+            feat[t_idx, 14] = n_active
+            feat[t_idx, 15] = float(tto)
+            has_snap[sid][t_idx] = True
+
+    # Now compute V2 stats per runner from LTP series.
+    for sid, feat in per_runner.items():
+        ltps = feat[:, 0]  # (n_ticks,)
+        for t_idx in range(n_ticks):
+            # lag features — 0 if not enough history (predictor's training
+            # path uses left-pad-zero too)
+            feat[t_idx, 16] = ltps[t_idx - 1] if t_idx >= 1 else 0.0
+            feat[t_idx, 17] = ltps[t_idx - 5] if t_idx >= 5 else 0.0
+            feat[t_idx, 18] = ltps[t_idx - 10] if t_idx >= 10 else 0.0
+            feat[t_idx, 19] = ltps[t_idx - 30] if t_idx >= 30 else 0.0
+            # Window stats over [t-31, t] — 32 ticks max
+            lo = max(0, t_idx + 1 - DIR_WINDOW)
+            window = ltps[lo:t_idx + 1]
+            feat[t_idx, 20] = float(window.mean())
+            feat[t_idx, 21] = float(window.std())
+            feat[t_idx, 22] = float(window.min())
+            feat[t_idx, 23] = float(window.max())
+            feat[t_idx, 24] = float(window[0])
+            feat[t_idx, 25] = float(len(window))
+
+    # Build (N, 32, 26) windows for each (tick, sid) WHERE the runner has
+    # a real snapshot at that tick.
+    windows: list = []
+    indices: list[tuple[int, int]] = []
+    for sid, feat in per_runner.items():
+        snap_mask = has_snap[sid]
+        for t_idx in range(n_ticks):
+            if not snap_mask[t_idx]:
+                continue
+            lo = max(0, t_idx + 1 - DIR_WINDOW)
+            seg = feat[lo:t_idx + 1]
+            if seg.shape[0] < DIR_WINDOW:
+                pad = np.zeros(
+                    (DIR_WINDOW - seg.shape[0], DIR_V2_DIM), dtype=np.float32,
+                )
+                seg = np.concatenate([pad, seg], axis=0)
+            windows.append(seg)
+            indices.append((t_idx, sid))
+
+    if not windows:
+        return np.zeros((0, DIR_WINDOW, DIR_V2_DIM), dtype=np.float32), []
+    arr = np.stack(windows, axis=0).astype(np.float32, copy=False)
+    return arr, indices
+
+
+# ---------------------------------------------------------------------------
 # F2 DataFrame stitcher — for bundle.predict_race(df)
 # ---------------------------------------------------------------------------
 
