@@ -424,6 +424,7 @@ def _build_env_for_day(
     predictor_bundle: object | None = None,
     use_race_outcome_predictor: bool | None = None,
     use_direction_predictor: bool | None = None,
+    predictor_lean_obs: bool = False,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     day = load_day(day_str, data_dir=data_dir)
     env = BetfairEnv(
@@ -433,6 +434,7 @@ def _build_env_for_day(
         predictor_bundle=predictor_bundle,
         use_race_outcome_predictor=use_race_outcome_predictor,
         use_direction_predictor=use_direction_predictor,
+        predictor_lean_obs=predictor_lean_obs,
     )
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
@@ -712,6 +714,7 @@ def train_one_agent(
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
+    predictor_lean_obs: bool = False,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -835,6 +838,7 @@ def train_one_agent(
         reward_overrides=per_agent_reward_overrides,
         scalping_overrides=per_agent_scalping_overrides,
         predictor_bundle=predictor_bundle,
+        predictor_lean_obs=predictor_lean_obs,
     )
 
     # Phase-14 S03 — direction gate config flows through trainer_hp
@@ -1186,6 +1190,7 @@ def train_one_agent(
                 reward_overrides=per_agent_reward_overrides,
                 scalping_overrides=per_agent_scalping_overrides,
                 predictor_bundle=predictor_bundle,
+                predictor_lean_obs=predictor_lean_obs,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -1384,6 +1389,7 @@ def train_one_agent(
             reward_overrides=per_agent_reward_overrides,
             scalping_overrides=per_agent_scalping_overrides,
             predictor_bundle=predictor_bundle,
+            predictor_lean_obs=predictor_lean_obs,
         )
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policy, device=device,

@@ -422,6 +422,38 @@ VELOCITY_DIM = len(MARKET_VELOCITY_KEYS)  # 11 (6 + 1 time_since_status_change +
 RUNNER_DIM = len(RUNNER_KEYS)             # 143 (was 125, +18 predictor-integration S02)
 
 
+# ── Predictor-lean obs (predictor-integration "agent + 2 advisors" mode) ────
+# When `BetfairEnv(..., predictor_lean_obs=True)`, the env exposes ONLY the
+# 23 keys below per runner instead of the full 143-col firehose. The agent
+# is the human; the predictors are the two advisors. The agent sees the
+# advisors' opinions + the minimum market state needed to act.
+#
+# All of these keys are populated by the existing `data/feature_engineer.py`
+# + `_compute_race_predictor_outputs` paths — no new feature engineering.
+LEAN_RUNNER_KEYS: list[str] = [
+    # Market state (5) — what does the price look like right now?
+    "back_price_1",            # best back price; implied_p_win = 1/this
+    "lay_price_1",             # best lay price
+    "spread_pct",              # market tightness
+    "ltp_velocity_30",         # recent (~8 min) price movement
+    "ltp_velocity_60",         # longer (~16 min) price movement
+    # Race-level predictor outputs (6) — Advisor #1: who's going to win?
+    "champion_p_win",
+    "champion_p_placed",
+    "champion_segment_strong",
+    "ranker_softmax_share",
+    "ranker_top1_flag",
+    "ranker_top1_high_conf_flag",
+    # Per-tick direction predictor outputs (12) — Advisor #2: where's the
+    # price going next?
+    "dir_q10_1m", "dir_q50_1m", "dir_q90_1m",
+    "dir_q10_3m", "dir_q50_3m", "dir_q90_3m",
+    "dir_q10_7m", "dir_q50_7m", "dir_q90_7m",
+    "dir_fire_drift", "dir_fire_shorten", "dir_fire_no_signal",
+]
+LEAN_RUNNER_DIM = len(LEAN_RUNNER_KEYS)    # 23
+
+
 # ── Strategy modes (predictor-integration Session 03) ────────────────────────
 # Three strategies share the env, matcher, bet manager, and policy class;
 # only the action-surface and reward-gate differ.
@@ -798,6 +830,14 @@ class BetfairEnv(gymnasium.Env):
         # scalping_mode is provided, the env derives strategy_mode
         # (True → arb, False → value_win) for backward compat.
         strategy_mode: str | None = None,
+        # Predictor-integration "agent + 2 advisors" mode
+        # (plans/predictor-integration/, post-deterministic-baseline).
+        # When True, the env exposes only the 23 LEAN_RUNNER_KEYS per
+        # runner instead of the full 143-col firehose. The agent sees
+        # the two predictors' outputs + minimal market state and
+        # decides for itself. Default False = byte-identical to the
+        # post-Session-02 obs schema.
+        predictor_lean_obs: bool = False,
     ) -> None:
         super().__init__()
         self.day = day
@@ -1193,6 +1233,18 @@ class BetfairEnv(gymnasium.Env):
         self._use_race_outcome_predictor = bool(use_race_outcome_predictor)
         self._use_direction_predictor = bool(use_direction_predictor)
 
+        # Predictor-integration "agent + 2 advisors" obs mode. When True,
+        # the env exposes 23 LEAN_RUNNER_KEYS per runner instead of the
+        # full 143 — the agent gets the predictors' opinions + minimum
+        # market state, NOT the firehose.
+        self._predictor_lean_obs: bool = bool(predictor_lean_obs)
+        if self._predictor_lean_obs:
+            self._active_runner_keys: list[str] = LEAN_RUNNER_KEYS
+            self._active_runner_dim: int = LEAN_RUNNER_DIM
+        else:
+            self._active_runner_keys = RUNNER_KEYS
+            self._active_runner_dim = RUNNER_DIM
+
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
 
@@ -1202,7 +1254,7 @@ class BetfairEnv(gymnasium.Env):
         obs_dim = (
             MARKET_DIM
             + VELOCITY_DIM
-            + (RUNNER_DIM * self.max_runners)
+            + (self._active_runner_dim * self.max_runners)
             + AGENT_STATE_DIM + extra_agent_state_dim
             + ((POSITION_DIM + extra_position_dim) * self.max_runners)
         )
@@ -1457,12 +1509,14 @@ class BetfairEnv(gymnasium.Env):
             [velocity.get(k, 0.0) for k in MARKET_VELOCITY_KEYS], dtype=np.float32,
         )
 
-        runner_vec = np.zeros(self.max_runners * RUNNER_DIM, dtype=np.float32)
+        runner_dim = self._active_runner_dim
+        runner_keys = self._active_runner_keys
+        runner_vec = np.zeros(self.max_runners * runner_dim, dtype=np.float32)
         for sid, slot in runner_map.items():
             if sid in runners:
                 feats = runners[sid]
-                offset = slot * RUNNER_DIM
-                for i, key in enumerate(RUNNER_KEYS):
+                offset = slot * runner_dim
+                for i, key in enumerate(runner_keys):
                     runner_vec[offset + i] = feats.get(key, 0.0)
 
         static = np.concatenate([market_vec, vel_vec, runner_vec])

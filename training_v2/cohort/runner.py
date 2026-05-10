@@ -125,6 +125,7 @@ def run_cohort(
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
+    predictor_lean_obs: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -340,6 +341,7 @@ def run_cohort(
                         predictor_bundle=predictor_bundle,
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
+                        predictor_lean_obs=predictor_lean_obs,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -978,6 +980,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "False; flag-off behaviour is byte-identical to pre-plan."
         ),
     )
+    p.add_argument(
+        "--predictor-lean-obs", action="store_true",
+        help=(
+            "AGENT-AS-HUMAN + 2 ADVISORS mode. Strips the env's "
+            "RUNNER_KEYS down to 23: just the predictors' outputs + "
+            "minimum market state (back/lay price, spread, velocity). "
+            "The agent gets the advisors' opinions, NOT the firehose. "
+            "Use with --use-race-outcome-predictor for the real "
+            "experiment. Default False = full 143-col obs."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1118,6 +1131,7 @@ def main(argv: list[str] | None = None) -> int:
             predictor_bundle=predictor_bundle,
             strategy_mode=args.strategy_mode,
             use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
+            predictor_lean_obs=bool(args.predictor_lean_obs),
         )
     finally:
         if server is not None:
