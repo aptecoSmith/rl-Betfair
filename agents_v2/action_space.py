@@ -122,17 +122,18 @@ class DiscreteActionSpace:
     def n(self) -> int:
         """Total number of discrete actions (incl. no-op).
 
-        Layout:
-        - Scalping=True, each_way=False (default): 1 + 3 * max_runners
+        Layout (constant per `each_way` flag, INDEPENDENT of
+        scalping_mode — the v2 policy's actor_head is hard-wired
+        to 3 logits per runner so we can't change `n` based on
+        scalping. In non-scalping mode, CLOSE actions exist in the
+        action space but `compute_mask` never marks them legal,
+        and the shim's CLOSE encode raises if reached.):
+
+        - each_way=False (default): 1 + 3 * max_runners
           (NOOP + OPEN_BACK + OPEN_LAY + CLOSE per runner).
-        - Scalping=True, each_way=True: 1 + 5 * max_runners
+        - each_way=True: 1 + 5 * max_runners
           (adds OPEN_BACK_EACH_WAY + OPEN_LAY_EACH_WAY per runner).
-        - Scalping=False (value modes): 1 + 2 * max_runners
-          (NOOP + OPEN_BACK + OPEN_LAY per runner; no CLOSE because
-          single-shot value bets don't have pair lifecycles to close).
         """
-        if not self._scalping_mode:
-            return 1 + 2 * self._max_runners
         per_runner = 5 if self._each_way else 3
         return 1 + per_runner * self._max_runners
 

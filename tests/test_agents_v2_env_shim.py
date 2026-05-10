@@ -391,8 +391,15 @@ class TestActionMaskForwarding:
 class TestConstructorGuards:
     def test_accepts_non_scalping_env(self):
         """Predictor-integration "agent + 2 advisors" mode: shim now
-        supports non-scalping envs with a 1+2*max_runners action space
-        (NoOp, OpenBack, OpenLay per runner; no CLOSE)."""
+        supports non-scalping envs.
+
+        Action-space `n` stays constant (1+3*max_runners) — the v2
+        policy's actor_head is hard-wired to 3 logits per runner so
+        we can't change `n` based on scalping. Instead, in non-scalping
+        mode the CLOSE actions exist in the space but `compute_mask`
+        never marks them legal, and the shim's CLOSE encode raises if
+        reached.
+        """
         from agents_v2.action_space import ActionType
         from agents_v2.env_shim import DiscreteActionShim
 
@@ -409,10 +416,12 @@ class TestConstructorGuards:
         }
         env = BetfairEnv(_make_day(n_races=1), non_scalping)
         shim = DiscreteActionShim(env)
-        # 1 + 2 * 4 = 9 (NoOp + OpenBack/OpenLay per runner; no CLOSE).
-        assert shim._action_space.n == 9
+        # 1 + 3 * 4 = 13 (constant; matches scalping policy's actor_head).
+        assert shim._action_space.n == 13
         assert shim._action_space.scalping_mode is False
-        # CLOSE not encodable in non-scalping mode.
+        # CLOSE encode raises in non-scalping mode (defensive guard;
+        # policy should never sample CLOSE because compute_mask keeps
+        # it illegal).
         with pytest.raises(ValueError, match="scalping_mode=False"):
             shim._action_space.encode(ActionType.CLOSE, 0)
 
