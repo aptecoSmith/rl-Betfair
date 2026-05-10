@@ -143,13 +143,15 @@ class DiscreteActionShim:
         arb_ticks: int = _DEFAULT_ARB_TICKS,
         default_stake: float = _DEFAULT_STAKE,
     ) -> None:
-        if not env.scalping_mode:
-            raise ValueError(
-                "DiscreteActionShim requires scalping_mode=True on the env "
-                "(the discrete action space is built around the 7-dim "
-                "per-runner scalping layout).",
-            )
+        # Predictor-integration "agent + 2 advisors" mode
+        # (post-deterministic-baseline): the shim now accepts both
+        # scalping=True (legacy 7-dim arb action vector) AND
+        # scalping=False (4-dim non-scalping). Non-scalping fires
+        # single-shot value bets without the auto-paired-passive
+        # mechanic — what the operator's "human reads advisor edge"
+        # vision needs.
         self.env = env
+        self._scalping = bool(env.scalping_mode)
         self._scorer_dir = Path(scorer_dir)
         if not (MIN_ARB_TICKS <= arb_ticks <= MAX_ARB_TICKS):
             raise ValueError(
@@ -159,10 +161,18 @@ class DiscreteActionShim:
         self._arb_ticks = int(arb_ticks)
         self._default_stake = max(float(default_stake), MIN_BET_STAKE)
 
-        self._action_space = DiscreteActionSpace(env.max_runners)
+        # Discrete action space — scalping mode keeps the legacy
+        # 1+3*N layout (NoOp, OpenBack, OpenLay, Close per runner).
+        # Non-scalping mode drops Close (no pair-trade lifecycle to
+        # close), giving 1+2*N. The action_space owner exposes
+        # `scalping_mode` so the policy / mask helpers can tell.
+        self._action_space = DiscreteActionSpace(
+            env.max_runners,
+            scalping_mode=self._scalping,
+        )
         self._N = env.max_runners
         self._actions_per_runner = env._actions_per_runner
-        if self._actions_per_runner != SCALPING_ACTIONS_PER_RUNNER:
+        if self._scalping and self._actions_per_runner != SCALPING_ACTIONS_PER_RUNNER:
             raise ValueError(
                 "Env reports actions_per_runner="
                 f"{self._actions_per_runner}, expected "
@@ -295,22 +305,29 @@ class DiscreteActionShim:
                 self._default_stake if stake is None else float(stake)
             )
             stake_raw = self._encode_stake(stake_value)
-            arb_raw = (
-                self._arb_raw
-                if arb_spread is None
-                else self._encode_arb_spread(int(arb_spread))
-            )
             sign = +1.0 if kind is ActionType.OPEN_BACK else -1.0
             action[slot] = sign                              # signal
             action[self._N + slot] = stake_raw               # stake
             action[2 * self._N + slot] = +1.0                # aggression
             action[3 * self._N + slot] = 0.0                 # cancel
-            action[4 * self._N + slot] = arb_raw             # arb_spread
-            action[5 * self._N + slot] = 0.0                 # requote
-            action[6 * self._N + slot] = 0.0                 # close
+            if self._scalping:
+                arb_raw = (
+                    self._arb_raw
+                    if arb_spread is None
+                    else self._encode_arb_spread(int(arb_spread))
+                )
+                action[4 * self._N + slot] = arb_raw         # arb_spread
+                action[5 * self._N + slot] = 0.0             # requote
+                action[6 * self._N + slot] = 0.0             # close
             return action
 
-        # ActionType.CLOSE
+        # ActionType.CLOSE — only valid in scalping mode (DiscreteActionSpace
+        # raises if asked to encode CLOSE outside scalping; defensive guard).
+        if not self._scalping:
+            raise ValueError(
+                f"shim received CLOSE action in non-scalping mode "
+                f"(env.scalping_mode=False); shouldn't be reachable",
+            )
         action[6 * self._N + slot] = +1.0
         return action
 

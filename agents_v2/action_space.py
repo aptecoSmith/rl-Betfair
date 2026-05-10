@@ -61,21 +61,36 @@ class DiscreteActionSpace:
     shim and tests can build it on the fly.
     """
 
-    def __init__(self, max_runners: int, each_way: bool = False) -> None:
+    def __init__(
+        self,
+        max_runners: int,
+        each_way: bool = False,
+        scalping_mode: bool = True,
+    ) -> None:
         if max_runners <= 0:
             raise ValueError(
                 f"max_runners must be positive, got {max_runners!r}",
             )
         self._max_runners = int(max_runners)
         self._each_way = bool(each_way)
+        # Predictor-integration "agent + 2 advisors": non-scalping mode
+        # drops the CLOSE action type (no pair-trade lifecycle to close).
+        # `n` becomes 1 + 2*max_runners + (2*max_runners if each_way else 0).
+        self._scalping_mode = bool(scalping_mode)
         # Range boundaries are derived once and cached as plain ints —
         # decode/encode hit them on every action.
         self._open_back_lo = 1
         self._open_back_hi = 1 + max_runners                       # exclusive
         self._open_lay_lo = self._open_back_hi
         self._open_lay_hi = self._open_lay_lo + max_runners        # exclusive
-        self._close_lo = self._open_lay_hi
-        self._close_hi = self._close_lo + max_runners              # exclusive
+        if self._scalping_mode:
+            self._close_lo = self._open_lay_hi
+            self._close_hi = self._close_lo + max_runners          # exclusive
+        else:
+            # Non-scalping: collapse the CLOSE range to zero so encode/decode
+            # naturally skip it.
+            self._close_lo = self._open_lay_hi
+            self._close_hi = self._open_lay_hi
         # Predictor-integration Session 04: when each_way=True, two new
         # ranges follow CLOSE — OPEN_BACK_EACH_WAY then
         # OPEN_LAY_EACH_WAY. When each_way=False (default), n is
@@ -100,14 +115,24 @@ class DiscreteActionSpace:
         return self._each_way
 
     @property
+    def scalping_mode(self) -> bool:
+        return self._scalping_mode
+
+    @property
     def n(self) -> int:
         """Total number of discrete actions (incl. no-op).
 
-        With ``each_way=False`` (default): ``1 + 3 * max_runners``
-        (NOOP + OPEN_BACK + OPEN_LAY + CLOSE per runner). With
-        ``each_way=True`` (value_each_way mode): ``1 + 5 * max_runners``
-        (adds OPEN_BACK_EACH_WAY + OPEN_LAY_EACH_WAY per runner).
+        Layout:
+        - Scalping=True, each_way=False (default): 1 + 3 * max_runners
+          (NOOP + OPEN_BACK + OPEN_LAY + CLOSE per runner).
+        - Scalping=True, each_way=True: 1 + 5 * max_runners
+          (adds OPEN_BACK_EACH_WAY + OPEN_LAY_EACH_WAY per runner).
+        - Scalping=False (value modes): 1 + 2 * max_runners
+          (NOOP + OPEN_BACK + OPEN_LAY per runner; no CLOSE because
+          single-shot value bets don't have pair lifecycles to close).
         """
+        if not self._scalping_mode:
+            return 1 + 2 * self._max_runners
         per_runner = 5 if self._each_way else 3
         return 1 + per_runner * self._max_runners
 
@@ -156,6 +181,12 @@ class DiscreteActionSpace:
         if kind is ActionType.OPEN_LAY:
             return self._open_lay_lo + runner_idx
         if kind is ActionType.CLOSE:
+            if not self._scalping_mode:
+                raise ValueError(
+                    "CLOSE not encodable: DiscreteActionSpace was "
+                    "constructed with scalping_mode=False (value modes "
+                    "fire single-shot bets, no pair lifecycle to close)."
+                )
             return self._close_lo + runner_idx
         # Each-way action types are only encodable when each_way=True.
         if not self._each_way:
@@ -234,13 +265,16 @@ def compute_mask(
     # passive partner hasn't yet matched (i.e. ``complete=False``).
     # ``get_paired_positions`` filters by market_id so cross-race pairs
     # are excluded automatically.
+    # Skip in non-scalping mode — there are no pair lifecycles, and
+    # `space.encode(CLOSE, ...)` raises in non-scalping space.
     closeable_sids: set[int] = set()
-    for pair in bm.get_paired_positions(market_id=race.market_id):
-        if pair.get("complete"):
-            continue
-        agg = pair.get("aggressive")
-        if agg is not None:
-            closeable_sids.add(agg.selection_id)
+    if space.scalping_mode:
+        for pair in bm.get_paired_positions(market_id=race.market_id):
+            if pair.get("complete"):
+                continue
+            agg = pair.get("aggressive")
+            if agg is not None:
+                closeable_sids.add(agg.selection_id)
 
     for slot in range(space.max_runners):
         sid = slot_map.get(slot)
@@ -267,7 +301,7 @@ def compute_mask(
             mask[space.encode(ActionType.OPEN_BACK, slot)] = True
             mask[space.encode(ActionType.OPEN_LAY, slot)] = True
 
-        if sid in closeable_sids:
+        if space.scalping_mode and sid in closeable_sids:
             mask[space.encode(ActionType.CLOSE, slot)] = True
 
     return mask

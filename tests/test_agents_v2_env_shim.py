@@ -389,7 +389,11 @@ class TestActionMaskForwarding:
 
 
 class TestConstructorGuards:
-    def test_rejects_non_scalping_env(self):
+    def test_accepts_non_scalping_env(self):
+        """Predictor-integration "agent + 2 advisors" mode: shim now
+        supports non-scalping envs with a 1+2*max_runners action space
+        (NoOp, OpenBack, OpenLay per runner; no CLOSE)."""
+        from agents_v2.action_space import ActionType
         from agents_v2.env_shim import DiscreteActionShim
 
         non_scalping = {
@@ -404,8 +408,13 @@ class TestConstructorGuards:
             },
         }
         env = BetfairEnv(_make_day(n_races=1), non_scalping)
-        with pytest.raises(ValueError, match="scalping_mode"):
-            DiscreteActionShim(env)
+        shim = DiscreteActionShim(env)
+        # 1 + 2 * 4 = 9 (NoOp + OpenBack/OpenLay per runner; no CLOSE).
+        assert shim._action_space.n == 9
+        assert shim._action_space.scalping_mode is False
+        # CLOSE not encodable in non-scalping mode.
+        with pytest.raises(ValueError, match="scalping_mode=False"):
+            shim._action_space.encode(ActionType.CLOSE, 0)
 
     def test_rejects_arb_ticks_out_of_range(self):
         from agents_v2.env_shim import DiscreteActionShim
