@@ -102,6 +102,7 @@ def train_cluster_batched(
     n_agents_in_cohort: int = 1,
     reward_overrides: dict | None = None,
     enabled_set: frozenset[str] = frozenset(),
+    argmax_eval: bool = False,
 ) -> list[AgentResult]:
     """Train ``N`` arch-compatible agents in lock-step with a batched rollout.
 
@@ -433,7 +434,7 @@ def train_cluster_batched(
             eval_collector = RolloutCollector(
                 shim=eval_shim, policy=policies[i], device=device,
             )
-            eval_batch = eval_collector.collect_episode()
+            eval_batch = eval_collector.collect_episode(deterministic=argmax_eval)
             partial = _eval_rollout_stats(
                 batch=eval_batch,
                 last_info=eval_collector.last_info,

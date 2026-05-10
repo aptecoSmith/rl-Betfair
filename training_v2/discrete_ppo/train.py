@@ -703,6 +703,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Specific GPUs (cuda:0, cuda:1) supported via raw string."
         ),
     )
+    p.add_argument(
+        "--argmax-eval", action="store_true",
+        help=(
+            "Accepted for CLI parity with the cohort runner. No effect "
+            "in the standalone train CLI — eval rollout not implemented."
+        ),
+    )
     args = p.parse_args(argv)
     if args.day is None and args.days is None:
         # Default: single-day on the Phase 2 baseline date so existing

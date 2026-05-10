@@ -74,6 +74,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--seed", type=int, default=42,
         help="Per-agent eval seed (rolled deterministically per agent).",
     )
+    p.add_argument(
+        "--argmax-eval", action="store_true",
+        help=(
+            "Use deterministic (argmax) action selection for eval "
+            "rollouts instead of stochastic sampling. Removes £100–£300 "
+            "PnL swings caused by action-sampling RNG on identical "
+            "weights + identical day. Output rows gain "
+            "reeval_mode='argmax' when active."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -271,7 +281,9 @@ def main(argv: list[str] | None = None) -> int:
                 eval_collector = RolloutCollector(
                     shim=eval_shim, policy=policy, device=str(args.device),
                 )
-                eval_batch = eval_collector.collect_episode()
+                eval_batch = eval_collector.collect_episode(
+                    deterministic=args.argmax_eval,
+                )
                 partial = _eval_rollout_stats(
                     batch=eval_batch,
                     last_info=eval_collector.last_info,
@@ -349,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
                 "reeval_force_closed_pnl": agg.force_closed_pnl,
                 "reeval_stop_closed_pnl": agg.stop_closed_pnl,
                 "reeval_maturation_rate": mat_rate,
+                "reeval_mode": "argmax" if args.argmax_eval else "stochastic",
                 # Per-day breakdown for variance inspection
                 "reeval_per_day": [
                     {
