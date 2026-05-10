@@ -186,3 +186,177 @@ def compute_f2_aggregates_for_runners(
         rm.selection_id: compute_f2_aggregates(rm, as_of_date=as_of_date)
         for rm in runner_metas
     }
+
+
+# ---------------------------------------------------------------------------
+# F2 DataFrame stitcher — for bundle.predict_race(df)
+# ---------------------------------------------------------------------------
+
+
+# F1 numeric columns the champion expects, in the order the predictor's
+# `numeric_feature_matrix` emits them (see
+# `betfair-predictors/scripts/outcome_predictor/datasets.py::F1_NUMERIC`).
+_F1_NUMERIC_COLS: tuple[str, ...] = (
+    "field_size",
+    "draw",
+    "weight_lbs",
+    "age",
+    "days_since_last_run",
+    "official_rating",
+    "sort_priority",
+    "forecast_price",
+    "distance_yards",
+)
+
+# F1 categorical columns the encoder maps to `<col>_idx` integer columns
+# (see `betfair-predictors/scripts/outcome_predictor/datasets.py::F1_CATEGORICAL`).
+_F1_CATEGORICAL_COLS: tuple[str, ...] = (
+    "course",
+    "race_class",
+    "race_type",
+    "surface",
+    "sex",
+    "headgear",
+)
+
+# F5 columns the ranker expects beyond F2. Until the F5 aggregator lands,
+# zero-fill these to mean "no prior jockey/trainer history known"; the
+# ranker still runs (column-shape match) but its output is degraded
+# vs. fully-populated F5. Order doesn't matter (numeric_feature_matrix
+# selects by column name); listing here to keep the contract local.
+_F5_ZERO_FILL_COLS: tuple[str, ...] = (
+    "jockey_runs", "jockey_wins", "jockey_places",
+    "jockey_win_rate", "jockey_place_rate", "jockey_days_since_last",
+    "trainer_runs", "trainer_wins", "trainer_places",
+    "trainer_win_rate", "trainer_place_rate", "trainer_days_since_last",
+    "jockey_trainer_combo_runs", "jockey_trainer_combo_wins",
+    "jockey_trainer_combo_win_rate", "jockey_trainer_combo_place_rate",
+    "jockey_name_te_win", "jockey_name_te_placed",
+    "trainer_name_te_win", "trainer_name_te_placed",
+    "course_te_win", "course_te_placed",
+)
+
+
+def _safe_float(value: object, default: float = float("nan")) -> float:
+    """Best-effort string -> float, returning ``default`` on parse failure."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if not s:
+        return default
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _forecast_price_decimal(numerator: str, denominator: str) -> float:
+    """Convert the racecard's fractional forecast price to decimal form.
+
+    ``"8/1" -> 9.0`` (decimal-form Betfair convention: numerator/denominator
+    + 1.0). Returns NaN if either component is missing or unparseable.
+    """
+    num = _safe_float(numerator)
+    den = _safe_float(denominator)
+    if num != num or den != den or den == 0.0:  # NaN check
+        return float("nan")
+    return num / den + 1.0
+
+
+def build_predict_race_dataframe(
+    race: "object",  # data.episode_builder.Race — string-typed to keep this module import-free
+    *,
+    as_of_date: _date,
+    feature_variant: str = "F2",
+) -> "object":  # pandas.DataFrame
+    """Stitch race-level + per-runner data into the DataFrame the GBM expects.
+
+    Builds one row per runner (active + removed) carrying:
+
+    - The 9 F1 numeric columns + 6 F1 categorical raw values.
+    - The 6 F2 prior-form aggregates from
+      :func:`compute_f2_aggregates`.
+    - ``selection_id`` and ``market_id`` for routing the bundle's
+      output dicts.
+
+    Race-level fields rl-betfair / ai-betfair currently have natively
+    (``course = race.venue``) get populated. Race-level fields the
+    streamrecorder pipeline doesn't yet extract (``race_class``,
+    ``race_type``, ``surface``, ``distance_yards``) get an empty
+    string / NaN fallback; the encoder's ``<UNKNOWN>`` token absorbs
+    them at inference time per the predictor repo's §9 cold-start
+    contract. Field-level coverage will improve once the
+    streamrecorder coldData extraction lands the missing race-level
+    metadata in rl-betfair's parquets.
+
+    Returns a ``pandas.DataFrame``. Column ordering matches what
+    ``apply_encoders`` + ``numeric_feature_matrix`` produce so
+    downstream wiring just sets `each_way` on the bet, no further
+    column shuffling required.
+
+    ``feature_variant`` is currently ``"F2"`` (champion contract).
+    The F5 (ranker) variant adds jockey/trainer aggregates; that
+    extension lands in the next follow-on iteration.
+    """
+    if feature_variant not in ("F2", "F5"):
+        raise NotImplementedError(
+            f"build_predict_race_dataframe only supports F2 / F5; "
+            f"got feature_variant={feature_variant!r}"
+        )
+
+    import pandas as pd
+
+    n_runners = max(1, getattr(race, "n_runners", 0) or len(race.runner_metadata))
+
+    rows = []
+    for sid, rm in race.runner_metadata.items():
+        forecast_price = _forecast_price_decimal(
+            rm.forecastprice_numerator,
+            rm.forecastprice_denominator,
+        )
+        f2 = compute_f2_aggregates(rm, as_of_date=as_of_date)
+        row: dict[str, object] = {
+            "market_id": race.market_id,
+            "selection_id": int(sid),
+            # F1 numerics
+            "field_size": int(n_runners),
+            "draw": _safe_float(rm.stall_draw),
+            "weight_lbs": _safe_float(rm.weight_value),
+            "age": _safe_float(rm.age),
+            "days_since_last_run": _safe_float(rm.days_since_last_run),
+            "official_rating": _safe_float(rm.official_rating),
+            "sort_priority": _safe_float(rm.sort_priority),
+            "forecast_price": forecast_price,
+            # ``distance_yards`` is not yet in rl-betfair's `Race`; leave NaN.
+            # See `incoming/predictor-integration-data-bridging.md` for the
+            # streamrecorder coldData extension that lands this.
+            "distance_yards": float("nan"),
+            # F1 categoricals — raw strings; the encoder applies the int mapping.
+            # ``course`` derives from ``race.venue``; the other four are not
+            # in the day parquet today and route through the encoder's
+            # ``<UNKNOWN>`` cold-start token.
+            "course": getattr(race, "venue", "") or "",
+            "race_class": "",  # TODO(data-bridging): pull from coldData
+            "race_type": "",   # TODO(data-bridging): pull from coldData
+            "surface": "",     # TODO(data-bridging): pull from coldData
+            "sex": rm.sex_type or "",
+            "headgear": rm.wearing or "",
+        }
+        # F2 aggregates
+        row.update(f2)
+
+        # F5 ranker columns — zero-fill until the F5 jockey/trainer
+        # aggregator lands. Semantically "unknown jockey/trainer history",
+        # which makes the ranker effectively rank by F2 features alone.
+        # The pipeline runs end-to-end with this fallback; ranker
+        # accuracy is degraded versus a fully-populated F5, by design.
+        # See `incoming/predictor-integration-data-bridging.md` for the
+        # F5 implementation in the next data-bridging iteration.
+        for k in _F5_ZERO_FILL_COLS:
+            row.setdefault(k, 0.0)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    return df
