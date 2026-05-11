@@ -118,6 +118,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "shape mismatch on weight load)."
         ),
     )
+    p.add_argument(
+        "--strategy-mode", default=None,
+        choices=["arb", "value_win", "value_each_way"],
+        help=(
+            "Match training-time strategy_mode. Value modes have a "
+            "different obs/action shape (scalping_mode=False) so the "
+            "obs_dim differs from arb mode. Defaults to None = "
+            "config default (arb)."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -215,6 +225,9 @@ def main(argv: list[str] | None = None) -> int:
     starting_budget = float(cfg["training"]["starting_budget"])
     cfg["training"]["starting_budget"] = starting_budget
     max_runners = int(cfg["training"]["max_runners"])
+    if args.strategy_mode is not None:
+        cfg["training"]["strategy_mode"] = args.strategy_mode
+        logger.info("strategy_mode overridden to %r", args.strategy_mode)
 
     t0 = time.perf_counter()
     n_done = 0
