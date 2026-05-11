@@ -2349,3 +2349,74 @@ condition §1 (Session 07 conclusion is committed) and
 because the next move is genuinely an operator decision
 on direction (a/b/c/d are not equivalent risk profiles
 under default-recommendation discipline).
+
+## 2026-05-11 09:45 — Naked-tail root cause: GA had no safety knobs
+
+**State entering iteration:** Held-out reeval verdict was
+"locked consistent, naked tail kills 4/5." Recommendation
+(d) was a per-bet diagnostic. Started with hyperparameter
+audit instead — cheaper, no GPU needed.
+
+**Work done:**
+- Compared close/safety genes across the top-5 reeval agents:
+  ALL identical. `stop_loss_pnl_threshold = 0`,
+  `open_cost = 0`, `matured_arb_bonus_weight = 0`,
+  `direction_prob_loss_weight = 0`,
+  `direction_force_close_seconds = 60`, `naked_loss_scale = 1`.
+  Only `entropy_coeff` (0.0001 vs 0.0005) and `learning_rate`
+  varied meaningfully.
+- Scanned the full 60-agent scoreboard with the same
+  filter: **0/60 agents had any non-default value on
+  ANY of the six safety / shaping genes.** The GA's gene
+  pool was seeded with all-zero defaults on every knob
+  that could attenuate naked losses.
+
+**Conclusion (re-read of the cohort verdict):**
+The held-out reeval isn't telling us "scalping doesn't
+generalize." It's telling us "PPO can find arb mechanics
+from predictor obs without any safety shaping, but it can't
+suppress the naked tail without a gradient telling it to."
+The +£167 to −£532 naked spread across agents reflects
+weight-init variance, not GA-discovered policy diversity.
+
+The composite_score column makes this explicit: all 60
+agents in this cohort scored between −651 and −2000+
+(NEGATIVE). The "+£923 on 2026-05-06" peak was a
+single-day outlier on the BEST training day for the BEST
+agent, not a stable composite. The training metric was
+always reporting these agents as broadly unprofitable.
+
+**Revised recommendation (replaces (d)):**
+
+Launch a follow-on cohort with the safety / shaping genes
+**activated** in the GA's mutation ranges. Concrete design:
+
+| Gene | Old range | New range | Rationale |
+|---|---|---|---|
+| `stop_loss_pnl_threshold` | `[0, 0]` | `[0, 50]` | cut nakeds before tail accumulates |
+| `open_cost` | `[0, 0]` | `[0, 1.0]` | selective-open shaping (per CLAUDE.md) |
+| `matured_arb_bonus_weight` | `[0, 0]` | `[0, 20]` | positive gradient toward closing |
+| `direction_force_close_seconds` | `[60, 60]` | `[60, 180]` | close earlier, catch tail |
+| `naked_loss_scale` | `[1.0, 1.0]` | `[0.5, 1.0]` | anneal early gens past naked valley |
+
+Same scalping mode, same predictor obs, same lean schema,
+same architecture — only the gene ranges change. ~14h GPU
+for 10 generations. The locked +£150–£230 baseline is the
+floor; what we're searching for is the gene combo that pulls
+the naked term to neutral.
+
+The shadow-trading and productionization options remain
+on the table but **should not run first**: the cohort we
+have can't beat its own naked tail, and shadow-trading or
+productionizing a 1-out-of-60-not-overfit agent burns
+operator goodwill on a sample size of one. Tighten the
+cohort first; production candidates fall out of that.
+
+**Loop status:** Stopping per autonomous-run prompt stop
+condition §1 (Session 07 verdict committed, plan complete,
+plus the held-out follow-up). The follow-on cohort design
+above is OUT OF SCOPE for `predictor-integration/` — it
+needs its own plan (`plans/scalping-safety-gene-sweep/`
+or similar). Operator authorization to launch the
+follow-on cohort, OR to pivot to (b)/(c), is needed
+before the next training-class command.
