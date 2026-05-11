@@ -337,6 +337,10 @@ def main(argv: list[str] | None = None) -> int:
                         scorer_dir=DEFAULT_SCORER_DIR,
                         reward_overrides=per_agent_reward_overrides,
                         scalping_overrides=per_agent_scalping_overrides,
+                        predictor_bundle=predictor_bundle,
+                        use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
+                        use_direction_predictor=bool(args.use_direction_predictor),
+                        predictor_lean_obs=bool(args.predictor_lean_obs),
                     )
                 except Exception as e:
                     logger.warning(
