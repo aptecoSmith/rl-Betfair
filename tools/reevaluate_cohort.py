@@ -101,6 +101,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "predictor_*_experiment_id doesn't match the live bundle."
         ),
     )
+    p.add_argument(
+        "--use-race-outcome-predictor", action="store_true",
+        help="Match training-time flag — env populates champion+ranker obs.",
+    )
+    p.add_argument(
+        "--use-direction-predictor", action="store_true",
+        help="Match training-time flag — env populates direction obs.",
+    )
+    p.add_argument(
+        "--predictor-lean-obs", action="store_true",
+        help=(
+            "Match training-time flag — env uses the 23-col lean obs "
+            "instead of the 143-col firehose. MUST be set to load "
+            "checkpoints trained with this flag (otherwise input_proj "
+            "shape mismatch on weight load)."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -267,13 +284,20 @@ def main(argv: list[str] | None = None) -> int:
 
             # Build a sample env to size the policy. Use the FIRST eval
             # day for the sizing — env.obs_dim and shim.action_space are
-            # day-agnostic.
+            # day-agnostic. Forward the predictor flags so the env's
+            # obs_dim matches the cohort's training-time setup;
+            # otherwise the policy's input_proj layer won't match the
+            # saved weights.
             try:
                 env, shim = _build_env_for_day(
                     day_str=eval_days[0], data_dir=args.data_dir, cfg=cfg,
                     scorer_dir=DEFAULT_SCORER_DIR,
                     reward_overrides=per_agent_reward_overrides,
                     scalping_overrides=per_agent_scalping_overrides,
+                    predictor_bundle=predictor_bundle,
+                    use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
+                    use_direction_predictor=bool(args.use_direction_predictor),
+                    predictor_lean_obs=bool(args.predictor_lean_obs),
                 )
             except Exception as e:
                 logger.warning(
