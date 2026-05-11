@@ -52,6 +52,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Skip opens where time_to_off < this (default 7min); "
              "ensures the horizon has room to play out.",
     )
+    p.add_argument(
+        "--max-spread-7m", type=float, default=None,
+        help="Confidence filter: skip fires where (q90_7m - q10_7m) > "
+             "this. From confidence_buckets analysis, ~26 keeps the "
+             "75-88%% hit-rate buckets and drops the 46-49%% buckets.",
+    )
+    p.add_argument(
+        "--max-q50-7m", type=float, default=None,
+        help="Price filter: skip fires where q50_7m > this. From "
+             "confidence_buckets analysis, ~12 selects mid-priced "
+             "runners with deeper order books.",
+    )
     p.add_argument("--commission", type=float, default=0.05)
     p.add_argument(
         "--starting-budget", type=float, default=100_000.0,
@@ -118,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             if windows.shape[0] == 0:
                 continue
             try:
-                _, fires = bundle.predict_tick_batch(windows)
+                quantiles, fires = bundle.predict_tick_batch(windows)
             except Exception as exc:
                 logger.debug("race %s predict failed: %s", race.market_id, exc)
                 continue
@@ -126,12 +138,25 @@ def main(argv: list[str] | None = None) -> int:
                 continue  # no drift fires this race
 
             # fires[fire_idx, 0] = drift
+            # quantiles shape (N, 3 horizons, 3 quantiles=q10/q50/q90); 7m = horizon idx 2
             # indices[fire_idx] = (tick_idx, sid)
-            # Group fires by tick_idx
+            # Group fires by tick_idx; apply optional confidence filter.
             fires_by_tick: dict[int, list[tuple[int, int]]] = {}
+            n_filtered = 0
             for fi, (ti, sid) in enumerate(indices):
-                if fires[fi, 0]:
-                    fires_by_tick.setdefault(ti, []).append((fi, sid))
+                if not fires[fi, 0]:
+                    continue
+                if args.max_spread_7m is not None:
+                    spread = float(quantiles[fi, 2, 2] - quantiles[fi, 2, 0])
+                    if spread > args.max_spread_7m:
+                        n_filtered += 1
+                        continue
+                if args.max_q50_7m is not None:
+                    q50 = float(quantiles[fi, 2, 1])
+                    if q50 > args.max_q50_7m:
+                        n_filtered += 1
+                        continue
+                fires_by_tick.setdefault(ti, []).append((fi, sid))
 
             # Open positions: list of dicts {sid, open_tick_idx, open_ts,
             # close_ts, lay_price, lay_stake, market_id}
