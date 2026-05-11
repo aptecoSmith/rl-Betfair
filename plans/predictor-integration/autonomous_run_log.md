@@ -2246,3 +2246,106 @@ production.
   4d291ea7, 2f384ae8), wrap in inference service, ship to
   live trading.
 
+
+## 2026-05-11 09:30 — Post-Session-07, held-out reeval
+
+**State entering iteration:** Session 07 verdict (scalping ≫
+value_win) was based on in-sample training-day PnL. Operator's
+two-fix to `reevaluate_cohort` (predictor-flags not forwarded
+to the env builds) committed in `def091b` and `03eba47`.
+Multi-day held-out reeval of top-5 scalping agents launched
+against eval days `2026-05-04 / 05 / 06`.
+
+**Work done:**
+- Two `_build_env_for_day` call sites in `tools/reevaluate_cohort.py`
+  fixed to forward `--use-race-outcome-predictor`,
+  `--use-direction-predictor`, `--predictor-lean-obs`,
+  and `predictor_bundle` so the eval env matches the
+  cohort's training-time obs schema (504-dim lean).
+- Re-ran reeval with the production manifests + lean flags.
+  Log: `registry/_predictor_SCALPING_reeval_top5_1778487037.log`.
+  Output: `registry/_predictor_SCALPING_overnight_1778458751/reeval_top5_3day.jsonl`.
+- 5 agents × 3 days = 15 evals in 19.7 min.
+
+**Results (3-day aggregate per agent):**
+
+| Rank | Agent | pnl | locked | naked | mr |
+|---:|---|---:|---:|---:|---:|
+| 1 | `75eded9a-40b` | −£93 | +£191 | −£263 | 0.275 |
+| 2 | `4d291ea7-778` | −£4 | +£173 | −£147 | 0.281 |
+| 3 | `86725868-835` | −£316 | +£228 | −£532 | 0.247 |
+| 4 | `910a0e20-08b` | −£74 | +£156 | −£201 | 0.258 |
+| 5 | `2f384ae8-2f1` | **+£347** | +£201 | **+£167** | 0.230 |
+
+Mean **−£28** / median **−£74** across 3 held-out days.
+
+**Key observations:**
+- `locked` is consistently positive across all 5 agents
+  (+£156 to +£228). The arb-pair mechanics transfer
+  cleanly — predictor-driven open + close-signal works
+  out-of-sample.
+- `naked` is consistently negative for 4 of 5
+  (−£147 to −£532). The naked tail kills the trade.
+- Only one agent, `2f384ae8-2f1` (rank-5 by training
+  composite_score, _lowest_ training mr), has
+  positive naked. Its profile differs:
+  fewer bets/race (231–497), lowest mr (0.230),
+  positive naked (+£167). Suggests it forces-closes more
+  aggressively (mr is "matured rate", lower = closer to
+  the close_signal). The +£347 isn't luck — it's the only
+  agent that learned to NOT leave directional residuals.
+- The in-sample +£923 on `2026-05-06` (training peak,
+  agent `2f384ae8`) translates to +£570 on the same day
+  out-of-sample for the same agent. Reeval shows agent
+  ID stable, day-to-day correlation reasonable.
+- The agents ranked top-1 by training composite_score
+  (which weights training-day PnL) are NOT the ones that
+  transfer; the training metric is overfitted to in-sample
+  arb-rich days.
+
+**Operator decision pending:**
+The Session 07 conclusion "scalping wins" stands — every agent
+locks £150+ per race-day. But the in-sample +£923 doesn't
+generalize: top-1 by training metric loses £93 out-of-sample,
+and only 1 of 5 selected agents is profitable on the held-out
+window. Options:
+
+- (a) **Longer training (10+ gens, ~14h GPU)** — more rollouts
+  may produce more agents in the `2f384ae8` profile (low-mr,
+  positive-naked). Risk: overfitting deeper into the training
+  days' arb topology.
+- (b) **Live shadow trading via ai-betfair** with the top-3 by
+  3-day held-out PnL (`2f384ae8`, `4d291ea7`, `910a0e20`).
+  Validates without capital risk; tests against fresh-not-
+  cached market dynamics. Requires ai-betfair wiring.
+- (c) **Productionise `2f384ae8` only** — single profitable
+  held-out agent. Sample size of 1 makes this a
+  capital-at-risk gamble.
+- (d) **Investigate the naked-tail** — every agent has a
+  +£170–£230 locked profile but loses £150–£530 in nakeds.
+  The training process is finding good open/close pairs
+  but the naked pairs are systematically negative.
+  Possibilities: force-close threshold too lenient (T−30s
+  too late to close the long tail), or the agent is
+  opening pairs at prices where the passive leg can't
+  resolve and the directional residual is structurally
+  bearish in the eval-window distribution. A diagnostic
+  pass on `_predictor_SCALPING_overnight_1778458751`'s
+  episodes.jsonl would clarify whether nakeds are
+  open-time selection failures or close-time mechanics
+  failures.
+
+**Recommendation:** (d) → diagnostic on naked-tail
+attribution, then (b). Productionising 1 out of 5 against
+unattested live conditions has worse risk/reward than
+spending a session understanding why 4 of 5 lose £150+.
+The Session 07 verdict (scalping > value_win) is sound;
+the held-out result tightens the claim from "scalping
+profits" to "scalping locks consistently but the naked
+mechanics are unfinished."
+
+**Loop status:** Stopping. Per autonomous-run prompt stop
+condition §1 (Session 07 conclusion is committed) and
+because the next move is genuinely an operator decision
+on direction (a/b/c/d are not equivalent risk profiles
+under default-recommendation discipline).
