@@ -136,6 +136,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--predictor-p-win-lay-threshold", type=float, default=1.0,
         help="Match training-time p_win-lay action-mask gate.",
     )
+    p.add_argument(
+        "--direction-gate-enabled", action="store_true",
+        help="Match training-time direction-gate flag.",
+    )
     return p.parse_args(argv)
 
 
@@ -321,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                     predictor_lean_obs=bool(args.predictor_lean_obs),
                     predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
                     predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
+                    direction_gate_enabled=bool(args.direction_gate_enabled),
                 )
             except Exception as e:
                 logger.warning(
@@ -366,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                         predictor_lean_obs=bool(args.predictor_lean_obs),
                         predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
                         predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
+                        direction_gate_enabled=bool(args.direction_gate_enabled),
                     )
                 except Exception as e:
                     logger.warning(

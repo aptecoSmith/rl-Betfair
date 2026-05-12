@@ -129,6 +129,7 @@ def run_cohort(
     use_direction_predictor: bool = False,
     predictor_p_win_back_threshold: float = 0.0,
     predictor_p_win_lay_threshold: float = 1.0,
+    direction_gate_enabled: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -348,6 +349,7 @@ def run_cohort(
                         use_direction_predictor=use_direction_predictor,
                         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
                         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+                        direction_gate_enabled=direction_gate_enabled,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -1026,6 +1028,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "disabled."
         ),
     )
+    p.add_argument(
+        "--direction-gate-enabled", action="store_true",
+        help=(
+            "Action-mask gate: also refuse OPEN_LAY on runners "
+            "where dir_fire_drift did NOT fire at the current tick. "
+            "Requires --use-direction-predictor. Composes with "
+            "--predictor-p-win-back-threshold / "
+            "--predictor-p-win-lay-threshold (champion gate). See "
+            "plans/scalping-direction-gate/."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1170,6 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
             use_direction_predictor=bool(args.use_direction_predictor),
             predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
             predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
+            direction_gate_enabled=bool(args.direction_gate_enabled),
         )
     finally:
         if server is not None:

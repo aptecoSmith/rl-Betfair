@@ -847,6 +847,15 @@ class BetfairEnv(gymnasium.Env):
         # p_win isn't computed).
         predictor_p_win_back_threshold: float = 0.0,
         predictor_p_win_lay_threshold: float = 1.0,
+        # Direction-predictor action gate (plans/scalping-direction-gate/).
+        # When True, ALSO refuse OPEN_LAY on (tick, sid) pairs where the
+        # direction predictor's ``dir_fire_drift`` did NOT fire at the
+        # current tick. OPEN_BACK is NOT direction-gated (shorten signal
+        # is broken, per 2026-05-12 audit). Requires
+        # ``use_direction_predictor=True`` and a non-None
+        # ``predictor_bundle``. Default False = byte-identical to
+        # pre-plan behavior.
+        direction_gate_enabled: bool = False,
     ) -> None:
         super().__init__()
         self.day = day
@@ -1286,6 +1295,26 @@ class BetfairEnv(gymnasium.Env):
         # _precompute; key = race_idx, value = {sid: p_win}.
         self._race_p_win_by_race: list[dict[int, float]] = []
 
+        # Direction-predictor action gate (plans/scalping-direction-gate/).
+        # Refuses OPEN_LAY on (tick, sid) where dir_fire_drift didn't fire.
+        # See module docstring of the plan for the asymmetric design.
+        self._direction_gate_enabled: bool = bool(direction_gate_enabled)
+        if self._direction_gate_enabled and not self._use_direction_predictor:
+            raise ValueError(
+                "direction_gate_enabled=True requires "
+                "use_direction_predictor=True. The gate refuses OPEN_LAY "
+                "based on dir_fire_drift which is only computed when the "
+                "direction predictor is on.",
+            )
+        if self._direction_gate_enabled and self._predictor_bundle is None:
+            raise ValueError(
+                "direction_gate_enabled=True requires a predictor_bundle.",
+            )
+        self._direction_gate_active: bool = self._direction_gate_enabled
+        # Per-race cache of dir_fire_drift booleans. Populated in
+        # _precompute; key = race_idx, value = {(tick_idx, sid): bool}.
+        self._tick_drift_fires_by_race: list[dict[tuple[int, int], bool]] = []
+
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
 
@@ -1444,6 +1473,16 @@ class BetfairEnv(gymnasium.Env):
             # {(tick_idx, sid): {dir_q*, dir_fire_*}} or empty when
             # use_direction_predictor=False.
             tick_predictor_outputs = self._compute_tick_predictor_outputs(race)
+
+            # Cache drift-fire per (tick_idx, sid) for compute_mask's
+            # direction gate (plans/scalping-direction-gate/). Reuses
+            # the same tick_predictor_outputs already computed above;
+            # value is the bool from "dir_fire_drift". When the
+            # direction predictor is off, this is just an empty dict.
+            self._tick_drift_fires_by_race.append({
+                key: bool(d.get("dir_fire_drift", False))
+                for key, d in (tick_predictor_outputs or {}).items()
+            })
 
             # Build static observation array per tick
             race_obs: list[np.ndarray] = []

@@ -296,6 +296,21 @@ def compute_mask(
         p_win_lay_thr = 1.0
         race_p_wins = {}
 
+    # Direction gate (plans/scalping-direction-gate/). When active,
+    # OPEN_LAY is refused on (tick, sid) where dir_fire_drift didn't
+    # fire. OPEN_BACK is NOT direction-gated. Default-off short-
+    # circuits the cache lookup so the mask is byte-identical to the
+    # pwin-only path.
+    direction_gate_active = getattr(env, "_direction_gate_active", False)
+    if direction_gate_active:
+        drift_fires: dict[tuple[int, int], bool] = (
+            env._tick_drift_fires_by_race[env._race_idx]
+            if env._race_idx < len(env._tick_drift_fires_by_race)
+            else {}
+        )
+    else:
+        drift_fires = {}
+
     for slot in range(space.max_runners):
         sid = slot_map.get(slot)
         if sid is None:
@@ -327,6 +342,16 @@ def compute_mask(
             else:
                 mask[space.encode(ActionType.OPEN_BACK, slot)] = True
                 mask[space.encode(ActionType.OPEN_LAY, slot)] = True
+
+            # Direction gate: if active, ALSO require drift to fire on
+            # this (tick, sid) for OPEN_LAY to remain legal. Purely
+            # additive — only ever clears, never sets.
+            if (
+                direction_gate_active
+                and mask[space.encode(ActionType.OPEN_LAY, slot)]
+                and not drift_fires.get((env._tick_idx, sid), False)
+            ):
+                mask[space.encode(ActionType.OPEN_LAY, slot)] = False
 
         if space.scalping_mode and sid in closeable_sids:
             mask[space.encode(ActionType.CLOSE, slot)] = True

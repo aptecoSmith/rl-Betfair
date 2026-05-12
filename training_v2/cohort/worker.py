@@ -427,6 +427,7 @@ def _build_env_for_day(
     predictor_lean_obs: bool = False,
     predictor_p_win_back_threshold: float = 0.0,
     predictor_p_win_lay_threshold: float = 1.0,
+    direction_gate_enabled: bool = False,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     day = load_day(day_str, data_dir=data_dir)
     env = BetfairEnv(
@@ -439,6 +440,7 @@ def _build_env_for_day(
         predictor_lean_obs=predictor_lean_obs,
         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+        direction_gate_enabled=direction_gate_enabled,
     )
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
@@ -722,6 +724,7 @@ def train_one_agent(
     use_direction_predictor: bool = False,
     predictor_p_win_back_threshold: float = 0.0,
     predictor_p_win_lay_threshold: float = 1.0,
+    direction_gate_enabled: bool = False,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -851,6 +854,7 @@ def train_one_agent(
         predictor_lean_obs=predictor_lean_obs,
         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+        direction_gate_enabled=direction_gate_enabled,
     )
 
     # Phase-14 S03 — direction gate config flows through trainer_hp
@@ -1205,6 +1209,7 @@ def train_one_agent(
                 predictor_lean_obs=predictor_lean_obs,
                 predictor_p_win_back_threshold=predictor_p_win_back_threshold,
                 predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+                direction_gate_enabled=direction_gate_enabled,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -1406,6 +1411,7 @@ def train_one_agent(
             predictor_lean_obs=predictor_lean_obs,
             predictor_p_win_back_threshold=predictor_p_win_back_threshold,
             predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+            direction_gate_enabled=direction_gate_enabled,
         )
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policy, device=device,

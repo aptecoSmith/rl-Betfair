@@ -492,3 +492,113 @@ class TestEachWayActionSpace:
             space.encode(ActionType.OPEN_BACK_EACH_WAY, 0)
         with pytest.raises(ValueError, match="each_way=False"):
             space.encode(ActionType.OPEN_LAY_EACH_WAY, 0)
+
+
+# ── Direction-predictor action gate (plans/scalping-direction-gate/) ────────
+
+
+class TestDirectionGate:
+    """`compute_mask` honours the asymmetric direction-predictor gate.
+
+    When `_direction_gate_active` is True on the env, the mask refuses
+    OPEN_LAY on `(tick, sid)` pairs where `dir_fire_drift` did NOT fire.
+    OPEN_BACK is NEVER direction-gated (the shorten signal is broken,
+    per the 2026-05-12 audit). Default-off mode is byte-identical to
+    the pwin-only path.
+
+    Tests inject drift-fire booleans directly into the env's cache so
+    we don't depend on a real PredictorBundle for unit tests.
+    """
+
+    def _reset_env(self) -> BetfairEnv:
+        env = BetfairEnv(_make_day(n_races=1), _scalping_config())
+        env.reset()
+        return env
+
+    def test_direction_gate_disabled_by_default(self):
+        """Default constructor → gate inactive → mask matches pre-plan."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        assert env._direction_gate_enabled is False
+        assert env._direction_gate_active is False
+        mask = compute_mask(space, env)
+        # Slot 0 (sid 101) is healthy → both opens legal regardless of
+        # what's in the (empty) drift cache.
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)]
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)]
+
+    def test_direction_gate_refuses_lay_when_drift_not_firing(self):
+        """Gate active, drift cache empty → OPEN_LAY masked on every slot."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._direction_gate_active = True
+        # No fires at all.
+        env._tick_drift_fires_by_race[env._race_idx] = {}
+
+        mask = compute_mask(space, env)
+        # Active runners (slots 0, 1) — OPEN_LAY refused, OPEN_BACK legal.
+        assert not mask[space.encode(ActionType.OPEN_LAY, 0)], \
+            "drift not firing → OPEN_LAY must be masked"
+        assert not mask[space.encode(ActionType.OPEN_LAY, 1)], \
+            "drift not firing → OPEN_LAY must be masked"
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)], \
+            "OPEN_BACK is NOT direction-gated"
+        assert mask[space.encode(ActionType.OPEN_BACK, 1)], \
+            "OPEN_BACK is NOT direction-gated"
+
+    def test_direction_gate_allows_lay_when_drift_firing(self):
+        """Drift firing on (tick, sid) → OPEN_LAY remains legal there."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._direction_gate_active = True
+        # Drift fires on both runners at tick 0.
+        env._tick_drift_fires_by_race[env._race_idx] = {
+            (env._tick_idx, 101): True,
+            (env._tick_idx, 102): True,
+        }
+
+        mask = compute_mask(space, env)
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)], \
+            "drift firing on slot 0 → OPEN_LAY legal"
+        assert mask[space.encode(ActionType.OPEN_LAY, 1)], \
+            "drift firing on slot 1 → OPEN_LAY legal"
+
+    def test_direction_gate_does_not_touch_back(self):
+        """Asymmetry guard: OPEN_BACK legal even when drift absent everywhere."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._direction_gate_active = True
+        env._tick_drift_fires_by_race[env._race_idx] = {}
+
+        mask = compute_mask(space, env)
+        # Slots 0 and 1 are the active runners in the fixture day.
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)]
+        assert mask[space.encode(ActionType.OPEN_BACK, 1)]
+
+    def test_direction_gate_byte_identical_when_disabled(self):
+        """Gate off → mask matches reference even with a populated cache."""
+        space = DiscreteActionSpace(max_runners=4)
+        env_a = self._reset_env()
+        env_b = self._reset_env()
+        # env_b leaves the gate off but stuffs the cache with drift
+        # bools that WOULD trigger refusal if the gate were active.
+        assert env_b._direction_gate_active is False
+        env_b._tick_drift_fires_by_race[env_b._race_idx] = {
+            (env_b._tick_idx, 101): False,
+            (env_b._tick_idx, 102): False,
+        }
+        mask_a = compute_mask(space, env_a)
+        mask_b = compute_mask(space, env_b)
+        assert (mask_a == mask_b).all(), \
+            "gate-disabled env must produce identical mask regardless of cache"
+
+    def test_direction_gate_raises_without_use_direction_predictor(self):
+        """Loud-fail on incompatible flags (hard_constraints §2)."""
+        with pytest.raises(ValueError, match="use_direction_predictor"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                direction_gate_enabled=True,
+                # use_direction_predictor stays None → resolves False
+                # without a predictor_bundle.
+            )
