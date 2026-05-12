@@ -277,6 +277,25 @@ def compute_mask(
             if agg is not None:
                 closeable_sids.add(agg.selection_id)
 
+    # Predictor p_win gate (plans/scalping-pwin-gate/). Default-off
+    # means we never look up p_win and the mask is byte-identical to
+    # pre-gate behavior. When active, the gate refuses OPEN_BACK on
+    # runners whose champion p_win is below the back threshold and
+    # OPEN_LAY on runners whose p_win is above the lay threshold.
+    p_win_gate_active = getattr(env, "_predictor_p_win_gate_active", False)
+    if p_win_gate_active:
+        p_win_back_thr = env._predictor_p_win_back_threshold
+        p_win_lay_thr = env._predictor_p_win_lay_threshold
+        race_p_wins: dict[int, float] = (
+            env._race_p_win_by_race[env._race_idx]
+            if env._race_idx < len(env._race_p_win_by_race)
+            else {}
+        )
+    else:
+        p_win_back_thr = 0.0
+        p_win_lay_thr = 1.0
+        race_p_wins = {}
+
     for slot in range(space.max_runners):
         sid = slot_map.get(slot)
         if sid is None:
@@ -299,8 +318,15 @@ def compute_mask(
             and not has_unsettled
         )
         if open_ok:
-            mask[space.encode(ActionType.OPEN_BACK, slot)] = True
-            mask[space.encode(ActionType.OPEN_LAY, slot)] = True
+            if p_win_gate_active:
+                p_win = race_p_wins.get(sid, 0.0)
+                if p_win >= p_win_back_thr:
+                    mask[space.encode(ActionType.OPEN_BACK, slot)] = True
+                if p_win <= p_win_lay_thr:
+                    mask[space.encode(ActionType.OPEN_LAY, slot)] = True
+            else:
+                mask[space.encode(ActionType.OPEN_BACK, slot)] = True
+                mask[space.encode(ActionType.OPEN_LAY, slot)] = True
 
         if space.scalping_mode and sid in closeable_sids:
             mask[space.encode(ActionType.CLOSE, slot)] = True

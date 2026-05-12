@@ -425,6 +425,8 @@ def _build_env_for_day(
     use_race_outcome_predictor: bool | None = None,
     use_direction_predictor: bool | None = None,
     predictor_lean_obs: bool = False,
+    predictor_p_win_back_threshold: float = 0.0,
+    predictor_p_win_lay_threshold: float = 1.0,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     day = load_day(day_str, data_dir=data_dir)
     env = BetfairEnv(
@@ -435,6 +437,8 @@ def _build_env_for_day(
         use_race_outcome_predictor=use_race_outcome_predictor,
         use_direction_predictor=use_direction_predictor,
         predictor_lean_obs=predictor_lean_obs,
+        predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
     )
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
@@ -716,6 +720,8 @@ def train_one_agent(
     use_race_outcome_predictor: bool = False,
     predictor_lean_obs: bool = False,
     use_direction_predictor: bool = False,
+    predictor_p_win_back_threshold: float = 0.0,
+    predictor_p_win_lay_threshold: float = 1.0,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -843,6 +849,8 @@ def train_one_agent(
         scalping_overrides=per_agent_scalping_overrides,
         predictor_bundle=predictor_bundle,
         predictor_lean_obs=predictor_lean_obs,
+        predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
     )
 
     # Phase-14 S03 — direction gate config flows through trainer_hp
@@ -1195,6 +1203,8 @@ def train_one_agent(
                 scalping_overrides=per_agent_scalping_overrides,
                 predictor_bundle=predictor_bundle,
                 predictor_lean_obs=predictor_lean_obs,
+                predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+                predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -1394,6 +1404,8 @@ def train_one_agent(
             scalping_overrides=per_agent_scalping_overrides,
             predictor_bundle=predictor_bundle,
             predictor_lean_obs=predictor_lean_obs,
+            predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+            predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
         )
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policy, device=device,

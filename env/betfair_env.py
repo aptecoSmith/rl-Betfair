@@ -838,6 +838,15 @@ class BetfairEnv(gymnasium.Env):
         # decides for itself. Default False = byte-identical to the
         # post-Session-02 obs schema.
         predictor_lean_obs: bool = False,
+        # Predictor p_win action gate (plans/scalping-pwin-gate/).
+        # Refuse OPEN_BACK on runners with champion p_win below the
+        # back threshold; refuse OPEN_LAY on runners with p_win above
+        # the lay threshold. Defaults 0.0 / 1.0 = both gates disabled
+        # = byte-identical to pre-gate behavior. Only applied when
+        # ``use_race_outcome_predictor`` is True (otherwise champion
+        # p_win isn't computed).
+        predictor_p_win_back_threshold: float = 0.0,
+        predictor_p_win_lay_threshold: float = 1.0,
     ) -> None:
         super().__init__()
         self.day = day
@@ -1245,6 +1254,38 @@ class BetfairEnv(gymnasium.Env):
             self._active_runner_keys = RUNNER_KEYS
             self._active_runner_dim = RUNNER_DIM
 
+        # Predictor p_win action gate. See constructor docstring.
+        # Per-race cache populated lazily in _precompute alongside the
+        # baked-into-obs predictor outputs. compute_mask reads it.
+        self._predictor_p_win_back_threshold: float = float(
+            predictor_p_win_back_threshold
+        )
+        self._predictor_p_win_lay_threshold: float = float(
+            predictor_p_win_lay_threshold
+        )
+        if not 0.0 <= self._predictor_p_win_back_threshold <= 1.0:
+            raise ValueError(
+                "predictor_p_win_back_threshold must be in [0, 1], got "
+                f"{self._predictor_p_win_back_threshold!r}",
+            )
+        if not 0.0 <= self._predictor_p_win_lay_threshold <= 1.0:
+            raise ValueError(
+                "predictor_p_win_lay_threshold must be in [0, 1], got "
+                f"{self._predictor_p_win_lay_threshold!r}",
+            )
+        # Active iff the gate would actually refuse any action. When
+        # both defaults hold, compute_mask short-circuits the lookup.
+        self._predictor_p_win_gate_active: bool = (
+            self._use_race_outcome_predictor
+            and (
+                self._predictor_p_win_back_threshold > 0.0
+                or self._predictor_p_win_lay_threshold < 1.0
+            )
+        )
+        # Per-race cache of champion p_win values. Populated in
+        # _precompute; key = race_idx, value = {sid: p_win}.
+        self._race_p_win_by_race: list[dict[int, float]] = []
+
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
 
@@ -1389,6 +1430,14 @@ class BetfairEnv(gymnasium.Env):
             # ``feat_dict["runners"][sid]`` for the env's
             # ``_features_to_array`` to read into the obs slice.
             predictor_outputs_per_runner = self._compute_race_predictor_outputs(race)
+
+            # Cache p_win per (race, sid) for the p_win action gate.
+            # Keyed by race_idx (insertion order matches self.day.races).
+            # When the predictor isn't on, this is just an empty dict.
+            self._race_p_win_by_race.append({
+                sid: float(d.get("champion_p_win", 0.0))
+                for sid, d in (predictor_outputs_per_runner or {}).items()
+            })
 
             # Per-tick direction-predictor outputs (advisor #2). Computed
             # once per race in batched form. Returns a dict

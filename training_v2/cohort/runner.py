@@ -127,6 +127,8 @@ def run_cohort(
     use_race_outcome_predictor: bool = False,
     predictor_lean_obs: bool = False,
     use_direction_predictor: bool = False,
+    predictor_p_win_back_threshold: float = 0.0,
+    predictor_p_win_lay_threshold: float = 1.0,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -344,6 +346,8 @@ def run_cohort(
                         use_race_outcome_predictor=use_race_outcome_predictor,
                         predictor_lean_obs=predictor_lean_obs,
                         use_direction_predictor=use_direction_predictor,
+                        predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+                        predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -1004,6 +1008,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "arb mode (per the predictor's `signal_description`)."
         ),
     )
+    p.add_argument(
+        "--predictor-p-win-back-threshold", type=float, default=0.0,
+        help=(
+            "Action-mask gate: refuse OPEN_BACK on runners whose "
+            "champion p_win is below this. Default 0.0 = gate "
+            "disabled. Only meaningful when "
+            "--use-race-outcome-predictor is set. See "
+            "plans/scalping-pwin-gate/."
+        ),
+    )
+    p.add_argument(
+        "--predictor-p-win-lay-threshold", type=float, default=1.0,
+        help=(
+            "Action-mask gate: refuse OPEN_LAY on runners whose "
+            "champion p_win is above this. Default 1.0 = gate "
+            "disabled."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1146,6 +1168,8 @@ def main(argv: list[str] | None = None) -> int:
             use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
             predictor_lean_obs=bool(args.predictor_lean_obs),
             use_direction_predictor=bool(args.use_direction_predictor),
+            predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
+            predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
         )
     finally:
         if server is not None:

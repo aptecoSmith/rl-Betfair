@@ -128,6 +128,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "config default (arb)."
         ),
     )
+    p.add_argument(
+        "--predictor-p-win-back-threshold", type=float, default=0.0,
+        help="Match training-time p_win-back action-mask gate.",
+    )
+    p.add_argument(
+        "--predictor-p-win-lay-threshold", type=float, default=1.0,
+        help="Match training-time p_win-lay action-mask gate.",
+    )
     return p.parse_args(argv)
 
 
@@ -311,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
                     use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
                     use_direction_predictor=bool(args.use_direction_predictor),
                     predictor_lean_obs=bool(args.predictor_lean_obs),
+                    predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
+                    predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
                 )
             except Exception as e:
                 logger.warning(
@@ -354,6 +364,8 @@ def main(argv: list[str] | None = None) -> int:
                         use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
                         use_direction_predictor=bool(args.use_direction_predictor),
                         predictor_lean_obs=bool(args.predictor_lean_obs),
+                        predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
+                        predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
                     )
                 except Exception as e:
                     logger.warning(

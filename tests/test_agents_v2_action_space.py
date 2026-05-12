@@ -267,6 +267,150 @@ class TestComputeMask:
         assert not mask[1:].any()
 
 
+# ── Predictor p_win action gate (plans/scalping-pwin-gate/) ────────────────
+
+
+class TestPredictorPWinGate:
+    """`compute_mask` honours the champion-p_win action gate.
+
+    When `_predictor_p_win_gate_active` is True on the env, the mask
+    refuses OPEN_BACK on runners with `p_win < back_threshold` and
+    OPEN_LAY on runners with `p_win > lay_threshold`. Defaults of 0.0
+    / 1.0 are byte-identical to pre-gate behaviour.
+
+    Tests inject known p_win values directly into the env's cache
+    so we don't depend on a real PredictorBundle for unit tests.
+    """
+
+    def _reset_env(self) -> BetfairEnv:
+        env = BetfairEnv(_make_day(n_races=1), _scalping_config())
+        env.reset()
+        return env
+
+    def test_gate_disabled_by_default(self):
+        """Default constructor → gate inactive → mask matches pre-gate."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        assert env._predictor_p_win_back_threshold == 0.0
+        assert env._predictor_p_win_lay_threshold == 1.0
+        assert env._predictor_p_win_gate_active is False
+        mask = compute_mask(space, env)
+        # Slot 0 (sid 101) is healthy → both opens legal.
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)]
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)]
+
+    def test_back_threshold_blocks_low_pwin(self):
+        """back_threshold=0.4, runner p_win=0.2 → OPEN_BACK masked."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        # Activate the gate manually — bypasses the
+        # use_race_outcome_predictor requirement (tests are
+        # PredictorBundle-free).
+        env._predictor_p_win_back_threshold = 0.4
+        env._predictor_p_win_lay_threshold = 1.0
+        env._predictor_p_win_gate_active = True
+        # Slot 0 (sid 101) p_win=0.2, slot 1 (sid 102) p_win=0.6.
+        env._race_p_win_by_race[env._race_idx] = {101: 0.2, 102: 0.6}
+
+        mask = compute_mask(space, env)
+        assert not mask[space.encode(ActionType.OPEN_BACK, 0)], \
+            "back on low-p_win runner should be masked"
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)], \
+            "lay still legal — lay_threshold=1.0 allows all"
+        assert mask[space.encode(ActionType.OPEN_BACK, 1)], \
+            "back on high-p_win runner stays legal"
+
+    def test_lay_threshold_blocks_high_pwin(self):
+        """lay_threshold=0.3, runner p_win=0.6 → OPEN_LAY masked."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._predictor_p_win_back_threshold = 0.0
+        env._predictor_p_win_lay_threshold = 0.3
+        env._predictor_p_win_gate_active = True
+        env._race_p_win_by_race[env._race_idx] = {101: 0.2, 102: 0.6}
+
+        mask = compute_mask(space, env)
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)], \
+            "back stays legal — back_threshold=0.0 allows all"
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)], \
+            "lay on p_win=0.2 ≤ 0.3 still legal"
+        assert not mask[space.encode(ActionType.OPEN_LAY, 1)], \
+            "lay on p_win=0.6 > 0.3 should be masked"
+
+    def test_both_thresholds_active(self):
+        """Both gates active: only mid-p_win runners are unbackable AND unlayable."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._predictor_p_win_back_threshold = 0.5  # back if p_win >= 0.5
+        env._predictor_p_win_lay_threshold = 0.5   # lay if p_win <= 0.5
+        env._predictor_p_win_gate_active = True
+        # Three runners at low, mid, high p_win.
+        env._race_p_win_by_race[env._race_idx] = {101: 0.1, 102: 0.5, 103: 0.9}
+
+        mask = compute_mask(space, env)
+        # Slot 0 (p_win=0.1): can lay (0.1 ≤ 0.5), cannot back (0.1 < 0.5).
+        assert not mask[space.encode(ActionType.OPEN_BACK, 0)]
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)]
+        # Slot 1 (p_win=0.5): can both — boundary inclusive.
+        assert mask[space.encode(ActionType.OPEN_BACK, 1)]
+        assert mask[space.encode(ActionType.OPEN_LAY, 1)]
+        # Slot 2 (p_win=0.9): can back (0.9 ≥ 0.5), cannot lay (0.9 > 0.5).
+        assert mask[space.encode(ActionType.OPEN_BACK, 2)]
+        assert not mask[space.encode(ActionType.OPEN_LAY, 2)]
+
+    def test_missing_pwin_falls_back_to_zero(self):
+        """Runner not in the p_win cache → treated as p_win=0.
+
+        Backs on that runner get masked under any back_threshold > 0;
+        lays stay legal because 0 ≤ any lay_threshold ≥ 0.
+        """
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._predictor_p_win_back_threshold = 0.1
+        env._predictor_p_win_lay_threshold = 1.0
+        env._predictor_p_win_gate_active = True
+        # Cache only has slot 1 (sid 102); slot 0 (sid 101) is missing.
+        env._race_p_win_by_race[env._race_idx] = {102: 0.6}
+
+        mask = compute_mask(space, env)
+        assert not mask[space.encode(ActionType.OPEN_BACK, 0)], \
+            "missing p_win defaults to 0 < 0.1 → back masked"
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)], \
+            "p_win=0 ≤ 1.0 → lay legal"
+        assert mask[space.encode(ActionType.OPEN_BACK, 1)], \
+            "slot 1 has p_win=0.6 ≥ 0.1 → back legal"
+
+    def test_invalid_threshold_raises(self):
+        """Constructor rejects threshold outside [0, 1]."""
+        with pytest.raises(ValueError, match="back_threshold"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                predictor_p_win_back_threshold=1.5,
+            )
+        with pytest.raises(ValueError, match="lay_threshold"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                predictor_p_win_lay_threshold=-0.1,
+            )
+
+    def test_gate_byte_identical_when_disabled(self):
+        """back=0.0, lay=1.0 → gate inactive → mask matches no-gate behavior bit-for-bit."""
+        space = DiscreteActionSpace(max_runners=4)
+        env_a = self._reset_env()
+        env_b = self._reset_env()
+        # env_b explicitly sets the defaults, env_a leaves them implicit.
+        env_b._predictor_p_win_back_threshold = 0.0
+        env_b._predictor_p_win_lay_threshold = 1.0
+        # Inject p_win values that WOULD trigger a gate if it were active.
+        env_b._race_p_win_by_race[env_b._race_idx] = {101: 0.05, 102: 0.95}
+        mask_a = compute_mask(space, env_a)
+        mask_b = compute_mask(space, env_b)
+        assert (mask_a == mask_b).all(), \
+            "gate-disabled env must produce identical mask regardless of p_win values"
+
+
 # ─── Each-way action space (predictor-integration Session 04) ────────────────
 
 
