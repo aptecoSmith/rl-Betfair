@@ -130,6 +130,7 @@ def run_cohort(
     predictor_p_win_back_threshold: float = 0.0,
     predictor_p_win_lay_threshold: float = 1.0,
     direction_gate_enabled: bool = False,
+    race_confidence_threshold: float = 0.0,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -350,6 +351,7 @@ def run_cohort(
                         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
                         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                         direction_gate_enabled=direction_gate_enabled,
+                        race_confidence_threshold=race_confidence_threshold,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -1039,6 +1041,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "plans/scalping-direction-gate/."
         ),
     )
+    p.add_argument(
+        "--race-confidence-threshold", type=float, default=0.0,
+        help=(
+            "Per-race action-mask gate: refuse all opens/closes in "
+            "races where max(champion p_win) across runners is below "
+            "this. Default 0.0 = disabled. Requires "
+            "--use-race-outcome-predictor. See "
+            "plans/scalping-race-confidence-gate/."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1184,6 +1196,7 @@ def main(argv: list[str] | None = None) -> int:
             predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
             predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
             direction_gate_enabled=bool(args.direction_gate_enabled),
+            race_confidence_threshold=float(args.race_confidence_threshold),
         )
     finally:
         if server is not None:

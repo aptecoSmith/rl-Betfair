@@ -246,6 +246,23 @@ def compute_mask(
         return mask
     tick = race.ticks[env._tick_idx]
 
+    # Race-confidence gate (plans/scalping-race-confidence-gate/). When
+    # active and the current race's max(champion p_win) is below the
+    # threshold, every non-NOOP action is masked — early return before
+    # any per-slot logic runs. Default-off short-circuits via
+    # ``getattr`` so the mask is byte-identical to pre-plan behavior.
+    race_confidence_gate_active = getattr(
+        env, "_race_confidence_gate_active", False,
+    )
+    if race_confidence_gate_active:
+        confident_by_race = env._race_is_confident_by_race
+        if env._race_idx < len(confident_by_race):
+            race_is_confident = confident_by_race[env._race_idx]
+        else:
+            race_is_confident = False
+        if not race_is_confident:
+            return mask
+
     # Global gates that kill ALL open actions for this tick.
     budget_ok = bm.budget >= MIN_BET_STAKE
     bet_count_ok = bm.race_bet_count(race.market_id) < env.max_bets_per_race

@@ -602,3 +602,143 @@ class TestDirectionGate:
                 # use_direction_predictor stays None → resolves False
                 # without a predictor_bundle.
             )
+
+
+# ── Race-confidence action gate (plans/scalping-race-confidence-gate/) ──────
+
+
+class TestRaceConfidenceGate:
+    """`compute_mask` honours the per-race confidence gate.
+
+    When ``_race_confidence_gate_active`` is True on the env, the mask
+    refuses ALL non-NOOP actions on races where
+    ``max(champion p_win) < race_confidence_threshold``. Composes
+    additively with the per-runner pwin gate. Default 0.0 is
+    byte-identical to pre-plan behaviour.
+
+    Tests inject ``_race_is_confident_by_race`` directly to avoid the
+    need for a real PredictorBundle.
+    """
+
+    def _reset_env(self) -> BetfairEnv:
+        env = BetfairEnv(_make_day(n_races=1), _scalping_config())
+        env.reset()
+        return env
+
+    def test_gate_disabled_by_default(self):
+        """Default constructor → gate inactive → mask matches pre-plan."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        assert env._race_confidence_threshold == 0.0
+        assert env._race_confidence_gate_active is False
+        mask = compute_mask(space, env)
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)]
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)]
+
+    def test_confident_race_passes_through_unchanged(self):
+        """Gate active, race confident → OPEN_BACK / OPEN_LAY stay legal."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._race_confidence_threshold = 0.3
+        env._race_confidence_gate_active = True
+        env._race_is_confident_by_race = [True]
+        mask = compute_mask(space, env)
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)], \
+            "confident race → OPEN_BACK legal on active slot"
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)], \
+            "confident race → OPEN_LAY legal on active slot"
+
+    def test_non_confident_race_masks_all_opens_and_closes(self):
+        """Gate active, race not confident → only NOOP legal everywhere."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        env._race_confidence_threshold = 0.5
+        env._race_confidence_gate_active = True
+        env._race_is_confident_by_race = [False]
+        mask = compute_mask(space, env)
+        # NOOP is the ONLY legal action.
+        assert mask[0] is True or mask[0] == True  # noqa: E712
+        # Every non-NOOP slot for every action type is masked.
+        for slot in range(space.max_runners):
+            assert not mask[space.encode(ActionType.OPEN_BACK, slot)], \
+                f"non-confident race must mask OPEN_BACK slot {slot}"
+            assert not mask[space.encode(ActionType.OPEN_LAY, slot)], \
+                f"non-confident race must mask OPEN_LAY slot {slot}"
+            assert not mask[space.encode(ActionType.CLOSE, slot)], \
+                f"non-confident race must mask CLOSE slot {slot}"
+
+    def test_byte_identical_when_disabled(self):
+        """Gate off → mask matches reference even with a populated cache."""
+        space = DiscreteActionSpace(max_runners=4)
+        env_a = self._reset_env()
+        env_b = self._reset_env()
+        assert env_b._race_confidence_gate_active is False
+        # Stuff the cache with False — would trigger refusal if active.
+        env_b._race_is_confident_by_race = [False]
+        mask_a = compute_mask(space, env_a)
+        mask_b = compute_mask(space, env_b)
+        assert (mask_a == mask_b).all(), \
+            "gate-disabled env must produce identical mask regardless of cache"
+
+    def test_raises_without_use_race_outcome_predictor(self):
+        """Loud-fail on incompatible flags (hard_constraints §2)."""
+        with pytest.raises(ValueError, match="use_race_outcome_predictor"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                race_confidence_threshold=0.3,
+                # use_race_outcome_predictor stays None → resolves False
+                # without a predictor_bundle.
+            )
+
+    def test_invalid_threshold_raises(self):
+        """Constructor rejects threshold outside [0, 1]."""
+        with pytest.raises(ValueError, match="race_confidence_threshold"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                race_confidence_threshold=1.5,
+            )
+        with pytest.raises(ValueError, match="race_confidence_threshold"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                race_confidence_threshold=-0.1,
+            )
+
+    def test_composes_with_pwin_gate(self):
+        """Race-confidence gate masks BEFORE the per-runner pwin gate runs.
+
+        Non-confident race → OPEN_LAY masked on every slot regardless of
+        pwin. Confident race + p_win > lay_threshold → OPEN_LAY masked by
+        the pwin gate (gate-confidence didn't make it newly legal).
+        """
+        space = DiscreteActionSpace(max_runners=4)
+        # Branch A: race not confident → all opens masked.
+        env_a = self._reset_env()
+        env_a._race_confidence_threshold = 0.3
+        env_a._race_confidence_gate_active = True
+        env_a._race_is_confident_by_race = [False]
+        env_a._predictor_p_win_back_threshold = 0.0
+        env_a._predictor_p_win_lay_threshold = 1.0
+        env_a._predictor_p_win_gate_active = True
+        env_a._race_p_win_by_race[env_a._race_idx] = {101: 0.2, 102: 0.6}
+        mask_a = compute_mask(space, env_a)
+        assert not mask_a[space.encode(ActionType.OPEN_LAY, 0)], \
+            "non-confident race masks OPEN_LAY regardless of pwin"
+        assert not mask_a[space.encode(ActionType.OPEN_LAY, 1)]
+
+        # Branch B: race confident, pwin lay gate trips on high-pwin runner.
+        env_b = self._reset_env()
+        env_b._race_confidence_threshold = 0.3
+        env_b._race_confidence_gate_active = True
+        env_b._race_is_confident_by_race = [True]
+        env_b._predictor_p_win_back_threshold = 0.0
+        env_b._predictor_p_win_lay_threshold = 0.3
+        env_b._predictor_p_win_gate_active = True
+        env_b._race_p_win_by_race[env_b._race_idx] = {101: 0.2, 102: 0.6}
+        mask_b = compute_mask(space, env_b)
+        # Slot 0 (p_win=0.2 ≤ 0.3): lay legal (race confident, pwin OK).
+        assert mask_b[space.encode(ActionType.OPEN_LAY, 0)]
+        # Slot 1 (p_win=0.6 > 0.3): masked by pwin gate, NOT race-confidence.
+        assert not mask_b[space.encode(ActionType.OPEN_LAY, 1)]

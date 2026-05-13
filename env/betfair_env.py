@@ -856,6 +856,13 @@ class BetfairEnv(gymnasium.Env):
         # ``predictor_bundle``. Default False = byte-identical to
         # pre-plan behavior.
         direction_gate_enabled: bool = False,
+        # Race-confidence action gate (plans/scalping-race-confidence-gate/).
+        # When > 0, refuse ALL non-NOOP actions on races where
+        # max(champion_p_win) across runners < this threshold. Composes
+        # additively with the per-runner pwin gate. Requires
+        # ``use_race_outcome_predictor=True`` and a non-None
+        # ``predictor_bundle``. Default 0.0 = byte-identical to pre-plan.
+        race_confidence_threshold: float = 0.0,
     ) -> None:
         super().__init__()
         self.day = day
@@ -1315,6 +1322,34 @@ class BetfairEnv(gymnasium.Env):
         # _precompute; key = race_idx, value = {(tick_idx, sid): bool}.
         self._tick_drift_fires_by_race: list[dict[tuple[int, int], bool]] = []
 
+        # Race-confidence action gate (plans/scalping-race-confidence-gate/).
+        # Refuses ALL non-NOOP actions on races where max(champion p_win)
+        # across runners is below the threshold. See hard_constraints.md
+        # §9 for the locked semantics. Composes additively with the
+        # per-runner pwin gate and (if active) the direction gate.
+        self._race_confidence_threshold: float = float(race_confidence_threshold)
+        if not 0.0 <= self._race_confidence_threshold <= 1.0:
+            raise ValueError(
+                f"race_confidence_threshold must be in [0, 1], got "
+                f"{self._race_confidence_threshold!r}",
+            )
+        if self._race_confidence_threshold > 0.0 and not self._use_race_outcome_predictor:
+            raise ValueError(
+                "race_confidence_threshold > 0 requires "
+                "use_race_outcome_predictor=True (we need champion p_win "
+                "to compute per-race confidence).",
+            )
+        if self._race_confidence_threshold > 0.0 and self._predictor_bundle is None:
+            raise ValueError(
+                "race_confidence_threshold > 0 requires a predictor_bundle.",
+            )
+        self._race_confidence_gate_active: bool = (
+            self._race_confidence_threshold > 0.0
+        )
+        # Per-race flag: True iff max(p_win) across runners >= threshold.
+        # Populated in _precompute alongside _race_p_win_by_race.
+        self._race_is_confident_by_race: list[bool] = []
+
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
 
@@ -1467,6 +1502,15 @@ class BetfairEnv(gymnasium.Env):
                 sid: float(d.get("champion_p_win", 0.0))
                 for sid, d in (predictor_outputs_per_runner or {}).items()
             })
+
+            # Race-confidence cache for the per-race action gate
+            # (plans/scalping-race-confidence-gate/). True iff at least
+            # one runner has champion p_win >= threshold.
+            race_p_wins = self._race_p_win_by_race[-1]
+            max_pwin = max(race_p_wins.values()) if race_p_wins else 0.0
+            self._race_is_confident_by_race.append(
+                max_pwin >= self._race_confidence_threshold
+            )
 
             # Per-tick direction-predictor outputs (advisor #2). Computed
             # once per race in batched form. Returns a dict
