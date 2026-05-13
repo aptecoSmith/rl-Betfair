@@ -433,6 +433,7 @@ def _build_env_for_day(
     predictor_p_win_lay_threshold: float = 1.0,
     direction_gate_enabled: bool = False,
     race_confidence_threshold: float = 0.0,
+    lay_price_max: float = 0.0,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     day = load_day(day_str, data_dir=data_dir)
     env = BetfairEnv(
@@ -447,6 +448,7 @@ def _build_env_for_day(
         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
         direction_gate_enabled=direction_gate_enabled,
         race_confidence_threshold=race_confidence_threshold,
+        lay_price_max=lay_price_max,
     )
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
@@ -867,6 +869,7 @@ def train_one_agent(
     predictor_p_win_lay_threshold: float = 1.0,
     direction_gate_enabled: bool = False,
     race_confidence_threshold: float = 0.0,
+    lay_price_max: float = 0.0,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -998,6 +1001,7 @@ def train_one_agent(
         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
         direction_gate_enabled=direction_gate_enabled,
         race_confidence_threshold=race_confidence_threshold,
+        lay_price_max=lay_price_max,
     )
 
     # Phase-14 S03 — direction gate config flows through trainer_hp
@@ -1354,6 +1358,7 @@ def train_one_agent(
                 predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                 direction_gate_enabled=direction_gate_enabled,
                 race_confidence_threshold=race_confidence_threshold,
+                lay_price_max=lay_price_max,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -1562,6 +1567,7 @@ def train_one_agent(
             predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
             direction_gate_enabled=direction_gate_enabled,
             race_confidence_threshold=race_confidence_threshold,
+            lay_price_max=lay_price_max,
         )
         eval_collector = RolloutCollector(
             shim=eval_shim, policy=policy, device=device,

@@ -145,6 +145,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Match training-time race-confidence threshold.",
     )
     p.add_argument(
+        "--lay-price-max", type=float, default=0.0,
+        help=(
+            "Match training-time lay-price cap. Refuses OPEN_LAY on "
+            "runners whose LTP exceeds the cap. Default 0.0 = "
+            "disabled."
+        ),
+    )
+    p.add_argument(
         "--reward-overrides", action="append", default=[],
         metavar="KEY=VALUE",
         help=(
@@ -359,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
                     predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
                     direction_gate_enabled=bool(args.direction_gate_enabled),
                     race_confidence_threshold=float(args.race_confidence_threshold),
+                    lay_price_max=float(args.lay_price_max),
                 )
             except Exception as e:
                 logger.warning(
@@ -406,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
                         predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
                         direction_gate_enabled=bool(args.direction_gate_enabled),
                         race_confidence_threshold=float(args.race_confidence_threshold),
+                        lay_price_max=float(args.lay_price_max),
                     )
                 except Exception as e:
                     logger.warning(

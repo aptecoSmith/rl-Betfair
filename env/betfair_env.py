@@ -871,6 +871,16 @@ class BetfairEnv(gymnasium.Env):
         # ``use_race_outcome_predictor=True`` and a non-None
         # ``predictor_bundle``. Default 0.0 = byte-identical to pre-plan.
         race_confidence_threshold: float = 0.0,
+        # Lay-price-cap action gate (plans/scalping-lay-quality-gate/).
+        # When > 0, refuse OPEN_LAY on runners whose current LTP exceeds
+        # the cap. Removes the 2026-05-13 lay-EV-probe-identified
+        # "leverage trap" bucket (price 20-50 bleeds -£0.39 per £1 stake
+        # on the gate-admitted set). Composes additively with the pwin
+        # lay threshold and the race-confidence gate. Requires
+        # ``use_race_outcome_predictor=True`` for symmetry with the other
+        # predictor-driven gates (loud-fail if predictor off). Default
+        # 0.0 = disabled = byte-identical to pre-plan.
+        lay_price_max: float = 0.0,
     ) -> None:
         super().__init__()
         self.day = day
@@ -1357,6 +1367,29 @@ class BetfairEnv(gymnasium.Env):
         # Per-race flag: True iff max(p_win) across runners >= threshold.
         # Populated in _precompute alongside _race_p_win_by_race.
         self._race_is_confident_by_race: list[bool] = []
+
+        # Lay-price-cap action gate (plans/scalping-lay-quality-gate/).
+        # The cap is read by ``compute_mask`` at tick time against the
+        # current LTP; no precompute cache. Validation mirrors the
+        # race-confidence gate's loud-fail discipline.
+        self._lay_price_max: float = float(lay_price_max)
+        if not 0.0 <= self._lay_price_max <= 1000.0:
+            raise ValueError(
+                f"lay_price_max must be in [0, 1000], got "
+                f"{self._lay_price_max!r}",
+            )
+        if self._lay_price_max > 0.0 and not self._use_race_outcome_predictor:
+            raise ValueError(
+                "lay_price_max > 0 requires "
+                "use_race_outcome_predictor=True (the cap composes "
+                "with the predictor-driven lay gate; standalone use "
+                "is not supported).",
+            )
+        if self._lay_price_max > 0.0 and self._predictor_bundle is None:
+            raise ValueError(
+                "lay_price_max > 0 requires a predictor_bundle.",
+            )
+        self._lay_price_cap_active: bool = self._lay_price_max > 0.0
 
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)

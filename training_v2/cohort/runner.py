@@ -131,6 +131,7 @@ def run_cohort(
     predictor_p_win_lay_threshold: float = 1.0,
     direction_gate_enabled: bool = False,
     race_confidence_threshold: float = 0.0,
+    lay_price_max: float = 0.0,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -352,6 +353,7 @@ def run_cohort(
                         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                         direction_gate_enabled=direction_gate_enabled,
                         race_confidence_threshold=race_confidence_threshold,
+                        lay_price_max=lay_price_max,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -1051,6 +1053,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "plans/scalping-race-confidence-gate/."
         ),
     )
+    p.add_argument(
+        "--lay-price-max", type=float, default=0.0,
+        help=(
+            "Per-(tick, runner) lay-price cap: refuse OPEN_LAY on "
+            "runners whose current LTP exceeds this. Default 0.0 = "
+            "disabled. Allowed range [0, 1000]. Requires "
+            "--use-race-outcome-predictor (the cap composes with "
+            "the predictor-driven lay gate). See "
+            "plans/scalping-lay-quality-gate/."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1197,6 +1210,7 @@ def main(argv: list[str] | None = None) -> int:
             predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
             direction_gate_enabled=bool(args.direction_gate_enabled),
             race_confidence_threshold=float(args.race_confidence_threshold),
+            lay_price_max=float(args.lay_price_max),
         )
     finally:
         if server is not None:

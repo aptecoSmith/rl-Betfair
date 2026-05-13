@@ -742,3 +742,101 @@ class TestRaceConfidenceGate:
         assert mask_b[space.encode(ActionType.OPEN_LAY, 0)]
         # Slot 1 (p_win=0.6 > 0.3): masked by pwin gate, NOT race-confidence.
         assert not mask_b[space.encode(ActionType.OPEN_LAY, 1)]
+
+
+class TestLayPriceCapGate:
+    """``compute_mask`` honours the per-(tick, runner) lay-price cap.
+
+    When ``_lay_price_cap_active`` is True on the env, OPEN_LAY is
+    refused on any runner whose current LTP exceeds the cap. Drops the
+    20-50 leverage-trap bucket the 2026-05-13 lay-EV probe identified
+    as the dominant negative-EV bleed on the gate-admitted set. Default
+    0.0 is byte-identical to pre-plan. Mirrors the
+    ``TestRaceConfidenceGate`` shape.
+    """
+
+    def _reset_env(self) -> BetfairEnv:
+        env = BetfairEnv(_make_day(n_races=1), _scalping_config())
+        env.reset()
+        return env
+
+    def test_gate_disabled_by_default(self):
+        """Default constructor → cap inactive → mask matches pre-plan."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        assert env._lay_price_max == 0.0
+        assert env._lay_price_cap_active is False
+        mask = compute_mask(space, env)
+        # Synthetic runner LTP is 4.0 (well below any conceivable cap).
+        assert mask[space.encode(ActionType.OPEN_BACK, 0)]
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)]
+
+    def test_ltp_below_cap_passes_through_unchanged(self):
+        """Cap active, runner LTP ≤ cap → OPEN_LAY stays legal."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        # Synthetic LTP=4.0; cap at 20 should admit it.
+        env._lay_price_max = 20.0
+        env._lay_price_cap_active = True
+        mask = compute_mask(space, env)
+        assert mask[space.encode(ActionType.OPEN_LAY, 0)], \
+            "LTP 4.0 ≤ cap 20 → OPEN_LAY legal"
+
+    def test_ltp_above_cap_masks_open_lay_only(self):
+        """Cap active, runner LTP > cap → OPEN_LAY masked, OPEN_BACK
+        unaffected. The cap is asymmetric — backs at high prices are
+        fine (the leverage trap is on the LAY side)."""
+        space = DiscreteActionSpace(max_runners=4)
+        env = self._reset_env()
+        # Synthetic LTP=4.0; cap at 3 forces every runner over the cap.
+        env._lay_price_max = 3.0
+        env._lay_price_cap_active = True
+        mask = compute_mask(space, env)
+        for slot in range(3):  # 3 synthetic runners (sids 101/102/103)
+            assert not mask[space.encode(ActionType.OPEN_LAY, slot)], \
+                f"slot {slot} LTP 4.0 > cap 3.0 → OPEN_LAY masked"
+            # OPEN_BACK unchanged by the cap.
+            assert mask[space.encode(ActionType.OPEN_BACK, slot)], \
+                f"slot {slot} → cap does not touch OPEN_BACK"
+
+    def test_byte_identical_when_disabled(self):
+        """Cap off → mask matches reference regardless of stored value."""
+        space = DiscreteActionSpace(max_runners=4)
+        env_a = self._reset_env()
+        env_b = self._reset_env()
+        # Both envs have cap disabled; the second one carries a non-zero
+        # stored value that would trip the comparison if the cap was
+        # active. Mask must be identical.
+        env_b._lay_price_max = 3.0
+        # _lay_price_cap_active stays False; gate is inactive.
+        assert env_b._lay_price_cap_active is False
+        mask_a = compute_mask(space, env_a)
+        mask_b = compute_mask(space, env_b)
+        assert (mask_a == mask_b).all(), \
+            "gate-disabled env must ignore lay_price_max value"
+
+    def test_raises_without_use_race_outcome_predictor(self):
+        """Loud-fail on incompatible flags (hard_constraints §2)."""
+        with pytest.raises(ValueError, match="use_race_outcome_predictor"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                lay_price_max=20.0,
+                # use_race_outcome_predictor stays None → resolves False
+                # without a predictor_bundle.
+            )
+
+    def test_invalid_lay_price_max_raises(self):
+        """Constructor rejects ``lay_price_max`` outside [0, 1000]."""
+        with pytest.raises(ValueError, match="lay_price_max"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                lay_price_max=1001.0,
+            )
+        with pytest.raises(ValueError, match="lay_price_max"):
+            BetfairEnv(
+                _make_day(n_races=1),
+                _scalping_config(),
+                lay_price_max=-1.0,
+            )

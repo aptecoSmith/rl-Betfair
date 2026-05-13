@@ -328,6 +328,17 @@ def compute_mask(
     else:
         drift_fires = {}
 
+    # Lay-price cap (plans/scalping-lay-quality-gate/). When active,
+    # OPEN_LAY is refused on runners whose current LTP exceeds the
+    # cap. Drops the 20-50 leverage-trap bucket the 2026-05-13 lay-EV
+    # probe identified as the dominant -EV bleed on the gate-admitted
+    # set. Default-off short-circuits the comparison so the mask is
+    # byte-identical to pre-plan when ``lay_price_max == 0``.
+    lay_price_cap_active = getattr(env, "_lay_price_cap_active", False)
+    lay_price_max = (
+        env._lay_price_max if lay_price_cap_active else 0.0
+    )
+
     for slot in range(space.max_runners):
         sid = slot_map.get(slot)
         if sid is None:
@@ -367,6 +378,17 @@ def compute_mask(
                 direction_gate_active
                 and mask[space.encode(ActionType.OPEN_LAY, slot)]
                 and not drift_fires.get((env._tick_idx, sid), False)
+            ):
+                mask[space.encode(ActionType.OPEN_LAY, slot)] = False
+
+            # Lay-price cap: if active, refuse OPEN_LAY when the
+            # runner's current LTP exceeds the cap. ``runner.last_
+            # traded_price`` is already required to be > 1.0 by the
+            # ``ltp_ok`` guard above, so any positive cap is reachable.
+            if (
+                lay_price_cap_active
+                and mask[space.encode(ActionType.OPEN_LAY, slot)]
+                and runner.last_traded_price > lay_price_max
             ):
                 mask[space.encode(ActionType.OPEN_LAY, slot)] = False
 
