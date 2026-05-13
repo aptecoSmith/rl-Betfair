@@ -100,22 +100,40 @@ Success bar: **≥3 of top-5 profitable on the same held-out window
 beat the predecessor on both metrics, or the gate isn't adding
 value.
 
-## Threshold choice — default 0.30
+## Threshold choice — default 0.50 (revised 2026-05-13)
 
 The deterministic baseline uses `edge > 0.05` (champion p_win
 minus implied-from-price), which on most prices means champion
 p_win must be > ~0.15-0.25 to trigger. For a race-level gate,
 we want at least one runner the predictor strongly favors.
 
-**Default `race_confidence_threshold = 0.30`.** Choices:
+**Initial default `race_confidence_threshold = 0.30` was a guess
+and failed the pre-flight smoke** — the per-race max-p_win
+distribution probed across 2026-05-01/02/04/05/06 (434 races)
+showed `min(max-p_win) = 0.32`, so the 0.30 cut admitted 100% of
+races and the gate was structurally inert. See
+`autonomous_run_log.md` 2026-05-13 entries for the FAIL diagnostic
+and the distribution probe (`tools.probe_race_confidence_
+distribution`).
 
-- Threshold = 0.20: very permissive, ~80%+ of races qualify
-- Threshold = 0.30: moderate, ~50-65% of races qualify
-  (default — pre-flight smoke validates)
-- Threshold = 0.40: strict, ~30-45% of races qualify
+**Revised default `race_confidence_threshold = 0.50`** — lands
+at the median of the observed max-p_win distribution (p50 =
+0.5338 across the 5-day probe). Skips ~40% of races (legal_ratio
+~60%, comfortably under §3's 80% bar), keeping ~60% of races as
+the agent's training surface.
+
+Observed distribution (5-day, 434 races):
+
+| Quantile | max-p_win | Threshold candidate |
+|---:|---:|---|
+| p10 | 0.39 | 0.40 — too permissive (~16% skip) |
+| p25 | 0.43 | 0.45 — borderline (~30% skip) |
+| p50 | 0.53 | **0.50 — chosen (~40% skip)** |
+| p75 | 0.61 | 0.60 — too strict (~72% skip) |
 
 Smoke verifies the default produces enough trade-able races
-(`race_qualification_rate ≥ 30%`) before launching the cohort.
+(`race_qualification_rate ≥ 30%`) AND the gate does material
+work (`legal_ratio ≤ 80%`) before launching the cohort.
 
 ## Autonomous execution
 

@@ -86,7 +86,7 @@ compute table, write findings.md, commit, STOP.
 
 | Question | Default |
 |---|---|
-| `race_confidence_threshold` | 0.30 |
+| `race_confidence_threshold` | 0.50 (revised 2026-05-13 after 0.30 smoke FAIL) |
 | `predictor_p_win_back_threshold` | 0.20 (same as predecessor) |
 | `predictor_p_win_lay_threshold` | 0.40 (same as predecessor) |
 | Cohort size | 12 × 8 × 6 |
@@ -101,7 +101,8 @@ compute table, write findings.md, commit, STOP.
 ## What NOT to do
 
 - Do NOT tweak `race_confidence_threshold` between sessions or
-  mid-cohort. The default 0.30 is locked.
+  mid-cohort. The default 0.50 is locked (revised 2026-05-13;
+  see autonomous_run_log.md for the probe + decision).
 - Do NOT use `p_placed`, `segment_strong_flag`, or per-runner
   averages instead of `max(p_win)`. See hard_constraints §9.
 - Do NOT silence failing tests.

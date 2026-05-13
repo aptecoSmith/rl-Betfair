@@ -44,7 +44,8 @@ The new cohort uses EXACTLY the same settings except the new gate:
 - predictor bundle: same three production manifests
 - 6 Phase 5 safety genes enabled (same set)
 - pwin gate: back=0.20, lay=0.40
-- (new) `--race-confidence-threshold 0.30`
+- (new) `--race-confidence-threshold 0.50` (revised 2026-05-13;
+  0.30 failed smoke — see `autonomous_run_log.md`)
 
 No threshold tuning, no architecture changes, no new shaping.
 

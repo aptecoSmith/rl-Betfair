@@ -160,3 +160,127 @@ plan with `threshold=0.50` default, modelled on this plan but
 using the smoke's per-day max-p_win distribution to set a value
 that produces a meaningful split. The current cohort budget (12 ×
 8 × 6) is unchanged — only the gate value differs.
+
+## 2026-05-13 08:51 — operator override: pick a new threshold in-plan
+
+**Operator instruction** (this conversation): "yes, use different
+defaults. See if you can find a sensible figure that works".
+
+The follow-on-plan path is dropped; the threshold is re-tuned
+in-place. The autonomous loop resumes with the operator-authorised
+new default.
+
+## 2026-05-13 08:51 — Session 02b, iteration 1 (post-override probe)
+
+**State entering iteration:** smoke FAILED at 0.30 (gate inert).
+Operator authorised a new threshold; I need to pick one supported
+by the per-race max-p_win distribution.
+
+**Work done:**
+- Wrote `tools/probe_race_confidence_distribution.py`. Reads
+  `_race_p_win_by_race` after env construction across N days,
+  prints quantiles + threshold candidate table.
+- Ran the probe across 5 days
+  (2026-05-01, 02, 04, 05, 06 — 434 races total).
+- Distribution (max per-race champion p_win):
+
+```
+QUANTILES:
+  p10 = 0.3865
+  p25 = 0.4258
+  p50 = 0.5338
+  p75 = 0.6140
+  p90 = 0.7069
+
+THRESHOLD → races SKIPPED (qualification rate):
+  0.30  →   0%  (100% qualify) ← FAIL'd smoke; gate inert
+  0.40  →  16%  ( 84%)
+  0.45  →  30%  ( 70%)
+  0.47  →  33%  ( 68%) ← probe's suggestion
+  0.50  →  40%  ( 60%) ← chosen default
+  0.55  →  58%  ( 42%)
+  0.60  →  72%  ( 28%) ← would FAIL §3 qualification floor
+```
+
+- Per-day medians confirm the distribution is stable across days:
+  2026-05-01 = 0.59, 2026-05-02 = 0.52, 2026-05-04 = 0.53,
+  2026-05-05 = 0.51, 2026-05-06 = 0.52.
+
+**Decision: `race_confidence_threshold = 0.50`.** Sits at the
+median of the observed distribution — natural "above-median
+favorite" cut. Skips ~40% of races (legal_ratio ~60%, comfortably
+under §3's 80% bar) without starving training (race
+qualification rate ~60%, well above the 30% floor).
+
+The probe also tested 0.47 (its automatic suggestion based on
+landing in the 25-40% target band) but 0.50 is a cleaner
+round-number choice and sits exactly at the population median.
+
+**Plan documents updated (in-place):**
+- `README.md` — threshold-choice section rewritten with the probe
+  evidence + new default.
+- `hard_constraints.md` §4 — `--race-confidence-threshold 0.30`
+  → `0.50`.
+- `master_todo.md` — Session 03 launch command threshold.
+- `session_prompts/00_autonomous_full_run.md` — defaults table
+  entry + "What NOT to do" lock.
+- `session_prompts/03_launch_cohort.md` — replaced all 0.30
+  references with 0.50 + revision note.
+
+**Outstanding:** re-run smoke at the new threshold.
+
+**Next iteration's focus:** smoke at 0.50, verify all three §3
+PASS, then Session 03 launch.
+
+## 2026-05-13 08:53 — Session 02b, iteration 2 — SMOKE PASS
+
+**State entering iteration:** plan docs updated to threshold 0.50.
+
+**Work done:**
+- Ran `tools.smoke_race_confidence_gate --day 2026-05-04
+  --race-confidence-threshold 0.50 --device cuda`.
+
+**Smoke result on 2026-05-04 (118 races, 8925 ticks) at
+threshold 0.50:**
+
+```
+POPULATION:
+  total races ........................... 118
+  races confident (max p_win >= 0.50) ... 65 (55.08%)
+  races skipped ......................... 53
+
+LEGAL ACTIONS (post-mask):
+  baseline (pwin only):
+    OPEN_BACK ........................... 13890
+    OPEN_LAY  ........................... 71700
+  with race-confidence gate:
+    OPEN_BACK ........................... 8133  (delta: -5757)
+    OPEN_LAY  ........................... 33287 (delta: -38413)
+    legal-tick ratio (with/no race gate)  48.39%
+
+POLICY ROLLOUT (uniform-random over legal, 3 races):
+  attempted opens BACK / LAY ............ 750 / 3109
+  matched bets .......................... 98
+  → bets/race ........................... 32.67
+  → full-day estimate (118 races) ....... 3854
+
+VERDICT vs hard_constraints §3:
+  race_qualification_rate >= 30%        PASS (actual 55.08%)
+  legal_ratio <= 80% (material work)    PASS (actual 48.39%)
+  bets_matched >= 50 (full day est.)    PASS (estimate 3854)
+
+OVERALL: PASS — proceed to Session 03
+```
+
+All three §3 thresholds PASS with healthy margin:
+- 55% qualification rate (1.8× the 30% floor)
+- 48% legal-ratio (gate refusing 52% of action surface — substantial work)
+- 3854 estimated full-day matched bets (76× the 50 floor)
+
+**Decisions made:** proceed to Session 03 launch.
+
+**Outstanding for this session:** none — Session 02b complete.
+
+**Next iteration's focus:** Session 03 — launch the 12h cohort
+with the locked-by-operator threshold 0.50. Verify Gen 1 starts
+within 5 min, arm watcher, sleep into 1h heartbeat mode.

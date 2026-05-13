@@ -101,7 +101,7 @@ nohup python -m training_v2.cohort.runner \
   --use-race-outcome-predictor --use-direction-predictor --predictor-lean-obs \
   --predictor-p-win-back-threshold 0.20 \
   --predictor-p-win-lay-threshold 0.40 \
-  --race-confidence-threshold 0.30 \
+  --race-confidence-threshold 0.50 \
   --enable-gene stop_loss_pnl_threshold \
   --enable-gene open_cost \
   --enable-gene matured_arb_bonus_weight \

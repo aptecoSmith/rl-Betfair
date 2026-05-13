@@ -1,8 +1,11 @@
 # Session 03 — Launch cohort
 
 Mirror the pwin-gate cohort launch + `--race-confidence-threshold
-0.30`. Arm watcher that auto-fires held-out reeval at completion.
-Loop into 1h heartbeat mode until cohort completes.
+0.50` (revised 2026-05-13 — 0.30 failed smoke; 0.50 sits at the
+median of the per-race max-p_win distribution and skips ~40% of
+races; see `autonomous_run_log.md`). Arm watcher that auto-fires
+held-out reeval at completion. Loop into 1h heartbeat mode until
+cohort completes.
 
 ## Pre-checks
 
@@ -33,7 +36,7 @@ nohup python -m training_v2.cohort.runner \
   --use-race-outcome-predictor --use-direction-predictor --predictor-lean-obs \
   --predictor-p-win-back-threshold 0.20 \
   --predictor-p-win-lay-threshold 0.40 \
-  --race-confidence-threshold 0.30 \
+  --race-confidence-threshold 0.50 \
   --enable-gene stop_loss_pnl_threshold \
   --enable-gene open_cost \
   --enable-gene matured_arb_bonus_weight \
@@ -102,7 +105,7 @@ python -m tools.reevaluate_cohort \
     --strategy-mode arb \
     --predictor-p-win-back-threshold 0.20 \
     --predictor-p-win-lay-threshold 0.40 \
-    --race-confidence-threshold 0.30 \
+    --race-confidence-threshold 0.50 \
     --output "${REEVAL_OUTPUT}" \
     > "${REEVAL_LOG}" 2>&1
 
