@@ -407,13 +407,21 @@ AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, rac
 POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 
 # Extra obs dims appended when scalping_mode is enabled.
-# Per-runner (4): has_open_arb, passive_fill_proximity,
+# Per-runner (8): has_open_arb, passive_fill_proximity,
 #                 seconds_since_passive_placed,
-#                 passive_price_vs_current_ltp_ticks.
-#   The last two were added in scalping-active-management session 01 and
-#   lift OBS_SCHEMA_VERSION to 6 (scalping obs layout only).
+#                 passive_price_vs_current_ltp_ticks,
+#                 naked_downside_if_runner_wins,
+#                 naked_downside_if_runner_loses,
+#                 cost_to_close_now,
+#                 worst_case_naked_pnl.
+#   The middle two were added in scalping-active-management session 01.
+#   The last four were added in scalping-lay-quality-gate Phase 2b
+#   (2026-05-13) — see plan dir for motivation. All four are zero
+#   when no naked (unmatched-counterpart) leg exists on the runner;
+#   when nakeds exist the values are signed £-pnl normalised by
+#   ``starting_budget`` and clipped to [-1, 1] for stability.
 # Global  (2):   locked_pnl_frac, naked_exposure_frac.
-SCALPING_POSITION_DIM = 4
+SCALPING_POSITION_DIM = 8
 SCALPING_AGENT_STATE_DIM = 2
 
 # Derived constants
@@ -1785,7 +1793,7 @@ class BetfairEnv(gymnasium.Env):
     def _get_position_vector(self) -> np.ndarray:
         """Per-runner position features: back exposure, lay exposure, bet count.
 
-        When scalping_mode is on, appends four more features per runner:
+        When scalping_mode is on, appends eight more features per runner:
 
         - ``has_open_arb`` — 1.0 if a paired passive leg is resting, else 0.0.
         - ``passive_fill_proximity`` — in [0, 1], higher when the resting
@@ -1802,6 +1810,30 @@ class BetfairEnv(gymnasium.Env):
           rest, drift toward for a lay rest — the sign is LTP-relative).
           0 when there is no open paired passive. (Added in
           scalping-active-management session 01.)
+
+        scalping-lay-quality-gate Phase 2b (2026-05-13) adds four more
+        per-runner features for naked-pair leverage / close-cost visibility:
+
+        - ``naked_downside_if_runner_wins`` — total £ P&L on this runner's
+          open naked legs (matched bets whose pair partner hasn't filled)
+          IF the runner wins, normalised by ``starting_budget`` and
+          clipped to [-1, 1]. Zero when no naked leg.
+        - ``naked_downside_if_runner_loses`` — same, IF the runner loses.
+        - ``cost_to_close_now`` — locked £ P&L that would result from
+          crossing each naked leg at the runner's current LTP right now
+          (back+lay or lay+back hedge). Negative = closing locks in a
+          loss because the price moved against us. Normalised + clipped.
+          Zero when no naked leg, or when LTP is unpriceable.
+        - ``worst_case_naked_pnl`` — ``min(if_wins, if_loses)`` after the
+          two sums above are computed but BEFORE normalisation/clip.
+          Surfaces the worse of the two race-outcome branches to the
+          policy. Normalised + clipped.
+
+        All four are computed per ``selection_id`` from ``bm.bets`` —
+        a "naked leg" is a matched bet with a ``pair_id`` whose partner
+        is still in ``bm.passive_book.orders`` (i.e. the pair's second
+        leg hasn't filled). Bets without a ``pair_id`` (directional)
+        don't contribute.
         """
         bm = self.bet_manager
         assert bm is not None
@@ -1819,6 +1851,13 @@ class BetfairEnv(gymnasium.Env):
         arb_by_sid: dict[
             int, tuple[bool, float, float, float]
         ] = {}
+        # scalping-lay-quality-gate Phase 2b (2026-05-13). Per-runner
+        # naked-leverage / close-cost features. ``naked_by_sid[sid] =
+        # (if_wins, if_loses, cost_to_close)`` in absolute £ P&L (pre-
+        # normalisation). ``worst_case`` is derived per-sid as
+        # min(if_wins, if_loses) just before writing into the obs slot.
+        naked_by_sid: dict[int, tuple[float, float, float]] = {}
+        ltp_by_sid: dict[int, float] = {}
         if self.scalping_mode:
             tick = self.day.races[self._race_idx].ticks[self._tick_idx]
             ltp_by_sid = {
@@ -1869,6 +1908,53 @@ class BetfairEnv(gymnasium.Env):
                             True, proximity, seconds_since, price_delta,
                         )
 
+            # Naked-leg detection: a Bet with a pair_id whose partner is
+            # still in passive_book.orders (not yet filled). Aggregate
+            # per selection_id so multiple naked legs on the same runner
+            # sum together. Bets without ``pair_id`` (directional) are
+            # ignored — leverage features are scalping-pair-specific.
+            unfilled_pair_ids: set[str] = {
+                o.pair_id for o in bm.passive_book.orders
+                if o.pair_id is not None
+                and o.market_id == race.market_id
+            }
+            c = float(self._commission)
+            for b in bm.bets:
+                if b.market_id != race.market_id:
+                    continue
+                if b.pair_id is None:
+                    continue
+                if b.pair_id not in unfilled_pair_ids:
+                    continue  # pair is fully matched (not naked)
+                sid = b.selection_id
+                S = float(b.matched_stake)
+                P = float(b.average_price)
+                ltp = ltp_by_sid.get(sid) or 0.0
+                if b.side is BetSide.BACK:
+                    # Back at P, stake S. On race-win: gain S*(P-1)*(1-c).
+                    # On race-lose: lose S.
+                    if_wins = S * (P - 1.0) * (1.0 - c)
+                    if_loses = -S
+                    # Hedge: lay S at current LTP. Locked P&L ≈ S*(P-LTP)
+                    # (the back wins (P-1)*(1-c), the lay loses (LTP-1);
+                    # commission is small on the difference and netted
+                    # at race-win only). Use the simple price-difference
+                    # form so the feature stays interpretable as "price
+                    # drift since entry".
+                    cost = S * (P - ltp) if ltp > 1.0 else 0.0
+                else:
+                    # Lay at P, stake S. On race-win: lose S*(P-1).
+                    # On race-lose: gain S*(1-c).
+                    if_wins = -S * (P - 1.0)
+                    if_loses = S * (1.0 - c)
+                    cost = S * (ltp - P) if ltp > 1.0 else 0.0
+                acc = naked_by_sid.get(sid, (0.0, 0.0, 0.0))
+                naked_by_sid[sid] = (
+                    acc[0] + if_wins,
+                    acc[1] + if_loses,
+                    acc[2] + cost,
+                )
+
         for slot_idx in range(self.max_runners):
             sid = slot_map.get(slot_idx)
             offset = slot_idx * per_runner
@@ -1885,6 +1971,26 @@ class BetfairEnv(gymnasium.Env):
                 vec[offset + POSITION_DIM + 1] = proximity
                 vec[offset + POSITION_DIM + 2] = seconds_since
                 vec[offset + POSITION_DIM + 3] = price_delta
+                # scalping-lay-quality-gate Phase 2b — normalise the four
+                # naked-pnl features by ``starting_budget`` and clip to
+                # [-1, 1] so they share scale with the existing exposure
+                # columns and stay bounded under thin-book leverage.
+                if_wins, if_loses, cost = naked_by_sid.get(
+                    sid, (0.0, 0.0, 0.0),
+                )
+                worst = min(if_wins, if_loses)
+                vec[offset + POSITION_DIM + 4] = float(
+                    np.clip(if_wins / budget, -1.0, 1.0),
+                )
+                vec[offset + POSITION_DIM + 5] = float(
+                    np.clip(if_loses / budget, -1.0, 1.0),
+                )
+                vec[offset + POSITION_DIM + 6] = float(
+                    np.clip(cost / budget, -1.0, 1.0),
+                )
+                vec[offset + POSITION_DIM + 7] = float(
+                    np.clip(worst / budget, -1.0, 1.0),
+                )
         return vec
 
     def set_episode_idx(self, episode_idx: int) -> None:

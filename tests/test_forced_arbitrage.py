@@ -245,11 +245,11 @@ class TestScalpingEnvSpaces:
     def test_obs_space_grows_when_scalping(self, scalping_config, legacy_config):
         env_on = BetfairEnv(_make_day(n_races=1), scalping_config)
         env_off = BetfairEnv(_make_day(n_races=1), legacy_config)
-        # Session 01 of scalping-active-management grew
-        # SCALPING_POSITION_DIM from 2 → 4 (added
-        # seconds_since_passive_placed + passive_price_vs_current_ltp_ticks).
-        # 4 extra per runner + 2 global = 4*14 + 2 = 58 extra.
-        assert env_on.observation_space.shape[0] == env_off.observation_space.shape[0] + 58
+        # Phase 2b of scalping-lay-quality-gate (2026-05-13) grew
+        # SCALPING_POSITION_DIM from 4 → 8 (added naked downside +
+        # cost-to-close + worst-case-naked features). 8 extra per
+        # runner + 2 global = 8*14 + 2 = 114 extra.
+        assert env_on.observation_space.shape[0] == env_off.observation_space.shape[0] + 114
 
     def test_legacy_step_matches_before_scalping(self, legacy_config):
         """Round-trip a random-seeded rollout to verify shape/behaviour invariance."""

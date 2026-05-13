@@ -1624,3 +1624,201 @@ class TestEachWayEnvIntegration:
         # day_pnl should be the sum of both race pnls
         total_pnl = sum(r.pnl for r in info["race_records"])
         assert info["day_pnl"] == pytest.approx(total_pnl)
+
+
+# ── scalping-lay-quality-gate Phase 2b (2026-05-13) ─────────────────────
+
+
+class TestLeverageObsFeatures:
+    """Per-runner leverage / close-cost observation features.
+
+    ``SCALPING_POSITION_DIM`` was bumped from 4 to 8 to add four naked-
+    pair features per runner. Built so the policy can SEE the
+    leverage on its open positions before deciding whether to fire
+    ``close_signal`` (the predecessor cohort can't act on leverage
+    because the obs doesn't expose it). See plan dir
+    ``plans/scalping-lay-quality-gate/``.
+    """
+
+    def _scalping_config(self) -> dict:
+        return {
+            "training": {
+                "max_runners": 14,
+                "starting_budget": 100.0,
+                "max_bets_per_race": 20,
+                "scalping_mode": True,
+            },
+            "actions": {"force_aggressive": True},
+            "reward": {
+                "early_pick_bonus_min": 1.2,
+                "early_pick_bonus_max": 1.5,
+                "early_pick_min_seconds": 300,
+                "efficiency_penalty": 0.01,
+                "commission": 0.05,
+            },
+        }
+
+    def _build_env(self) -> BetfairEnv:
+        env = BetfairEnv(_make_day(n_races=1), self._scalping_config())
+        env.reset()
+        return env
+
+    def _inject_naked_pair(
+        self, env, *, sid, side, price, stake, partner_price,
+    ):
+        from env.bet_manager import (
+            Bet, BetOutcome, BetSide, PassiveOrder,
+        )
+
+        race = env.day.races[env._race_idx]
+        bm = env.bet_manager
+        pair_id = "P-" + str(sid) + "-" + str(len(bm.bets))
+        partner_side = (
+            BetSide.LAY if side is BetSide.BACK else BetSide.BACK
+        )
+        bm.bets.append(Bet(
+            selection_id=sid,
+            side=side,
+            requested_stake=stake,
+            matched_stake=stake,
+            average_price=price,
+            market_id=race.market_id,
+            outcome=BetOutcome.UNSETTLED,
+            tick_index=env._tick_idx,
+            pair_id=pair_id,
+        ))
+        # ``passive_book.orders`` returns a defensive copy — mutate
+        # the underlying ``_orders`` list to inject directly.
+        bm.passive_book._orders.append(PassiveOrder(
+            selection_id=sid,
+            side=partner_side,
+            price=partner_price,
+            requested_stake=stake,
+            queue_ahead_at_placement=0.0,
+            placed_tick_index=env._tick_idx,
+            market_id=race.market_id,
+            pair_id=pair_id,
+        ))
+        return pair_id
+
+    def _per_runner_dim(self, env) -> int:
+        from env.betfair_env import POSITION_DIM, SCALPING_POSITION_DIM
+        return POSITION_DIM + (
+            SCALPING_POSITION_DIM if env.scalping_mode else 0
+        )
+
+    def test_obs_dim_increases_by_4_per_runner(self):
+        from env.betfair_env import POSITION_DIM, SCALPING_POSITION_DIM
+
+        assert SCALPING_POSITION_DIM == 8
+        env = self._build_env()
+        vec = env._get_position_vector()
+        per_runner = POSITION_DIM + SCALPING_POSITION_DIM
+        assert vec.shape[0] == env.max_runners * per_runner
+
+    def test_naked_downside_zero_when_no_open_leg(self):
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env()
+        vec = env._get_position_vector()
+        per_runner = self._per_runner_dim(env)
+        for slot in range(env.max_runners):
+            offset = slot * per_runner + POSITION_DIM
+            assert vec[offset + 4] == 0.0
+            assert vec[offset + 5] == 0.0
+            assert vec[offset + 6] == 0.0
+            assert vec[offset + 7] == 0.0
+
+    def test_naked_downside_back_leg_correct_arithmetic(self):
+        from env.bet_manager import BetSide
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env()
+        self._inject_naked_pair(
+            env, sid=101, side=BetSide.BACK,
+            price=5.0, stake=10.0, partner_price=4.5,
+        )
+        vec = env._get_position_vector()
+        per_runner = self._per_runner_dim(env)
+        offset = 0 * per_runner + POSITION_DIM
+        if_wins = vec[offset + 4]
+        if_loses = vec[offset + 5]
+        # commission 0.05 -> if_wins = 10*(5-1)*0.95 / 100 = 0.38
+        assert if_wins == pytest.approx(0.38)
+        # if_loses = -10 / 100 = -0.10
+        assert if_loses == pytest.approx(-0.10)
+
+    def test_naked_downside_lay_leg_correct_arithmetic(self):
+        from env.bet_manager import BetSide
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env()
+        self._inject_naked_pair(
+            env, sid=101, side=BetSide.LAY,
+            price=5.0, stake=10.0, partner_price=5.5,
+        )
+        vec = env._get_position_vector()
+        per_runner = self._per_runner_dim(env)
+        offset = POSITION_DIM
+        # if_wins = -10*(5-1) / 100 = -0.40
+        assert vec[offset + 4] == pytest.approx(-0.40)
+        # if_loses = 10*0.95 / 100 = 0.095
+        assert vec[offset + 5] == pytest.approx(0.095)
+
+    def test_cost_to_close_reflects_opposite_side_book(self):
+        from env.bet_manager import BetSide
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env()
+        self._inject_naked_pair(
+            env, sid=101, side=BetSide.BACK,
+            price=5.0, stake=10.0, partner_price=4.5,
+        )
+        vec = env._get_position_vector()
+        per_runner = self._per_runner_dim(env)
+        offset = POSITION_DIM
+        # cost_to_close = 10*(5.0 - 4.0) / 100 = +0.10 (locked in
+        # profit because LTP 4.0 is below the back-entry price 5.0).
+        assert vec[offset + 6] == pytest.approx(0.10)
+
+    def test_worst_case_naked_pnl_is_min_of_two_downsides(self):
+        from env.bet_manager import BetSide
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env()
+        self._inject_naked_pair(
+            env, sid=101, side=BetSide.BACK,
+            price=5.0, stake=10.0, partner_price=4.5,
+        )
+        vec = env._get_position_vector()
+        per_runner = self._per_runner_dim(env)
+        offset = POSITION_DIM
+        if_wins = vec[offset + 4]
+        if_loses = vec[offset + 5]
+        worst = vec[offset + 7]
+        assert worst == pytest.approx(min(if_wins, if_loses))
+        assert worst == pytest.approx(-0.10)
+
+    def test_pre_plan_weights_fail_strict_load(self):
+        from agents_v2.action_space import DiscreteActionSpace
+        from agents_v2.discrete_policy import DiscreteLSTMPolicy
+
+        max_runners = 14
+        action_space = DiscreteActionSpace(max_runners=max_runners)
+        env = self._build_env()
+        real_obs_dim = env.observation_space.shape[0]
+        post_policy = DiscreteLSTMPolicy(
+            obs_dim=real_obs_dim,
+            action_space=action_space,
+            hidden_size=32,
+        )
+        # Pre-plan obs_dim is 56 columns narrower (4 fields x 14 runners).
+        pre_obs_dim = real_obs_dim - 4 * max_runners
+        pre_policy = DiscreteLSTMPolicy(
+            obs_dim=pre_obs_dim,
+            action_space=action_space,
+            hidden_size=32,
+        )
+        pre_state = pre_policy.state_dict()
+        with pytest.raises(RuntimeError):
+            post_policy.load_state_dict(pre_state, strict=True)
