@@ -284,3 +284,48 @@ All three §3 thresholds PASS with healthy margin:
 **Next iteration's focus:** Session 03 — launch the 12h cohort
 with the locked-by-operator threshold 0.50. Verify Gen 1 starts
 within 5 min, arm watcher, sleep into 1h heartbeat mode.
+
+## 2026-05-13 09:32 — Session 03, iteration 1 — COHORT LAUNCHED
+
+**State entering iteration:** smoke PASS at threshold 0.50;
+operator confirmed launch via AskUserQuestion.
+
+**Work done:**
+- Pre-checks: GPU 22 GB free (RTX 3090), all three predictor
+  manifests present, prior cohort code untouched.
+- Launched cohort:
+  - TAG = `_predictor_SCALPING_raceconf_1778661062`
+  - PID 635
+  - Log: `registry/_predictor_SCALPING_raceconf_1778661062.log`
+  - Command: `training_v2.cohort.runner --n-agents 12
+    --generations 8 --days 6 --seed 42 --mutation-rate 0.2
+    --strategy-mode arb --predictor-p-win-back-threshold 0.20
+    --predictor-p-win-lay-threshold 0.40
+    --race-confidence-threshold 0.50` + the 6 safety genes +
+    three production manifests + lean obs.
+- Verified Gen 1 started (log shows "Cohort: 12 agents × 8
+  generations on 3 training days (eval=2026-05-04…2026-05-06 (3
+  days)); device=cuda" and agents 1-12 enumerated with their
+  starting genes).
+- Wrote watcher `/tmp/auto_reeval_raceconf.sh` (mirror of the
+  pwin-gate watcher template; threshold 0.50 in the reeval call;
+  tag substituted). Launched in background, PID 657. Output to
+  `/tmp/auto_reeval_raceconf.log`; first lines confirm "waiting
+  for 96 rows".
+- Launched `tools.show_cohort_status --watch 60`, PID 668.
+- Verified cohort artefacts present: `models.db`,
+  `scoreboard.jsonl` (empty so far), `status.txt`
+  ("Progress: 0/96 agents"), `weights/`, `bet_logs/`.
+
+**Tests run:** none in this iteration — cohort itself is the
+test surface. Pre-flight smoke covered correctness.
+
+**Decisions made:** none new; mirroring predecessor pwin-gate
+launch verbatim except for the new threshold.
+
+**Outstanding for this session:** ~12h wall-time waiting for the
+cohort to fill 96 scoreboard rows. Sleep into 1h heartbeat mode.
+
+**Next iteration's focus:** heartbeat — read `status.txt`, log a
+single-line entry "heartbeat N/96 rows", check for Traceback. If
+N=96, jump to Session 04.
