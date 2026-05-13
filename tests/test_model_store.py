@@ -579,6 +579,15 @@ class TestEvaluationBetsParquet:
             # files (default False).
             "close_leg",
             "force_close",
+            # scalping-lay-quality-gate Phase 2a (2026-05-13) — raw
+            # ``stop_close`` flag (mirrors close_leg/force_close);
+            # per-bet predictor context (nullable float when the
+            # predictor was off); derived per-pair lifecycle category.
+            # Older files tolerate absence with default values.
+            "stop_close",
+            "runner_champion_p_win",
+            "race_max_pwin",
+            "final_outcome",
         }
         assert set(df.columns) == expected_cols
 

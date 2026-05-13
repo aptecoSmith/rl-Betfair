@@ -44,7 +44,11 @@ from env.betfair_env import (
     OBS_SCHEMA_VERSION,
     BetfairEnv,
 )
-from registry.model_store import EvaluationDayRecord, ModelStore
+from registry.model_store import (
+    EvaluationBetRecord,
+    EvaluationDayRecord,
+    ModelStore,
+)
 from training_v2.cohort.events import (
     agent_training_complete_event,
     agent_training_started_event,
@@ -687,6 +691,141 @@ def _eval_rollout_stats(
         force_closed_pnl=force_closed_pnl,
         stop_closed_pnl=stop_closed_pnl,
     )
+
+
+# ── Per-bet log capture (Phase 2a) ──────────────────────────────────────
+
+
+def _build_eval_bet_records(
+    *,
+    env: BetfairEnv,
+    day,
+    starting_budget: float,
+) -> list[EvaluationBetRecord]:
+    """Build :class:`EvaluationBetRecord` list from the day's settled bets.
+
+    Captures predictor context (per-runner pwin + race max pwin) when
+    the predictor is active, and derives a per-pair lifecycle
+    classification (``matured`` / ``agent_closed`` / ``force_closed`` /
+    ``stop_closed`` / ``naked`` / ``directional``) for each bet.
+
+    ``run_id`` is left as an empty string and must be patched by the
+    caller before writing to the registry — the run_id is only known
+    after ``create_evaluation_run`` returns. Mirrors the v1 pattern in
+    ``training/evaluator.py``.
+
+    Returns an empty list when ``env.all_settled_bets`` is empty so
+    the caller can short-circuit the write.
+    """
+    bets = list(env.all_settled_bets)
+    if not bets:
+        return []
+
+    # Lookup tables built once per day.
+    race_by_market = {r.market_id: r for r in day.races}
+    market_to_race_idx = {r.market_id: i for i, r in enumerate(day.races)}
+    pwin_by_race: list[dict[int, float]] = getattr(
+        env, "_race_p_win_by_race", [],
+    )
+
+    # Pre-compute per-pair lifecycle classification. We touch every
+    # bet in two passes: first pass groups by pair_id and decides
+    # the category; second pass stamps it on each leg's record.
+    pair_legs: dict[str, list] = {}
+    for b in bets:
+        pid = getattr(b, "pair_id", None)
+        if pid is not None:
+            pair_legs.setdefault(pid, []).append(b)
+
+    pair_outcome: dict[str, str] = {}
+    for pid, legs in pair_legs.items():
+        any_stop = any(getattr(b, "stop_close", False) for b in legs)
+        any_force = any(getattr(b, "force_close", False) for b in legs)
+        any_close = any(getattr(b, "close_leg", False) for b in legs)
+        if any_stop:
+            pair_outcome[pid] = "stop_closed"
+        elif any_force:
+            pair_outcome[pid] = "force_closed"
+        elif any_close:
+            pair_outcome[pid] = "agent_closed"
+        elif len(legs) >= 2:
+            pair_outcome[pid] = "matured"
+        else:
+            pair_outcome[pid] = "naked"
+
+    records: list[EvaluationBetRecord] = []
+    for bet in bets:
+        race = race_by_market.get(bet.market_id)
+        race_idx = market_to_race_idx.get(bet.market_id, -1)
+
+        runner_name = ""
+        tick_timestamp = ""
+        seconds_to_off = 0.0
+        runner_pwin: float | None = None
+        race_max_pwin: float | None = None
+
+        if race is not None:
+            meta = race.runner_metadata.get(bet.selection_id)
+            if meta is not None:
+                runner_name = meta.runner_name
+
+            if 0 <= bet.tick_index < len(race.ticks):
+                tick = race.ticks[bet.tick_index]
+                tick_timestamp = tick.timestamp.isoformat()
+                seconds_to_off = (
+                    race.market_start_time - tick.timestamp
+                ).total_seconds()
+
+        if 0 <= race_idx < len(pwin_by_race):
+            race_pwins = pwin_by_race[race_idx]
+            if race_pwins:
+                runner_pwin = float(race_pwins.get(bet.selection_id, 0.0))
+                race_max_pwin = float(max(race_pwins.values()))
+
+        pid = getattr(bet, "pair_id", None)
+        if pid is None:
+            final_outcome = "directional"
+        else:
+            final_outcome = pair_outcome.get(pid, "naked")
+
+        records.append(EvaluationBetRecord(
+            run_id="",  # patched by caller after create_evaluation_run
+            date=day.date,
+            market_id=bet.market_id,
+            tick_timestamp=tick_timestamp,
+            seconds_to_off=seconds_to_off,
+            runner_id=bet.selection_id,
+            runner_name=runner_name,
+            action=bet.side.value,
+            price=bet.average_price,
+            stake=bet.matched_stake,
+            matched_size=bet.matched_stake,
+            outcome=bet.outcome.value,
+            pnl=bet.pnl,
+            opportunity_window_s=0.0,
+            is_each_way=bet.is_each_way,
+            each_way_divisor=bet.each_way_divisor,
+            number_of_places=bet.number_of_places,
+            settlement_type=bet.settlement_type,
+            effective_place_odds=bet.effective_place_odds,
+            starting_budget=starting_budget,
+            pair_id=pid,
+            fill_prob_at_placement=getattr(bet, "fill_prob_at_placement", None),
+            predicted_locked_pnl_at_placement=getattr(
+                bet, "predicted_locked_pnl_at_placement", None,
+            ),
+            predicted_locked_stddev_at_placement=getattr(
+                bet, "predicted_locked_stddev_at_placement", None,
+            ),
+            close_leg=bool(getattr(bet, "close_leg", False)),
+            force_close=bool(getattr(bet, "force_close", False)),
+            stop_close=bool(getattr(bet, "stop_close", False)),
+            runner_champion_p_win=runner_pwin,
+            race_max_pwin=race_max_pwin,
+            final_outcome=final_outcome,
+        ))
+
+    return records
 
 
 # ── Main entry point ────────────────────────────────────────────────────
@@ -1402,12 +1541,17 @@ def train_one_agent(
     # 24-agent cohort's signal (~£200 day_pnl spread on identical-gene
     # agents from naked-luck alone).
     per_day_summaries: list[EvalSummary] = []
+    # Phase 2a (2026-05-13) — per-bet log capture. Records are built
+    # inside the loop (the env is recreated per day and goes out of
+    # scope when the next iteration starts) and the writer is called
+    # after ``create_evaluation_run`` returns the real run_id.
+    per_day_bet_records: list[tuple[str, list[EvaluationBetRecord]]] = []
     for ed in eval_days:
         eval_t0 = time.perf_counter()
         logger.info(
             "Agent %s: eval rollout on held-out day %s", agent_id, ed,
         )
-        _, eval_shim = _build_env_for_day(
+        eval_day_obj, eval_shim = _build_env_for_day(
             day_str=ed, data_dir=data_dir, cfg=cfg,
             scorer_dir=scorer_dir,
             reward_overrides=per_agent_reward_overrides,
@@ -1428,6 +1572,24 @@ def train_one_agent(
             last_info=eval_collector.last_info,
             action_space=eval_shim.action_space,
         )
+        # Capture per-bet records BEFORE the env goes out of scope on
+        # the next loop iteration. ``_build_eval_bet_records`` returns
+        # an empty list when no bets were placed, which the writer
+        # handles by short-circuiting.
+        try:
+            day_records = _build_eval_bet_records(
+                env=eval_shim.env,
+                day=eval_day_obj,
+                starting_budget=float(eval_shim.env.starting_budget),
+            )
+        except Exception:
+            logger.exception(
+                "Agent %s: _build_eval_bet_records failed on %s; "
+                "continuing without bet log",
+                agent_id, ed,
+            )
+            day_records = []
+        per_day_bet_records.append((ed, day_records))
         eval_wall = time.perf_counter() - eval_t0
         per_day_summaries.append(EvalSummary(
             eval_day=ed,
@@ -1496,6 +1658,24 @@ def train_one_agent(
             train_cutoff_date=days_to_train[-1],
             test_days=list(eval_days),
         )
+        # Phase 2a (2026-05-13) — write per-bet parquet logs now that
+        # ``run_id`` is known. Records were captured inside the eval-day
+        # loop with ``run_id=""``; patch the real id before writing.
+        for ed_, records in per_day_bet_records:
+            if not records:
+                continue
+            for r in records:
+                r.run_id = run_id
+            try:
+                model_store.write_bet_logs_parquet(
+                    run_id=run_id, date=ed_, records=records,
+                )
+            except Exception:
+                logger.exception(
+                    "Agent %s: write_bet_logs_parquet failed for %s; "
+                    "continuing — bet log will be missing for this day",
+                    agent_id, ed_,
+                )
         # Persist one EvaluationDayRecord per eval day. peek_cohort
         # already aggregates the per-day rows when summarising —
         # writing them per-day keeps the registry's lineage detail

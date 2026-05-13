@@ -177,6 +177,28 @@ class EvaluationBetRecord:
     # so pre-fix parquet rows stay readable without schema migration.
     close_leg: bool = False
     force_close: bool = False
+    # Force-close-architecture Session 02 (2026-05-02) mirror — captures
+    # the ``stop_close`` Bet flag so post-hoc analysis can distinguish
+    # mid-race stop-loss closes from agent-initiated and T-N force-closes.
+    stop_close: bool = False
+    # scalping-lay-quality-gate Phase 2a (2026-05-13) — per-bet predictor
+    # context captured at write time. ``runner_champion_p_win`` is the
+    # champion's predicted win probability for THIS runner; ``race_max_pwin``
+    # is the max across all runners in the race. Together they let
+    # post-hoc forensic queries answer "did the agent back / lay this
+    # runner in a race the predictor had a view on?" without re-running
+    # the predictor over the eval days. Both ``None`` when the predictor
+    # was disabled on this run.
+    runner_champion_p_win: float | None = None
+    race_max_pwin: float | None = None
+    # scalping-lay-quality-gate Phase 2a (2026-05-13) — derived per-pair
+    # lifecycle classification, applied to both legs of a pair (and to
+    # naked legs of failed pairs). One of "matured", "agent_closed",
+    # "force_closed", "stop_closed", "naked", "directional", or
+    # "unsettled". Computed from pair_id + close_leg + force_close +
+    # stop_close + leg count at write time. Default ``None`` for pre-
+    # plan parquet rows.
+    final_outcome: str | None = None
 
 
 @dataclass
@@ -811,6 +833,14 @@ class ModelStore:
                 # source ``Bet`` object always has these flags.
                 "close_leg": r.close_leg,
                 "force_close": r.force_close,
+                # scalping-lay-quality-gate Phase 2a (2026-05-13). Raw
+                # ``stop_close`` flag + predictor context (None when
+                # predictor was disabled) + derived per-pair lifecycle
+                # classification.
+                "stop_close": r.stop_close,
+                "runner_champion_p_win": r.runner_champion_p_win,
+                "race_max_pwin": r.race_max_pwin,
+                "final_outcome": r.final_outcome,
             }
             for r in records
         ])

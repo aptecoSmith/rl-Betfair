@@ -403,3 +403,272 @@ def test_reward_overrides_for_aux_weights_reaches_constructed_trainer(
     )
     trainer = captured_trainer[0]
     assert getattr(trainer, weight_key) == 0.5
+
+
+# ── scalping-lay-quality-gate Phase 2a (2026-05-13) — bet log capture ────
+
+
+class TestPerBetLogCapture:
+    """``_build_eval_bet_records`` converts ``env.all_settled_bets``
+    into ``EvaluationBetRecord`` rows with predictor context and a
+    derived per-pair lifecycle classification. The writer side
+    (``ModelStore.write_bet_logs_parquet``) is verified end-to-end
+    in the synthetic-data integration test below; these unit tests
+    pin the categorization logic and predictor-field capture that
+    forensic analysis (per ``memory/feedback_per_bet_logging.md``)
+    depends on.
+    """
+
+    def _make_env_day_stubs(self, *, bets, race_pwins):
+        """Build minimal stubs sufficient for ``_build_eval_bet_records``.
+
+        ``race_pwins`` is a list of ``{sid: pwin}`` dicts indexed by
+        race position; one race per dict. ``bets`` are
+        ``env.bet_manager.Bet`` instances whose ``market_id`` references
+        the synthesized races.
+        """
+        from datetime import datetime, timedelta
+        from types import SimpleNamespace
+
+        races = []
+        for i, _ in enumerate(race_pwins):
+            mid = f"1.{i + 100}"
+            ticks = [SimpleNamespace(
+                timestamp=datetime(2026, 4, 28, 12, 0, 0)
+                + timedelta(seconds=10 * t),
+            ) for t in range(5)]
+            race = SimpleNamespace(
+                market_id=mid,
+                market_start_time=datetime(2026, 4, 28, 12, 1, 0),
+                ticks=ticks,
+                runner_metadata={
+                    sid: SimpleNamespace(runner_name=f"runner_{sid}")
+                    for sid in race_pwins[i]
+                },
+            )
+            races.append(race)
+
+        day = SimpleNamespace(date="2026-04-28", races=races)
+        env = SimpleNamespace(
+            all_settled_bets=bets,
+            _race_p_win_by_race=list(race_pwins),
+            starting_budget=100.0,
+        )
+        return env, day
+
+    def _bet(
+        self, *, market_id, sid, side, price=5.0, stake=10.0,
+        outcome="won", pnl=10.0, tick_index=2, pair_id=None,
+        close_leg=False, force_close=False, stop_close=False,
+    ):
+        from env.bet_manager import Bet, BetOutcome, BetSide
+        return Bet(
+            selection_id=sid,
+            side=BetSide(side),
+            requested_stake=stake,
+            matched_stake=stake,
+            average_price=price,
+            market_id=market_id,
+            outcome=BetOutcome(outcome),
+            pnl=pnl,
+            tick_index=tick_index,
+            pair_id=pair_id,
+            close_leg=close_leg,
+            force_close=force_close,
+            stop_close=stop_close,
+        )
+
+    def test_empty_bets_returns_empty_list(self):
+        from training_v2.cohort.worker import _build_eval_bet_records
+        env, day = self._make_env_day_stubs(bets=[], race_pwins=[{1: 0.4}])
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert out == []
+
+    def test_predictor_context_captured(self):
+        """``runner_champion_p_win`` and ``race_max_pwin`` come from
+        the env's ``_race_p_win_by_race`` cache and ``max(...)`` across
+        runners in the same race."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [self._bet(market_id="1.100", sid=2, side="lay")]
+        env, day = self._make_env_day_stubs(
+            bets=bets,
+            race_pwins=[{1: 0.6, 2: 0.15, 3: 0.05}],
+        )
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert len(out) == 1
+        assert out[0].runner_champion_p_win == pytest.approx(0.15)
+        assert out[0].race_max_pwin == pytest.approx(0.6)
+
+    def test_predictor_disabled_yields_none(self):
+        """When ``_race_p_win_by_race`` is empty (predictor off), the
+        predictor fields stay ``None`` rather than zero."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [self._bet(market_id="1.100", sid=2, side="lay")]
+        env, day = self._make_env_day_stubs(
+            bets=bets, race_pwins=[{1: 0.4}],
+        )
+        env._race_p_win_by_race = []
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert out[0].runner_champion_p_win is None
+        assert out[0].race_max_pwin is None
+
+    def test_final_outcome_matured(self):
+        """Two legs sharing a pair_id, no close flags → ``matured``."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [
+            self._bet(
+                market_id="1.100", sid=1, side="back", pair_id="P1",
+            ),
+            self._bet(
+                market_id="1.100", sid=1, side="lay", pair_id="P1",
+            ),
+        ]
+        env, day = self._make_env_day_stubs(
+            bets=bets, race_pwins=[{1: 0.5}],
+        )
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert all(r.final_outcome == "matured" for r in out)
+
+    def test_final_outcome_naked(self):
+        """Single leg with pair_id (passive never filled) → ``naked``."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [self._bet(
+            market_id="1.100", sid=1, side="back", pair_id="P1",
+        )]
+        env, day = self._make_env_day_stubs(
+            bets=bets, race_pwins=[{1: 0.5}],
+        )
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert out[0].final_outcome == "naked"
+
+    def test_final_outcome_agent_closed(self):
+        """A pair where one leg carries ``close_leg=True`` (not
+        force/stop) → ``agent_closed``."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [
+            self._bet(
+                market_id="1.100", sid=1, side="back", pair_id="P1",
+            ),
+            self._bet(
+                market_id="1.100", sid=1, side="lay", pair_id="P1",
+                close_leg=True,
+            ),
+        ]
+        env, day = self._make_env_day_stubs(
+            bets=bets, race_pwins=[{1: 0.5}],
+        )
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert all(r.final_outcome == "agent_closed" for r in out)
+
+    def test_final_outcome_force_closed(self):
+        """A pair where one leg carries ``force_close=True`` →
+        ``force_closed`` (precedes ``agent_closed``)."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [
+            self._bet(
+                market_id="1.100", sid=1, side="back", pair_id="P1",
+            ),
+            self._bet(
+                market_id="1.100", sid=1, side="lay", pair_id="P1",
+                close_leg=True, force_close=True,
+            ),
+        ]
+        env, day = self._make_env_day_stubs(
+            bets=bets, race_pwins=[{1: 0.5}],
+        )
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert all(r.final_outcome == "force_closed" for r in out)
+
+    def test_final_outcome_stop_closed(self):
+        """``stop_close=True`` wins over both ``force_close`` and
+        ``close_leg`` in the precedence."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [
+            self._bet(
+                market_id="1.100", sid=1, side="back", pair_id="P1",
+            ),
+            self._bet(
+                market_id="1.100", sid=1, side="lay", pair_id="P1",
+                close_leg=True, stop_close=True,
+            ),
+        ]
+        env, day = self._make_env_day_stubs(
+            bets=bets, race_pwins=[{1: 0.5}],
+        )
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert all(r.final_outcome == "stop_closed" for r in out)
+
+    def test_final_outcome_directional(self):
+        """Bet with ``pair_id=None`` is a directional bet, not a
+        scalping leg → ``directional``."""
+        from training_v2.cohort.worker import _build_eval_bet_records
+        bets = [self._bet(
+            market_id="1.100", sid=1, side="back", pair_id=None,
+        )]
+        env, day = self._make_env_day_stubs(
+            bets=bets, race_pwins=[{1: 0.5}],
+        )
+        out = _build_eval_bet_records(
+            env=env, day=day, starting_budget=100.0,
+        )
+        assert out[0].final_outcome == "directional"
+
+    def test_parquet_round_trip_carries_new_fields(self, tmp_path):
+        """``write_bet_logs_parquet`` round-trips the new columns —
+        the operator must be able to read predictor context + lifecycle
+        class back out for joining to scoreboard.jsonl."""
+        import pandas as pd
+        from registry.model_store import EvaluationBetRecord, ModelStore
+
+        store = ModelStore(
+            db_path=tmp_path / "models.db",
+            weights_dir=tmp_path / "weights",
+            bet_logs_dir=tmp_path / "bet_logs",
+        )
+        records = [EvaluationBetRecord(
+            run_id="run-A",
+            date="2026-04-28",
+            market_id="1.100",
+            tick_timestamp="2026-04-28T12:00:20",
+            seconds_to_off=40.0,
+            runner_id=2,
+            runner_name="runner_2",
+            action="lay",
+            price=8.0,
+            stake=10.0,
+            matched_size=10.0,
+            outcome="lost",
+            pnl=10.0,
+            pair_id="P1",
+            close_leg=True,
+            force_close=False,
+            stop_close=False,
+            runner_champion_p_win=0.15,
+            race_max_pwin=0.6,
+            final_outcome="agent_closed",
+        )]
+        path = store.write_bet_logs_parquet(
+            run_id="run-A", date="2026-04-28", records=records,
+        )
+        assert path is not None and path.exists()
+        df = pd.read_parquet(path)
+        assert df.loc[0, "stop_close"] is False or df.loc[0, "stop_close"] == 0
+        assert df.loc[0, "runner_champion_p_win"] == pytest.approx(0.15)
+        assert df.loc[0, "race_max_pwin"] == pytest.approx(0.6)
+        assert df.loc[0, "final_outcome"] == "agent_closed"
