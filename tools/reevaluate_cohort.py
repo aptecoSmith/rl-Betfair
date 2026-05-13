@@ -140,6 +140,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--direction-gate-enabled", action="store_true",
         help="Match training-time direction-gate flag.",
     )
+    p.add_argument(
+        "--reward-overrides", action="append", default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Apply a cohort-wide reward_overrides entry. Repeatable. "
+            "Useful for retrospective probes — e.g. "
+            "'force_close_before_off_seconds=60' to retroactively "
+            "activate force-close-at-T-N on already-trained agents."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -290,15 +300,33 @@ def main(argv: list[str] | None = None) -> int:
             # field is enabled because the saved row carries actual
             # per-agent values, not cohort-default placeholders).
             enabled_set = frozenset(CohortGenes.__dataclass_fields__)
-            reward_overrides = None  # cohort-level overrides already
-            # baked into env behaviour at training time; re-eval should
-            # use the same env config as training, which is exactly the
-            # per-agent reward_overrides the worker built. We don't have
-            # the cohort_overrides dict stored separately, so rebuild it
-            # from the gene values that are non-default — same path the
-            # worker takes.
+            # Parse --reward-overrides KEY=VALUE pairs into a dict to
+            # layer on top of the per-agent gene overrides. Lets the
+            # operator retroactively activate env mechanisms that
+            # weren't active during the cohort's training (e.g.
+            # force_close_before_off_seconds=60 to probe the T-N
+            # close-sweep on already-trained agents).
+            cli_reward_overrides: dict = {}
+            for item in (args.reward_overrides or []):
+                if "=" not in item:
+                    raise SystemExit(
+                        f"--reward-overrides expects key=value, got {item!r}",
+                    )
+                k, _, raw = item.partition("=")
+                k = k.strip()
+                raw = raw.strip()
+                lo = raw.lower()
+                if lo in ("true", "1"):
+                    cli_reward_overrides[k] = True
+                elif lo in ("false", "0"):
+                    cli_reward_overrides[k] = False
+                else:
+                    try:
+                        cli_reward_overrides[k] = float(raw)
+                    except ValueError:
+                        cli_reward_overrides[k] = raw
             per_agent_reward_overrides = _build_per_agent_reward_overrides(
-                cohort_overrides=reward_overrides,
+                cohort_overrides=cli_reward_overrides or None,
                 genes=genes,
                 enabled_set=enabled_set,
             )
