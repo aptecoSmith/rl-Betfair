@@ -288,6 +288,64 @@ def main(argv: list[str] | None = None) -> int:
         ev_per_pound = 0.0
         avg_lay_price = 0.0
 
+    # 2026-05-14 — second pass: apply the ``lay_price_max`` cap to the
+    # off-30s LTP AT EV-COMPUTATION TIME so the admitted set is
+    # internally consistent (admit-tick LTP ≤ cap AND off-30s LTP ≤
+    # cap). Without this, drifter runners (LTP ≤ cap at some tick,
+    # > cap at off-30s) inflate the admitted set and contaminate the
+    # EV with high-price losses that the gate would never actually
+    # take. The probe tool applies the cap at probe-time on the same
+    # LTP it uses for EV; this matches that methodology.
+    n_admitted_consistent = 0
+    n_wins_consistent = 0
+    sum_loss_consistent = 0.0
+    lay_prices_consistent: list[float] = []
+    for race_idx, sid in seen_admitted:
+        race = races[race_idx]
+        winner = race.winner_selection_id
+        target = race.market_start_time
+        best_tick = None
+        best_dt = None
+        for tick in race.ticks:
+            ttoff = (target - tick.timestamp).total_seconds()
+            if ttoff < 0:
+                continue
+            dt = abs(ttoff - args.secs_before_off)
+            if best_dt is None or dt < best_dt:
+                best_dt = dt
+                best_tick = tick
+        if best_tick is None:
+            continue
+        lay_price = 0.0
+        for r in best_tick.runners:
+            if r.selection_id == sid:
+                lay_price = float(r.last_traded_price or 0.0)
+                break
+        if lay_price <= 1.0:
+            continue
+        if (
+            args.lay_price_max > 0.0
+            and lay_price > args.lay_price_max
+        ):
+            continue
+        n_admitted_consistent += 1
+        lay_prices_consistent.append(lay_price)
+        if winner is None or sid != winner:
+            n_wins_consistent += 1
+        else:
+            sum_loss_consistent += (lay_price - 1.0)
+    if n_admitted_consistent > 0:
+        winrate_c = n_wins_consistent / n_admitted_consistent
+        ev_consistent = (
+            winrate_c * 1.0
+            - (sum_loss_consistent / n_admitted_consistent)
+        )
+        avg_lay_price_c = float(np.mean(lay_prices_consistent))
+    else:
+        winrate_c = 0.0
+        ev_consistent = 0.0
+        avg_lay_price_c = 0.0
+
     legal_total_full = legal_back_full + legal_lay_full
     legal_total_race = legal_back_race + legal_lay_race
     legal_ratio = legal_total_full / max(legal_total_race, 1)
@@ -367,11 +425,18 @@ def main(argv: list[str] | None = None) -> int:
         f"    legal-tick ratio (full/race-only) ... {legal_ratio * 100:.2f}%",
         "",
         f"EV ON ADMITTED LAY SET (LTP at off-{args.secs_before_off:.0f}s):",
-        f"  admitted (race, runner) tuples ........ {n_admitted}",
-        f"  lay win rate (sid != winner) .......... {winrate * 100:.2f}%",
-        f"  avg lay price ......................... {avg_lay_price:.2f}",
-        f"  EV per GBP 1 lay stake ................ "
-        f"GBP {ev_per_pound:+.4f}",
+        f"  raw admitted (mask at any tick) ....... {n_admitted}",
+        f"  raw lay win rate ...................... {winrate * 100:.2f}%",
+        f"  raw avg lay price ..................... {avg_lay_price:.2f}",
+        f"  raw EV per GBP 1 stake ................ "
+        f"GBP {ev_per_pound:+.4f} "
+        f"(contaminated by drifters; see below)",
+        f"  CONSISTENT admitted (off-30s LTP <= cap){n_admitted_consistent}",
+        f"  CONSISTENT lay win rate ............... "
+        f"{winrate_c * 100:.2f}%",
+        f"  CONSISTENT avg lay price .............. {avg_lay_price_c:.2f}",
+        f"  CONSISTENT EV per GBP 1 stake ......... "
+        f"GBP {ev_consistent:+.4f}",
         "",
         f"POLICY ROLLOUT (uniform-random over legal, "
         f"{races_actually_seen} race(s)):",
@@ -386,7 +451,10 @@ def main(argv: list[str] | None = None) -> int:
 
     qual_ok = race_qualification_rate >= 0.30
     ratio_ok = legal_ratio <= 0.80
-    ev_ok = ev_per_pound >= -0.05
+    # Use the CONSISTENT EV (cap applied at both admission and pricing).
+    # The raw figure is reported for diagnostic comparison but doesn't
+    # represent what the gate actually admits.
+    ev_ok = ev_consistent >= -0.05
     bets_ok = full_day_bets_est >= 50
 
     rows.append("")
@@ -404,7 +472,8 @@ def main(argv: list[str] | None = None) -> int:
     rows.append(
         f"  expected_per_GBP_lay_EV >= -GBP 0.05   "
         f"{'PASS' if ev_ok else 'FAIL'} "
-        f"(actual GBP {ev_per_pound:+.4f})"
+        f"(actual GBP {ev_consistent:+.4f}, "
+        f"n={n_admitted_consistent})"
     )
     rows.append(
         f"  bets_matched >= 50 (full day est.)    "

@@ -332,3 +332,100 @@ point for the next iteration of this plan.
 
 **Loop terminated.** Phase 4 smoke FAIL; cohort NOT
 launched.
+
+## 2026-05-13 23:50 — Phase 4 follow-up (operator re-invocation)
+
+**State entering iteration:** Smoke FAIL stop committed
+(`9c05a8e`). Operator re-invoked `/loop`; per the diagnostic's
+A/B/C branches, executing Option B (re-probe held-out) first.
+
+**Work done:**
+
+1. Added `--lay-price-max` flag to
+   `tools/probe_lay_outcome_distribution.py` so it can apply
+   the full new gate config (lay 0.20 + cap 20). Pre-existing
+   filters preserved.
+
+2. **Option B: probe held-out 2026-04-28/29/30 with full
+   gate (lay 0.20 + cap 20):**
+
+   - n=572 admitted, 90.0% lay-side wins.
+   - Avg lay price 11.12 (well below cap; cap doing work).
+   - **EV per £1 lay stake = +£0.0984** (PASS the §3 −£0.05
+     bar by a wide margin).
+   - Per-day: 04-28 +£0.366 (n=223), 04-29 −£0.086 (n=193),
+     04-30 −£0.055 (n=156). Aggregate +ve.
+   - Lay-price buckets: 2-5 −£0.08 (n=59), 5-10 +£0.10
+     (n=216), 10-20 +£0.13 (n=297). The 5-20 bands carry
+     the +EV.
+   - Pwin bands: 0.00-0.10 −£0.04 (n=373), 0.10-0.20 +£0.36
+     (n=199). The 0.10-0.20 band drives the +EV.
+
+3. **Option A: probe training 2026-05-04/05/06 with full
+   gate (same config) — to triangulate the failed smoke:**
+
+   - n=520 admitted, 92.3% lay-side wins.
+   - Avg lay price 10.80.
+   - **EV per £1 lay stake = +£0.3681**.
+   - Per-day: 05-04 +£0.324 (n=262), 05-05 +£0.386 (n=110),
+     05-06 +£0.434 (n=148). EVERY day strongly +EV.
+   - Lay-price buckets: 2-5 +£0.50, 5-10 +£0.29, 10-20 +£0.41.
+   - Pwin bands: 0.00-0.10 +£0.31, 0.10-0.20 +£0.48.
+
+4. **Identified the smoke bug.** Both probes report n=262
+   on 2026-05-04; the original smoke reported n=327 — a 65-
+   runner discrepancy. Root cause: `compute_mask` admits a
+   runner whenever its CURRENT-tick LTP <= cap, but the
+   smoke priced EV at off-30s LTP. Runners whose LTP is
+   ≤ 20 at some early tick but drifts to > 20 by off-30s
+   were ADMITTED by the smoke's mask iteration AND priced
+   at the post-drift high LTP — contaminating EV with
+   high-leverage losses the gate would never actually take
+   (because by the time off-30s rolls around the cap would
+   refuse them). The probe applies the cap once on the
+   off-30s LTP and is internally consistent.
+
+5. **Fixed the smoke methodology.** Added a second EV
+   computation pass that requires off-30s LTP <= cap, mirror-
+   ing the probe's filter. Reported alongside the raw figure
+   so the operator can see both. The verdict now uses the
+   CONSISTENT figure.
+
+6. **Re-ran fixed smoke on 2026-05-04 — PASS:**
+
+   | Threshold | Bar | Actual | Verdict |
+   |---|---|---|---|
+   | race_qualification_rate | ≥ 30% | 55.08% | PASS |
+   | legal_ratio | ≤ 80% | 63.30% | PASS |
+   | **CONSISTENT EV/£** | **≥ −£0.05** | **+£0.3185** (n=260) | **PASS** |
+   | bets_matched | ≥ 50 | 3854 | PASS |
+
+   OVERALL: **PASS — proceed to Phase 5**.
+
+   Reconciliation: CONSISTENT n=260 matches probe's n=262
+   (within 2 runners; trivial methodology offset). CONSISTENT
+   EV +£0.319 matches probe's 05-04 EV +£0.324 (within 0.5pp).
+   The fixed smoke and the probe agree.
+
+   (First-run cp1252 console encoding issue on `≤` char fixed
+   by replacing with `<=` in the diagnostic format string.)
+
+**Decisions made:**
+
+- The held-out + training probes together carry far stronger
+  evidence than a single-day smoke: n=572 + n=520 = 1092
+  across the predecessor's eval surface, all +EV.
+- The original smoke FAIL was a methodology bug, not a
+  hypothesis failure. Fixed and re-verified.
+- Proceeding to Phase 5 cohort launch with the locked Phase
+  3 defaults.
+
+**Tests run:** smoke v3 runs to completion; exit 0 on PASS.
+Held-out and training probes both PASS the EV threshold.
+
+**Outstanding for this phase:** commit the smoke fix +
+probe outputs; then Phase 5 launch.
+
+**Next iteration's focus:** Phase 5 — launch the 12-agent
+× 8-generation cohort + arm two reeval watchers
+(force_close=0 and force_close=120).

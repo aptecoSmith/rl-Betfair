@@ -69,6 +69,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--secs-before-off", type=float, default=30.0,
         help="LTP proxy: use the tick this many seconds before the off.",
     )
+    p.add_argument(
+        "--lay-price-max", type=float, default=0.0,
+        help=(
+            "Runner is lay-eligible iff lay_price_proxy <= this. "
+            "Default 0.0 = disabled (no cap). Mirrors the env's "
+            "lay_price_max kwarg added in "
+            "plans/scalping-lay-quality-gate/."
+        ),
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args(argv)
 
@@ -173,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 lay_price = ltps.get(sid)
                 if lay_price is None or lay_price <= 1.0:
+                    continue
+                if args.lay_price_max > 0.0 and lay_price > args.lay_price_max:
                     continue
                 runner_won = int(sid == int(winner_sid))
                 all_rows.append({
