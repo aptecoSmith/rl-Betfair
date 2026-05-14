@@ -171,3 +171,139 @@ clean. Env file untouched.
 held-out lay-EV re-probe on the new data pool (verifies the
 gate's structural EV survived the data refresh).
 
+## 2026-05-14 15:00 — Phases 3+4, iteration 4
+
+**State entering iteration:** Phases 0–2 committed
+(`d6702b9` → `2c03503` → `045174d`). Working tree clean.
+
+**Phase 3 — held-out lay-EV re-probe.** Ran on the new 36-day
+data pool against the locked held-out window:
+
+```
+python -m tools.probe_lay_outcome_distribution \
+    --days 2026-04-28 2026-04-29 2026-04-30 \
+    --race-confidence-threshold 0.50 \
+    --lay-threshold 0.20 --lay-price-max 20 \
+    --device cuda
+```
+
+Verdict: **EV/£ = +£0.0984** on 572 gate-eligible (race, runner)
+tuples. **PASS** (matches lay-quality-gate Phase 1's ~+£0.10 to
+within noise — predictor + held-out data unchanged, only the
+training pool grew).
+
+Per-day:
+| day | n | lay_winrate | EV/£ |
+|---|---:|---:|---:|
+| 2026-04-28 | 223 | 92.4% | +£0.366 |
+| 2026-04-29 | 193 | 88.1% | -£0.086 |
+| 2026-04-30 | 156 | 89.1% | -£0.055 |
+
+Bucket sanity:
+| price band | n | EV/£ |
+|---|---:|---:|
+| 2-5 | 59 | -£0.080 |
+| 5-10 | 216 | +£0.102 |
+| 10-20 | 297 | +£0.131 |
+
+The cap at 20 keeps the +EV territory intact — same shape as
+predecessor.
+
+**Phase 4 — pre-flight smoke** (`tools/smoke_lay_quality_gate.py`)
+on 2026-05-04. The agg-leg-age obs change (Phase 2) doesn't
+break the smoke — the smoke uses uniform-random rollouts at
+fresh policy, no policy-load involved.
+
+```
+LAY-QUALITY-GATE SMOKE — 2026-05-04
+race-confident races ............... 65/118 (55.08%)
+LAY legal-tick ratio (full/race-only) 63.30%
+CONSISTENT admitted set EV ......... £+0.3185 (n=260)
+matched bets/race .................. 32.67  → full day est 3854
+
+VERDICT vs hard_constraints §3:
+  race_qualification_rate >= 30%   PASS (55.08%)
+  legal_ratio <= 80% material work PASS (63.30%)
+  EV per £ admitted >= -£0.05      PASS (+£0.3185)
+  bets_matched >= 50 estimate      PASS (3854)
+OVERALL: PASS — proceed to Phase 5
+```
+
+All four thresholds pass with material headroom. Smoke logs at
+`/c/tmp/lockfit_phase4_smoke.log`; probe at
+`/c/tmp/lockfit_phase3_probe.log`.
+
+**Outstanding:** Phase 5 launch + dual reeval watchers.
+
+**Next iteration's focus:** Build launch script with
+`--composite-score-mode locked_weighted`, `--exclude-days
+2026-04-28 2026-04-29 2026-04-30`, `--n-days 20` (raised from
+13 because Phase 0 added --exclude-days). Build and arm both
+reeval watchers (fc=0 + fc=120) using the predecessor's
+`auto_reeval_raceconf.sh` template (NOT the buggy
+`auto_reeval_layq_*.sh`). Launch cohort with `run_in_background`.
+
+## 2026-05-14 15:01 — Phase 5 launch, iteration 5
+
+**State entering iteration:** Phases 0-4 done. Cohort dir
+`registry/_predictor_SCALPING_lockfit_1778767165` created.
+Predecessor's lay-quality-gate watchers carry the
+double-prefix `--output` path bug — NOT copied directly.
+
+**Work done:**
+- Wrote `/c/tmp/auto_reeval_lockfit_no_forceclose.sh` and
+  `/c/tmp/auto_reeval_lockfit_forceclose120.sh`. BOTH use BARE
+  filename in `--output` to dodge the predecessor's path bug
+  (`reevaluate_cohort.py` prepends `cohort_dir` itself —
+  verified at `tools/reevaluate_cohort.py:208-211`).
+- fc=120 watcher passes
+  `--reward-overrides force_close_before_off_seconds=120` to
+  `reevaluate_cohort.py` (memory:
+  `project_force_close_train_vs_deploy.md`).
+- Held-out window hard-coded to `2026-04-28 2026-04-29
+  2026-04-30` in BOTH watchers.
+- Launched the cohort with `run_in_background=true` (Bash task
+  ID `by248wlkp`). Both watchers also armed in background
+  (`bwq6aicit` fc=0, `bgu9u935r` fc=120).
+
+**Launch flags (active):**
+- `--n-agents 12 --generations 8` (96 rows total)
+- `--days 20 --exclude-days 2026-04-28 2026-04-29 2026-04-30`
+  → 10 train + 10 in-sample-eval = 2026-04-22..2026-05-03 train
+  / 2026-05-04..2026-05-13 in-sample-eval (verified in cohort
+  log)
+- `--composite-score-mode locked_weighted` (this plan's Lever 1)
+- `--seed 42 --mutation-rate 0.2 --strategy-mode arb`
+- 6 enabled genes: stop_loss_pnl_threshold, open_cost,
+  matured_arb_bonus_weight, naked_loss_scale,
+  mature_prob_loss_weight, fill_prob_loss_weight (same set as
+  predecessor)
+- Gate: race_confidence_threshold=0.50, both pwin thresholds=
+  0.20, lay_price_max=20 (inherited unchanged)
+- `force_close_before_off_seconds=0` during training (no
+  override)
+
+**Initial cohort log evidence (15:00:23):**
+- Predictor bundle loaded (champion / ranker / direction)
+- `Cohort: 12 agents × 8 generations on 10 training days
+  (eval=2026-05-04..2026-05-13 (10 days)); device=cuda`
+- Held-out 2026-04-28/29/30 NOT in either training or
+  in-sample-eval window (excluded as designed)
+- Generation 1 starting; Agent 1 loading 2026-05-01
+
+**Risk noted:** Bash tool's `run_in_background` carries up to a
+600s timeout per the schema; unclear whether that times out the
+synchronous wait or kills the OS process. Predecessor cohorts
+were launched the same way and survived 12h, so the empirical
+evidence is the timeout doesn't kill OS-detached processes. If
+later iterations find the cohort/watchers dead, will relaunch
+them via PowerShell Start-Process.
+
+**Outstanding:** Wait for the cohort to fill scoreboard.jsonl
+to 96 rows (~12h estimate); watchers will fire reevals when
+they see TARGET_ROWS=96. Then write findings.md + verdict.
+
+**Next iteration's focus:** Heartbeat the cohort progress.
+First check at ~25 min to verify that all three background
+processes survived past the 10-min Bash-timeout threshold.
+
