@@ -1556,7 +1556,7 @@ def train_one_agent(
         logger.info(
             "Agent %s: eval rollout on held-out day %s", agent_id, ed,
         )
-        eval_day_obj, eval_shim = _build_env_for_day(
+        _, eval_shim = _build_env_for_day(
             day_str=ed, data_dir=data_dir, cfg=cfg,
             scorer_dir=scorer_dir,
             reward_overrides=per_agent_reward_overrides,
@@ -1585,7 +1585,7 @@ def train_one_agent(
         try:
             day_records = _build_eval_bet_records(
                 env=eval_shim.env,
-                day=eval_day_obj,
+                day=eval_shim.env.day,
                 starting_budget=float(eval_shim.env.starting_budget),
             )
         except Exception:
