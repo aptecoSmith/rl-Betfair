@@ -40,35 +40,44 @@ new session.
    - Launch cohort + dual reeval watchers (paths corrected vs
      the lay-quality-gate watcher template — see below).
 
-## Data refresh — USE the new days, lock the verdict window
+## Data refresh — USE more days, but watch the leak boundary
 
-7 new days of parquets are landing. The two questions decouple:
+7 new days of parquets are landing (current pool runs 2026-04-06
+→ 2026-05-13, 36 days). The two questions decouple:
 
-- **Held-out verdict window: HARD-CODE to 2026-04-28/29/30.**
-  Pass these three dates explicitly to the reeval watchers as
+- **Held-out verdict window: HARD-CODE to 2026-04-28/29/30.** Pass
+  these three dates explicitly to the reeval watchers as
   `--eval-days 2026-04-28 2026-04-29 2026-04-30`. They are fixed
-  dates; nothing to do with `select_days(seed=42)`. This keeps the
-  verdict cross-comparable to predecessors regardless of training
-  pool changes.
+  dates; nothing to do with `select_days(seed=42)`. Verdict
+  surface stays cross-comparable to predecessors.
 
-- **Training + in-sample eval days: USE the larger pool.** Pass
-  the bigger `--n-days` (e.g. `--n-days 10` from a 13-day pool) to
-  the cohort runner. `select_days(seed=42)` is deterministic given
-  the pool; more days in → more training signal per agent. The
-  data-dir-dependence concern is only about *cross-cohort training
-  day comparability*, which we don't need — we need verdict-
-  surface comparability, and that's locked.
+- **Training + in-sample-eval pool: USE the larger pool — but
+  STOP at `--n-days 13`.** `select_days` takes the LAST `n_days`
+  chronologically; the held-out window sits 14-16 days back from
+  the current most-recent day. So:
+  ```
+  --n-days ≤ 13   SAFE: held-out NOT in training pool
+  --n-days  14    LEAKED: 2026-04-30 enters training
+  --n-days  15    LEAKED: 2026-04-29 + 30
+  --n-days ≥ 16   LEAKED: all three held-out days
+  ```
 
 **Concrete launch flags:**
 
 ```bash
 python -m training_v2.cohort.runner \
   --n-agents 12 --generations 8 \
-  --days 10 \                  # ← bumped from 6; use the larger pool
-  --data-dir data/processed \  # ← default dir with new parquets
+  --days 13 \                  # ← max safe value as of 2026-05-14
+  --data-dir data/processed \
   --device cuda --seed 42 \
   ...
 ```
+
+With `--days 13` and default `n_eval_days = n_days // 2 = 6`,
+that's 7 training days + 6 in-sample-eval days. Up from
+predecessor's 3 train + 3 in-sample-eval. More than double the
+training signal; double the in-sample-eval surface for fitness
+stability.
 
 ```bash
 # In the reeval watcher
@@ -78,10 +87,26 @@ python -m tools.reevaluate_cohort \
   ...
 ```
 
-The verdict is calibrated against the **same held-out days** as
-lay-quality-gate (+£192.53/day fc=0 / +£25.74 fc=120 / 5/5
-profitable), so the next plan's verdict is directly comparable
-even though it sees more training days.
+**As more days arrive over time**, the safe ceiling rises
+chronologically (every new day pushed onto the right shifts the
+held-out further into the safe zone of "not in last N"). Re-run
+the leak check before each new launch:
+
+```python
+from training_v2.discrete_ppo.train import _enumerate_day_files
+from pathlib import Path
+days = _enumerate_day_files(Path('data/processed'))
+held_out = {'2026-04-28', '2026-04-29', '2026-04-30'}
+for n in range(10, 30):
+    leak = held_out & set(days[-n:])
+    print(f"n_days={n}: {'LEAK' if leak else 'SAFE'} {sorted(leak)}")
+```
+
+**Permanent fix (10-min change worth queuing):** add `--exclude-days`
+flag to `select_days` in `training_v2/discrete_ppo/train.py` so
+the cohort runner explicitly filters out the held-out dates from
+the candidate pool before the last-N selection. This makes
+`--n-days` safely unbounded.
 
 ## Reeval watcher path bug — already-known
 
