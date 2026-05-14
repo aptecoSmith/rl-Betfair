@@ -72,25 +72,49 @@ logger = logging.getLogger(__name__)
 # ── Public API ────────────────────────────────────────────────────────────
 
 
+COMPOSITE_SCORE_MODE_TOTAL_REWARD = "total_reward"
+COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED = "locked_weighted"
+COMPOSITE_SCORE_MODES = (
+    COMPOSITE_SCORE_MODE_TOTAL_REWARD,
+    COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
+)
+LOCKED_WEIGHTED_NAKED_COEFFICIENT = 0.25
+
+
 def _composite_score(
     eval_stats, maturation_bonus_weight: float,
+    composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
 ) -> float:
-    """GA selection score = ``total_reward + w × (matured + closed)``.
+    """GA selection score.
 
-    ``w = 0.0`` (default) → ``composite_score == total_reward`` and the
-    selection sort is byte-identical to pre-2026-05-04 behaviour.
+    Two modes:
 
-    ``w > 0`` adds a per-completed-pair bonus directly into the GA
-    selection signal. ``arbs_completed + arbs_closed`` is the
-    numerator of ``maturation_rate``; multiplying by a £-scale weight
-    rewards both rate AND volume in a unit that's interpretable on
-    the same scale as ``total_reward`` (which lives at ~£100s per
-    eval). Force-closed pairs are excluded — they're env bail-outs,
-    not skill, matching the strict ``mature_prob`` label semantics.
+    - ``total_reward`` (default, byte-identical to pre-plan):
+      ``total_reward + w × (matured + closed)`` where ``w`` is the
+      ``maturation_bonus_weight`` knob. ``w = 0.0`` → score equals
+      ``total_reward``. ``w > 0`` rewards both rate AND volume of
+      matured / agent-closed pairs at a £-scale interpretable on the
+      same scale as ``total_reward`` (~£100s per eval). Force-closed
+      pairs are excluded — env bail-outs, not skill.
+
+    - ``locked_weighted`` (scalping-locked-fitness-and-age-obs plan):
+      ``locked_pnl + 0.25 × naked_pnl``. The 0.25 weight is locked
+      (hard_constraints §9) — calibrated against the cross-agent
+      naked/locked variance ratio observed in the predecessor
+      lay-quality-gate cohort (σ_naked / σ_locked ≈ 4-5x). Surfaces
+      structural locked-floor agents at the GA selection step
+      instead of letting per-eval naked-pnl noise dominate. Ignores
+      ``maturation_bonus_weight`` — this mode is a single-formula
+      replacement, not an additive modification.
 
     The scoreboard row's ``composite_score`` field carries this exact
     value so downstream tooling sees what the GA actually selected on.
     """
+    if composite_score_mode == COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED:
+        return (
+            float(eval_stats.locked_pnl)
+            + LOCKED_WEIGHTED_NAKED_COEFFICIENT * float(eval_stats.naked_pnl)
+        )
     n_completed = (
         int(eval_stats.arbs_completed) + int(eval_stats.arbs_closed)
     )
@@ -133,6 +157,7 @@ def run_cohort(
     race_confidence_threshold: float = 0.0,
     lay_price_max: float = 0.0,
     exclude_days: list[str] | None = None,
+    composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -164,6 +189,11 @@ def run_cohort(
         :class:`training_v2.cohort.events.WebSocketBroadcastServer`
         in here.
     """
+    if composite_score_mode not in COMPOSITE_SCORE_MODES:
+        raise ValueError(
+            f"composite_score_mode={composite_score_mode!r} must be one "
+            f"of {COMPOSITE_SCORE_MODES}",
+        )
     if n_agents < 2:
         raise ValueError(f"n_agents must be >= 2 for breeding, got {n_agents}")
     if n_generations < 1:
@@ -356,6 +386,7 @@ def run_cohort(
                         direction_gate_enabled=direction_gate_enabled,
                         race_confidence_threshold=race_confidence_threshold,
                         lay_price_max=lay_price_max,
+                        composite_score_mode=composite_score_mode,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -376,6 +407,7 @@ def run_cohort(
                         training_days=list(training_days),
                         maturation_bonus_weight=maturation_bonus_weight,
                         argmax_eval=argmax_eval,
+                        composite_score_mode=composite_score_mode,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
@@ -396,6 +428,7 @@ def run_cohort(
                         training_days=list(training_days),
                         maturation_bonus_weight=maturation_bonus_weight,
                         argmax_eval=argmax_eval,
+                        composite_score_mode=composite_score_mode,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
@@ -410,22 +443,29 @@ def run_cohort(
             # contributions.
             results.sort(
                 key=lambda r: (
-                    -_composite_score(r.eval, maturation_bonus_weight),
+                    -_composite_score(
+                        r.eval, maturation_bonus_weight,
+                        composite_score_mode,
+                    ),
                     -float(r.eval.day_pnl),
                 ),
             )
             gen_wall = time.perf_counter() - gen_t0
             logger.info(
                 "Generation %d complete in %.1fs. Top-3 by composite_score "
-                "(maturation_bonus_weight=%.3f):",
-                generation + 1, gen_wall, maturation_bonus_weight,
+                "(mode=%s, maturation_bonus_weight=%.3f):",
+                generation + 1, gen_wall, composite_score_mode,
+                maturation_bonus_weight,
             )
             for rank, r in enumerate(results[:3]):
                 logger.info(
                     "  #%d agent=%s composite=%+.3f reward=%+.3f "
                     "pnl=%+.2f bets=%d matured=%d closed=%d genes=%s",
                     rank + 1, r.agent_id[:12],
-                    _composite_score(r.eval, maturation_bonus_weight),
+                    _composite_score(
+                        r.eval, maturation_bonus_weight,
+                        composite_score_mode,
+                    ),
                     r.eval.total_reward,
                     r.eval.day_pnl, r.eval.bet_count,
                     r.eval.arbs_completed, r.eval.arbs_closed,
@@ -459,6 +499,7 @@ def run_cohort(
                     "model_id": r.model_id,
                     "composite_score": _composite_score(
                         r.eval, maturation_bonus_weight,
+                        composite_score_mode,
                     ),
                     "pnl": float(r.eval.day_pnl),
                     "win_rate": float(r.eval.bet_precision),
@@ -473,6 +514,7 @@ def run_cohort(
                     "model_id": br.model_id,
                     "composite_score": _composite_score(
                         br.eval, maturation_bonus_weight,
+                        composite_score_mode,
                     ),
                     "total_pnl": float(br.eval.day_pnl),
                     "win_rate": float(br.eval.bet_precision),
@@ -593,6 +635,7 @@ def _agent_result_to_scoreboard_row(
     training_days: list[str],
     maturation_bonus_weight: float = 0.0,
     argmax_eval: bool = False,
+    composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
 ) -> dict:
     """Flatten an :class:`AgentResult` into a v1-shape scoreboard row.
 
@@ -680,8 +723,9 @@ def _agent_result_to_scoreboard_row(
         # ``maturation_bonus_weight = 0.0`` (byte-identical to pre-2026-05-04
         # rows). When > 0 includes ``w × (matured + closed)`` per pair.
         "composite_score": _composite_score(
-            result.eval, maturation_bonus_weight,
+            result.eval, maturation_bonus_weight, composite_score_mode,
         ),
+        "composite_score_mode": str(composite_score_mode),
         "maturation_bonus_weight": float(maturation_bonus_weight),
         "eval_mode": "argmax" if argmax_eval else "stochastic",
     }
@@ -858,6 +902,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Pass ``1`` for the pre-2026-05-05 single-eval-day behaviour. "
             "Eval metrics on the scoreboard are MEANS across the N eval "
             "days, so per-agent naked-pnl variance averages down ~√N."
+        ),
+    )
+    p.add_argument(
+        "--composite-score-mode",
+        default=COMPOSITE_SCORE_MODE_TOTAL_REWARD,
+        choices=list(COMPOSITE_SCORE_MODES),
+        help=(
+            "GA selection scalar formula. "
+            "`total_reward` (default, byte-identical to pre-plan): "
+            "score = total_reward + maturation_bonus_weight x "
+            "(arbs_completed + arbs_closed). "
+            "`locked_weighted` (scalping-locked-fitness-and-age-obs "
+            "plan): score = locked_pnl + 0.25 x naked_pnl. The 0.25 "
+            "weight is locked (hard_constraints #9) — calibrated "
+            "against the predecessor cohort's naked/locked variance "
+            "ratio. Surfaces structural locked-floor agents at the "
+            "GA selection step instead of letting per-eval naked-pnl "
+            "noise dominate. Mutually exclusive with maturation_bonus_"
+            "weight (locked_weighted ignores it; the registry column "
+            "still records the active mode + score)."
         ),
     )
     p.add_argument(
@@ -1225,6 +1289,7 @@ def main(argv: list[str] | None = None) -> int:
             race_confidence_threshold=float(args.race_confidence_threshold),
             lay_price_max=float(args.lay_price_max),
             exclude_days=list(args.exclude_days) if args.exclude_days else None,
+            composite_score_mode=str(args.composite_score_mode),
         )
     finally:
         if server is not None:

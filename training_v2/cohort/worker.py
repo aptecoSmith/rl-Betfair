@@ -870,6 +870,7 @@ def train_one_agent(
     direction_gate_enabled: bool = False,
     race_confidence_threshold: float = 0.0,
     lay_price_max: float = 0.0,
+    composite_score_mode: str = "total_reward",
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -1711,11 +1712,24 @@ def train_one_agent(
                 force_closed_pnl=per_day.force_closed_pnl,
                 stop_closed_pnl=per_day.stop_closed_pnl,
             ))
-        # Composite score = eval-day total_reward. Phase 3 keeps the
-        # ranking simple; Session 04 may add a multi-component score.
+        # Composite score: by default = eval-day total_reward
+        # (byte-identical to pre-plan). When
+        # ``composite_score_mode == "locked_weighted"`` (scalping-
+        # locked-fitness-and-age-obs plan) the registry's
+        # composite_score column instead records
+        # ``locked_pnl + 0.25 × naked_pnl`` so the model row matches
+        # what the GA actually selected on at the runner level. The
+        # 0.25 weight is locked in hard_constraints §9.
+        if composite_score_mode == "locked_weighted":
+            composite_score_value = (
+                float(eval_summary.locked_pnl)
+                + 0.25 * float(eval_summary.naked_pnl)
+            )
+        else:
+            composite_score_value = float(eval_summary.total_reward)
         model_store.update_composite_score(
             model_id=model_id,
-            score=float(eval_summary.total_reward),
+            score=composite_score_value,
         )
 
     # Drop trainer to release optimiser-state tensors before the next
