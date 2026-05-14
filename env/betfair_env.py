@@ -95,7 +95,14 @@ logger = logging.getLogger(__name__)
 #               This decision is intentional (integration_contract.md §2):
 #               keeping RUNNER_DIM constant per schema version keeps
 #               the architecture-hash check tractable.
-OBS_SCHEMA_VERSION: int = 8
+#   Version 9 — scalping-locked-fitness-and-age-obs (2026-05-14): added
+#               ``seconds_since_aggressive_placed`` per runner
+#               (scalping only) — elapsed since the matched
+#               aggressive leg of an open pair was placed, normalised
+#               to race duration. SCALPING_POSITION_DIM 8 → 9. Pre-
+#               plan checkpoints cannot strict-load (architecture-hash
+#               break is expected and correct).
+OBS_SCHEMA_VERSION: int = 9
 
 # ── Action schema version ────────────────────────────────────────────────────
 # Bump this integer whenever the action vector layout changes.
@@ -407,21 +414,29 @@ AGENT_STATE_DIM = 6  # in_play, budget_frac, liability_frac, race_bets_norm, rac
 POSITION_DIM = 3  # per runner: back_exposure, lay_exposure, runner_bet_count
 
 # Extra obs dims appended when scalping_mode is enabled.
-# Per-runner (8): has_open_arb, passive_fill_proximity,
+# Per-runner (9): has_open_arb, passive_fill_proximity,
 #                 seconds_since_passive_placed,
 #                 passive_price_vs_current_ltp_ticks,
 #                 naked_downside_if_runner_wins,
 #                 naked_downside_if_runner_loses,
 #                 cost_to_close_now,
-#                 worst_case_naked_pnl.
+#                 worst_case_naked_pnl,
+#                 seconds_since_aggressive_placed.
 #   The middle two were added in scalping-active-management session 01.
-#   The last four were added in scalping-lay-quality-gate Phase 2b
-#   (2026-05-13) — see plan dir for motivation. All four are zero
-#   when no naked (unmatched-counterpart) leg exists on the runner;
-#   when nakeds exist the values are signed £-pnl normalised by
-#   ``starting_budget`` and clipped to [-1, 1] for stability.
+#   The four naked-pair leverage features were added in scalping-lay-
+#   quality-gate Phase 2b (2026-05-13) — see plan dir for motivation.
+#   All four are zero when no naked (unmatched-counterpart) leg
+#   exists on the runner; when nakeds exist the values are signed
+#   £-pnl normalised by ``starting_budget`` and clipped to [-1, 1].
+#   The final ``seconds_since_aggressive_placed`` column was added
+#   in scalping-locked-fitness-and-age-obs (2026-05-14) — elapsed
+#   real seconds since the matched aggressive leg of an open pair
+#   on this runner was placed, divided by race duration and clamped
+#   to [0, 1]. Zero when no open pair (matched aggressive +
+#   unmatched passive partner) exists on this runner. Lets the
+#   policy time ``close_signal`` on stale pairs.
 # Global  (2):   locked_pnl_frac, naked_exposure_frac.
-SCALPING_POSITION_DIM = 8
+SCALPING_POSITION_DIM = 9
 SCALPING_AGENT_STATE_DIM = 2
 
 # Derived constants
@@ -1867,6 +1882,20 @@ class BetfairEnv(gymnasium.Env):
         is still in ``bm.passive_book.orders`` (i.e. the pair's second
         leg hasn't filled). Bets without a ``pair_id`` (directional)
         don't contribute.
+
+        scalping-locked-fitness-and-age-obs (2026-05-14) adds one more
+        per-runner feature:
+
+        - ``seconds_since_aggressive_placed`` — elapsed real seconds
+          since the matched aggressive leg of an open pair on this
+          runner was placed, divided by ``race_duration`` and clamped
+          to [0, 1]. Zero when no open pair (matched aggressive +
+          unmatched passive partner) exists on this runner. When
+          multiple aggressive legs target the same runner (e.g. a
+          requote), the OLDEST elapsed value wins — the policy should
+          see the most-stale pair's age. Lets the policy time
+          ``close_signal`` on stale pairs that the existing leverage
+          features only show the £-cost of, not the age of.
         """
         bm = self.bet_manager
         assert bm is not None
@@ -1890,6 +1919,12 @@ class BetfairEnv(gymnasium.Env):
         # normalisation). ``worst_case`` is derived per-sid as
         # min(if_wins, if_loses) just before writing into the obs slot.
         naked_by_sid: dict[int, tuple[float, float, float]] = {}
+        # scalping-locked-fitness-and-age-obs (2026-05-14). Per-runner
+        # ``seconds_since_aggressive_placed``. The OLDEST aggressive leg
+        # of any open pair on a given runner wins (stale pairs surface
+        # the largest age signal, which is what the policy needs to
+        # decide on ``close_signal``).
+        agg_age_by_sid: dict[int, float] = {}
         ltp_by_sid: dict[int, float] = {}
         if self.scalping_mode:
             tick = self.day.races[self._race_idx].ticks[self._tick_idx]
@@ -1988,6 +2023,35 @@ class BetfairEnv(gymnasium.Env):
                     acc[2] + cost,
                 )
 
+            # scalping-locked-fitness-and-age-obs (2026-05-14). Compute
+            # the per-runner ``seconds_since_aggressive_placed`` feature
+            # by looking up the placement tick of every matched aggressive
+            # leg of an open pair (same definition of "open" as the naked
+            # loop above: pair_id present, partner still in passive book).
+            # Aggressive legs without a recorded ``tick_index`` (e.g. test
+            # stubs that didn't set it) are skipped — they contribute 0.
+            race_ticks = race.ticks
+            n_ticks = len(race_ticks)
+            for b in bm.bets:
+                if b.market_id != race.market_id:
+                    continue
+                if b.pair_id is None:
+                    continue
+                if b.pair_id not in unfilled_pair_ids:
+                    continue
+                if b.tick_index < 0 or b.tick_index >= n_ticks:
+                    continue
+                placed_tto = (
+                    race.market_start_time
+                    - race_ticks[b.tick_index].timestamp
+                ).total_seconds()
+                elapsed = max(0.0, placed_tto - current_time_to_off)
+                age = float(np.clip(elapsed / race_duration, 0.0, 1.0))
+                sid = b.selection_id
+                prev = agg_age_by_sid.get(sid, 0.0)
+                if age > prev:
+                    agg_age_by_sid[sid] = age
+
         for slot_idx in range(self.max_runners):
             sid = slot_map.get(slot_idx)
             offset = slot_idx * per_runner
@@ -2023,6 +2087,11 @@ class BetfairEnv(gymnasium.Env):
                 )
                 vec[offset + POSITION_DIM + 7] = float(
                     np.clip(worst / budget, -1.0, 1.0),
+                )
+                # scalping-locked-fitness-and-age-obs — agg-leg age.
+                # 0.0 when no open pair on this runner.
+                vec[offset + POSITION_DIM + 8] = agg_age_by_sid.get(
+                    sid, 0.0,
                 )
         return vec
 

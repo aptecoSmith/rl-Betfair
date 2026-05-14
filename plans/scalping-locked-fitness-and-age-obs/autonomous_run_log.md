@@ -113,3 +113,61 @@ Working tree clean.
 (`seconds_since_aggressive_placed` obs + 5 tests; bump
 `SCALPING_POSITION_DIM` 8 → 9).
 
+## 2026-05-14 15:15 — Phase 2, iteration 3
+
+**State entering iteration:** Phases 0+1 committed. Working tree
+clean. Env file untouched.
+
+**Work done:**
+- Bumped `SCALPING_POSITION_DIM` 8 → 9 in `env/betfair_env.py`.
+  Bumped `OBS_SCHEMA_VERSION` 8 → 9 with a Version-9 note.
+  Updated the SCALPING_POSITION block comment to list the new
+  9th feature.
+- Extended `_get_position_vector` docstring with the new feature
+  description.
+- Added agg-leg-age detection loop right after the existing
+  Phase-2b naked-leg loop. Reuses `unfilled_pair_ids` for the
+  "open pair" definition (matched aggressive + unmatched passive
+  partner). Computes `placed_time_to_off` from
+  `race.ticks[bet.tick_index].timestamp`. Per-runner aggregator
+  takes the OLDEST aggressive leg's age (max), so multi-leg
+  pairs surface the most-stale signal.
+- Wrote the new column at `POSITION_DIM + 8` in the per-slot
+  loop. Default 0.0 when no open pair on the runner — preserves
+  Phase 2b's "byte-identical-when-no-position" guarantee
+  (hard_constraints §2).
+- Updated existing leverage test to assert
+  `SCALPING_POSITION_DIM >= 8` instead of `== 8` (the Phase-2b
+  invariant — additive features only).
+- Added `tests/test_betfair_env.py::TestAggLegAgeObs` with the
+  five tests required by the driver:
+  - `test_obs_dim_increases_by_1_per_runner` (asserts == 9)
+  - `test_zero_when_no_open_pair`
+  - `test_increases_monotonically_within_race`
+  - `test_normalised_to_race_duration`
+  - `test_pre_plan_weights_fail_strict_load`
+
+**Tests run:**
+- `pytest tests/test_betfair_env.py::TestAggLegAgeObs
+  tests/test_betfair_env.py::TestLeverageObsFeatures -v` →
+  **12/12 PASS**.
+- `pytest tests/test_betfair_env.py -q` → **74/74 PASS**
+  (no regression on the broader env suite).
+
+**Decisions made:**
+- "Aggressive leg" detected via the SAME `unfilled_pair_ids`
+  predicate as the naked-leg loop. Same definition of "open
+  pair" — matched aggressive + unmatched passive partner.
+  Inherits the Phase-2b detection guarantees.
+- Per-runner aggregation = MAX(age) across legs. The policy
+  needs to act on the most-stale pair, not an averaged value.
+- Bets with `tick_index < 0` (never recorded) contribute 0 —
+  they have no placement timestamp to anchor age. Also guards
+  against the test-stub case where `tick_index` was forgotten.
+
+**Outstanding for this phase:** Commit.
+
+**Next iteration's focus:** Commit Phase 2; run Phase 3 — the
+held-out lay-EV re-probe on the new data pool (verifies the
+gate's structural EV survived the data refresh).
+

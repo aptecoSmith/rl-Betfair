@@ -1710,7 +1710,13 @@ class TestLeverageObsFeatures:
     def test_obs_dim_increases_by_4_per_runner(self):
         from env.betfair_env import POSITION_DIM, SCALPING_POSITION_DIM
 
-        assert SCALPING_POSITION_DIM == 8
+        # Phase 2b bumped SCALPING_POSITION_DIM 4 → 8. The
+        # scalping-locked-fitness-and-age-obs plan (2026-05-14) bumped
+        # 8 → 9. Assertion floor preserves the Phase 2b invariant
+        # (each new feature is additive); the equality is checked
+        # against the live constant + scalping-locked-fitness-and-age-obs
+        # adds its own dim-increase test.
+        assert SCALPING_POSITION_DIM >= 8
         env = self._build_env()
         vec = env._get_position_vector()
         per_runner = POSITION_DIM + SCALPING_POSITION_DIM
@@ -1814,6 +1820,231 @@ class TestLeverageObsFeatures:
         )
         # Pre-plan obs_dim is 56 columns narrower (4 fields x 14 runners).
         pre_obs_dim = real_obs_dim - 4 * max_runners
+        pre_policy = DiscreteLSTMPolicy(
+            obs_dim=pre_obs_dim,
+            action_space=action_space,
+            hidden_size=32,
+        )
+        pre_state = pre_policy.state_dict()
+        with pytest.raises(RuntimeError):
+            post_policy.load_state_dict(pre_state, strict=True)
+
+
+# ── scalping-locked-fitness-and-age-obs Phase 2 (2026-05-14) ─────────────
+
+
+class TestAggLegAgeObs:
+    """Per-runner ``seconds_since_aggressive_placed`` observation feature.
+
+    ``SCALPING_POSITION_DIM`` was bumped from 8 to 9 to add this single
+    age column. The feature lets the policy time ``close_signal`` on
+    stale pairs — the existing leverage features show £-cost but not
+    the age dimension. See plan dir
+    ``plans/scalping-locked-fitness-and-age-obs/``.
+    """
+
+    AGG_AGE_COLUMN = 8  # offset within the SCALPING_POSITION block
+
+    def _scalping_config(self) -> dict:
+        return {
+            "training": {
+                "max_runners": 14,
+                "starting_budget": 100.0,
+                "max_bets_per_race": 20,
+                "scalping_mode": True,
+            },
+            "actions": {"force_aggressive": True},
+            "reward": {
+                "early_pick_bonus_min": 1.2,
+                "early_pick_bonus_max": 1.5,
+                "early_pick_min_seconds": 300,
+                "efficiency_penalty": 0.01,
+                "commission": 0.05,
+            },
+        }
+
+    def _build_env(self, n_pre_ticks: int = 5) -> BetfairEnv:
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=n_pre_ticks, n_inplay_ticks=2),
+            self._scalping_config(),
+        )
+        env.reset()
+        return env
+
+    def _per_runner_dim(self, env) -> int:
+        from env.betfair_env import POSITION_DIM, SCALPING_POSITION_DIM
+        return POSITION_DIM + (
+            SCALPING_POSITION_DIM if env.scalping_mode else 0
+        )
+
+    def _inject_open_pair_at_tick(
+        self, env, *, sid, side, price, stake, partner_price,
+        placed_tick_index: int,
+    ) -> str:
+        """Inject a matched aggressive bet + resting passive partner.
+
+        The aggressive's ``tick_index`` is set to ``placed_tick_index``
+        so the env can recover its placement timestamp from
+        ``race.ticks[tick_index]``.
+        """
+        from env.bet_manager import (
+            Bet, BetOutcome, BetSide, PassiveOrder,
+        )
+
+        race = env.day.races[env._race_idx]
+        bm = env.bet_manager
+        pair_id = f"P-{sid}-{len(bm.bets)}"
+        partner_side = (
+            BetSide.LAY if side is BetSide.BACK else BetSide.BACK
+        )
+        bm.bets.append(Bet(
+            selection_id=sid,
+            side=side,
+            requested_stake=stake,
+            matched_stake=stake,
+            average_price=price,
+            market_id=race.market_id,
+            outcome=BetOutcome.UNSETTLED,
+            tick_index=placed_tick_index,
+            pair_id=pair_id,
+        ))
+        bm.passive_book._orders.append(PassiveOrder(
+            selection_id=sid,
+            side=partner_side,
+            price=partner_price,
+            requested_stake=stake,
+            queue_ahead_at_placement=0.0,
+            placed_tick_index=placed_tick_index,
+            market_id=race.market_id,
+            pair_id=pair_id,
+        ))
+        return pair_id
+
+    def test_obs_dim_increases_by_1_per_runner(self):
+        """SCALPING_POSITION_DIM bumps 8 -> 9.
+
+        The plan adds exactly one new column; the per-runner block
+        is one wider per scalping slot.
+        """
+        from env.betfair_env import POSITION_DIM, SCALPING_POSITION_DIM
+
+        assert SCALPING_POSITION_DIM == 9
+        env = self._build_env()
+        vec = env._get_position_vector()
+        per_runner = POSITION_DIM + SCALPING_POSITION_DIM
+        assert vec.shape[0] == env.max_runners * per_runner
+
+    def test_zero_when_no_open_pair(self):
+        """Every runner reports 0.0 for the new column when no pair is open."""
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env()
+        vec = env._get_position_vector()
+        per_runner = self._per_runner_dim(env)
+        for slot in range(env.max_runners):
+            offset = slot * per_runner + POSITION_DIM + self.AGG_AGE_COLUMN
+            assert vec[offset] == 0.0
+
+    def test_increases_monotonically_within_race(self):
+        """Stepping the env forward should increase the age value.
+
+        Inject a pair at tick 0 and read the age at tick 0, then advance
+        ``env._tick_idx`` to a later tick and read again. The later
+        reading must be strictly larger (more elapsed seconds).
+        """
+        from env.bet_manager import BetSide
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env(n_pre_ticks=10)
+        # Pair is placed at the env's current tick (post-reset, this is 0).
+        placed_tick = env._tick_idx
+        self._inject_open_pair_at_tick(
+            env, sid=101, side=BetSide.BACK,
+            price=5.0, stake=10.0, partner_price=4.5,
+            placed_tick_index=placed_tick,
+        )
+        per_runner = self._per_runner_dim(env)
+        offset = POSITION_DIM + self.AGG_AGE_COLUMN  # slot 0 = sid 101
+
+        vec_t0 = env._get_position_vector()
+        age_t0 = float(vec_t0[offset])
+
+        # Advance the env clock without changing positions / bets.
+        # Bound the bump by the race's tick count to stay in-range.
+        race = env.day.races[env._race_idx]
+        env._tick_idx = min(env._tick_idx + 5, len(race.ticks) - 1)
+        vec_tn = env._get_position_vector()
+        age_tn = float(vec_tn[offset])
+
+        assert age_tn > age_t0, (
+            f"agg-leg age failed to increase: t0={age_t0} tn={age_tn}"
+        )
+        # Both should be in the documented [0, 1] band.
+        assert 0.0 <= age_t0 <= 1.0
+        assert 0.0 <= age_tn <= 1.0
+
+    def test_normalised_to_race_duration(self):
+        """The value must be ``elapsed / race_duration`` (clamped [0, 1]).
+
+        Read the env's own ``_race_durations`` + the ticks' real
+        timestamps and recompute the expected normalised age. The obs
+        feature should match within float32 tolerance.
+        """
+        from env.bet_manager import BetSide
+        from env.betfair_env import POSITION_DIM
+
+        env = self._build_env(n_pre_ticks=10)
+        placed_tick = env._tick_idx
+        self._inject_open_pair_at_tick(
+            env, sid=101, side=BetSide.BACK,
+            price=5.0, stake=10.0, partner_price=4.5,
+            placed_tick_index=placed_tick,
+        )
+        race = env.day.races[env._race_idx]
+        # Step a few ticks forward.
+        env._tick_idx = min(env._tick_idx + 3, len(race.ticks) - 1)
+
+        vec = env._get_position_vector()
+        per_runner = self._per_runner_dim(env)
+        offset = POSITION_DIM + self.AGG_AGE_COLUMN  # slot 0 = sid 101
+        observed = float(vec[offset])
+
+        placed_tto = (
+            race.market_start_time
+            - race.ticks[placed_tick].timestamp
+        ).total_seconds()
+        current_tto = (
+            race.market_start_time
+            - race.ticks[env._tick_idx].timestamp
+        ).total_seconds()
+        race_duration = env._race_durations[env._race_idx]
+        expected = max(0.0, placed_tto - current_tto) / race_duration
+        expected = max(0.0, min(1.0, expected))
+
+        assert observed == pytest.approx(expected, abs=1e-6)
+
+    def test_pre_plan_weights_fail_strict_load(self):
+        """An older policy (SCALPING_POSITION_DIM == 8) cannot strict-load
+        into a post-plan policy (SCALPING_POSITION_DIM == 9). The
+        per-runner widening makes ``lstm_input_proj.0.weight`` (and the
+        like) one column wider per scalping slot, so PyTorch's strict
+        load refuses with a shape mismatch.
+        """
+        from agents_v2.action_space import DiscreteActionSpace
+        from agents_v2.discrete_policy import DiscreteLSTMPolicy
+
+        max_runners = 14
+        action_space = DiscreteActionSpace(max_runners=max_runners)
+        env = self._build_env()
+        post_obs_dim = env.observation_space.shape[0]
+        post_policy = DiscreteLSTMPolicy(
+            obs_dim=post_obs_dim,
+            action_space=action_space,
+            hidden_size=32,
+        )
+        # Pre-plan obs_dim is exactly ``max_runners`` columns narrower
+        # (1 new feature × 14 runners = 14 columns).
+        pre_obs_dim = post_obs_dim - max_runners
         pre_policy = DiscreteLSTMPolicy(
             obs_dim=pre_obs_dim,
             action_space=action_space,
