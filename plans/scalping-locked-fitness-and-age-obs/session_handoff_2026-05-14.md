@@ -40,43 +40,48 @@ new session.
    - Launch cohort + dual reeval watchers (paths corrected vs
      the lay-quality-gate watcher template — see below).
 
-## CRITICAL — data refresh changes the day window
+## Data refresh — USE the new days, lock the verdict window
 
-7 new days of parquets are landing. Per
-`project_select_days_data_dir_dependence.md`:
+7 new days of parquets are landing. The two questions decouple:
 
-> `select_days(seed=42)` is data-dir-dependent — new parquets
-> shift the window even with same seed.
+- **Held-out verdict window: HARD-CODE to 2026-04-28/29/30.**
+  Pass these three dates explicitly to the reeval watchers as
+  `--eval-days 2026-04-28 2026-04-29 2026-04-30`. They are fixed
+  dates; nothing to do with `select_days(seed=42)`. This keeps the
+  verdict cross-comparable to predecessors regardless of training
+  pool changes.
 
-**Implications for this plan:**
+- **Training + in-sample eval days: USE the larger pool.** Pass
+  the bigger `--n-days` (e.g. `--n-days 10` from a 13-day pool) to
+  the cohort runner. `select_days(seed=42)` is deterministic given
+  the pool; more days in → more training signal per agent. The
+  data-dir-dependence concern is only about *cross-cohort training
+  day comparability*, which we don't need — we need verdict-
+  surface comparability, and that's locked.
 
-- If you use the default `data/processed` dir, the seed=42 shuffle
-  will pick a different 6 training days and 3 eval days. This means
-  the predecessor cohort's training-eval window (2026-05-04/05/06)
-  and held-out window (2026-04-28/29/30) **will likely shift**.
-- For cross-cohort comparison (this plan vs lay-quality-gate),
-  the held-out window must be **identical**.
+**Concrete launch flags:**
 
-**Two options:**
+```bash
+python -m training_v2.cohort.runner \
+  --n-agents 12 --generations 8 \
+  --days 10 \                  # ← bumped from 6; use the larger pool
+  --data-dir data/processed \  # ← default dir with new parquets
+  --device cuda --seed 42 \
+  ...
+```
 
-1. **Recommended: curate a locked subdir.** Copy the original 9 days
-   used by lay-quality-gate (2026-04-28..30 + 2026-05-04..06 + the
-   3 other days the seed=42 shuffle picked for training) into
-   `data/processed_layq_window/`. Pass `--data-dir
-   data/processed_layq_window` to this plan's cohort + reevals. The
-   day-window memory has this on its TODO list — your moment to do
-   it.
+```bash
+# In the reeval watcher
+python -m tools.reevaluate_cohort \
+  --cohort-dir registry/${TAG} \
+  --eval-days 2026-04-28 2026-04-29 2026-04-30 \  # ← hard-coded
+  ...
+```
 
-2. **Alternative: accept the shifted window.** Train on whatever 6
-   days the new shuffle picks, but lock the held-out eval to the
-   same 2026-04-28/29/30 (those 3 specific days, hard-coded into
-   the reeval watchers regardless of training shuffle). This
-   gives apples-to-apples held-out comparison even though training
-   days drift. Easier to implement.
-
-Option 1 gives clean A/B vs lay-quality-gate. Option 2 gives clean
-held-out comparison only. Pick based on whether you care about
-in-sample comparability.
+The verdict is calibrated against the **same held-out days** as
+lay-quality-gate (+£192.53/day fc=0 / +£25.74 fc=120 / 5/5
+profitable), so the next plan's verdict is directly comparable
+even though it sees more training days.
 
 ## Reeval watcher path bug — already-known
 
