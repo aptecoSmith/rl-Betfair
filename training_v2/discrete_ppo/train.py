@@ -252,6 +252,7 @@ def select_days(
     n_days: int,
     day_shuffle_seed: int,
     n_eval_days: int | None = None,
+    exclude_days: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Pick the training days + the held-out eval days.
 
@@ -296,6 +297,9 @@ def select_days(
             "least one training day remains.",
         )
     available = _enumerate_day_files(data_dir)
+    if exclude_days:
+        excluded = set(exclude_days)
+        available = [d for d in available if d not in excluded]
     if len(available) < n_days:
         raise RuntimeError(
             f"--days {n_days} requested but only {len(available)} parquet "

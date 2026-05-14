@@ -132,6 +132,7 @@ def run_cohort(
     direction_gate_enabled: bool = False,
     race_confidence_threshold: float = 0.0,
     lay_price_max: float = 0.0,
+    exclude_days: list[str] | None = None,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -189,6 +190,7 @@ def run_cohort(
     training_days, eval_days = select_days(
         data_dir=data_dir, n_days=int(days), day_shuffle_seed=int(seed),
         n_eval_days=n_eval_days,
+        exclude_days=list(exclude_days) if exclude_days else None,
     )
     eval_day_summary = (
         eval_days[0] if len(eval_days) == 1
@@ -768,6 +770,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Directory containing YYYY-MM-DD.parquet day files.",
     )
     p.add_argument(
+        "--exclude-days", nargs="+", default=[], metavar="YYYY-MM-DD",
+        help=(
+            "Day(s) to drop from the candidate pool BEFORE the "
+            "most-recent-N selection. Use to keep held-out evaluation "
+            "dates out of training even when --days is wider than the "
+            "leak boundary. Default: empty (byte-identical to pre-flag "
+            "behaviour). Example: --exclude-days 2026-04-28 2026-04-29 "
+            "2026-04-30 lets you safely raise --days arbitrarily high."
+        ),
+    )
+    p.add_argument(
         "--device", default="cpu",
         help="Torch device (cpu, cuda, cuda:N). Default cpu.",
     )
@@ -1211,6 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
             direction_gate_enabled=bool(args.direction_gate_enabled),
             race_confidence_threshold=float(args.race_confidence_threshold),
             lay_price_max=float(args.lay_price_max),
+            exclude_days=list(args.exclude_days) if args.exclude_days else None,
         )
     finally:
         if server is not None:
