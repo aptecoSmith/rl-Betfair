@@ -39,6 +39,7 @@ def _per_agent_naked_range(db_path: Path) -> dict[str, dict]:
         cur = conn.cursor()
         sql = """
         SELECT er.model_id,
+               MAX(er.evaluated_at) AS evaluated_at,
                MIN(ed.naked_pnl) AS naked_min,
                MAX(ed.naked_pnl) AS naked_max,
                AVG(ed.naked_pnl) AS naked_mean,
@@ -50,6 +51,7 @@ def _per_agent_naked_range(db_path: Path) -> dict[str, dict]:
         """
         for r in cur.execute(sql):
             out[r["model_id"]] = {
+                "evaluated_at": str(r["evaluated_at"] or ""),
                 "span": float(r["naked_span"]),
                 "min": float(r["naked_min"]),
                 "max": float(r["naked_max"]),
@@ -168,8 +170,9 @@ def _format(
         out.append("")
         out.append("Top-10 agents by naked range (smallest span first):")
         out.append(
-            f"  {'agent':<10} {'gen':>4} {'span':>7} {'min':>8} "
-            f"{'max':>8} {'mean':>8} {'locked':>8} {'pnl':>8}"
+            f"  {'agent':<10} {'gen':>4} {'evaluated_at':<20} "
+            f"{'span':>7} {'min':>8} {'max':>8} {'mean':>8} "
+            f"{'locked':>8} {'pnl':>8}"
         )
         # Index scoreboard rows by model_id (== agent_id in v2).
         rows_by_id = {r.get("agent_id", ""): r for r in rows}
@@ -182,8 +185,12 @@ def _format(
         )
         for model_id, st in ranked[:10]:
             sb = rows_by_id.get(model_id, {})
+            # Trim ISO timestamp to "YYYY-MM-DD HH:MM:SS" (drop fractional
+            # seconds + 'T' separator) for readability.
+            ts = (st.get("evaluated_at", "") or "")[:19].replace("T", " ")
             out.append(
                 f"  {model_id[:8]:<10} {sb.get('generation', 0):>4} "
+                f"{ts:<20} "
                 f"{st['span']:>7.1f} {st['min']:>+8.1f} "
                 f"{st['max']:>+8.1f} {st['mean']:>+8.1f} "
                 f"{sb.get('eval_locked_pnl', 0):>+8.0f} "
