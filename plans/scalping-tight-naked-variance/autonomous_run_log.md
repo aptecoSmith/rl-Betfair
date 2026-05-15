@@ -39,3 +39,28 @@ Did NOT launch Phase 2.
 **Outstanding for this phase:** held-out reeval (8 jobs) once
 operator picks a remediation path.
 **Next iteration's focus:** wait for operator input.
+
+## 2026-05-15 12:13 — Phase 1c complete, Phase 1d done
+
+**State entering iteration:** Phase 1c reeval chain (8 jobs) launched
+from per-cohort eval worktrees at 22:02 BST 2026-05-14.
+**Work done:**
+- All 8 reevals completed cleanly between 22:02 and 11:33 BST,
+  14 rows per JSONL. Total wall: 13h 31m.
+- Wrote `C:/tmp/phase1_analyze.py` to roll the 8 JSONLs into the
+  per-selector × per-cohort × per-window × per-fc verdict table.
+- Generated `phase1_verdict_table.csv` (40 cells) and amended
+  `phase1_verdict.md` with the headline numbers, full per-cell
+  table, and band verdict.
+**Tests run:** None this iteration; analysis only.
+**Decisions made:** All 20 fc-paired cells land in REGRESSION
+territory (fc=120 mean < 0). No band cleared. Phase 1 hypothesis
+(variance-aware selection over existing populations surfaces
+deployable agents) is REJECTED on held-out data. Phase 2 (retrain
+with variance-aware reward + fc=120 in training) is the only
+remaining path per the plan; recipes documented in verdict.md.
+**Outstanding for this phase:** verdict + analysis CSV need
+committing.
+**Next iteration's focus:** Phase 1 EXITS here. Operator gate per
+hard_constraints.md s22 — operator picks Phase 2A / Phase 2B /
+BOTH / retire.
