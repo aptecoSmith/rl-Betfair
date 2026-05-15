@@ -176,7 +176,16 @@ CLOSE_SIGNAL_BONUS: float = 1.0
 # never touches raw. Default beta=0.0 = byte-identical pre-plan.
 # Symmetric on the per-pair sign (both wins and losses contribute
 # beta * p^2). See hard_constraints.md §7–§11.
-NAKED_VARIANCE_PENALTY_BETA_MAX: float = 0.005
+#
+# Range upper bound bumped 0.005 → 0.05 (2026-05-15, post-Phase-1-
+# verdict). At 0.005 the per-£100-outlier penalty was £50 — too
+# muted to dominate the agent's selection signal at typical
+# per-pair amplitudes. At 0.05 the per-£100-outlier penalty is
+# £500 and the per-day swing for moving from σ_pair=£80 →
+# σ_pair=£30 is ~£8250/day of shaped reward (was ~£825). Bites
+# hard on tails without forcing bet_count=0 collapse at the
+# typical σ_leg≈£36 amplitude (penalty ~£65/pair).
+NAKED_VARIANCE_PENALTY_BETA_MAX: float = 0.05
 
 
 def _covered_fraction(agg, close, commission: float) -> float:
