@@ -167,6 +167,38 @@ def _format(
             f"max span {max(spans):.1f}, "
             f"mean span {sum(spans) / len(spans):.1f}"
         )
+
+        # Per-generation naked-span trend. The plan's training-time
+        # variance penalty should tighten this distribution gen-on-gen
+        # if the GA's breeding loop is selecting for low-variance
+        # phenotypes. Watching the median + mean shrink across
+        # generations is the cleanest in-sample validation that the
+        # penalty is doing its job. (Mean is sensitive to single high-
+        # span outliers; median tracks the bulk of the cohort.)
+        out.append("")
+        out.append("Naked span by generation (smaller = tighter variance):")
+        out.append(
+            f"  {'gen':<4} {'n':>4} {'min':>8} {'median':>8} "
+            f"{'mean':>8} {'max':>8}"
+        )
+        spans_by_gen: dict[int, list[float]] = defaultdict(list)
+        for r in rows:
+            mid = r.get("agent_id", "")
+            if mid in naked_range_by_model:
+                spans_by_gen[int(r.get("generation", 0))].append(
+                    float(naked_range_by_model[mid]["span"]),
+                )
+        for g in sorted(spans_by_gen):
+            gs = sorted(spans_by_gen[g])
+            n = len(gs)
+            mn = gs[0]
+            md = gs[n // 2] if n else float("nan")
+            mx = gs[-1]
+            avg = sum(gs) / n if n else float("nan")
+            out.append(
+                f"  {g:<4} {n:>4} {mn:>8.1f} {md:>8.1f} "
+                f"{avg:>8.1f} {mx:>8.1f}"
+            )
         out.append("")
         out.append("Top-10 agents by naked range (smallest span first):")
         out.append(
