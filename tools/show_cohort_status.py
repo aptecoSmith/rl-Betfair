@@ -16,10 +16,51 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+
+
+def _per_agent_naked_range(db_path: Path) -> dict[str, dict]:
+    """Compute per-model naked stats across in-sample-eval days.
+
+    Returns ``{model_id: {span, min, max, mean, n_days}}`` sourced
+    from the ``evaluation_days`` table joined to ``evaluation_runs``.
+    Empty dict when the DB is missing or has no rows yet.
+    """
+    if not db_path.exists():
+        return {}
+    out: dict[str, dict] = {}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        sql = """
+        SELECT er.model_id,
+               MIN(ed.naked_pnl) AS naked_min,
+               MAX(ed.naked_pnl) AS naked_max,
+               AVG(ed.naked_pnl) AS naked_mean,
+               (MAX(ed.naked_pnl) - MIN(ed.naked_pnl)) AS naked_span,
+               COUNT(*)           AS n_days
+        FROM evaluation_days ed
+        JOIN evaluation_runs er ON ed.run_id = er.run_id
+        GROUP BY er.model_id
+        """
+        for r in cur.execute(sql):
+            out[r["model_id"]] = {
+                "span": float(r["naked_span"]),
+                "min": float(r["naked_min"]),
+                "max": float(r["naked_max"]),
+                "mean": float(r["naked_mean"]),
+                "n_days": int(r["n_days"]),
+            }
+        conn.close()
+    except sqlite3.Error:
+        # DB locked mid-write or schema mismatch — skip the section.
+        pass
+    return out
 
 
 def _read_rows(scoreboard_path: Path) -> list[dict]:
@@ -38,7 +79,10 @@ def _read_rows(scoreboard_path: Path) -> list[dict]:
     return rows
 
 
-def _format(rows: list[dict], cohort_tag: str, total_target: int = 96) -> str:
+def _format(
+    rows: list[dict], cohort_tag: str, total_target: int = 96,
+    naked_range_by_model: dict[str, dict] | None = None,
+) -> str:
     out: list[str] = []
     out.append(f"COHORT: {cohort_tag}")
     out.append(f"Progress: {len(rows)}/{total_target} agents")
@@ -104,6 +148,48 @@ def _format(rows: list[dict], cohort_tag: str, total_target: int = 96) -> str:
             f"{mr:>5.3f}"
         )
 
+    # Per-agent naked range across the in-sample-eval days. "Range"
+    # = MAX(daily naked) - MIN(daily naked) per agent. Larger span =
+    # more luck-dominated; smaller span at positive mean = the
+    # structurally stable phenotype the locked-weighted selection
+    # is meant to surface.
+    if naked_range_by_model:
+        spans = [v["span"] for v in naked_range_by_model.values()]
+        out.append("")
+        out.append(
+            f"Per-agent naked range (n_agents={len(spans)}; "
+            f"each agent spans 10 in-sample-eval days):"
+        )
+        out.append(
+            f"  cohort-wide: min span {min(spans):.1f}, "
+            f"max span {max(spans):.1f}, "
+            f"mean span {sum(spans) / len(spans):.1f}"
+        )
+        out.append("")
+        out.append("Top-10 agents by naked range (smallest span first):")
+        out.append(
+            f"  {'agent':<10} {'gen':>4} {'span':>7} {'min':>8} "
+            f"{'max':>8} {'mean':>8} {'locked':>8} {'pnl':>8}"
+        )
+        # Index scoreboard rows by model_id (== agent_id in v2).
+        rows_by_id = {r.get("agent_id", ""): r for r in rows}
+        # Smaller span = tighter naked variance = better. Sort ascending.
+        # (Reversed 2026-05-15 for the scalping-tight-naked-variance
+        # plan; previously largest-first, which surfaced the worst
+        # cohort members at the top.)
+        ranked = sorted(
+            naked_range_by_model.items(), key=lambda kv: kv[1]["span"],
+        )
+        for model_id, st in ranked[:10]:
+            sb = rows_by_id.get(model_id, {})
+            out.append(
+                f"  {model_id[:8]:<10} {sb.get('generation', 0):>4} "
+                f"{st['span']:>7.1f} {st['min']:>+8.1f} "
+                f"{st['max']:>+8.1f} {st['mean']:>+8.1f} "
+                f"{sb.get('eval_locked_pnl', 0):>+8.0f} "
+                f"{sb.get('eval_day_pnl', 0):>+8.0f}"
+            )
+
     # ETA
     wall_times = [
         r.get("train_wall_time_sec", 0) + r.get("eval_wall_time_sec", 0)
@@ -139,11 +225,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: cohort dir not found: {cohort_dir}", file=sys.stderr)
         return 1
     scoreboard = cohort_dir / "scoreboard.jsonl"
+    db_path = cohort_dir / "models.db"
     out_path = args.out or (cohort_dir / "status.txt")
 
     def render_once() -> None:
         rows = _read_rows(scoreboard)
-        text = _format(rows, cohort_tag=cohort_dir.name, total_target=args.target_rows)
+        naked_range = _per_agent_naked_range(db_path)
+        text = _format(
+            rows,
+            cohort_tag=cohort_dir.name,
+            total_target=args.target_rows,
+            naked_range_by_model=naked_range,
+        )
         print(text)
         try:
             out_path.write_text(text, encoding="utf-8")
