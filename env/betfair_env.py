@@ -171,6 +171,13 @@ MAX_ARB_TICKS: int = 25
 NAKED_WINNER_CLIP_FRACTION: float = 0.95
 CLOSE_SIGNAL_BONUS: float = 1.0
 
+# scalping-tight-naked-variance Phase 2A (2026-05-15). L2 per-pair
+# naked-pnl variance penalty applied in the SHAPED channel only —
+# never touches raw. Default beta=0.0 = byte-identical pre-plan.
+# Symmetric on the per-pair sign (both wins and losses contribute
+# beta * p^2). See hard_constraints.md §7–§11.
+NAKED_VARIANCE_PENALTY_BETA_MAX: float = 0.005
+
 
 def _covered_fraction(agg, close, commission: float) -> float:
     """Fraction of the aggressive leg that is actually hedged by the
@@ -211,6 +218,7 @@ def _compute_scalping_reward_terms(
     naked_per_pair: list[float],
     n_close_signal_successes: int,
     naked_loss_scale: float = 1.0,
+    naked_variance_penalty_beta: float = 0.0,
 ) -> tuple[float, float]:
     """Split a scalping race's settlement into raw and shaped terms.
 
@@ -242,13 +250,29 @@ def _compute_scalping_reward_terms(
         of losing naked bets to bootstrap the policy past the naked
         valley. See plans/arb-curriculum/hard_constraints.md s13-s15.
 
+    naked_variance_penalty_beta:
+        L2 per-pair variance penalty coefficient
+        (scalping-tight-naked-variance Phase 2A, 2026-05-15). The
+        contribution is ``−beta × sum(p² for p in naked_per_pair)``,
+        added to the SHAPED channel only (raw P&L is untouched per
+        hard_constraints §9). Symmetric — both +£100 winners and
+        −£100 losers contribute ``beta × 10000`` of negative shaped
+        reward. Default 0.0 = byte-identical pre-plan. Range
+        ``[0.0, NAKED_VARIANCE_PENALTY_BETA_MAX]``.
+
     Returns
     -------
     ``(race_reward_pnl, race_shaping)``
         ``race_reward_pnl`` feeds the raw accumulator and reports
         actual race cashflow (with loss-side scaling when enabled);
         ``race_shaping`` feeds the shaped accumulator and carries the
-        training-signal adjustments.
+        training-signal adjustments INCLUDING the variance penalty.
+        The realised per-race variance-penalty contribution is
+        exposed separately via the env's
+        ``_race_naked_variance_penalty_pnl`` attribute (and the
+        ``naked_variance_penalty_pnl`` info-dict field) — keeps the
+        public return tuple at 2 values for backward compatibility
+        with existing test callers.
 
     The two training-signal terms are:
 
@@ -273,7 +297,15 @@ def _compute_scalping_reward_terms(
         max(0.0, p) for p in naked_per_pair
     )
     close_bonus = CLOSE_SIGNAL_BONUS * float(n_close_signal_successes)
-    race_shaping = naked_winner_clip + close_bonus
+    # scalping-tight-naked-variance Phase 2A (2026-05-15). L2
+    # symmetric per-pair penalty. Net contribution is non-positive
+    # (penalty), so the magnitude on shaped is bounded by the sum
+    # of squared per-pair pnls × beta. At beta=0.005 a single
+    # ±£100 pair pays £50 of shaped penalty.
+    variance_penalty = -float(naked_variance_penalty_beta) * sum(
+        p * p for p in naked_per_pair
+    )
+    race_shaping = naked_winner_clip + close_bonus + variance_penalty
     return race_reward_pnl, race_shaping
 
 
@@ -1159,6 +1191,30 @@ class BetfairEnv(gymnasium.Env):
             self._naked_loss_scale = float(
                 np.clip(self._naked_loss_scale, 0.0, 1.0)
             )
+        # scalping-tight-naked-variance Phase 2A (2026-05-15). L2
+        # per-pair naked-pnl variance penalty applied to the SHAPED
+        # channel only. Default 0.0 = byte-identical pre-plan.
+        # Symmetric, range [0.0, NAKED_VARIANCE_PENALTY_BETA_MAX].
+        # See hard_constraints.md §7-§11.
+        self._naked_variance_penalty_beta: float = float(
+            reward_cfg.get("naked_variance_penalty_beta", 0.0)
+        )
+        if not (0.0 <= self._naked_variance_penalty_beta
+                <= NAKED_VARIANCE_PENALTY_BETA_MAX):
+            logger.warning(
+                "naked_variance_penalty_beta=%s out of [0, %s]; clamping",
+                self._naked_variance_penalty_beta,
+                NAKED_VARIANCE_PENALTY_BETA_MAX,
+            )
+            self._naked_variance_penalty_beta = float(np.clip(
+                self._naked_variance_penalty_beta,
+                0.0,
+                NAKED_VARIANCE_PENALTY_BETA_MAX,
+            ))
+        # Initialised to 0.0; overwritten on every settle. Surfaced
+        # on the info dict so callers see the most-recent race's
+        # contribution.
+        self._race_naked_variance_penalty_pnl: float = 0.0
         # Selective-open-shaping Session 01 (2026-04-25). Per-pair
         # open-time cost in £, charged at successful pair open and
         # refunded at settle iff the pair matures or is agent-closed.
@@ -2337,6 +2393,16 @@ class BetfairEnv(gymnasium.Env):
             # Arb-curriculum Session 03: active loss scale for telemetry.
             # 1.0 = no scaling (default / byte-identical).
             "naked_loss_scale_active": self._naked_loss_scale,
+            # scalping-tight-naked-variance Phase 2A (2026-05-15).
+            # Active beta + the realised per-race penalty contribution
+            # (always <= 0). hard_constraints.md §11. Pre-plan rows
+            # default-tolerant: missing → 0.0.
+            "naked_variance_penalty_beta_active": (
+                self._naked_variance_penalty_beta
+            ),
+            "naked_variance_penalty_pnl": (
+                self._race_naked_variance_penalty_pnl
+            ),
             # Arb-signal-cleanup Session 02 (2026-04-21) — shaped-penalty
             # warmup telemetry. ``scale`` reflects the multiplier
             # applied to efficiency_cost / precision_reward at the most
@@ -4555,8 +4621,18 @@ class BetfairEnv(gymnasium.Env):
                 naked_per_pair=naked_per_pair,
                 n_close_signal_successes=scalping_arbs_closed,
                 naked_loss_scale=self._naked_loss_scale,
+                naked_variance_penalty_beta=(
+                    self._naked_variance_penalty_beta
+                ),
             )
             shaped += race_shaping
+            # Realised per-race variance-penalty contribution. Recomputed
+            # here so the helper can stay 2-tuple for backward-compat.
+            # Always ≤ 0 (penalty). At beta=0.0 this is exactly 0.0.
+            self._race_naked_variance_penalty_pnl = (
+                -float(self._naked_variance_penalty_beta)
+                * sum(p * p for p in naked_per_pair)
+            )
             # Selective-open-shaping per-tick (2026-04-25 Session 02
             # revision). The per-tick contributions have ALREADY been
             # added to ``self._cum_shaped_reward`` and to each step's

@@ -224,6 +224,10 @@ class TestPhase5Genes:
             "value_kelly_fraction": 0.25,
             "each_way_edge_threshold": 0.05,
             "each_way_kelly_fraction": 0.25,
+            # scalping-tight-naked-variance Phase 2A (2026-05-15).
+            # Default 0.0 = byte-identical to pre-plan (no shaped
+            # variance penalty).
+            "naked_variance_penalty_beta": 0.0,
         }
         assert PHASE5_GENE_DEFAULTS == expected
 
@@ -345,15 +349,17 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_34_fields(self):
+    def test_to_dict_serialises_all_35_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
-        # 7 legacy + 17 Phase 5 (12 prior + 5 predictor-integration) +
-        # 3 Phase 8 BC + 4 Phase-13 direction + 1 Phase-13 S05 BC +
-        # 1 Phase-14 S03 (direction_gate_enabled) + 1 Phase-14 S06
-        # (direction_gate_warmup_eps).
-        assert len(d) == 34
+        # 7 legacy + 18 Phase 5 (12 prior + 5 predictor-integration +
+        # 1 scalping-tight-naked-variance Phase 2A
+        # naked_variance_penalty_beta) + 3 Phase 8 BC + 4 Phase-13
+        # direction + 1 Phase-13 S05 BC + 1 Phase-14 S03
+        # (direction_gate_enabled) + 1 Phase-14 S06
+        # (direction_gate_warmup_eps) = 35.
+        assert len(d) == 35
         for name in PHASE5_GENE_NAMES:
             assert name in d
             assert isinstance(d[name], float)
@@ -385,8 +391,7 @@ class TestPhase5Genes:
 
     def test_phase5_gene_names_set_size(self):
         # 12 Phase 5 genes + 5 predictor-integration Session 03 genes
-        # (predictor_feature_gain, value_edge_threshold,
-        # value_kelly_fraction, each_way_edge_threshold,
-        # each_way_kelly_fraction) = 17.
-        assert len(PHASE5_GENE_NAMES) == 17
+        # + 1 scalping-tight-naked-variance Phase 2A
+        # (naked_variance_penalty_beta) = 18.
+        assert len(PHASE5_GENE_NAMES) == 18
         assert PHASE5_GENE_NAMES == frozenset(PHASE5_GENE_DEFAULTS)

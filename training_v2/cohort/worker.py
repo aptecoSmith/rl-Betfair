@@ -105,6 +105,9 @@ _PHASE5_GENES_VIA_REWARD_OVERRIDES: frozenset[str] = frozenset({
     "mature_prob_loss_weight",
     "risk_loss_weight",
     "reward_clip",
+    # scalping-tight-naked-variance Phase 2A (2026-05-15). Flows
+    # through reward_overrides to env's _compute_scalping_reward_terms.
+    "naked_variance_penalty_beta",
 })
 
 _PHASE5_GENES_VIA_SCALPING_OVERRIDES: frozenset[str] = frozenset({

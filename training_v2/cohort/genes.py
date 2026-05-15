@@ -65,6 +65,13 @@ MATURE_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (1.0, 5.0)
 RISK_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.30)
 ALPHA_LR_RANGE: tuple[float, float] = (1e-2, 1e-1)
 REWARD_CLIP_RANGE: tuple[float, float] = (1.0, 10.0)
+# scalping-tight-naked-variance Phase 2A (2026-05-15). L2 symmetric
+# per-pair naked-pnl variance penalty coefficient. Applied to the
+# SHAPED reward channel only. Default 0.0 = byte-identical pre-plan.
+# Range upper bound matches env/betfair_env.py::
+# NAKED_VARIANCE_PENALTY_BETA_MAX. See plans/scalping-tight-naked-
+# variance/hard_constraints.md §7-§11.
+NAKED_VARIANCE_PENALTY_BETA_RANGE: tuple[float, float] = (0.0, 0.005)
 # Phase-14 S03 (2026-05-07). Direction-gate threshold. Lower bound
 # is the gate's "no-op floor" semantic. Upper bound clamps the
 # strictest gene draw — at 0.99+ an agent never opens, starving
@@ -114,6 +121,9 @@ PHASE5_GENE_DEFAULTS: dict[str, float] = {
     "risk_loss_weight": 0.0,
     "alpha_lr": 1e-2,
     "reward_clip": 10.0,
+    # scalping-tight-naked-variance Phase 2A (2026-05-15). Default
+    # 0.0 = no penalty = byte-identical to pre-plan.
+    "naked_variance_penalty_beta": 0.0,
     # Phase-14 S03 (2026-05-07). Default 0.5 = the gate's no-op
     # floor: when ``direction_gate_enabled=False`` (the cohort-wide
     # default) this value is unread; when enabled, 0.5 is the
@@ -151,6 +161,7 @@ _PHASE5_RANGES: dict[str, tuple[float, float]] = {
     "risk_loss_weight": RISK_LOSS_WEIGHT_RANGE,
     "alpha_lr": ALPHA_LR_RANGE,
     "reward_clip": REWARD_CLIP_RANGE,
+    "naked_variance_penalty_beta": NAKED_VARIANCE_PENALTY_BETA_RANGE,
     "direction_gate_threshold": DIRECTION_GATE_THRESHOLD_RANGE,
     "predictor_feature_gain": PREDICTOR_FEATURE_GAIN_RANGE,
     "value_edge_threshold": VALUE_EDGE_THRESHOLD_RANGE,
@@ -206,6 +217,10 @@ class CohortGenes:
     risk_loss_weight: float = 0.0
     alpha_lr: float = 1e-2
     reward_clip: float = 10.0
+    # scalping-tight-naked-variance Phase 2A (added 2026-05-15).
+    # L2 symmetric per-pair naked-pnl variance penalty coefficient.
+    # Default 0.0 = byte-identical to pre-plan. Range [0, 0.005].
+    naked_variance_penalty_beta: float = 0.0
 
     # Phase 8 (added 2026-05-05). BC pretrain knobs. Defaults are
     # inert — ``bc_pretrain_steps = 0`` is the no-op switch; the other
@@ -288,6 +303,9 @@ class CohortGenes:
             "risk_loss_weight": float(self.risk_loss_weight),
             "alpha_lr": float(self.alpha_lr),
             "reward_clip": float(self.reward_clip),
+            "naked_variance_penalty_beta": float(
+                self.naked_variance_penalty_beta,
+            ),
             "bc_pretrain_steps": int(self.bc_pretrain_steps),
             "bc_learning_rate": float(self.bc_learning_rate),
             "bc_target_entropy_warmup_eps": int(

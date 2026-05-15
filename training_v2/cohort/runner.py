@@ -74,11 +74,23 @@ logger = logging.getLogger(__name__)
 
 COMPOSITE_SCORE_MODE_TOTAL_REWARD = "total_reward"
 COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED = "locked_weighted"
+# scalping-tight-naked-variance Phase 2A (2026-05-15). Variance-aware
+# selection: surfaces low-σ_naked agents at the GA-selection step.
+# Formula: ``mean_locked - 0.5 × σ_naked_daily + 0.25 × mean_naked``.
+# Requires multi-day eval (``n_eval_days >= 2``); falls back to
+# ``locked_weighted`` otherwise per hard_constraints §15.
+COMPOSITE_SCORE_MODE_TIGHT_VARIANCE = "tight_variance"
 COMPOSITE_SCORE_MODES = (
     COMPOSITE_SCORE_MODE_TOTAL_REWARD,
     COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
+    COMPOSITE_SCORE_MODE_TIGHT_VARIANCE,
 )
 LOCKED_WEIGHTED_NAKED_COEFFICIENT = 0.25
+# scalping-tight-naked-variance hard_constraints.md §5 — module-level
+# constants for grep-ability. Mirror values from the report tool
+# (``tools/build_naked_variance_report.py``).
+TIGHT_VARIANCE_VOL_COEF = 0.5
+TIGHT_VARIANCE_NAKED_COEF = 0.25
 
 
 def _composite_score(
@@ -114,6 +126,30 @@ def _composite_score(
         return (
             float(eval_stats.locked_pnl)
             + LOCKED_WEIGHTED_NAKED_COEFFICIENT * float(eval_stats.naked_pnl)
+        )
+    if composite_score_mode == COMPOSITE_SCORE_MODE_TIGHT_VARIANCE:
+        # scalping-tight-naked-variance Phase 2A. Surface low-σ_naked
+        # agents at the GA-selection step. ``eval_stats.per_day`` is
+        # populated when the cohort runner uses ``--n-eval-days N>1``.
+        # When ``len(per_day) < 2`` σ is undefined → fall back to
+        # ``locked_weighted`` per hard_constraints §15.
+        per_day = list(getattr(eval_stats, "per_day", []) or [])
+        if len(per_day) < 2:
+            return (
+                float(eval_stats.locked_pnl)
+                + LOCKED_WEIGHTED_NAKED_COEFFICIENT
+                * float(eval_stats.naked_pnl)
+            )
+        naked_daily = [float(d.naked_pnl) for d in per_day]
+        n = len(naked_daily)
+        mean = sum(naked_daily) / n
+        # Sample stddev (ddof=1) — matches the report tool.
+        variance = sum((x - mean) ** 2 for x in naked_daily) / (n - 1)
+        naked_std = variance ** 0.5
+        return (
+            float(eval_stats.locked_pnl)
+            - TIGHT_VARIANCE_VOL_COEF * naked_std
+            + TIGHT_VARIANCE_NAKED_COEF * float(eval_stats.naked_pnl)
         )
     n_completed = (
         int(eval_stats.arbs_completed) + int(eval_stats.arbs_closed)

@@ -219,6 +219,14 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             # Phase-14 S06 (added 2026-05-07). Threshold-warmup
             # window — operator-controlled, default 5.
             "direction_gate_warmup_eps",
+            # Predictor-integration Session 03 (added 2026-05-10).
+            "predictor_feature_gain",
+            "value_edge_threshold",
+            "value_kelly_fraction",
+            "each_way_edge_threshold",
+            "each_way_kelly_fraction",
+            # scalping-tight-naked-variance Phase 2A (added 2026-05-15).
+            "naked_variance_penalty_beta",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2
