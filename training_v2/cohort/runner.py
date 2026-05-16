@@ -80,10 +80,25 @@ COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED = "locked_weighted"
 # Requires multi-day eval (``n_eval_days >= 2``); falls back to
 # ``locked_weighted`` otherwise per hard_constraints §15.
 COMPOSITE_SCORE_MODE_TIGHT_VARIANCE = "tight_variance"
+# scalping-tight-naked-variance Phase 3 corrective (2026-05-16). Variance-
+# aware Sharpe-style selection that NEVER reads naked-sign (mean_naked).
+# Formula: ``mean_locked / (1 + naked_std_daily)``. Picked after the
+# Phase 3b post-hoc analysis showed:
+#   - score_a (pure_locked) picks the best held-out cohort because
+#     locked is structurally signed (matched-arb count × spread cost).
+#   - tight_variance's ``+ 0.25 × mean_naked`` term made the GA chase
+#     in-sample naked luck — agents with in-sample +£342 reverted to
+#     -£170 on 3-day held-out (cohort tnv_raceconf 1778852093,
+#     agent ad42a47b).
+# This mode keeps the variance-penalty discipline (Sharpe-like
+# denominator) without reading naked-sign. Falls back to
+# locked_weighted when ``len(per_day) < 2`` (σ undefined).
+COMPOSITE_SCORE_MODE_LOCKED_PER_STD = "locked_per_std"
 COMPOSITE_SCORE_MODES = (
     COMPOSITE_SCORE_MODE_TOTAL_REWARD,
     COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
     COMPOSITE_SCORE_MODE_TIGHT_VARIANCE,
+    COMPOSITE_SCORE_MODE_LOCKED_PER_STD,
 )
 LOCKED_WEIGHTED_NAKED_COEFFICIENT = 0.25
 # scalping-tight-naked-variance hard_constraints.md §5 — module-level
@@ -151,6 +166,25 @@ def _composite_score(
             - TIGHT_VARIANCE_VOL_COEF * naked_std
             + TIGHT_VARIANCE_NAKED_COEF * float(eval_stats.naked_pnl)
         )
+    if composite_score_mode == COMPOSITE_SCORE_MODE_LOCKED_PER_STD:
+        # scalping-tight-naked-variance Phase 3 corrective. Sharpe-like
+        # selection on locked floor only — never reads naked-sign.
+        # The +1 in the denominator stabilises the score when σ is
+        # near zero (degenerate cohort) and matches the report tool's
+        # score_b/score_c convention.
+        per_day = list(getattr(eval_stats, "per_day", []) or [])
+        if len(per_day) < 2:
+            return (
+                float(eval_stats.locked_pnl)
+                + LOCKED_WEIGHTED_NAKED_COEFFICIENT
+                * float(eval_stats.naked_pnl)
+            )
+        naked_daily = [float(d.naked_pnl) for d in per_day]
+        n = len(naked_daily)
+        mean = sum(naked_daily) / n
+        variance = sum((x - mean) ** 2 for x in naked_daily) / (n - 1)
+        naked_std = variance ** 0.5
+        return float(eval_stats.locked_pnl) / (1.0 + naked_std)
     n_completed = (
         int(eval_stats.arbs_completed) + int(eval_stats.arbs_closed)
     )

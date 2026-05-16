@@ -227,3 +227,79 @@ def test_total_reward_and_locked_weighted_unchanged_by_tight_variance() -> None:
         maturation_bonus_weight=0.0,
         composite_score_mode=COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
     ) == pytest.approx(10.0 + 0.25 * 0.0)
+
+
+# ── locked_per_std mode (scalping-tight-naked-variance Phase 3 corrective) ──
+
+
+def _import_locked_per_std():
+    """Lazy import so other tests can still run if the constant moves."""
+    from training_v2.cohort.runner import (
+        COMPOSITE_SCORE_MODE_LOCKED_PER_STD,
+        _composite_score,
+    )
+    return COMPOSITE_SCORE_MODE_LOCKED_PER_STD, _composite_score
+
+
+def test_locked_per_std_score_formula() -> None:
+    """Per-day naked = [-50, 0, +50] → sample std = 50. locked = 100.
+    score = 100 / (1 + 50) ≈ 1.961.
+    """
+    MODE, score_fn = _import_locked_per_std()
+    per_day = [
+        _eval(locked_pnl=100.0, naked_pnl=-50.0),
+        _eval(locked_pnl=100.0, naked_pnl=0.0),
+        _eval(locked_pnl=100.0, naked_pnl=+50.0),
+    ]
+    eval_stats = _eval(locked_pnl=100.0, naked_pnl=0.0, per_day=per_day)
+    score = score_fn(
+        eval_stats,
+        maturation_bonus_weight=0.0,
+        composite_score_mode=MODE,
+    )
+    assert score == pytest.approx(100.0 / (1.0 + 50.0))
+
+
+def test_locked_per_std_does_not_read_naked_sign() -> None:
+    """Hard property: two agents with identical locked AND identical
+    σ_naked but OPPOSITE mean_naked must score IDENTICALLY. This is the
+    bit the operator's diagnosis identified — tight_variance reads
+    naked-sign via its +0.25*mean_naked term; locked_per_std must not.
+    """
+    MODE, score_fn = _import_locked_per_std()
+    # Agent A: naked = [-100, +100] → mean 0, σ 141.42
+    per_day_a = [
+        _eval(locked_pnl=80.0, naked_pnl=-100.0),
+        _eval(locked_pnl=80.0, naked_pnl=+100.0),
+    ]
+    eval_a = _eval(locked_pnl=80.0, naked_pnl=0.0, per_day=per_day_a)
+    # Agent B: naked = [+50, +250] → mean 150, σ 141.42 (SAME spread)
+    per_day_b = [
+        _eval(locked_pnl=80.0, naked_pnl=+50.0),
+        _eval(locked_pnl=80.0, naked_pnl=+250.0),
+    ]
+    eval_b = _eval(locked_pnl=80.0, naked_pnl=150.0, per_day=per_day_b)
+
+    score_a = score_fn(eval_a, maturation_bonus_weight=0.0, composite_score_mode=MODE)
+    score_b = score_fn(eval_b, maturation_bonus_weight=0.0, composite_score_mode=MODE)
+    # Both should score identically because mean_naked is NOT read.
+    assert score_a == pytest.approx(score_b)
+
+
+def test_locked_per_std_falls_back_to_locked_weighted_when_n_lt_2() -> None:
+    """Same fallback contract as tight_variance: σ undefined → use
+    locked + 0.25 × naked formula."""
+    MODE, score_fn = _import_locked_per_std()
+    eval_stats = _eval(locked_pnl=100.0, naked_pnl=-40.0, per_day=[])
+    score = score_fn(eval_stats, maturation_bonus_weight=0.0, composite_score_mode=MODE)
+    assert score == pytest.approx(100.0 + 0.25 * -40.0)
+
+
+def test_locked_per_std_in_modes_tuple() -> None:
+    """Cohort runner CLI accepts the new mode."""
+    from training_v2.cohort.runner import (
+        COMPOSITE_SCORE_MODE_LOCKED_PER_STD,
+        COMPOSITE_SCORE_MODES,
+    )
+    assert COMPOSITE_SCORE_MODE_LOCKED_PER_STD == "locked_per_std"
+    assert COMPOSITE_SCORE_MODE_LOCKED_PER_STD in COMPOSITE_SCORE_MODES
