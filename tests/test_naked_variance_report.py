@@ -14,6 +14,7 @@ from tools.build_naked_variance_report import (
     DAILY_VOL_HARD_FILTER,
     N_NAKED_LEGS_MIN,
     PER_LEG_STD_HARD_FILTER,
+    _positive_pnl_smallest_span_top,
     build_report,
 )
 
@@ -229,3 +230,73 @@ def test_empty_cohort_produces_empty_csv(tmp_path: Path) -> None:
     # crash on cohorts that haven't started yet.
     content = csv_out.read_text().strip()
     assert content == ""
+
+
+def test_positive_pnl_smallest_span_top_filters_and_sorts(tmp_path: Path) -> None:
+    """Filter drops negative-PnL agents; sort puts smallest naked_range
+    first with mean_pnl as a tiebreak (per the operator note that a
+    tiny-span but losing agent like `85121e4b` should NOT outrank a
+    slightly-wider but profitable agent like `ad42a47b`).
+    """
+    # Synthetic DataFrame mirroring what build_report emits.
+    df = pd.DataFrame([
+        # span 50, pnl -54 — tight but losing (Phase 2A 85121e4b shape)
+        {"agent_id": "tight_loser", "gen": 3, "naked_range": 50.0,
+         "mean_pnl": -54.0, "mean_locked": 75.0, "mean_naked": -114.0,
+         "naked_min": -140.0, "naked_max": -90.0},
+        # span 82, pnl +342 — winning + relatively tight (Phase 2A ad42a47b)
+        {"agent_id": "winner_82", "gen": 4, "naked_range": 82.0,
+         "mean_pnl": 342.0, "mean_locked": 72.0, "mean_naked": 285.0,
+         "naked_min": 239.0, "naked_max": 321.0},
+        # span 119, pnl +213 — winning but wider
+        {"agent_id": "winner_119", "gen": 4, "naked_range": 119.0,
+         "mean_pnl": 213.0, "mean_locked": 99.0, "mean_naked": 139.0,
+         "naked_min": 85.0, "naked_max": 205.0},
+        # span 67, pnl +5 — barely winning but tight
+        {"agent_id": "winner_67", "gen": 5, "naked_range": 67.0,
+         "mean_pnl": 5.0, "mean_locked": 60.0, "mean_naked": -55.0,
+         "naked_min": -70.0, "naked_max": -3.0},
+        # NaN naked_range — must be excluded
+        {"agent_id": "no_range", "gen": 0, "naked_range": float("nan"),
+         "mean_pnl": 100.0, "mean_locked": 90.0, "mean_naked": 10.0,
+         "naked_min": float("nan"), "naked_max": float("nan")},
+    ])
+
+    pos_top = _positive_pnl_smallest_span_top(df, n=10)
+
+    # Negative-PnL agent dropped; NaN-naked_range agent dropped.
+    assert list(pos_top["agent_id"]) == ["winner_67", "winner_82", "winner_119"]
+    # Verify the ordering rationale: smallest span first.
+    assert pos_top.iloc[0]["naked_range"] == 67.0
+    assert pos_top.iloc[1]["naked_range"] == 82.0
+    assert pos_top.iloc[2]["naked_range"] == 119.0
+
+
+def test_positive_pnl_smallest_span_top_pnl_tiebreak(tmp_path: Path) -> None:
+    """When two agents share the same naked_range, the one with the
+    higher mean_pnl wins (lex sort secondary key)."""
+    df = pd.DataFrame([
+        {"agent_id": "tied_low_pnl", "gen": 0, "naked_range": 100.0,
+         "mean_pnl": 10.0, "mean_locked": 80.0, "mean_naked": -70.0,
+         "naked_min": -100.0, "naked_max": 0.0},
+        {"agent_id": "tied_high_pnl", "gen": 0, "naked_range": 100.0,
+         "mean_pnl": 200.0, "mean_locked": 80.0, "mean_naked": 120.0,
+         "naked_min": 70.0, "naked_max": 170.0},
+    ])
+
+    pos_top = _positive_pnl_smallest_span_top(df, n=2)
+    assert list(pos_top["agent_id"]) == ["tied_high_pnl", "tied_low_pnl"]
+
+
+def test_positive_pnl_smallest_span_top_empty_when_all_negative(tmp_path: Path) -> None:
+    """If every agent has negative mean_pnl the filter returns empty."""
+    df = pd.DataFrame([
+        {"agent_id": "loser_a", "gen": 0, "naked_range": 50.0,
+         "mean_pnl": -10.0, "mean_locked": 0.0, "mean_naked": -10.0,
+         "naked_min": -50.0, "naked_max": 0.0},
+        {"agent_id": "loser_b", "gen": 0, "naked_range": 100.0,
+         "mean_pnl": -50.0, "mean_locked": 0.0, "mean_naked": -50.0,
+         "naked_min": -100.0, "naked_max": 0.0},
+    ])
+    pos_top = _positive_pnl_smallest_span_top(df, n=10)
+    assert pos_top.empty

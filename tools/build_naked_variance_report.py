@@ -280,6 +280,24 @@ def _union_top5(df: pd.DataFrame) -> list[str]:
     return union
 
 
+def _positive_pnl_smallest_span_top(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """Agents with positive in-sample mean_pnl, sorted by smallest
+    naked_range ascending (PnL-descending tiebreak).
+
+    Added 2026-05-16 after Phase 2A operator observation: the union
+    of the five selector scores can include negative-PnL agents whose
+    span happens to be small (e.g. agent `85121e4b` in the
+    tnv_raceconf cohort — span 50, mean_pnl −£54 in-sample). A
+    deployment-shape filter wants BOTH a tight span AND positive PnL.
+    This view drops the trivially-tight-but-losing agents.
+
+    Returns the top-n rows of the filtered + sorted DataFrame.
+    """
+    sub = df[(df["mean_pnl"] > 0) & (df["naked_range"].notna())].copy()
+    sub = sub.sort_values(["naked_range", "mean_pnl"], ascending=[True, False])
+    return sub.head(n)
+
+
 def build_report(cohort_dir: Path, csv_out: Path | None = None) -> pd.DataFrame:
     """Build the variance report DataFrame. If csv_out is supplied,
     also write it to disk. Returns the DataFrame for downstream use."""
@@ -333,6 +351,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "to this path. Default: <cohort_dir>/phase1_top5_union.txt."
         ),
     )
+    p.add_argument(
+        "--positive-pnl-top-n", default=10, type=int,
+        help=(
+            "Number of rows for the positive-PnL + smallest-naked-span "
+            "filtered ranking. Default 10."
+        ),
+    )
+    p.add_argument(
+        "--positive-pnl-out", default=None, type=Path,
+        help=(
+            "If set, write the positive-PnL + smallest-naked-span "
+            "top-N agent_ids to this path. Default: "
+            "<cohort_dir>/positive_pnl_smallest_span_top.txt."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -373,6 +406,45 @@ def main(argv: list[str] | None = None) -> int:
             f.write(aid + "\n")
     print()
     print(f"Wrote {len(union)} agent_ids to {union_out}")
+
+    # Positive-PnL + smallest-span ranking (2026-05-16). Surfaces
+    # agents that combine tight in-sample variance with positive in-
+    # sample EV — the deployment shape the variance penalty plan was
+    # ultimately trying to find.
+    pos_top = _positive_pnl_smallest_span_top(df, n=args.positive_pnl_top_n)
+    print()
+    print("=" * 130)
+    print(
+        f"TOP-{args.positive_pnl_top_n} BY POSITIVE in-sample PnL + smallest naked span "
+        "(lex sort: span asc, mean_pnl desc)"
+    )
+    print("=" * 130)
+    if pos_top.empty:
+        print("  (no agents with positive mean_pnl AND finite naked_range)")
+    else:
+        display_cols = [
+            "agent_id", "gen", "naked_range",
+            "mean_pnl", "mean_locked", "mean_naked",
+            "naked_min", "naked_max",
+        ]
+        pos_disp = pos_top.copy()
+        pos_disp["agent_id"] = pos_disp["agent_id"].str[:12]
+        pos_disp = pos_disp[[c for c in display_cols if c in pos_disp.columns]]
+        print(pos_disp.to_string(
+            index=False,
+            float_format=lambda x: (
+                f"{x:+.2f}" if isinstance(x, float) and not np.isnan(x) else "nan"
+            ),
+        ))
+
+    pos_out = args.positive_pnl_out or (
+        cohort_dir / "positive_pnl_smallest_span_top.txt"
+    )
+    with pos_out.open("w") as f:
+        for aid in pos_top["agent_id"]:
+            f.write(aid + "\n")
+    print()
+    print(f"Wrote {len(pos_top)} agent_ids to {pos_out}")
     return 0
 
 
