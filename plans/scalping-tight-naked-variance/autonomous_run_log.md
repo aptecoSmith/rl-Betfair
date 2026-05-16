@@ -64,3 +64,31 @@ committing.
 **Next iteration's focus:** Phase 1 EXITS here. Operator gate per
 hard_constraints.md s22 — operator picks Phase 2A / Phase 2B /
 BOTH / retire.
+
+## 2026-05-16 07:48 — Phase 2A complete
+
+**State entering iteration:** Cohort _predictor_SCALPING_tnv_raceconf_
+1778852093 complete (96/96 agents at 02:34). Phase 3 reeval (4 jobs)
+underway since 02:40.
+**Work done:**
+- All 4 Phase 3 reevals completed cleanly at 07:30. 10-agent union
+  top-5 reevald on 2 windows x 2 fc settings = 4 JSONLs.
+- Analysed results vs Phase 1 explicit null:
+  - new fc=0 top-5 mean PnL: -£9.73 vs null -£40.50 = +£30.77 BETTER
+  - new fc=120 top-5 mean PnL: -£20.09 vs null -£16.92 = tied
+  - Best agent 32ed9e32 (gen 0, beta=0.00133): -£0.76/day fc=120 new,
+    4/7 profitable days, naked_std £101 (Modest band's std ceiling).
+- Wrote `findings.md` with full verdict, in-sample gen trend, and
+  three follow-on recipes (default: re-run Phase 2A WITH fc=120 in
+  training).
+**Tests run:** None this iteration; analysis only.
+**Decisions made:** Phase 2A complete. No band cleared but variance-
+penalty mechanism CONFIRMED to produce selection pressure in-sample
+(46% max-span reduction gen 0-3, beta_med 0.016 -> 0.030). The
+train-vs-deploy fc asymmetry from the layq predecessor remains —
+operator's decision to defer fc=120 in training was the limiting
+factor.
+**Outstanding for this phase:** verdict + log need committing.
+**Next iteration's focus:** plan exits here; operator decides
+follow-on (Option A: re-run with fc=120; Option B: narrow sweep;
+Option C: deploy 32ed9e32 directly).
