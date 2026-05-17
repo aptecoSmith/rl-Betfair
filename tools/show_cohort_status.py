@@ -44,6 +44,10 @@ def _per_agent_naked_range(db_path: Path) -> dict[str, dict]:
                MAX(ed.naked_pnl) AS naked_max,
                AVG(ed.naked_pnl) AS naked_mean,
                (MAX(ed.naked_pnl) - MIN(ed.naked_pnl)) AS naked_span,
+               AVG(ed.arbs_force_closed) AS fc_count_mean,
+               AVG(ed.force_closed_pnl) AS fc_pnl_mean,
+               AVG(ed.arbs_closed) AS closed_count_mean,
+               AVG(ed.closed_pnl) AS closed_pnl_mean,
                COUNT(*)           AS n_days
         FROM evaluation_days ed
         JOIN evaluation_runs er ON ed.run_id = er.run_id
@@ -56,6 +60,10 @@ def _per_agent_naked_range(db_path: Path) -> dict[str, dict]:
                 "min": float(r["naked_min"]),
                 "max": float(r["naked_max"]),
                 "mean": float(r["naked_mean"]),
+                "fc_count_mean": float(r["fc_count_mean"] or 0.0),
+                "fc_pnl_mean": float(r["fc_pnl_mean"] or 0.0),
+                "closed_count_mean": float(r["closed_count_mean"] or 0.0),
+                "closed_pnl_mean": float(r["closed_pnl_mean"] or 0.0),
                 "n_days": int(r["n_days"]),
             }
         conn.close()
@@ -96,14 +104,21 @@ def _format(
     for r in rows:
         by_gen[r.get("generation", 0)].append(r)
     out.append("")
-    out.append("Per-generation summary:")
-    out.append(f"  {'gen':<4} {'n':>4} {'mean':>8} {'median':>8} {'best':>8} {'profitable':>11} {'mean_locked':>12} {'mean_naked':>11} {'mean_bets':>10}")
+    out.append("Per-generation summary (mean_fc_pnl is the per-day force-close cost):")
+    out.append(f"  {'gen':<4} {'n':>4} {'mean':>8} {'median':>8} {'best':>8} {'profitable':>11} {'mean_locked':>12} {'mean_naked':>11} {'mean_fc_pnl':>12} {'mean_bets':>10}")
     for g in sorted(by_gen):
         rs = by_gen[g]
         pnls = sorted([r.get("eval_day_pnl", 0) for r in rs])
         bets = [r.get("eval_bet_count", 0) for r in rs]
         locks = [r.get("eval_locked_pnl", 0) for r in rs]
         nakeds = [r.get("eval_naked_pnl", 0) for r in rs]
+        # fc_pnl is pulled from the joined DB stats — only present
+        # when ``naked_range_by_model`` was passed in.
+        fc_pnls: list[float] = []
+        if naked_range_by_model:
+            for r in rs:
+                d = naked_range_by_model.get(r.get("agent_id", ""), {})
+                fc_pnls.append(float(d.get("fc_pnl_mean", 0.0)))
         nprof = sum(1 for p in pnls if p > 0)
         mn = sum(pnls) / len(pnls)
         med = pnls[len(pnls) // 2]
@@ -111,9 +126,10 @@ def _format(
         mb = sum(bets) / len(bets)
         ml = sum(locks) / len(locks)
         mnk = sum(nakeds) / len(nakeds)
+        mfc = sum(fc_pnls) / len(fc_pnls) if fc_pnls else 0.0
         out.append(
             f"  {g:<4} {len(rs):>4} {mn:>+8.0f} {med:>+8.0f} {best:>+8.0f} "
-            f"{nprof}/{len(rs):>9} {ml:>+12.0f} {mnk:>+11.0f} {mb:>10.0f}"
+            f"{nprof}/{len(rs):>9} {ml:>+12.0f} {mnk:>+11.0f} {mfc:>+12.0f} {mb:>10.0f}"
         )
 
     # Top-10 by eval_day_pnl
@@ -202,9 +218,13 @@ def _format(
         out.append("")
         out.append("Top-10 agents by naked range (smallest span first):")
         out.append(
+            "  Counts (fc_n / cl_n) and £ (fc_£ / cl_£) are PER-DAY means. "
+            "fc = env-initiated force-close at T-120; cl = agent close_signal."
+        )
+        out.append(
             f"  {'agent':<10} {'gen':>4} {'evaluated_at':<20} "
-            f"{'span':>7} {'min':>8} {'max':>8} {'mean':>8} "
-            f"{'locked':>8} {'pnl':>8}"
+            f"{'span':>7} {'naked':>8} {'locked':>8} {'fc_n':>6} {'fc_£':>8} "
+            f"{'cl_n':>6} {'cl_£':>8} {'pnl':>8}"
         )
         # Index scoreboard rows by model_id (== agent_id in v2).
         rows_by_id = {r.get("agent_id", ""): r for r in rows}
@@ -223,9 +243,12 @@ def _format(
             out.append(
                 f"  {model_id[:8]:<10} {sb.get('generation', 0):>4} "
                 f"{ts:<20} "
-                f"{st['span']:>7.1f} {st['min']:>+8.1f} "
-                f"{st['max']:>+8.1f} {st['mean']:>+8.1f} "
+                f"{st['span']:>7.1f} {st['mean']:>+8.1f} "
                 f"{sb.get('eval_locked_pnl', 0):>+8.0f} "
+                f"{st.get('fc_count_mean', 0):>6.0f} "
+                f"{st.get('fc_pnl_mean', 0):>+8.1f} "
+                f"{st.get('closed_count_mean', 0):>6.0f} "
+                f"{st.get('closed_pnl_mean', 0):>+8.1f} "
                 f"{sb.get('eval_day_pnl', 0):>+8.0f}"
             )
 
