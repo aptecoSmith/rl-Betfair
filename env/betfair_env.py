@@ -185,7 +185,13 @@ CLOSE_SIGNAL_BONUS: float = 1.0
 # σ_pair=£30 is ~£8250/day of shaped reward (was ~£825). Bites
 # hard on tails without forcing bet_count=0 collapse at the
 # typical σ_leg≈£36 amplitude (penalty ~£65/pair).
-NAKED_VARIANCE_PENALTY_BETA_MAX: float = 0.05
+#
+# Bumped 0.05 → 0.10 (2026-05-17, post-tnv2). tnv2's GA pinned
+# β_med at 0.0496 by gen 4 and pulled back to 0.037 only after
+# discovering the saturated upper bound didn't beat 0.038. The
+# GA was actively trying to exceed the cap. Widen so the GA can
+# continue to discover its sweet spot without clipping.
+NAKED_VARIANCE_PENALTY_BETA_MAX: float = 0.10
 
 
 def _covered_fraction(agg, close, commission: float) -> float:

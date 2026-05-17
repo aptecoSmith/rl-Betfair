@@ -161,7 +161,8 @@ class TestNakedVariancePenaltyBetaClamp:
     """Range / max-constant guard."""
 
     def test_beta_max_constant_matches_plan_spec(self):
-        """hard_constraints.md §7 (revised 2026-05-15) — upper bound
-        bumped to 0.05 so the per-£100-outlier penalty is £500
-        (was £50 at the original 0.005)."""
-        assert NAKED_VARIANCE_PENALTY_BETA_MAX == pytest.approx(0.05)
+        """Bumped 0.05 → 0.10 (2026-05-17, tnv3). tnv2's GA saturated
+        at β=0.05 trying to find more variance pressure than the
+        range allowed; widen so the gene's exploration isn't
+        clipped."""
+        assert NAKED_VARIANCE_PENALTY_BETA_MAX == pytest.approx(0.10)

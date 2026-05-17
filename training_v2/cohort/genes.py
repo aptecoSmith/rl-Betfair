@@ -71,7 +71,7 @@ REWARD_CLIP_RANGE: tuple[float, float] = (1.0, 10.0)
 # Range upper bound matches env/betfair_env.py::
 # NAKED_VARIANCE_PENALTY_BETA_MAX. See plans/scalping-tight-naked-
 # variance/hard_constraints.md §7-§11.
-NAKED_VARIANCE_PENALTY_BETA_RANGE: tuple[float, float] = (0.0, 0.05)
+NAKED_VARIANCE_PENALTY_BETA_RANGE: tuple[float, float] = (0.0, 0.10)
 # Phase-14 S03 (2026-05-07). Direction-gate threshold. Lower bound
 # is the gate's "no-op floor" semantic. Upper bound clamps the
 # strictest gene draw — at 0.99+ an agent never opens, starving

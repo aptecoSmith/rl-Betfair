@@ -303,3 +303,113 @@ def test_locked_per_std_in_modes_tuple() -> None:
     )
     assert COMPOSITE_SCORE_MODE_LOCKED_PER_STD == "locked_per_std"
     assert COMPOSITE_SCORE_MODE_LOCKED_PER_STD in COMPOSITE_SCORE_MODES
+
+
+# ── day_pnl_per_std mode (scalping-tight-naked-variance tnv3 corrective) ──
+
+
+def _import_day_pnl_per_std():
+    from training_v2.cohort.runner import (
+        COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD,
+        _composite_score,
+    )
+    return COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD, _composite_score
+
+
+def test_day_pnl_per_std_score_formula() -> None:
+    """day_pnl=20, naked = [-50, 0, +50] → σ=50. score = 20 / (1+50) ≈ 0.392."""
+    MODE, score_fn = _import_day_pnl_per_std()
+    per_day = [
+        _eval(locked_pnl=80.0, naked_pnl=-50.0),
+        _eval(locked_pnl=80.0, naked_pnl=0.0),
+        _eval(locked_pnl=80.0, naked_pnl=+50.0),
+    ]
+    # day_pnl is set directly on the aggregate; per_day is the σ source only
+    eval_stats = _eval(
+        total_reward=0.0,
+        locked_pnl=80.0,
+        naked_pnl=0.0,
+        per_day=per_day,
+    )
+    # NB: _eval doesn't set day_pnl; the aggregate's day_pnl defaults to 0.0
+    # because EvalSummary's day_pnl is independently populated by the worker.
+    # Construct it explicitly:
+    eval_stats = type(eval_stats)(
+        eval_day=eval_stats.eval_day,
+        total_reward=0.0,
+        n_steps=0,
+        day_pnl=20.0,
+        bet_count=0,
+        winning_bets=0,
+        bet_precision=0.0,
+        pnl_per_bet=0.0,
+        early_picks=0,
+        profitable=True,
+        action_histogram={},
+        arbs_completed=0, arbs_naked=0, arbs_closed=0, arbs_force_closed=0,
+        arbs_stop_closed=0, arbs_target_pnl_refused=0, pairs_opened=0,
+        locked_pnl=80.0, naked_pnl=0.0, closed_pnl=0.0,
+        force_closed_pnl=-60.0, stop_closed_pnl=0.0, wall_time_sec=0.0,
+        per_day=per_day,
+    )
+    score = score_fn(eval_stats, maturation_bonus_weight=0.0, composite_score_mode=MODE)
+    assert score == pytest.approx(20.0 / (1.0 + 50.0))
+
+
+def test_day_pnl_per_std_penalises_force_close_cost() -> None:
+    """Hard property: an agent with high locked AND high fc-cost (low
+    day_pnl) scores WORSE than an agent with lower locked but no fc cost
+    (high day_pnl). Same σ.
+    """
+    MODE, score_fn = _import_day_pnl_per_std()
+    EvalSummary = type(_eval())
+    per_day_a = [
+        _eval(locked_pnl=100.0, naked_pnl=-25.0),
+        _eval(locked_pnl=100.0, naked_pnl=+25.0),
+    ]
+    per_day_b = [
+        _eval(locked_pnl=50.0, naked_pnl=-25.0),
+        _eval(locked_pnl=50.0, naked_pnl=+25.0),
+    ]
+    # Agent A: locked 100, fc cost -90, day_pnl = 10
+    agent_a = EvalSummary(
+        eval_day="2026-04-30", total_reward=0.0, n_steps=0,
+        day_pnl=10.0, bet_count=0, winning_bets=0, bet_precision=0.0,
+        pnl_per_bet=0.0, early_picks=0, profitable=True, action_histogram={},
+        arbs_completed=0, arbs_naked=0, arbs_closed=0, arbs_force_closed=0,
+        arbs_stop_closed=0, arbs_target_pnl_refused=0, pairs_opened=0,
+        locked_pnl=100.0, naked_pnl=0.0, closed_pnl=0.0,
+        force_closed_pnl=-90.0, stop_closed_pnl=0.0, wall_time_sec=0.0,
+        per_day=per_day_a,
+    )
+    # Agent B: locked 50, no fc, day_pnl = 50
+    agent_b = EvalSummary(
+        eval_day="2026-04-30", total_reward=0.0, n_steps=0,
+        day_pnl=50.0, bet_count=0, winning_bets=0, bet_precision=0.0,
+        pnl_per_bet=0.0, early_picks=0, profitable=True, action_histogram={},
+        arbs_completed=0, arbs_naked=0, arbs_closed=0, arbs_force_closed=0,
+        arbs_stop_closed=0, arbs_target_pnl_refused=0, pairs_opened=0,
+        locked_pnl=50.0, naked_pnl=0.0, closed_pnl=0.0,
+        force_closed_pnl=0.0, stop_closed_pnl=0.0, wall_time_sec=0.0,
+        per_day=per_day_b,
+    )
+    score_a = score_fn(agent_a, maturation_bonus_weight=0.0, composite_score_mode=MODE)
+    score_b = score_fn(agent_b, maturation_bonus_weight=0.0, composite_score_mode=MODE)
+    # B (no fc cost, higher day_pnl) MUST score higher
+    assert score_b > score_a, f"B should beat A: A={score_a}, B={score_b}"
+
+
+def test_day_pnl_per_std_falls_back_to_locked_weighted_when_n_lt_2() -> None:
+    MODE, score_fn = _import_day_pnl_per_std()
+    eval_stats = _eval(locked_pnl=100.0, naked_pnl=-40.0, per_day=[])
+    score = score_fn(eval_stats, maturation_bonus_weight=0.0, composite_score_mode=MODE)
+    assert score == pytest.approx(100.0 + 0.25 * -40.0)
+
+
+def test_day_pnl_per_std_in_modes_tuple() -> None:
+    from training_v2.cohort.runner import (
+        COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD,
+        COMPOSITE_SCORE_MODES,
+    )
+    assert COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD == "day_pnl_per_std"
+    assert COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD in COMPOSITE_SCORE_MODES

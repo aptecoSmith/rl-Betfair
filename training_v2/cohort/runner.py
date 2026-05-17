@@ -94,11 +94,25 @@ COMPOSITE_SCORE_MODE_TIGHT_VARIANCE = "tight_variance"
 # denominator) without reading naked-sign. Falls back to
 # locked_weighted when ``len(per_day) < 2`` (σ undefined).
 COMPOSITE_SCORE_MODE_LOCKED_PER_STD = "locked_per_std"
+# scalping-tight-naked-variance tnv3 corrective (2026-05-17). The tnv2
+# cohort revealed that ``locked_per_std`` selects for high-volume-open
+# agents that pay £-for-£ in force_close cost. Locked goes up, naked_std
+# stays tight, but ``day_pnl`` (the actual cash) goes negative because
+# fc cost cancels the locked floor.
+#
+# Formula: ``day_pnl / (1 + naked_std_daily)``. ``day_pnl`` naturally
+# includes force_close cost in its sum (= locked + naked + closed + fc)
+# so the GA selects against agents that lose money to fc. Trade-off:
+# re-introduces naked-sign reading at selection (which bit tnv1 at
+# 3 in-sample-eval days), but at 10+ eval days the noise drops
+# √(10/3) ≈ 1.8× — should be enough.
+COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD = "day_pnl_per_std"
 COMPOSITE_SCORE_MODES = (
     COMPOSITE_SCORE_MODE_TOTAL_REWARD,
     COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
     COMPOSITE_SCORE_MODE_TIGHT_VARIANCE,
     COMPOSITE_SCORE_MODE_LOCKED_PER_STD,
+    COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD,
 )
 LOCKED_WEIGHTED_NAKED_COEFFICIENT = 0.25
 # scalping-tight-naked-variance hard_constraints.md §5 — module-level
@@ -185,12 +199,115 @@ def _composite_score(
         variance = sum((x - mean) ** 2 for x in naked_daily) / (n - 1)
         naked_std = variance ** 0.5
         return float(eval_stats.locked_pnl) / (1.0 + naked_std)
+    if composite_score_mode == COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD:
+        # scalping-tight-naked-variance tnv3 corrective. Like
+        # locked_per_std but uses ``day_pnl`` as the numerator so the
+        # GA selects against agents that pay force_close cost (a hidden
+        # drag in tnv2's locked-only metric). Fallback to
+        # locked_weighted when n_eval_days < 2 per hard_constraints §15.
+        per_day = list(getattr(eval_stats, "per_day", []) or [])
+        if len(per_day) < 2:
+            return (
+                float(eval_stats.locked_pnl)
+                + LOCKED_WEIGHTED_NAKED_COEFFICIENT
+                * float(eval_stats.naked_pnl)
+            )
+        naked_daily = [float(d.naked_pnl) for d in per_day]
+        n = len(naked_daily)
+        mean = sum(naked_daily) / n
+        variance = sum((x - mean) ** 2 for x in naked_daily) / (n - 1)
+        naked_std = variance ** 0.5
+        return float(eval_stats.day_pnl) / (1.0 + naked_std)
     n_completed = (
         int(eval_stats.arbs_completed) + int(eval_stats.arbs_closed)
     )
     return float(eval_stats.total_reward) + float(
         maturation_bonus_weight,
     ) * n_completed
+
+
+# ── Early-stop helpers (scalping-tight-naked-variance tnv3, 2026-05-17) ──
+# Thresholds for "improvement" on each of the three signals. Tuned so the
+# default ``early_stop_patience=3`` only fires when the cohort has clearly
+# exhausted exploration on all three axes simultaneously.
+_EARLY_STOP_STD_IMPROVEMENT_THRESHOLD = 5.0   # £/day
+_EARLY_STOP_COMPOSITE_REL_THRESHOLD = 0.01    # 1 %
+_EARLY_STOP_BETA_REL_THRESHOLD = 0.10         # 10 %
+
+
+def _gen_early_stop_stats(
+    results: list,
+    composite_score_mode: str,
+    maturation_bonus_weight: float,
+) -> dict:
+    """Compute the three early-stop signals for a generation's results.
+
+    Returns ``{median_std, median_composite, beta_med}``.
+    """
+    import statistics as _stats
+    stds: list[float] = []
+    composites: list[float] = []
+    betas: list[float] = []
+    for r in results:
+        per_day = list(getattr(r.eval, "per_day", []) or [])
+        if len(per_day) >= 2:
+            nakeds = [float(d.naked_pnl) for d in per_day]
+            n = len(nakeds)
+            mean = sum(nakeds) / n
+            var = sum((x - mean) ** 2 for x in nakeds) / (n - 1)
+            stds.append(var ** 0.5)
+        composites.append(_composite_score(
+            r.eval, maturation_bonus_weight, composite_score_mode,
+        ))
+        try:
+            betas.append(float(r.genes.naked_variance_penalty_beta))
+        except AttributeError:
+            betas.append(0.0)
+    return {
+        "median_std": _stats.median(stds) if stds else float("nan"),
+        "median_composite": _stats.median(composites) if composites else float("nan"),
+        "beta_med": _stats.median(betas) if betas else 0.0,
+    }
+
+
+def _early_stop_improved(history: list[dict]) -> list[str]:
+    """Did the most-recent gen improve on the best of all prior gens
+    on ANY of (median_std, median_composite, beta_med)?
+
+    Returns a list naming the axes that improved (empty list = no
+    improvement = stall counter advances).
+
+    ``median_std`` improves when it DECREASES (tighter variance).
+    ``median_composite`` improves when it INCREASES (better fitness).
+    ``beta_med`` improves when it CHANGES by ≥ rel threshold (either
+    direction — the GA might be exploring up or down).
+    """
+    if len(history) < 2:
+        return ["initial"]  # not a stall on the first gen with data
+    current = history[-1]
+    prior = history[:-1]
+    improved: list[str] = []
+    # median_std: best so far is the MIN
+    best_std = min(h["median_std"] for h in prior)
+    if current["median_std"] + _EARLY_STOP_STD_IMPROVEMENT_THRESHOLD <= best_std:
+        improved.append("median_std")
+    # median_composite: best so far is the MAX
+    best_comp = max(h["median_composite"] for h in prior)
+    if (
+        abs(best_comp) > 1e-9
+        and (current["median_composite"] - best_comp) / abs(best_comp) >= _EARLY_STOP_COMPOSITE_REL_THRESHOLD
+    ):
+        improved.append("median_composite")
+    elif current["median_composite"] > best_comp + 0.01:  # absolute fallback for near-zero
+        improved.append("median_composite")
+    # beta_med: improves on EITHER direction by ≥ rel threshold vs ANY
+    # prior gen's value (the GA's exploration may revisit lower β too).
+    prior_best_beta = prior[-1]["beta_med"]
+    if prior_best_beta > 1e-9:
+        rel_change = abs(current["beta_med"] - prior_best_beta) / prior_best_beta
+        if rel_change >= _EARLY_STOP_BETA_REL_THRESHOLD:
+            improved.append("beta_med")
+    return improved
 
 
 def run_cohort(
@@ -228,6 +345,8 @@ def run_cohort(
     lay_price_max: float = 0.0,
     exclude_days: list[str] | None = None,
     composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
+    early_stop_patience: int = 0,
+    early_stop_min_gens: int = 4,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -316,6 +435,12 @@ def run_cohort(
     cohort_t0 = time.perf_counter()
     run_id = str(uuid.uuid4())
     total_agents_trained = 0
+
+    # ── Early-stop state (scalping-tight-naked-variance tnv3) ───────────
+    # ``_early_stop_history`` accumulates per-gen stats dicts.
+    # ``_early_stop_stall`` counts consecutive non-improving gens.
+    _early_stop_history: list[dict] = []
+    _early_stop_stall = 0
 
     # ── Run-start event ──────────────────────────────────────────────
     if event_emitter is not None:
@@ -543,6 +668,49 @@ def run_cohort(
                 )
 
             last_results = results
+
+            # ── Early-stop check (scalping-tight-naked-variance tnv3) ─────
+            # Compare this gen's median_naked_std, median_composite_score,
+            # and beta_med against the running best. Increment a stall
+            # counter when NONE of the three improved by their threshold.
+            # Break when the stall counter exceeds patience.
+            #
+            # Default ``early_stop_patience=0`` disables the check entirely
+            # (byte-identical to pre-tnv3 runs). Recommended live values:
+            # patience=3, min_gens=4.
+            if early_stop_patience > 0:
+                gen_stats = _gen_early_stop_stats(results, composite_score_mode, maturation_bonus_weight)
+                _early_stop_history.append(gen_stats)
+                if generation + 1 >= early_stop_min_gens:
+                    improved = _early_stop_improved(_early_stop_history)
+                    if improved:
+                        _early_stop_stall = 0
+                        logger.info(
+                            "Early-stop check (gen %d): IMPROVED on %s. Stall reset to 0/%d.",
+                            generation + 1, ", ".join(improved), early_stop_patience,
+                        )
+                    else:
+                        _early_stop_stall += 1
+                        logger.info(
+                            "Early-stop check (gen %d): no improvement on any axis "
+                            "(median_std=%.2f, median_composite=%.4f, beta_med=%.5f). "
+                            "Stall %d/%d.",
+                            generation + 1,
+                            gen_stats["median_std"], gen_stats["median_composite"],
+                            gen_stats["beta_med"],
+                            _early_stop_stall, early_stop_patience,
+                        )
+                        if _early_stop_stall >= early_stop_patience:
+                            logger.info(
+                                "EARLY STOP at gen %d/%d "
+                                "(patience=%d, min_gens=%d). "
+                                "Saved ~%d remaining gens of compute.",
+                                generation + 1, n_generations,
+                                early_stop_patience, early_stop_min_gens,
+                                n_generations - generation - 1,
+                            )
+                            break
+
             # ── Breed next generation if any left ─────────────────
             if generation < n_generations - 1:
                 cohort, parent_ids = _breed_next_generation(
@@ -975,6 +1143,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--early-stop-patience", type=int, default=0,
+        help=(
+            "GA early-stop: stop after this many consecutive non-improving "
+            "generations. 0 (default) disables = byte-identical pre-tnv3. "
+            "Recommended live value: 3. Improvement is judged on three "
+            "signals (median naked_std, median composite_score, beta_med); "
+            "ANY one of them improving by its threshold resets the counter."
+        ),
+    )
+    p.add_argument(
+        "--early-stop-min-gens", type=int, default=4,
+        help=(
+            "Generations to run unconditionally before the early-stop "
+            "check is allowed to fire. Default 4 lets the GA establish "
+            "a baseline (gen 0 = random, gens 1-3 = first breeding rounds)."
+        ),
+    )
+    p.add_argument(
         "--composite-score-mode",
         default=COMPOSITE_SCORE_MODE_TOTAL_REWARD,
         choices=list(COMPOSITE_SCORE_MODES),
@@ -1360,6 +1546,8 @@ def main(argv: list[str] | None = None) -> int:
             lay_price_max=float(args.lay_price_max),
             exclude_days=list(args.exclude_days) if args.exclude_days else None,
             composite_score_mode=str(args.composite_score_mode),
+            early_stop_patience=int(args.early_stop_patience),
+            early_stop_min_gens=int(args.early_stop_min_gens),
         )
     finally:
         if server is not None:
