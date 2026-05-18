@@ -234,6 +234,7 @@ def _compute_scalping_reward_terms(
     n_close_signal_successes: int,
     naked_loss_scale: float = 1.0,
     naked_variance_penalty_beta: float = 0.0,
+    close_signal_bonus: float = CLOSE_SIGNAL_BONUS,
 ) -> tuple[float, float]:
     """Split a scalping race's settlement into raw and shaped terms.
 
@@ -311,7 +312,7 @@ def _compute_scalping_reward_terms(
     naked_winner_clip = -NAKED_WINNER_CLIP_FRACTION * sum(
         max(0.0, p) for p in naked_per_pair
     )
-    close_bonus = CLOSE_SIGNAL_BONUS * float(n_close_signal_successes)
+    close_bonus = float(close_signal_bonus) * float(n_close_signal_successes)
     # scalping-tight-naked-variance Phase 2A (2026-05-15). L2
     # symmetric per-pair penalty. Net contribution is non-positive
     # (penalty), so the magnitude on shaped is bounded by the sum
@@ -777,6 +778,19 @@ class BetfairEnv(gymnasium.Env):
         # consume it) so a per-agent gene override flows through the
         # passthrough path without tripping the unknown-key debug log.
         "mature_prob_loss_weight",
+        # fc-cost-probe D (2026-05-17): trainer-side BCE weight on
+        # the new strict fc-prob head. Same passthrough pattern —
+        # whitelisted so cohort runners can pin it via
+        # ``--reward-overrides fc_prob_loss_weight=3.0``.
+        "fc_prob_loss_weight",
+        # fc-cost-probe D (2026-05-17): policy-arch flag enabling
+        # the fc_prob aux head + its actor_input column. Default
+        # False = byte-identical to pre-probe-D. Whitelisted here
+        # so probe D's launcher can pass it through the same
+        # reward_overrides path. NOT a reward parameter per se,
+        # but it's the operator-tunable knob cohort runners need
+        # to set per-experiment.
+        "enable_fc_prob_head",
         # Scalping-active-management session 03: auxiliary Gaussian-NLL
         # risk-head loss weight. Same pattern — trainer-only knob;
         # whitelisted here so the passthrough doesn't trip the env's
@@ -801,6 +815,13 @@ class BetfairEnv(gymnasium.Env):
         # 0.0 = byte-identical pre-plan path. See
         # plans/selective-open-shaping/purpose.md.
         "open_cost",
+        # fc-cost-probe (2026-05-17): per-close shaped bonus
+        # (default 1.0 from CLOSE_SIGNAL_BONUS module constant).
+        # Probe A pins this cohort-wide to 10.0 to test whether
+        # a stronger close_signal substitution incentive cuts fc
+        # cost. See plans/scalping-tight-naked-variance/
+        # findings_tnv3.md.
+        "close_signal_bonus",
         # Force-close-architecture Session 01 (2026-05-01): when
         # truthy, the agent's per-runner ``arb_spread`` action dim
         # reinterprets as a £-target ∈ [0.20, 5.00] and the env
@@ -1206,6 +1227,15 @@ class BetfairEnv(gymnasium.Env):
             self._naked_loss_scale = float(
                 np.clip(self._naked_loss_scale, 0.0, 1.0)
             )
+        # fc-cost-probe (2026-05-17). Cohort-wide overridable
+        # per-close shaped bonus. Default = module constant
+        # CLOSE_SIGNAL_BONUS = 1.0 (byte-identical pre-probe). Probe A
+        # pins this to 10.0 cohort-wide to test whether raising the
+        # close_signal substitution incentive cuts fc cost. See
+        # plans/scalping-tight-naked-variance/findings_tnv3.md.
+        self._close_signal_bonus: float = float(
+            reward_cfg.get("close_signal_bonus", CLOSE_SIGNAL_BONUS)
+        )
         # scalping-tight-naked-variance Phase 2A (2026-05-15). L2
         # per-pair naked-pnl variance penalty applied to the SHAPED
         # channel only. Default 0.0 = byte-identical pre-plan.
@@ -4639,6 +4669,7 @@ class BetfairEnv(gymnasium.Env):
                 naked_variance_penalty_beta=(
                     self._naked_variance_penalty_beta
                 ),
+                close_signal_bonus=self._close_signal_bonus,
             )
             shaped += race_shaping
             # Realised per-race variance-penalty contribution. Recomputed

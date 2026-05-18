@@ -390,6 +390,15 @@ class DiscretePPOTrainer:
         self.risk_loss_weight = float(
             hp.get("risk_loss_weight", 0.0) or 0.0
         )
+        # fc-cost-probe D (2026-05-17): strict-fc head BCE weight.
+        # Default 0.0 = byte-identical to pre-probe-D (the fc loss
+        # branch collapses to a no-op). Pinned high via cohort
+        # ``--reward-overrides fc_prob_loss_weight=3.0`` and
+        # consumed alongside the per-transition mature path because
+        # both use the same pair_open_records source.
+        self.fc_prob_loss_weight = float(
+            hp.get("fc_prob_loss_weight", 0.0) or 0.0
+        )
         # Phase 9 Session 02 — per-transition mature_prob credit
         # assignment. Default ``False`` keeps the per-slot path active
         # for byte-identity with Phase 7 baseline runs
@@ -880,6 +889,52 @@ class DiscretePPOTrainer:
             mature_mask_per_step = None
             runner_slot_at_step = None
 
+        # ── fc-cost-probe D (2026-05-17) per-transition fc_prob labels ──
+        # Same source (pair_open_records + all settled+live bets) as the
+        # per-transition mature path; STRICT fc label is `1.0 if
+        # force_closed else 0.0`. Active when the weight is > 0 AND
+        # the rollout collector populated ``pair_open_records``.
+        fc_prob_active = (
+            self.fc_prob_loss_weight > 0.0
+            and batch.pair_open_records is not None
+        )
+        if fc_prob_active:
+            # Reuse the same settled-bets list collection as mature.
+            if not per_trans_active:
+                # Mature was off, so we haven't built `settled` yet.
+                env = getattr(self.shim, "env", None)
+                settled = list(getattr(env, "_settled_bets", []) or [])
+                live_bm = getattr(env, "bet_manager", None)
+                if live_bm is not None:
+                    settled.extend(live_bm.bets)
+                # Same slot_np already needed below.
+                slot_np = np.zeros(T, dtype=np.int64)
+                for rec in batch.pair_open_records or []:
+                    idx = int(rec.step_index)
+                    if 0 <= idx < T:
+                        slot_np[idx] = int(rec.runner_slot)
+                runner_slot_at_step = _move_to_device(
+                    torch.from_numpy(slot_np), device,
+                )
+            # Compute fc-strict labels.
+            from training_v2.discrete_ppo.aux_labels import (
+                assign_per_transition_fc_labels,
+            )
+            fc_label_np, fc_mask_np = assign_per_transition_fc_labels(
+                batch.pair_open_records or [],
+                settled,
+                n_steps=T,
+            )
+            fc_label_per_step = _move_to_device(
+                torch.from_numpy(fc_label_np), device,
+            )
+            fc_mask_per_step = _move_to_device(
+                torch.from_numpy(fc_mask_np), device,
+            )
+        else:
+            fc_label_per_step = None
+            fc_mask_per_step = None
+
         # ── Phase-13 S03 direction-prob per-step labels ────────────────
         # Per-(env-step, runner, side) cached labels resolve at trainer
         # init time from the offline scan (training_v2.direction_label_
@@ -1083,6 +1138,31 @@ class DiscretePPOTrainer:
                         fill_prob_losses.append(0.0)
                         mature_prob_losses.append(0.0)
                         risk_losses.append(0.0)
+
+                    # fc-cost-probe D (2026-05-17): strict-fc BCE on
+                    # the fc_prob_head logits. Independent of the
+                    # mature_prob path — different label semantics
+                    # (positive class = force-closed pair). Active
+                    # only when fc_prob_loss_weight > 0 AND the
+                    # policy has the head wired in (fc_prob_logits
+                    # non-None). When inactive the branch is skipped
+                    # and total_loss is byte-identical.
+                    if (
+                        fc_prob_active
+                        and out.fc_prob_logits_per_runner is not None
+                    ):
+                        fc_loss_mb, _n_fc_targets_mb = (
+                            self._compute_per_transition_fc_loss(
+                                policy_out=out,
+                                fc_label_step=fc_label_per_step[mb_idx],
+                                fc_mask_step=fc_mask_per_step[mb_idx],
+                                runner_slot_step=runner_slot_at_step[mb_idx],
+                            )
+                        )
+                        total_loss = (
+                            total_loss
+                            + self.fc_prob_loss_weight * fc_loss_mb
+                        )
 
                     # Phase-13 S03 — per-side direction BCE-with-logits
                     # on the masked per-step labels, weighted by
@@ -1459,6 +1539,50 @@ class DiscretePPOTrainer:
         denom = mask_f.sum().clamp(min=1.0)
         loss = masked.sum() / denom
         n_targets = int(mature_mask_step.sum().item())
+        return loss, n_targets
+
+    def _compute_per_transition_fc_loss(
+        self,
+        *,
+        policy_out,
+        fc_label_step: torch.Tensor,
+        fc_mask_step: torch.Tensor,
+        runner_slot_step: torch.Tensor,
+    ) -> tuple[torch.Tensor, int]:
+        """Per-transition strict-fc BCE for one mini-batch.
+
+        fc-cost-probe D (2026-05-17). Mirrors
+        ``_compute_per_transition_mature_loss`` exactly — only the
+        head identity differs. For each step in the mini-batch where
+        ``fc_mask_step`` is True, picks the ``fc_prob_per_runner``
+        column corresponding to the runner the agent opened at that
+        step and applies BCE against the strict-fc label (1.0 =
+        pair force-closed; 0.0 = matured naturally OR agent-closed
+        OR naked).
+
+        When the mini-batch contains no open steps the loss is a
+        zeroed scalar that still produces a valid ``.backward()``
+        contribution (no NaN, no detached graph). Returns the loss
+        plus the count of masked entries actually consumed.
+        """
+        fc_pred = policy_out.fc_prob_per_runner  # (mb, R)
+        mb_size = fc_pred.shape[0]
+        device = fc_pred.device
+
+        rows = torch.arange(mb_size, device=device)
+        per_step_pred = fc_pred[rows, runner_slot_step]  # (mb,)
+
+        eps = 1e-7
+        per_step_pred_c = per_step_pred.clamp(eps, 1.0 - eps)
+        bce = -(
+            fc_label_step * torch.log(per_step_pred_c)
+            + (1.0 - fc_label_step) * torch.log(1.0 - per_step_pred_c)
+        )
+        mask_f = fc_mask_step.to(bce.dtype)
+        masked = bce * mask_f
+        denom = mask_f.sum().clamp(min=1.0)
+        loss = masked.sum() / denom
+        n_targets = int(fc_mask_step.sum().item())
         return loss, n_targets
 
     # ── Internals ──────────────────────────────────────────────────────────

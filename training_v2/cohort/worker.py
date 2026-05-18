@@ -129,6 +129,10 @@ _PHASE7_TRAINER_HP_KEYS: frozenset[str] = frozenset({
     "fill_prob_loss_weight",
     "mature_prob_loss_weight",
     "risk_loss_weight",
+    # fc-cost-probe D (2026-05-17): same Path-A precedence as the
+    # other aux-head weights. Default 0.0 in genes; cohort-wide pin
+    # via ``--reward-overrides fc_prob_loss_weight=3.0``.
+    "fc_prob_loss_weight",
 })
 
 # Phase-13 (2026-05-06). Direction-prob aux head — phase-13 S03.
@@ -1024,12 +1028,22 @@ def train_one_agent(
         ),
     )
 
+    # fc-cost-probe D (2026-05-17): policy-arch flag for the
+    # strict-fc aux head. Read from cohort-level reward_overrides
+    # (passthrough whitelist). Default False = byte-identical to
+    # pre-probe-D arch.
+    enable_fc_prob_head = bool(
+        (per_agent_reward_overrides or {}).get(
+            "enable_fc_prob_head", False,
+        ),
+    )
     policy = DiscreteLSTMPolicy(
         obs_dim=shim.obs_dim,
         action_space=shim.action_space,
         hidden_size=int(genes.hidden_size),
         direction_gate_enabled=direction_gate_enabled,
         direction_gate_threshold=direction_gate_threshold,
+        enable_fc_prob_head=enable_fc_prob_head,
     )
 
     trainer = DiscretePPOTrainer(

@@ -51,6 +51,7 @@ __all__ = [
     "AUX_LABEL_COMMISSION",
     "PairOpenRecord",
     "PerRunnerAuxLabels",
+    "assign_per_transition_fc_labels",
     "assign_per_transition_labels",
     "collect_pair_open_records_from_step",
     "compute_pair_locked_pnl",
@@ -375,3 +376,82 @@ def assign_per_transition_labels(
             mature_label[idx] = label
 
     return mature_label, mature_mask
+
+
+def assign_per_transition_fc_labels(
+    pair_open_records: Iterable[PairOpenRecord],
+    all_bets: Iterable[Bet],
+    n_steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assign STRICT fc_prob BCE labels to open-step transitions.
+
+    fc-cost-probe D (2026-05-17). Per-pair classification rule
+    isolates force-closed outcomes as the POSITIVE class:
+
+    - ``count < 2`` (only one leg matched) → naked → ``label = 0.0``
+    - ``count >= 2`` AND any leg has ``force_close=True`` →
+      env-initiated bail-out → ``label = 1.0`` (positive class)
+    - ``count >= 2`` AND no force_close leg → matured naturally OR
+      closed by agent signal → ``label = 0.0``
+
+    This is the structural complement of :func:`assign_per_transition_
+    labels`, which uses the inverse-ish label (positive = clean
+    mature). mature_prob conflates naked + force-closed both as
+    negative class; fc_prob isolates the fc class specifically so
+    the actor has a per-runner "this open will likely force-close"
+    feature.
+
+    Multi-pair-on-same-step semantics match the mature path: when
+    multiple pairs open on the same tick, the step receives ``max``
+    over those pairs' labels (any of them force-closes → step is
+    positive class).
+
+    Parameters
+    ----------
+    pair_open_records:
+        Iterable of :class:`PairOpenRecord` produced by the rollout
+        collector. Records whose ``step_index`` falls outside
+        ``[0, n_steps)`` are silently dropped.
+    all_bets:
+        Flat iterable over every matched leg the rollout produced.
+        Used solely to classify each ``pair_id``'s outcome.
+    n_steps:
+        Length of the rollout. Drives the output arrays' shape.
+
+    Returns
+    -------
+    fc_label:
+        ``(n_steps,)`` float32. ``1.0`` at every step where a
+        force-closed pair was opened; ``0.0`` elsewhere.
+    fc_mask:
+        ``(n_steps,)`` bool. ``True`` only at steps where at least
+        one pair was opened (subset of all transitions — naked
+        ticks where no open happened carry False).
+    """
+    n_steps = int(n_steps)
+    if n_steps < 0:
+        raise ValueError(f"n_steps must be non-negative, got {n_steps}")
+
+    pair_legs = _group_by_pair(all_bets)
+
+    def _classify_fc(pair_id: str) -> float:
+        legs = pair_legs.get(pair_id, [])
+        if len(legs) < 2:
+            return 0.0
+        if any(bool(getattr(b, "force_close", False)) for b in legs):
+            return 1.0  # positive class — force-closed
+        return 0.0  # matured naturally or agent-closed
+
+    fc_label = np.zeros(n_steps, dtype=np.float32)
+    fc_mask = np.zeros(n_steps, dtype=bool)
+
+    for rec in pair_open_records:
+        idx = int(rec.step_index)
+        if idx < 0 or idx >= n_steps:
+            continue
+        fc_mask[idx] = True
+        label = _classify_fc(str(rec.pair_id))
+        if label > fc_label[idx]:
+            fc_label[idx] = label
+
+    return fc_label, fc_mask

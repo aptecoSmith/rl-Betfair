@@ -1087,6 +1087,47 @@ class TestNakedWinnerClipAndCloseBonus:
         # Net: +25 + (−45.5) = −£20.5.
         assert raw + shaped == pytest.approx(-20.5)
 
+    def test_close_signal_bonus_default_matches_module_constant(self):
+        """Default close_signal_bonus equals CLOSE_SIGNAL_BONUS (1.0)
+        so pre-probe callers are byte-identical."""
+        raw, shaped = _compute_scalping_reward_terms(
+            race_pnl=0.0,
+            naked_per_pair=[],
+            n_close_signal_successes=3,
+        )
+        assert raw == pytest.approx(0.0)
+        # 3 × 1.0 = +£3.0 (only term contributing — no naked, no penalty).
+        assert shaped == pytest.approx(3.0)
+
+    def test_close_signal_bonus_override_scales_close_contribution(self):
+        """Override close_signal_bonus=10.0 → close contribution is
+        10× the default. Other shaped terms unchanged."""
+        raw, shaped = _compute_scalping_reward_terms(
+            race_pnl=50.0,  # whole-race cashflow including the naked winner
+            naked_per_pair=[50.0],  # winner → −47.5 clip stays.
+            n_close_signal_successes=3,
+            close_signal_bonus=10.0,
+        )
+        assert raw == pytest.approx(50.0)
+        # 3 × 10.0 + (−0.95 × 50) = 30.0 + (−47.5) = −17.5.
+        assert shaped == pytest.approx(-17.5)
+
+    def test_env_plumbs_close_signal_bonus_from_reward_overrides(
+        self, scalping_config,
+    ):
+        """Cohort-level ``--reward-overrides close_signal_bonus=10.0`` flows
+        through the env's ``reward_overrides`` channel and lands on
+        ``env._close_signal_bonus``. Default (no override) stays at the
+        module constant 1.0."""
+        env_default = BetfairEnv(_make_day(n_races=1), scalping_config)
+        assert env_default._close_signal_bonus == pytest.approx(1.0)
+        env_override = BetfairEnv(
+            _make_day(n_races=1),
+            scalping_config,
+            reward_overrides={"close_signal_bonus": 10.0},
+        )
+        assert env_override._close_signal_bonus == pytest.approx(10.0)
+
 
 # ── Session 3: gene / hyperparameter integration ───────────────────────────
 

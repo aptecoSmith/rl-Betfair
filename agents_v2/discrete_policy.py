@@ -142,6 +142,12 @@ class DiscretePolicyOutput:
     direction_lay_prob_per_runner: torch.Tensor
     direction_back_logits_per_runner: torch.Tensor
     direction_lay_logits_per_runner: torch.Tensor
+    # fc-cost-probe D (2026-05-17): per-runner strict-fc head outputs.
+    # ``None`` when the head is disabled (default) — keeps the
+    # PolicyOutput contract backward-compatible. When enabled, both
+    # are shape ``(batch, max_runners)``.
+    fc_prob_per_runner: torch.Tensor | None = None
+    fc_prob_logits_per_runner: torch.Tensor | None = None
 
 
 class BaseDiscretePolicy(nn.Module, abc.ABC):
@@ -346,6 +352,7 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         actor_mlp_hidden: int | None = None,
         direction_gate_enabled: bool = False,
         direction_gate_threshold: float = 0.5,
+        enable_fc_prob_head: bool = False,
     ) -> None:
         super().__init__(obs_dim, action_space, hidden_size)
         self.num_layers = 1
@@ -395,6 +402,19 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         self.risk_head = nn.Linear(
             self.hidden_size, self.max_runners * 2,
         )
+        # fc-cost-probe D (2026-05-17): per-runner aux head with
+        # STRICT label `1.0 if force_closed else 0.0`. Feeds
+        # actor_head via column-concat (5th aux column) when
+        # enabled. Default disabled → architecture byte-identical
+        # to pre-probe-D so existing weight loads still work.
+        # When enabled, actor_input grows by 1 column and the
+        # arch-hash check refuses pre-probe-D weights (by design;
+        # probe D launches with fresh init).
+        self.enable_fc_prob_head: bool = bool(enable_fc_prob_head)
+        if self.enable_fc_prob_head:
+            self.fc_prob_head = nn.Linear(
+                self.hidden_size, self.max_runners,
+            )
         # Phase-15 S01 (2026-05-08). Per-runner direction head fed
         # the runner's RAW per-runner FEATURE SLICE rather than
         # ``concat([slot_emb_i, lstm_last])``. The supervised
@@ -483,7 +503,9 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         )
         # +4 (was +2): fill_prob, mature_prob, direction_back_prob,
         # direction_lay_prob (phase-13 S03).
-        actor_input_dim = self.runner_embed_dim + self.hidden_size + 4
+        # +5 when enable_fc_prob_head=True: adds fc_prob column (probe D).
+        _aux_cols = 5 if self.enable_fc_prob_head else 4
+        actor_input_dim = self.runner_embed_dim + self.hidden_size + _aux_cols
         self.actor_head = nn.Sequential(
             nn.Linear(actor_input_dim, self.actor_mlp_hidden),
             nn.ReLU(),
@@ -622,6 +644,13 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         mature_logit = self.mature_prob_head(lstm_last)    # (batch, R)
         fill_prob = torch.sigmoid(fill_logit)
         mature_prob = torch.sigmoid(mature_logit)
+        # fc-cost-probe D (2026-05-17): strict-fc aux head.
+        if self.enable_fc_prob_head:
+            fc_prob_logit = self.fc_prob_head(lstm_last)   # (batch, R)
+            fc_prob = torch.sigmoid(fc_prob_logit)
+        else:
+            fc_prob_logit = None
+            fc_prob = None
 
         # Phase-14 S01 / phase-15 S01 — per-runner direction head.
         # Slot embeddings are still computed here because actor_head
@@ -731,17 +760,21 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # "learn to use the prediction" pathway has value to add. See
         # ``plans/rewrite/phase-15-direction-head-feature-slice/
         # lessons_learnt.md`` "PPO/BCE self-referential gate loop".
-        actor_input = torch.cat(
-            [
-                runner_embs_b,
-                lstm_expanded,
-                fill_prob.unsqueeze(-1),
-                mature_prob.unsqueeze(-1),
-                direction_back_prob.detach().unsqueeze(-1),
-                direction_lay_prob.detach().unsqueeze(-1),
-            ],
-            dim=-1,
-        )  # (batch, R, embed + hidden + 4)
+        _actor_input_parts = [
+            runner_embs_b,
+            lstm_expanded,
+            fill_prob.unsqueeze(-1),
+            mature_prob.unsqueeze(-1),
+            direction_back_prob.detach().unsqueeze(-1),
+            direction_lay_prob.detach().unsqueeze(-1),
+        ]
+        # fc-cost-probe D (2026-05-17): fc_prob feeds actor_head when
+        # enabled, on the same NOT-detached pattern as fill_prob /
+        # mature_prob (surrogate-loss gradient flows back through
+        # fc_prob_head so the actor can learn to use the prediction).
+        if self.enable_fc_prob_head:
+            _actor_input_parts.append(fc_prob.unsqueeze(-1))
+        actor_input = torch.cat(_actor_input_parts, dim=-1)  # (batch, R, embed + hidden + 4|5)
         per_runner_logits = self.actor_head(actor_input)  # (batch, R, 3)
         ob_logits = per_runner_logits[..., 0]  # (batch, R)
         ol_logits = per_runner_logits[..., 1]
@@ -809,6 +842,8 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             direction_lay_prob_per_runner=direction_lay_prob,
             direction_back_logits_per_runner=direction_back_logits,
             direction_lay_logits_per_runner=direction_lay_logits,
+            fc_prob_per_runner=fc_prob,
+            fc_prob_logits_per_runner=fc_prob_logit,
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────
