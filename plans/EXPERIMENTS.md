@@ -642,16 +642,43 @@ Hypothesis: deliver `close_signal_bonus` at the close-tick (mirror
 `_charge_open_cost` / `_resolve_open_cost_pairs` pattern). PPO will
 finally see the close-decision gradient and `cl_n` will move.
 
-**Implementation brief.** _Pending._ New `_step_close_bonus_pnl`
-accumulator reset each step; `_attempt_close` increments it by
-`close_signal_bonus` on agent-initiated successes
-(`force_close=False AND stop_close=False`); end-of-`step()` adds it
-to `reward` and `_cum_shaped_reward`. The matching contribution is
-removed from `_compute_scalping_reward_terms`'s `race_shaping` so
-totals don't double-count. Gated behind `per_tick_close_bonus: bool
-= False` so byte-identical default is preserved.
+**Implementation brief.** Landed in commit `4d4a5b6`. New
+`_step_close_bonus_pnl` accumulator reset each step;
+`_attempt_close` increments it by `close_signal_bonus` on
+agent-initiated successes (`force_close=False AND stop_close=False`)
+when `per_tick_close_bonus=True`; end-of-`step()` adds it to
+`reward` and `_cum_shaped_reward`. The matching contribution is
+suppressed from `_compute_scalping_reward_terms`'s `race_shaping`
+(passed `close_signal_bonus=0.0`) so totals don't double-count.
+5 regression tests guard the path (TestPerTickCloseBonus).
+Cohort tag `_predictor_SCALPING_probe_e1_per_tick_close_1779134372`,
+overrides `per_tick_close_bonus=true close_signal_bonus=10.0`.
 
-**Result.** _Pending._
+**Result.** **NO BITE.** 5/5 agents finished 2026-05-18 21:05.
+
+| Metric | Baseline (tnv3 gen 0) | E1 mean (5 agents) | Δ |
+|---|---:|---:|---:|
+| pnl | −£46/d | −£47/d | −£1 (flat) |
+| **cl_n** | **9** | **9.2** | **+0.2 (within noise)** |
+| fc_n | 54 | 49 | −5 |
+| fc_£ | −£86/d | −£97/d | −£11 (worse per event) |
+| locked | +£88/d | +£80/d | −£8 |
+| bets | 178 | 158 | −20 (mild drop in opens) |
+| naked_span | £227 | £67 | — (smaller eval window dominates) |
+
+Per-agent cl_n: 10, 11, 11, 9, 6 — three above baseline, two
+at-or-below. Mean is statistically indistinguishable from baseline
+on n=5. The hypothesis that "moving bonus to per-tick will move
+cl_n" is **refuted at this cohort scale**, same conclusion the
+7-probe meta-finding reached for magnitude-and-timing variations.
+
+The mechanism IS working — the test suite proves the credit lands
+on the close tick and the settle path doesn't double-count. PPO
+just doesn't respond to a £10 per-close gradient in 7 days, regardless
+of when it's delivered. Consistent with `findings_probes.md` final
+hypothesis: "cohort-scale signal-to-noise is the binding constraint."
+
+Per the user gate, NOT escalating to full cohort. Moving to E2.
 
 ---
 
