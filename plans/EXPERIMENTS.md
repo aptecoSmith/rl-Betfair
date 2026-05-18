@@ -792,7 +792,7 @@ the rest of the race in `action_mask`. Telemetry: new
 
 ---
 
-## 2026-05-18 — E7: curriculum — train close in isolation first [QUEUED]
+## 2026-05-18 — E7: curriculum — train close in isolation first [DEFERRED]
 
 **Intention.** Last-resort structural fix. Two-phase training.
 Phase A: agent's open decision is heuristically forced (e.g.
@@ -806,13 +806,17 @@ that no amount of credit-fixing can save it — and the conclusion is
 that the close action just isn't usefully learnable on this reward
 shape. Worth running only if E1+E2+E5 don't bite.
 
-**Implementation brief.** _Pending._ Trainer reworked into a
-two-phase loop. Phase A: env wraps `_process_action` to override
-the OPEN columns with a heuristic policy; policy only emits valid
-gradient for CLOSE columns. Phase B: full action space active.
-Heavy implementation — ~2-3 days of careful work.
+**Implementation brief.** _Deferred to a follow-on session._
+The full implementation requires either (a) trainer-loop changes
+to switch reward shape between phases, (b) env-level heuristic
+open injection with simultaneous masking of agent open actions,
+or (c) action-space partial freezing with explicit parameter
+groups. All three approaches are ~1-2 days of careful work and
+benefit from the data E1-E6 will produce — if any of those probes
+bite, the curriculum need is reduced. Skipping for now per
+"start with the cheap probes" gate.
 
-**Result.** _Pending._
+**Result.** _Pending implementation._
 
 ---
 

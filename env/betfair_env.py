@@ -872,6 +872,17 @@ class BetfairEnv(gymnasium.Env):
         # plans/EXPERIMENTS.md "E4: inverted keep_open action +
         # MTM stop-loss".
         "keep_open_inversion",
+        # E5 (2026-05-18): per-pair P&L emitted at the resolution
+        # tick (mature / agent-close / force-close / stop-close) as
+        # a SHAPED contribution. The matching cash still settles at
+        # race-end through ``race_pnl``; the shaped channel telescopes
+        # the per-pair lock back out at settle so totals are
+        # preserved (mirrors the MTM zero-mean property). PPO sees
+        # the pair's locked P&L at the moment of resolution rather
+        # than 200+ ticks later. Default False = byte-identical.
+        # See plans/EXPERIMENTS.md "E5: per-pair reward at resolution
+        # tick".
+        "per_pair_reward_at_resolution",
         # Force-close-architecture Session 01 (2026-05-01): when
         # truthy, the agent's per-runner ``arb_spread`` action dim
         # reinterprets as a £-target ∈ [0.20, 5.00] and the env
@@ -1347,6 +1358,22 @@ class BetfairEnv(gymnasium.Env):
         self._keep_open_inversion: bool = bool(
             reward_cfg.get("keep_open_inversion", False)
         )
+        # E5 (2026-05-18). Per-pair reward emitted at resolution tick.
+        # When True, emit each newly-resolved pair's locked-P&L
+        # estimate as that tick's shaped reward. Telescope at settle:
+        # subtract the sum from shaped so totals match (mirror of
+        # MTM zero-mean). Default False = byte-identical.
+        self._per_pair_reward_at_resolution: bool = bool(
+            reward_cfg.get("per_pair_reward_at_resolution", False)
+        )
+        # Per-tick accumulator (mirrors _step_open_cost_pnl). Reset
+        # each step. Folded into reward + cum_shaped at end of step().
+        self._step_per_pair_pnl: float = 0.0
+        # Per-race cumulative (for telescope unwind at settle).
+        self._race_per_pair_emitted_pnl: float = 0.0
+        # Set of pair_ids already credited this race so we don't
+        # double-pay. Cleared at race transition.
+        self._paid_pair_ids: set[str] = set()
         # Per-tick set of selection_ids the agent has marked keep-
         # open. Reset at the top of every step() (sticky-per-tick
         # only, NOT cross-tick). Used by ``_stop_close_open_pairs``
@@ -2699,6 +2726,10 @@ class BetfairEnv(gymnasium.Env):
         # E4 (2026-05-18). Per-episode keep-open state reset.
         self._keep_open_sids = set()
         self._stop_close_overridden = 0
+        # E5 (2026-05-18). Per-pair-resolution accumulators reset.
+        self._step_per_pair_pnl = 0.0
+        self._race_per_pair_emitted_pnl = 0.0
+        self._paid_pair_ids = set()
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         # Shaped-penalty warmup scale used by the last settle step —
         # emitted via info/JSONL telemetry. Initialised here so
@@ -2791,6 +2822,11 @@ class BetfairEnv(gymnasium.Env):
         # ``_per_tick_close_bonus=True``. Added to ``reward`` near
         # the end of step processing (mirrors open_cost).
         self._step_close_bonus_pnl = 0.0
+        # E5 (2026-05-18) per-pair-resolution accumulator. Reset
+        # each step; ``_emit_per_pair_resolution_pnl`` pushes the
+        # newly-resolved pairs' locked-P&L estimates. Added to
+        # ``reward`` at end of step.
+        self._step_per_pair_pnl = 0.0
 
         # 0. Update runtime windowed history with the current tick so that
         #    _get_info() can serve windowed debug_features for this tick.
@@ -2855,6 +2891,12 @@ class BetfairEnv(gymnasium.Env):
         # _force_close fired — the last category does NOT refund).
         if self.scalping_mode:
             self._resolve_open_cost_pairs()
+            # E5 (2026-05-18). Detect newly-resolved pairs and emit
+            # their locked-P&L estimates as shaped contributions on
+            # THIS tick. Telescope unwound at settle. No-op when
+            # per_pair_reward_at_resolution=False.
+            race_e5 = self.day.races[self._race_idx]
+            self._emit_per_pair_resolution_pnl(race_e5)
 
         # 2. Advance to next tick
         self._tick_idx += 1
@@ -2903,6 +2945,12 @@ class BetfairEnv(gymnasium.Env):
             # E6 (2026-05-18). Per-race live pair-count reset at
             # race transition. Per-episode refusal counter persists.
             self._pairs_opened_this_race = 0
+            # E5 (2026-05-18). Per-race per-pair-resolution
+            # accumulator + paid-set reset at race transition. The
+            # step-level accumulator is reset every step at top of
+            # step().
+            self._race_per_pair_emitted_pnl = 0.0
+            self._paid_pair_ids = set()
 
             # Reset BetManager and windowed history for the next race.
             if self._race_idx < self._total_races:
@@ -2985,6 +3033,14 @@ class BetfairEnv(gymnasium.Env):
         if self._step_close_bonus_pnl != 0.0:
             reward += self._step_close_bonus_pnl
             self._cum_shaped_reward += self._step_close_bonus_pnl
+
+        # E5 (2026-05-18). Per-pair-resolution shaped contribution.
+        # Folded into the resolution-tick's reward + cum_shaped. The
+        # telescope unwind at settle removes the cumulative emitted
+        # amount from shaped so totals match.
+        if self._step_per_pair_pnl != 0.0:
+            reward += self._step_per_pair_pnl
+            self._cum_shaped_reward += self._step_per_pair_pnl
 
         obs = self._get_obs() if not terminated else self._terminal_obs()
         info = self._get_info()
@@ -4310,6 +4366,76 @@ class BetfairEnv(gymnasium.Env):
         self._step_open_cost_pnl += contribution
         return contribution
 
+    def _emit_per_pair_resolution_pnl(self, race) -> float:
+        """E5: emit each newly-resolved pair's locked-P&L estimate as a
+        shaped-channel contribution on the resolution tick.
+
+        Walks ``bm.bets`` grouped by ``pair_id``. A pair is "resolved"
+        when both legs are matched (``len(legs) >= 2``). For each
+        newly-resolved pair (not yet in ``_paid_pair_ids``):
+
+        - Compute locked P&L manually using the same formula as
+          ``BetManager.get_paired_positions`` (commission-aware,
+          NOT max-floored — loss-closed pairs come through with the
+          negative value they actually settled at).
+        - Push into the per-step accumulator AND the per-race
+          accumulator (the latter is used at settle to unwind the
+          telescope, preserving raw+shaped ≈ total).
+        - Mark the pair as paid.
+
+        Called from ``step()`` once per tick when
+        ``_per_pair_reward_at_resolution=True``. No-op otherwise.
+        """
+        if not self._per_pair_reward_at_resolution:
+            return 0.0
+        bm = self.bet_manager
+        if bm is None:
+            return 0.0
+
+        # Group bets by pair_id (only this market, only pairs not yet
+        # paid). Skip the loop if no candidates.
+        legs_by_pair: dict[str, list] = {}
+        for b in bm.bets:
+            if b.pair_id is None:
+                continue
+            if b.market_id != race.market_id:
+                continue
+            if b.pair_id in self._paid_pair_ids:
+                continue
+            legs_by_pair.setdefault(b.pair_id, []).append(b)
+
+        c = float(self._commission)
+        emitted_total = 0.0
+        for pid, legs in legs_by_pair.items():
+            if len(legs) < 2:
+                continue  # pair not yet resolved
+            backs = [b for b in legs if b.side is BetSide.BACK]
+            lays = [b for b in legs if b.side is BetSide.LAY]
+            if not backs or not lays:
+                # Same-side legs (degenerate); skip.
+                self._paid_pair_ids.add(pid)
+                continue
+            # Mirror BetManager.get_paired_positions's locked-P&L
+            # formula, WITHOUT the max(0, …) floor so loss-closed
+            # pairs surface their negative settled value.
+            back = max(backs, key=lambda b: b.average_price)
+            lay = min(lays, key=lambda b: b.average_price)
+            win_pnl = (
+                back.matched_stake * (back.average_price - 1.0)
+                * (1.0 - c)
+                - lay.matched_stake * (lay.average_price - 1.0)
+            )
+            lose_pnl = (
+                -back.matched_stake
+                + lay.matched_stake * (1.0 - c)
+            )
+            locked = min(win_pnl, lose_pnl)
+            self._step_per_pair_pnl += locked
+            self._race_per_pair_emitted_pnl += locked
+            emitted_total += locked
+            self._paid_pair_ids.add(pid)
+        return emitted_total
+
     def _resolve_open_cost_pairs(self) -> float:
         """Walk ``_pending_pair_costs`` and refund pairs that have
         resolved favourably (matured naturally OR agent-closed via
@@ -5035,6 +5161,19 @@ class BetfairEnv(gymnasium.Env):
             # RaceRecord for telemetry (it carries the per-race sum).
         else:
             race_reward_pnl = race_pnl
+        # E5 (2026-05-18). Telescope unwind: subtract the cumulative
+        # per-pair-resolution emission from shaped at settle. Each
+        # per-pair contribution was already paid into shaped at its
+        # resolution tick (via _step_per_pair_pnl folded into reward).
+        # Subtracting it at settle keeps the per-race shaped sum
+        # invariant — only delivery timing changes. No-op when
+        # per_pair_reward_at_resolution=False.
+        if (
+            self.scalping_mode
+            and self._per_pair_reward_at_resolution
+            and self._race_per_pair_emitted_pnl != 0.0
+        ):
+            shaped -= self._race_per_pair_emitted_pnl
         self._day_reward_pnl += race_reward_pnl
         reward = race_reward_pnl + shaped
 

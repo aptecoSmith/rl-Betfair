@@ -5039,3 +5039,172 @@ class TestKeepOpenInversion:
         _, _, _, _, info = env.step(self._close_signal_action())
         assert "stop_close_overridden" in info
         assert info["stop_close_overridden"] == 0  # no stops triggered yet
+
+
+# ────────────────────────────────────────────────────────────────────────
+# E5 — per-pair reward at resolution tick (2026-05-18)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPerPairResolutionReward:
+    """E5: emit each newly-resolved pair's locked-P&L estimate as a
+    SHAPED contribution on the resolution tick. The settle step
+    telescopes the cumulative emission back out so the per-race
+    shaped sum is invariant — only delivery timing changes.
+
+    See ``plans/EXPERIMENTS.md`` "E5: per-pair reward at resolution
+    tick".
+    """
+
+    def _build_env(
+        self, scalping_config, *,
+        per_pair_reward_at_resolution=False,
+    ):
+        overrides = {}
+        if per_pair_reward_at_resolution:
+            overrides["per_pair_reward_at_resolution"] = (
+                per_pair_reward_at_resolution
+            )
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides=overrides or None,
+        )
+        env.reset()
+        return env
+
+    # ── 1. Default-off byte-identical ──
+
+    def test_default_off_no_emission(self, scalping_config):
+        env = self._build_env(scalping_config)
+        assert env._per_pair_reward_at_resolution is False
+        assert env._step_per_pair_pnl == 0.0
+        assert env._race_per_pair_emitted_pnl == 0.0
+        # Step shouldn't change accumulators (no resolution triggers).
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        assert env._step_per_pair_pnl == 0.0
+        assert env._race_per_pair_emitted_pnl == 0.0
+        assert env._paid_pair_ids == set()
+
+    # ── 2. Flag-on detects resolved pair and emits ──
+
+    def test_resolved_pair_emits_locked_pnl(self, scalping_config):
+        """Build a fake resolved pair in bm.bets and verify
+        ``_emit_per_pair_resolution_pnl`` credits its locked P&L."""
+        env = self._build_env(
+            scalping_config, per_pair_reward_at_resolution=True,
+        )
+        bm = env.bet_manager
+        race = env.day.races[0]
+        from env.bet_manager import Bet, BetOutcome
+
+        # Inject a back + lay pair with known prices/stakes so we can
+        # verify the locked P&L formula.
+        back = Bet(
+            selection_id=1, side=BetSide.BACK,
+            requested_stake=10.0, matched_stake=10.0,
+            average_price=5.0, market_id=race.market_id,
+            outcome=BetOutcome.UNSETTLED, pnl=0.0, pair_id="P1",
+        )
+        lay = Bet(
+            selection_id=1, side=BetSide.LAY,
+            requested_stake=8.0, matched_stake=8.0,
+            average_price=4.0, market_id=race.market_id,
+            outcome=BetOutcome.UNSETTLED, pnl=0.0, pair_id="P1",
+        )
+        bm.bets.extend([back, lay])
+
+        env._emit_per_pair_resolution_pnl(race)
+
+        # Locked P&L formula (BetManager.get_paired_positions,
+        # un-floored): commission default = 0.05.
+        # win_pnl = 10 * (5-1) * 0.95 - 8 * (4-1) = 38 - 24 = +14.0
+        # lose_pnl = -10 + 8 * 0.95 = -10 + 7.6 = -2.4
+        # min = -2.4 (loss-side dominates)
+        expected = -2.4
+        assert env._step_per_pair_pnl == pytest.approx(expected, abs=1e-6)
+        assert env._race_per_pair_emitted_pnl == pytest.approx(
+            expected, abs=1e-6,
+        )
+        assert "P1" in env._paid_pair_ids
+
+    # ── 3. Paid pairs are not double-credited ──
+
+    def test_paid_pair_not_recredited(self, scalping_config):
+        env = self._build_env(
+            scalping_config, per_pair_reward_at_resolution=True,
+        )
+        bm = env.bet_manager
+        race = env.day.races[0]
+        from env.bet_manager import Bet, BetOutcome
+
+        bm.bets.extend([
+            Bet(
+                selection_id=1, side=BetSide.BACK,
+                requested_stake=10.0, matched_stake=10.0,
+                average_price=5.0, market_id=race.market_id,
+                outcome=BetOutcome.UNSETTLED, pnl=0.0, pair_id="P1",
+            ),
+            Bet(
+                selection_id=1, side=BetSide.LAY,
+                requested_stake=8.0, matched_stake=8.0,
+                average_price=4.0, market_id=race.market_id,
+                outcome=BetOutcome.UNSETTLED, pnl=0.0, pair_id="P1",
+            ),
+        ])
+        env._emit_per_pair_resolution_pnl(race)
+        race_emitted_after_first = env._race_per_pair_emitted_pnl
+        # Reset step accumulator (as the per-step flow would).
+        env._step_per_pair_pnl = 0.0
+        # Call again — paid set should suppress re-emission.
+        env._emit_per_pair_resolution_pnl(race)
+        assert env._step_per_pair_pnl == 0.0
+        assert env._race_per_pair_emitted_pnl == pytest.approx(
+            race_emitted_after_first
+        )
+
+    # ── 4. Unresolved (single-leg) pair not credited ──
+
+    def test_single_leg_pair_not_credited(self, scalping_config):
+        env = self._build_env(
+            scalping_config, per_pair_reward_at_resolution=True,
+        )
+        bm = env.bet_manager
+        race = env.day.races[0]
+        from env.bet_manager import Bet, BetOutcome
+        bm.bets.append(Bet(
+            selection_id=1, side=BetSide.BACK,
+            requested_stake=10.0, matched_stake=10.0,
+            average_price=5.0, market_id=race.market_id,
+            outcome=BetOutcome.UNSETTLED, pnl=0.0, pair_id="P_naked",
+        ))
+        env._emit_per_pair_resolution_pnl(race)
+        assert env._step_per_pair_pnl == 0.0
+        assert "P_naked" not in env._paid_pair_ids
+
+    # ── 5. step() folds accumulator into reward ──
+
+    def test_step_folds_per_pair_pnl_into_reward(
+        self, scalping_config, monkeypatch,
+    ):
+        env = self._build_env(
+            scalping_config, per_pair_reward_at_resolution=True,
+        )
+        original_process = env._process_action
+
+        def _process_then_credit(*args, **kwargs):
+            original_process(*args, **kwargs)
+            # Simulate _emit_per_pair_resolution_pnl pushing
+            # locked P&L from a resolved pair.
+            env._step_per_pair_pnl += 5.0
+            env._race_per_pair_emitted_pnl += 5.0
+
+        monkeypatch.setattr(env, "_process_action", _process_then_credit)
+        cum_shaped_before = env._cum_shaped_reward
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(noop)
+        delta = env._cum_shaped_reward - cum_shaped_before
+        # The +5 must appear in cum_shaped (other shaping terms can
+        # add too — assert ≥).
+        assert delta >= 5.0 - 1e-6
