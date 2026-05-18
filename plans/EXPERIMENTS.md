@@ -876,13 +876,40 @@ E5) might be able to reach the same place by other means. If
 day_pnl gets worse, locked-floor was load-bearing and the next bet
 is on E1/E2/E5.
 
-**Implementation brief.** _Pending._ New env kwarg
-`max_open_pairs_per_race` (default 0 = no cap = byte-identical).
-When budget exhausted, mask all OPEN_BACK / OPEN_LAY actions for
-the rest of the race in `action_mask`. Telemetry: new
-`opens_refused_pair_budget` counter.
+**Implementation brief.** Landed in commit `f4e4a06`. New
+reward-override `max_open_pairs_per_race` (default 0 = no cap =
+byte-identical). When `_pairs_opened_this_race >=
+max_open_pairs_per_race`, refuse the open at the earliest exit
+(before generating a pair_id). Telemetry:
+`opens_refused_pair_budget` counter on info dict. 5 regression
+tests guard the gate. Cohort tag
+`_predictor_SCALPING_probe_e6_pair_budget_1779146398`, override
+`max_open_pairs_per_race=30`.
 
-**Result.** _Pending._
+**Result.** **NO BITE — but CAVEAT: cap never bound.** 5/5
+finished 2026-05-18 23:25.
+
+| Metric | Baseline | E6 mean | Δ |
+|---|---:|---:|---:|
+| pnl | −£46/d | −£38.5/d | +£7.5 (within noise) |
+| **bets** | **178** | **171** | **−7 (NOT 30/race × races/day = much lower)** |
+| fc_n | 54 | 52.8 | −1.2 |
+| locked | +£88 | +£95 | +£7 |
+| cl_n | 9 | 7.1 | −1.9 |
+
+The cap of 30 pairs/race was set too high. Looking at the
+baseline bets=178/day across ~3 races/day ≈ 60 bets/race ÷ 2 legs
+= 30 pairs/race — at the CAP, not above it. So the gate fired
+rarely if at all. The earlier "600 pairs/race" figure from
+`findings_probes.md` was from a different gate config (no
+raceconf, no lay_quality cap). Under raceconf the natural
+opens/race is much lower.
+
+Conclusion: this probe tells us nothing about whether forcing
+selectivity via a scarcity gate works. To get a real test would
+need `max_open_pairs_per_race=5` or similar (a binding cap).
+**Queue an E6b re-run with cap=5** if the open-phase intervention
+direction proves out further (E3 already strongly supports it).
 
 ---
 
