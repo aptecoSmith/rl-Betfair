@@ -616,3 +616,203 @@ lay_price_max).
 - **P** — multi-tick "commit" on opens (architectural).
 
 ---
+
+## 2026-05-18 — E1: per-tick close credit [QUEUED]
+
+**Intention.** The 7-probe fc-cost-probes finding (entry above)
+ruled out close-bonus *magnitude* and training *length* as bottlenecks.
+The one thing every probe shared — and never tested — was the
+credit-assignment *timing*. `close_signal_bonus` lands inside
+`race_shaping` at race-settle (`env/betfair_env.py:280-325`), so a
+close at T−200 sees its bonus arrive ~150+ ticks later. With γ=0.99,
+λ=0.95, the gradient reaching the close decision is
+`0.95^150 ≈ 4.6e-4` of the bonus magnitude. A £50 bonus arrives at
+the action as ~£0.023 of gradient — invisible against ±£500/d naked
+variance.
+
+This is the **same trap** `open_cost` hit on 2026-04-25 and was fixed
+in Session 02 of `selective-open-shaping` by moving to per-tick
+credit. The lessons file is explicit: "GAE smeared the per-race
+delta back across 5,000 ticks, drowning the per-tick gradient at the
+open decision in value-function noise. Per-tick delivery puts the
+gradient at the right place." That fix bit. The same fix has never
+been applied to `close_signal_bonus`.
+
+Hypothesis: deliver `close_signal_bonus` at the close-tick (mirror
+`_charge_open_cost` / `_resolve_open_cost_pairs` pattern). PPO will
+finally see the close-decision gradient and `cl_n` will move.
+
+**Implementation brief.** _Pending._ New `_step_close_bonus_pnl`
+accumulator reset each step; `_attempt_close` increments it by
+`close_signal_bonus` on agent-initiated successes
+(`force_close=False AND stop_close=False`); end-of-`step()` adds it
+to `reward` and `_cum_shaped_reward`. The matching contribution is
+removed from `_compute_scalping_reward_terms`'s `race_shaping` so
+totals don't double-count. Gated behind `per_tick_close_bonus: bool
+= False` so byte-identical default is preserved.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-18 — E2: asymmetric MTM [QUEUED]
+
+**Intention.** The current per-tick mark-to-market shaping (CLAUDE.md
+"Per-step mark-to-market shaping") is symmetric — gains and losses
+both telescope to zero across a race. That gives the policy a
+per-tick redistribution of the realised P&L signal but no asymmetric
+pressure to close drawdowns vs run winners.
+
+Asymmetric weighting (`mtm_weight_loss > mtm_weight_gain`) makes
+holding an underwater pair painful at every tick the drawdown
+exists. The cumulative shaped contribution per race is no longer
+zero-mean — losing races pay more shaped reward than winning ones
+gain — which intentionally violates the existing "raw + shaped ≈
+total" invariant. This is the same trade-off `naked_loss_anneal`
+made (CLAUDE.md "Naked-loss annealing"). The user's intuition
+("agents should run scared from naked bets") maps directly to this
+asymmetry.
+
+**Implementation brief.** _Pending._ Split the existing
+`mark_to_market_weight` reward-override into
+`mark_to_market_weight_loss` (default 0.15) and
+`mark_to_market_weight_gain` (default 0.05). At each step, compute
+the per-pair MTM delta; the loss side is scaled by `_loss`, the
+gain side by `_gain`. Sum and emit as shaped contribution that tick.
+Telemetry: new `mtm_asymmetry_active` boolean + `cum_mtm_loss`,
+`cum_mtm_gain` per-episode JSONL fields.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-18 — E3: open-with-close-feasibility gate [QUEUED]
+
+**Intention.** The user's principle — *"If they can't close it,
+they should never have opened it"* — applied at the env level
+without any learning. At open time, peek at the opposite-side ladder
+and compute the hypothetical cost-to-close at the current spread.
+If the cost exceeds a configurable fraction of stake, refuse the
+open at the matcher level.
+
+This is a structural prior the policy doesn't have to learn. It
+kills the 0.3% outsider-residue trades that EXPLORATIONS.md entry 2
+identified (back-first opens at price 15-30 with 0% positive naked
+outcomes), and more importantly it kills the pre-off thin-liquidity
+opens that drive the bulk of fc cost.
+
+**Implementation brief.** _Pending._ New env kwarg
+`close_feasibility_max_cost_frac` (default `None` = disabled,
+byte-identical). At each open candidate, the matcher computes the
+top opposite-side price (with junk filter) and the hypothetical
+close-leg P&L at the prevailing spread; if `cost_to_close / stake >
+threshold`, refuse the open. Telemetry: new
+`opens_refused_close_feasibility` counter on info dict.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-18 — E4: inverted keep_open action + MTM stop-loss [QUEUED]
+
+**Intention.** Reframe the close action. Env auto-closes any pair
+whose MTM drops below `−£mtm_stop_loss` (a fixed gene), and the
+agent's action becomes a `keep_open` override (default off) instead
+of `close_signal` (default off). Inverts the gradient direction —
+the agent must actively *defend* losing positions instead of actively
+*closing* them.
+
+Defensive-action framing is empirically easier for RL on sparse
+events: zero exploration cost (action defaults to a safe behaviour)
+rather than positive exploration cost (default behaviour is the bad
+one). The expected base rate of "agent decided to keep underwater
+position" is much lower than "agent decided to close any pair", so
+the gradient SNR per `keep_open` invocation is much higher.
+
+**Implementation brief.** _Pending._ Adds `keep_open` action head
+column replacing `close_signal` column (action-space inversion).
+New env kwarg `mtm_stop_loss_threshold` (default 0.0 = disabled).
+When pair MTM < threshold AND agent didn't fire `keep_open` that
+tick, env auto-closes via `_attempt_close(stop_close=True)`. Breaks
+architecture-hash. Pre-plan weights cannot cross-load.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-18 — E5: per-pair reward at resolution tick [QUEUED]
+
+**Intention.** The structural fix. Currently 600 opens/race + their
+600 outcomes share one summed reward signal at race-settle. PPO sees
+all per-decision gradients smeared by GAE through trajectories of
+length thousands. SNR per decision is awful.
+
+Replace with: each pair's realised P&L (locked / closed /
+force-closed / naked) lands as a per-step reward AT THAT PAIR'S
+RESOLUTION TICK. Race total = sum of per-pair P&Ls (invariant
+preserved). PPO's existing per-runner value head can predict
+per-pair returns much more cleanly than per-race noise. E1 is a
+special case of this for close events; E5 covers the natural-mature,
+force-close, and naked-at-settle cases too.
+
+**Implementation brief.** _Pending._ Refactor `_settle_current_race`
+to compute per-pair P&L at the moment each pair resolves
+(naturally-mature when both legs match; closed when close_leg
+posts; force-closed when env triggers; naked when race settles with
+only one leg). Emit each pair's P&L as that step's reward instead of
+accumulating into `race_pnl` and dumping at settle. Maintain a race
+P&L invariant test.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-18 — E6: hard pair-count budget [QUEUED]
+
+**Intention.** Cap `max_open_pairs_per_race = 30` (currently 600+).
+Forces selectivity at the open by making opens scarce. Reduces
+naked-side variance by construction — fewer pairs = less stuff to
+manage. Tests whether the over-opening phenotype is the *binding
+constraint* or merely *symptomatic* of bad credit assignment.
+
+Expected outcome: locked floor drops materially (fewer matured
+pairs). If overall day_pnl improves anyway, that's evidence the
+phenotype is binding and the cleaner training-side fixes (E1, E2,
+E5) might be able to reach the same place by other means. If
+day_pnl gets worse, locked-floor was load-bearing and the next bet
+is on E1/E2/E5.
+
+**Implementation brief.** _Pending._ New env kwarg
+`max_open_pairs_per_race` (default 0 = no cap = byte-identical).
+When budget exhausted, mask all OPEN_BACK / OPEN_LAY actions for
+the rest of the race in `action_mask`. Telemetry: new
+`opens_refused_pair_budget` counter.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-18 — E7: curriculum — train close in isolation first [QUEUED]
+
+**Intention.** Last-resort structural fix. Two-phase training.
+Phase A: agent's open decision is heuristically forced (e.g.
+predictor-driven, fixed stake and arb_spread); only `close_signal`
+is policy-trainable. Phase B: unfreeze open, fine-tune both.
+
+By isolating close from the noise of varying open decisions in
+Phase A, PPO sees clean gradient on the close action. If even a
+tight Phase A doesn't move `cl_n`, the bottleneck is so structural
+that no amount of credit-fixing can save it — and the conclusion is
+that the close action just isn't usefully learnable on this reward
+shape. Worth running only if E1+E2+E5 don't bite.
+
+**Implementation brief.** _Pending._ Trainer reworked into a
+two-phase loop. Phase A: env wraps `_process_action` to override
+the OPEN columns with a heuristic policy; policy only emits valid
+gradient for CLOSE columns. Phase B: full action space active.
+Heavy implementation — ~2-3 days of careful work.
+
+**Result.** _Pending._
+
+---
+

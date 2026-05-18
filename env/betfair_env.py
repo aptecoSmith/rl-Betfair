@@ -801,6 +801,16 @@ class BetfairEnv(gymnasium.Env):
         # here so a per-agent gene override can flow through the same
         # passthrough path as the other reward knobs.
         "mark_to_market_weight",
+        # E2 (2026-05-18): asymmetric MTM. When either of these is set
+        # (not None), the per-tick MTM shaped contribution becomes
+        # ``weight_loss * min(0, delta) + weight_gain * max(0, delta)``
+        # instead of the symmetric ``weight * delta``. Defaults
+        # fall back to ``mark_to_market_weight`` for byte-identical
+        # behaviour. Setting ``loss > gain`` puts continuous pressure
+        # on the policy to avoid drawdowns. See plans/EXPERIMENTS.md
+        # "E2: asymmetric MTM".
+        "mark_to_market_weight_loss",
+        "mark_to_market_weight_gain",
         # Arb-curriculum Session 02 (2026-04-19): per-pair shaped bonus
         # on pair maturation. Whitelisted so a per-agent gene override
         # flows through.
@@ -822,6 +832,14 @@ class BetfairEnv(gymnasium.Env):
         # cost. See plans/scalping-tight-naked-variance/
         # findings_tnv3.md.
         "close_signal_bonus",
+        # E1 (2026-05-18): per-tick close-credit delivery. When True,
+        # ``close_signal_bonus`` lands as that-tick's shaped reward at
+        # the moment ``_attempt_close`` succeeds (agent-initiated),
+        # instead of being summed at race-settle. Mirrors the
+        # 2026-04-25 Session 02 fix for ``open_cost``. Default False
+        # = byte-identical settle-time delivery (pre-E1 behaviour).
+        # See plans/EXPERIMENTS.md "E1: per-tick close credit".
+        "per_tick_close_bonus",
         # Force-close-architecture Session 01 (2026-05-01): when
         # truthy, the agent's per-runner ``arb_spread`` action dim
         # reinterprets as a £-target ∈ [0.20, 5.00] and the env
@@ -1211,6 +1229,30 @@ class BetfairEnv(gymnasium.Env):
         self._mark_to_market_weight: float = float(
             reward_cfg.get("mark_to_market_weight", 0.0)
         )
+        # E2 (2026-05-18). Asymmetric MTM. When either of these is
+        # explicitly set, the per-tick MTM contribution becomes
+        # ``weight_loss * min(0, delta) + weight_gain * max(0, delta)``.
+        # Defaults fall back to ``mark_to_market_weight`` so the
+        # symmetric formula ``weight_loss == weight_gain == weight``
+        # is byte-identical to pre-E2 behaviour. Setting
+        # ``weight_loss > weight_gain`` puts continuous pressure
+        # on the policy to close drawdowns. See plans/EXPERIMENTS.md
+        # "E2: asymmetric MTM".
+        _mtm_loss_raw = reward_cfg.get("mark_to_market_weight_loss", None)
+        _mtm_gain_raw = reward_cfg.get("mark_to_market_weight_gain", None)
+        self._mark_to_market_weight_loss: float = (
+            float(_mtm_loss_raw) if _mtm_loss_raw is not None
+            else self._mark_to_market_weight
+        )
+        self._mark_to_market_weight_gain: float = (
+            float(_mtm_gain_raw) if _mtm_gain_raw is not None
+            else self._mark_to_market_weight
+        )
+        # Telemetry: True iff either weight was explicitly set
+        # (i.e. asymmetric mode is active). Surfaces on info/JSONL.
+        self._mtm_asymmetry_active: bool = (
+            _mtm_loss_raw is not None or _mtm_gain_raw is not None
+        )
         # Arb-curriculum Session 03 (2026-04-19). Per-pair loss-side scalar
         # on naked cash flows; naked winners are untouched. 1.0 =
         # byte-identical to pre-change. < 1.0 reduces the raw P&L penalty
@@ -1236,6 +1278,25 @@ class BetfairEnv(gymnasium.Env):
         self._close_signal_bonus: float = float(
             reward_cfg.get("close_signal_bonus", CLOSE_SIGNAL_BONUS)
         )
+        # E1 (2026-05-18). When True, ``close_signal_bonus`` is
+        # delivered at the close-tick (inside ``_attempt_close``)
+        # instead of summed at race-settle. Mirrors the per-tick
+        # ``open_cost`` credit pattern (2026-04-25 Session 02).
+        # Default False = byte-identical pre-E1 settle-time delivery.
+        self._per_tick_close_bonus: bool = bool(
+            reward_cfg.get("per_tick_close_bonus", False)
+        )
+        # Per-step accumulator for E1 close-bonus contributions.
+        # Reset to 0.0 each step; pushed by ``_attempt_close`` on
+        # agent-initiated success; folded into ``reward`` +
+        # ``_cum_shaped_reward`` at end of ``step()``. Zero-valued
+        # when ``per_tick_close_bonus=False`` (helper never pushes).
+        self._step_close_bonus_pnl: float = 0.0
+        # Per-race telemetry accumulator (mirrors
+        # ``_race_open_cost_shaped_pnl``). Read by RaceRecord; never
+        # added to shaped at settle when per-tick delivery is on
+        # (the per-tick path already added it).
+        self._race_close_bonus_shaped_pnl: float = 0.0
         # scalping-tight-naked-variance Phase 2A (2026-05-15). L2
         # per-pair naked-pnl variance penalty applied to the SHAPED
         # channel only. Default 0.0 = byte-identical pre-plan.
@@ -2541,6 +2602,10 @@ class BetfairEnv(gymnasium.Env):
         self._pending_pair_costs = {}
         self._race_open_cost_shaped_pnl = 0.0
         self._step_open_cost_pnl = 0.0
+        # E1 (2026-05-18). Per-tick close-bonus accumulators reset
+        # at episode start (mirrors the open-cost pair).
+        self._race_close_bonus_shaped_pnl = 0.0
+        self._step_close_bonus_pnl = 0.0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         # Shaped-penalty warmup scale used by the last settle step —
         # emitted via info/JSONL telemetry. Initialised here so
@@ -2627,6 +2692,12 @@ class BetfairEnv(gymnasium.Env):
         # ``_resolve_open_cost_pairs`` increments it on refunds.
         # Added to ``reward`` near the end of step processing.
         self._step_open_cost_pnl = 0.0
+        # E1 (2026-05-18) close-bonus per-tick accumulator.
+        # Reset to zero each step; ``_attempt_close`` pushes
+        # ``+close_signal_bonus`` on agent-initiated success when
+        # ``_per_tick_close_bonus=True``. Added to ``reward`` near
+        # the end of step processing (mirrors open_cost).
+        self._step_close_bonus_pnl = 0.0
 
         # 0. Update runtime windowed history with the current tick so that
         #    _get_info() can serve windowed debug_features for this tick.
@@ -2732,6 +2803,10 @@ class BetfairEnv(gymnasium.Env):
             # so the next race's RaceRecord starts at 0.
             self._pending_pair_costs.clear()
             self._race_open_cost_shaped_pnl = 0.0
+            # E1 (2026-05-18). Per-race close-bonus accumulator
+            # reset at race transition. Step-level accumulator
+            # is reset every step at the top of ``step()``.
+            self._race_close_bonus_shaped_pnl = 0.0
 
             # Reset BetManager and windowed history for the next race.
             if self._race_idx < self._total_races:
@@ -2772,7 +2847,20 @@ class BetfairEnv(gymnasium.Env):
         mtm_now = self._compute_portfolio_mtm(current_ltps)
         mtm_delta = mtm_now - self._mtm_prev
         self._mtm_prev = mtm_now
-        mtm_shaped = self._mark_to_market_weight * mtm_delta
+        # E2 (2026-05-18). Asymmetric MTM: scale the loss and gain
+        # sides of the per-tick delta by separate weights. When both
+        # weights equal ``_mark_to_market_weight`` (the default), the
+        # formula collapses to the symmetric expression
+        # ``weight * delta`` and is byte-identical to pre-E2 behaviour.
+        # Setting ``weight_loss > weight_gain`` intentionally violates
+        # the per-race telescope-to-zero invariant (CLAUDE.md "Per-step
+        # mark-to-market shaping" §key property) — losing races pay
+        # more shaped reward than winning races gain. Equivalent to
+        # the naked-loss-anneal asymmetry on a per-tick basis.
+        if mtm_delta < 0.0:
+            mtm_shaped = self._mark_to_market_weight_loss * mtm_delta
+        else:
+            mtm_shaped = self._mark_to_market_weight_gain * mtm_delta
         reward += mtm_shaped
         self._cum_shaped_reward += mtm_shaped
         self._cumulative_mtm_shaped += mtm_shaped
@@ -2789,11 +2877,30 @@ class BetfairEnv(gymnasium.Env):
             reward += self._step_open_cost_pnl
             self._cum_shaped_reward += self._step_open_cost_pnl
 
+        # E1 (2026-05-18). Per-tick close-bonus delivery. When
+        # ``per_tick_close_bonus=False`` this branch is dormant
+        # (``_step_close_bonus_pnl`` stays 0.0 because
+        # ``_attempt_close`` only pushes when the flag is on); the
+        # settle-time path in ``_compute_scalping_reward_terms``
+        # then carries the bonus as before. When True, the per-tick
+        # contribution lands on the close action's own tick and the
+        # settle-time contribution is zeroed via the
+        # ``close_signal_bonus=0.0`` kwarg passed below.
+        if self._step_close_bonus_pnl != 0.0:
+            reward += self._step_close_bonus_pnl
+            self._cum_shaped_reward += self._step_close_bonus_pnl
+
         obs = self._get_obs() if not terminated else self._terminal_obs()
         info = self._get_info()
         info["mtm_delta"] = float(mtm_delta)
         info["cumulative_mtm_shaped"] = float(self._cumulative_mtm_shaped)
         info["mtm_weight_active"] = float(self._mark_to_market_weight)
+        # E2 (2026-05-18). Surfaces asymmetric-MTM state so the
+        # learning-curves panel and JSONL logger can distinguish
+        # symmetric runs from asymmetric runs.
+        info["mtm_asymmetry_active"] = bool(self._mtm_asymmetry_active)
+        info["mtm_weight_loss"] = float(self._mark_to_market_weight_loss)
+        info["mtm_weight_gain"] = float(self._mark_to_market_weight_gain)
         return obs, reward, terminated, False, info
 
     # ── P1c runtime windowed history ──────────────────────────────────────
@@ -3736,6 +3843,23 @@ class BetfairEnv(gymnasium.Env):
         if stop_close:
             self._scalping_arbs_stop_closed += 1
 
+        # E1 (2026-05-18). On agent-initiated close success (not
+        # force-close, not stop-close), push the per-close shaped
+        # bonus into the step's accumulator. ``step()`` folds it
+        # into the tick's reward + ``_cum_shaped_reward``. The
+        # matching settle-time contribution is suppressed at the
+        # ``_compute_scalping_reward_terms`` call site so the total
+        # bonus per race is identical to the pre-E1 path — only
+        # the delivery timing changes.
+        if (
+            self._per_tick_close_bonus
+            and not force_close
+            and not stop_close
+        ):
+            contribution = float(self._close_signal_bonus)
+            self._step_close_bonus_pnl += contribution
+            self._race_close_bonus_shaped_pnl += contribution
+
         _mark(close_attempted=True, close_placed=True,
               close_reason=None,
               cancelled=True)
@@ -4661,6 +4785,16 @@ class BetfairEnv(gymnasium.Env):
             naked_per_pair = bm.get_naked_per_pair_pnls(
                 market_id=race.market_id,
             )
+            # E1 (2026-05-18). When per-tick close-bonus delivery is
+            # active, suppress the settle-time contribution to avoid
+            # double-counting — the bonus already landed on the
+            # close-tick's reward via ``_step_close_bonus_pnl``.
+            # Per-race sum across both modes is identical to the
+            # pre-E1 path; only delivery timing changes.
+            _settle_close_bonus = (
+                0.0 if self._per_tick_close_bonus
+                else self._close_signal_bonus
+            )
             race_reward_pnl, race_shaping = _compute_scalping_reward_terms(
                 race_pnl=race_pnl,
                 naked_per_pair=naked_per_pair,
@@ -4669,7 +4803,7 @@ class BetfairEnv(gymnasium.Env):
                 naked_variance_penalty_beta=(
                     self._naked_variance_penalty_beta
                 ),
-                close_signal_bonus=self._close_signal_bonus,
+                close_signal_bonus=_settle_close_bonus,
             )
             shaped += race_shaping
             # Realised per-race variance-penalty contribution. Recomputed

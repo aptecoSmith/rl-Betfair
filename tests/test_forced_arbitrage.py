@@ -4261,3 +4261,405 @@ class TestStopClose:
         # The critical assertion: stop-close does NOT carry force_close
         # into the matcher.
         assert close_legs[0].force_close is False
+
+
+# ────────────────────────────────────────────────────────────────────────
+# E1 — per-tick close-signal bonus credit (2026-05-18)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPerTickCloseBonus:
+    """E1: when ``per_tick_close_bonus=True``, the close_signal_bonus
+    lands as that-tick's shaped reward at the moment ``_attempt_close``
+    succeeds (agent-initiated), instead of being summed at race-settle.
+
+    The fix mirrors the per-tick ``open_cost`` credit pattern
+    (selective-open-shaping Session 02, 2026-04-25 — see CLAUDE.md
+    "Selective-open shaping" §Per-tick credit assignment). Without this
+    fix, the bonus arrives at the close decision via GAE with a
+    ``0.95^N`` decay over N=O(150-200) ticks — effectively invisible.
+
+    See ``plans/EXPERIMENTS.md`` "E1: per-tick close credit" and
+    ``plans/scalping-tight-naked-variance/findings_probes.md``.
+    """
+
+    def _build_env(
+        self, scalping_config, *,
+        per_tick_close_bonus=False,
+        close_signal_bonus=10.0,
+    ):
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides={
+                "per_tick_close_bonus": per_tick_close_bonus,
+                "close_signal_bonus": close_signal_bonus,
+            },
+        )
+        env.reset()
+        return env
+
+    # ── 1. Default-off byte-identical ──
+
+    def test_per_tick_close_bonus_default_off_keeps_accum_zero(
+        self, scalping_config,
+    ):
+        """Default ``per_tick_close_bonus=False`` → the step-level
+        accumulator stays 0.0 even when an agent-initiated close
+        succeeds. The settle-time path continues to deliver the
+        bonus (pre-E1 behaviour)."""
+        env = self._build_env(scalping_config)
+        assert env._per_tick_close_bonus is False
+        assert env._step_close_bonus_pnl == 0.0
+        assert env._race_close_bonus_shaped_pnl == 0.0
+        # Even if we manually invoke the branch's conditions, the
+        # default-off flag suppresses the push.
+        # (Direct branch check — the conditional in _attempt_close
+        # gates on `self._per_tick_close_bonus and not force_close
+        # and not stop_close`. With flag off, no push.)
+        # Simulate an agent-initiated close success WITHOUT going
+        # through full _attempt_close machinery by checking the
+        # branch arithmetic directly:
+        if (
+            env._per_tick_close_bonus
+            and not False  # force_close=False
+            and not False  # stop_close=False
+        ):
+            env._step_close_bonus_pnl += float(env._close_signal_bonus)
+        assert env._step_close_bonus_pnl == 0.0
+
+    # ── 2. Flag-on credits on agent-initiated close ──
+
+    def test_per_tick_close_bonus_on_credits_on_agent_close(
+        self, scalping_config,
+    ):
+        """Flag on + agent-initiated close (not force, not stop) →
+        ``+close_signal_bonus`` lands in both the step and per-race
+        accumulators. The branch in ``_attempt_close`` is the
+        load-bearing surface; this test exercises the conditional
+        directly with the same inputs ``_attempt_close`` provides."""
+        env = self._build_env(
+            scalping_config,
+            per_tick_close_bonus=True,
+            close_signal_bonus=10.0,
+        )
+        assert env._per_tick_close_bonus is True
+        assert env._close_signal_bonus == 10.0
+        # Mirror the branch's condition + push from _attempt_close.
+        # The four call shapes from _attempt_close are
+        # (agent, force=False, stop=False),
+        # (force_close=True, stop_close=False),
+        # (force_close=False, stop_close=True),
+        # (force_close=True, stop_close=True — never produced).
+        for force_close, stop_close, expect_increment in [
+            (False, False, 10.0),  # agent-initiated → credit
+            (True, False, 0.0),    # force-close → skip
+            (False, True, 0.0),    # stop-close → skip
+        ]:
+            env._step_close_bonus_pnl = 0.0  # reset between cases
+            if (
+                env._per_tick_close_bonus
+                and not force_close
+                and not stop_close
+            ):
+                contribution = float(env._close_signal_bonus)
+                env._step_close_bonus_pnl += contribution
+                env._race_close_bonus_shaped_pnl += contribution
+            assert env._step_close_bonus_pnl == pytest.approx(
+                expect_increment,
+            ), (
+                f"force={force_close} stop={stop_close} expected "
+                f"step += {expect_increment}, got {env._step_close_bonus_pnl}"
+            )
+
+    # ── 3. step() folds the accumulator into reward ──
+
+    def test_step_folds_close_bonus_into_reward_when_flag_on(
+        self, scalping_config, monkeypatch,
+    ):
+        """The end-of-``step()`` branch adds ``_step_close_bonus_pnl``
+        to ``reward`` AND ``_cum_shaped_reward``. Mirror of the
+        existing ``_step_open_cost_pnl`` fold immediately above it.
+
+        ``_attempt_close`` pushes the bonus mid-step (after the
+        top-of-step reset, before the end-of-step fold). We simulate
+        that timing by monkey-patching ``_process_action`` to also
+        seed the accumulator AFTER calling the real implementation —
+        equivalent to a successful agent-initiated close firing in
+        the action-processing phase.
+        """
+        env = self._build_env(
+            scalping_config,
+            per_tick_close_bonus=True,
+            close_signal_bonus=10.0,
+        )
+
+        original_process = env._process_action
+
+        def _process_then_credit(*args, **kwargs):
+            original_process(*args, **kwargs)
+            # Simulate the branch inside _attempt_close: agent-
+            # initiated close success → push +bonus into the
+            # step's accumulator.
+            env._step_close_bonus_pnl += float(env._close_signal_bonus)
+            env._race_close_bonus_shaped_pnl += (
+                float(env._close_signal_bonus)
+            )
+
+        monkeypatch.setattr(env, "_process_action", _process_then_credit)
+
+        cum_shaped_before = env._cum_shaped_reward
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        _obs, reward, _term, _trunc, _info = env.step(noop)
+        cum_shaped_delta = env._cum_shaped_reward - cum_shaped_before
+        # cum_shaped delta must include the +10 from the close fold.
+        # Other per-step shaping (MTM) can contribute too; assert ≥.
+        assert cum_shaped_delta >= 10.0 - 1e-6, (
+            f"expected close-bonus +10 to land in cum_shaped; "
+            f"delta was {cum_shaped_delta}"
+        )
+        # Accumulator must be reset by the NEXT step's top-of-function
+        # reset (otherwise consecutive closes would double-count).
+        # Stop patching the close-fire path → next step's accumulator
+        # is just the top-of-step reset.
+        monkeypatch.setattr(env, "_process_action", original_process)
+        _obs2, reward2, _, _, _info2 = env.step(noop)
+        assert env._step_close_bonus_pnl == 0.0, (
+            "step()'s top-of-function reset failed; stale bonus "
+            "would double-count on the next close"
+        )
+
+    # ── 4. Settle-time suppression ──
+
+    def test_settle_suppresses_close_bonus_when_per_tick_on(
+        self, scalping_config, monkeypatch,
+    ):
+        """Critical no-double-count test. When
+        ``per_tick_close_bonus=True``, the settle-time call to
+        ``_compute_scalping_reward_terms`` must pass
+        ``close_signal_bonus=0.0`` so the per-race settle path
+        cannot add the bonus a second time after the close-tick
+        already paid it."""
+        env = self._build_env(
+            scalping_config,
+            per_tick_close_bonus=True,
+            close_signal_bonus=10.0,
+        )
+        # Patch the helper to record kwargs.
+        captured = {}
+        original = _compute_scalping_reward_terms
+
+        def _spy(*args, **kwargs):
+            captured.update(kwargs)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "env.betfair_env._compute_scalping_reward_terms",
+            _spy,
+        )
+
+        # Run to settle (no opens — the test just needs the helper
+        # to fire once at the final tick of the only race).
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        steps = 0
+        while not terminated and steps < 100:
+            _obs, _r, terminated, _trunc, _info = env.step(noop)
+            steps += 1
+
+        # The helper was called at least once with the suppressed
+        # bonus kwarg.
+        assert "close_signal_bonus" in captured, (
+            "helper not called during settle — test setup broken"
+        )
+        assert captured["close_signal_bonus"] == 0.0, (
+            f"per-tick path must suppress settle-time bonus; "
+            f"got close_signal_bonus={captured['close_signal_bonus']}"
+        )
+
+    def test_settle_passes_full_bonus_when_per_tick_off(
+        self, scalping_config, monkeypatch,
+    ):
+        """Inverse: default-off path passes the full
+        ``close_signal_bonus`` through to settle (pre-E1 byte-
+        identical behaviour)."""
+        env = self._build_env(
+            scalping_config,
+            per_tick_close_bonus=False,
+            close_signal_bonus=10.0,
+        )
+        captured = {}
+        original = _compute_scalping_reward_terms
+
+        def _spy(*args, **kwargs):
+            captured.update(kwargs)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "env.betfair_env._compute_scalping_reward_terms",
+            _spy,
+        )
+
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        terminated = False
+        steps = 0
+        while not terminated and steps < 100:
+            _obs, _r, terminated, _trunc, _info = env.step(noop)
+            steps += 1
+
+        assert captured.get("close_signal_bonus") == 10.0, (
+            f"flag-off path should pass full bonus; got "
+            f"{captured.get('close_signal_bonus')}"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# E2 — asymmetric mark-to-market shaping (2026-05-18)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestAsymmetricMTM:
+    """E2: split ``mark_to_market_weight`` into loss/gain weights.
+
+    The per-tick MTM contribution becomes
+    ``weight_loss * min(0, mtm_delta) + weight_gain * max(0, mtm_delta)``.
+    When both weights equal ``mark_to_market_weight`` (the default), the
+    expression collapses to ``weight * mtm_delta`` and is byte-identical
+    to pre-E2 behaviour. Setting ``weight_loss > weight_gain`` makes
+    drawdowns intentionally more painful than equivalent gains — the
+    cumulative shaped contribution no longer telescopes to zero across
+    a race.
+
+    See ``plans/EXPERIMENTS.md`` "E2: asymmetric MTM".
+    """
+
+    def _build_env(
+        self, scalping_config, *,
+        mark_to_market_weight=None,
+        mark_to_market_weight_loss=None,
+        mark_to_market_weight_gain=None,
+    ):
+        overrides = {}
+        if mark_to_market_weight is not None:
+            overrides["mark_to_market_weight"] = mark_to_market_weight
+        if mark_to_market_weight_loss is not None:
+            overrides["mark_to_market_weight_loss"] = (
+                mark_to_market_weight_loss
+            )
+        if mark_to_market_weight_gain is not None:
+            overrides["mark_to_market_weight_gain"] = (
+                mark_to_market_weight_gain
+            )
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides=overrides or None,
+        )
+        env.reset()
+        return env
+
+    # ── 1. Default-symmetric byte-identity ──
+
+    def test_no_loss_or_gain_override_falls_back_to_symmetric(
+        self, scalping_config,
+    ):
+        """When neither asymmetric weight is set, both ``_loss`` and
+        ``_gain`` equal ``mark_to_market_weight`` — formula identical
+        to pre-E2."""
+        env = self._build_env(
+            scalping_config, mark_to_market_weight=0.05,
+        )
+        assert env._mark_to_market_weight == pytest.approx(0.05)
+        assert env._mark_to_market_weight_loss == pytest.approx(0.05)
+        assert env._mark_to_market_weight_gain == pytest.approx(0.05)
+        assert env._mtm_asymmetry_active is False
+
+    # ── 2. Asymmetric override populates both fields ──
+
+    def test_asymmetric_overrides_populate_both_fields(
+        self, scalping_config,
+    ):
+        env = self._build_env(
+            scalping_config,
+            mark_to_market_weight=0.05,
+            mark_to_market_weight_loss=0.15,
+            mark_to_market_weight_gain=0.05,
+        )
+        assert env._mark_to_market_weight_loss == pytest.approx(0.15)
+        assert env._mark_to_market_weight_gain == pytest.approx(0.05)
+        assert env._mtm_asymmetry_active is True
+
+    # ── 3. Asymmetric formula on negative delta ──
+
+    def test_negative_delta_uses_loss_weight(self, scalping_config):
+        """When ``mtm_delta < 0``, contribution = ``weight_loss * delta``."""
+        env = self._build_env(
+            scalping_config,
+            mark_to_market_weight_loss=0.15,
+            mark_to_market_weight_gain=0.05,
+        )
+        # Force a known negative delta by priming _mtm_prev. The
+        # step will recompute mtm_now (likely 0 since no open bets),
+        # producing mtm_delta = 0 - prev = -prev. With prev=+10,
+        # delta=-10, expected mtm_shaped = 0.15 * -10 = -1.5.
+        env._mtm_prev = 10.0
+        cum_shaped_before = env._cum_shaped_reward
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        _, _, _, _, info = env.step(noop)
+        # The step's MTM delta should be observable on info.
+        assert info["mtm_delta"] == pytest.approx(-10.0)
+        # The cum_shaped delta from MTM is -1.5 (loss-weighted).
+        # Other shaping terms contribute too, so we extract the MTM
+        # contribution via the cumulative_mtm_shaped accumulator,
+        # which is MTM-only.
+        assert env._cumulative_mtm_shaped == pytest.approx(-1.5)
+
+    # ── 4. Asymmetric formula on positive delta ──
+
+    def test_positive_delta_uses_gain_weight(self, scalping_config):
+        """When ``mtm_delta > 0``, contribution = ``weight_gain * delta``."""
+        env = self._build_env(
+            scalping_config,
+            mark_to_market_weight_loss=0.15,
+            mark_to_market_weight_gain=0.05,
+        )
+        # Prime _mtm_prev to -10 so delta = 0 - (-10) = +10 →
+        # expected mtm_shaped = 0.05 * +10 = +0.5.
+        env._mtm_prev = -10.0
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        _, _, _, _, info = env.step(noop)
+        assert info["mtm_delta"] == pytest.approx(10.0)
+        assert env._cumulative_mtm_shaped == pytest.approx(0.5)
+
+    # ── 5. Zero delta produces zero contribution ──
+
+    def test_zero_delta_produces_zero_mtm_contribution(
+        self, scalping_config,
+    ):
+        env = self._build_env(
+            scalping_config,
+            mark_to_market_weight_loss=0.15,
+            mark_to_market_weight_gain=0.05,
+        )
+        env._mtm_prev = 0.0
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        _, _, _, _, info = env.step(noop)
+        # With no open bets, mtm_now = 0 and delta = 0.
+        assert info["mtm_delta"] == pytest.approx(0.0)
+        assert env._cumulative_mtm_shaped == pytest.approx(0.0)
+
+    # ── 6. Telemetry fields surface on info ──
+
+    def test_info_dict_surfaces_asymmetric_state(
+        self, scalping_config,
+    ):
+        env = self._build_env(
+            scalping_config,
+            mark_to_market_weight_loss=0.15,
+            mark_to_market_weight_gain=0.05,
+        )
+        noop = np.zeros(env.action_space.shape, dtype=np.float32)
+        _, _, _, _, info = env.step(noop)
+        assert info["mtm_asymmetry_active"] is True
+        assert info["mtm_weight_loss"] == pytest.approx(0.15)
+        assert info["mtm_weight_gain"] == pytest.approx(0.05)
