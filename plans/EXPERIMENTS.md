@@ -700,16 +700,46 @@ made (CLAUDE.md "Naked-loss annealing"). The user's intuition
 ("agents should run scared from naked bets") maps directly to this
 asymmetry.
 
-**Implementation brief.** _Pending._ Split the existing
-`mark_to_market_weight` reward-override into
-`mark_to_market_weight_loss` (default 0.15) and
-`mark_to_market_weight_gain` (default 0.05). At each step, compute
-the per-pair MTM delta; the loss side is scaled by `_loss`, the
-gain side by `_gain`. Sum and emit as shaped contribution that tick.
-Telemetry: new `mtm_asymmetry_active` boolean + `cum_mtm_loss`,
-`cum_mtm_gain` per-episode JSONL fields.
+**Implementation brief.** Landed in commit `4d4a5b6`. Two new
+reward-override keys: `mark_to_market_weight_loss` and
+`mark_to_market_weight_gain`. When either is set, the per-tick
+MTM shaped contribution becomes `weight_loss * min(0, delta) +
+weight_gain * max(0, delta)`. Defaults fall back to
+`mark_to_market_weight` so symmetric weights are byte-identical to
+pre-E2. Telemetry on info dict: `mtm_asymmetry_active`,
+`mtm_weight_loss`, `mtm_weight_gain`. 6 regression tests guard the
+path. Cohort tag
+`_predictor_SCALPING_probe_e2_asym_mtm_1779138407`, overrides
+`mark_to_market_weight_loss=0.15 mark_to_market_weight_gain=0.05`
+(3× asymmetry, drawdowns hurt more than wins).
 
-**Result.** _Pending._
+**Result.** **NO BITE.** 5/5 agents finished 2026-05-18 22:12.
+
+| Metric | Baseline | E2 mean | Δ |
+|---|---:|---:|---:|
+| pnl | −£46/d | −£38/d | +£8 (naked-tailwind noise) |
+| **cl_n** | **9** | **8.0** | **−1 (LOWER, opposite of intended)** |
+| fc_n | 54 | 51 | −3 |
+| **fc_£** | **−£86/d** | **−£102/d** | **−£16 (WORSE per event)** |
+| locked | +£88/d | +£84/d | −£4 |
+| bets | 178 | 162 | −16 |
+
+Per-agent cl_n: 8, 9, 11, 4, 8 — one agent (dee54213) dropped to
+4 closes, opposite of what the per-tick drawdown pressure was
+meant to produce. The +£8/d pnl lift is fully traceable to two
+agents (ee88c6d5 +£3, dee54213 −£7) catching modest naked
+tailwinds — same pattern as A/A2/O.
+
+Mechanism diagnosis: the asymmetric MTM gradient IS landing
+(verified by tests). PPO sees continuous loss-side pressure. But
+the policy's response is to slightly reduce opens (bets 178→162)
+rather than to substitute close_signal. The shaped channel pressure
+didn't unlock the close action. Worse, fc cost per event climbed
+£16 — likely because reduced opens left the remaining pairs in
+worse spots when force-close triggered.
+
+The hypothesis "punish drawdowns continuously → policy learns to
+close" is **refuted at 5×7d scale**. Same conclusion as E1.
 
 ---
 
