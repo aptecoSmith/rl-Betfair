@@ -858,6 +858,20 @@ class BetfairEnv(gymnasium.Env):
         # Refusal increments ``opens_refused_pair_budget``. See
         # plans/EXPERIMENTS.md "E6: hard pair-count budget".
         "max_open_pairs_per_race",
+        # E4 (2026-05-18): keep-open inversion. When True, the existing
+        # close_signal action column is REINTERPRETED — instead of
+        # triggering an agent-initiated close, raising it for a runner
+        # marks that runner's pairs as "keep open" for this tick,
+        # SUPPRESSING the env's stop-loss auto-close. The agent must
+        # actively defend each pair tick-by-tick. Pairs not marked
+        # keep-open are auto-closed via stop_close when MTM crosses
+        # the configured threshold. Requires
+        # ``stop_loss_pnl_threshold > 0`` to be meaningful. Default
+        # False = byte-identical close_signal semantics. Action space
+        # is unchanged (no architecture-hash break). See
+        # plans/EXPERIMENTS.md "E4: inverted keep_open action +
+        # MTM stop-loss".
+        "keep_open_inversion",
         # Force-close-architecture Session 01 (2026-05-01): when
         # truthy, the agent's per-runner ``arb_spread`` action dim
         # reinterprets as a £-target ∈ [0.20, 5.00] and the env
@@ -1324,6 +1338,24 @@ class BetfairEnv(gymnasium.Env):
         # pair_id placement, reset at race-start). Counter for refusals.
         self._pairs_opened_this_race: int = 0
         self._opens_refused_pair_budget: int = 0
+        # E4 (2026-05-18). Keep-open inversion. When True, the
+        # close_signal action column reinterprets as "keep open
+        # this tick" — raised → suppress stop-loss auto-close for
+        # this runner's pairs; lowered → env's stop-loss runs as
+        # normal. Default False = byte-identical close_signal
+        # semantics.
+        self._keep_open_inversion: bool = bool(
+            reward_cfg.get("keep_open_inversion", False)
+        )
+        # Per-tick set of selection_ids the agent has marked keep-
+        # open. Reset at the top of every step() (sticky-per-tick
+        # only, NOT cross-tick). Used by ``_stop_close_open_pairs``
+        # to skip those runners' pairs.
+        self._keep_open_sids: set[int] = set()
+        # Per-episode counter — how many stop-closes the agent
+        # actively suppressed. Surfaces on info dict so we can see
+        # whether the agent uses the keep_open lever at all.
+        self._stop_close_overridden: int = 0
         # Per-step accumulator for E1 close-bonus contributions.
         # Reset to 0.0 each step; pushed by ``_attempt_close`` on
         # agent-initiated success; folded into ``reward`` +
@@ -2584,6 +2616,10 @@ class BetfairEnv(gymnasium.Env):
             "opens_refused_pair_budget": (
                 self._opens_refused_pair_budget
             ),
+            # E4 (2026-05-18). Per-episode count of stop-closes the
+            # agent suppressed via keep_open_inversion. 0 when the
+            # flag is off OR stop_loss_pnl_threshold = 0.
+            "stop_close_overridden": self._stop_close_overridden,
             # Force-close-architecture Session 01 (2026-05-01).
             # Per-episode count of pair opens refused because the
             # solved target-£ passive price was non-physical
@@ -2660,6 +2696,9 @@ class BetfairEnv(gymnasium.Env):
         # reset at episode start.
         self._pairs_opened_this_race = 0
         self._opens_refused_pair_budget = 0
+        # E4 (2026-05-18). Per-episode keep-open state reset.
+        self._keep_open_sids = set()
+        self._stop_close_overridden = 0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         # Shaped-penalty warmup scale used by the last settle step —
         # emitted via info/JSONL telemetry. Initialised here so
@@ -3389,6 +3428,15 @@ class BetfairEnv(gymnasium.Env):
         # so a single tick can re-quote one runner and close another.
         # Silent no-op for runners without an outstanding aggressive
         # leg carrying a pair_id (hard_constraints §1).
+        #
+        # E4 (2026-05-18). When ``_keep_open_inversion`` is True, the
+        # column is REINTERPRETED — raising it marks the runner's
+        # pairs as keep-open (suppress stop-loss for this tick), NOT
+        # as a close request. Agent-initiated closes are unavailable
+        # in this mode; the env's stop-loss takes over auto-closing.
+        # Reset the per-tick set first so each tick's keep-open
+        # signals are fresh.
+        self._keep_open_sids = set()
         if self.scalping_mode and apr > 6:
             for slot_idx in range(self.max_runners):
                 close_raw = float(action[6 * self.max_runners + slot_idx])
@@ -3399,6 +3447,11 @@ class BetfairEnv(gymnasium.Env):
                     continue
                 runner = runner_by_sid.get(sid)
                 if runner is None or runner.status != "ACTIVE":
+                    continue
+                if self._keep_open_inversion:
+                    # E4: agent is defending this pair this tick.
+                    # Stop-loss path will skip it.
+                    self._keep_open_sids.add(sid)
                     continue
                 time_to_off = (
                     race.market_start_time - tick.timestamp
@@ -4203,6 +4256,15 @@ class BetfairEnv(gymnasium.Env):
             if self._is_naked_lay_long_odds(open_legs, long_odds_floor):
                 continue
             sid = open_legs[0].selection_id
+            # E4 (2026-05-18). When keep-open inversion is active AND
+            # the agent raised the keep-open column for this runner
+            # this tick, suppress the auto-close. The agent has
+            # defended this pair; the env honours that until the next
+            # tick (the per-tick set is reset at the top of each
+            # _process_action close-signal pass).
+            if self._keep_open_inversion and sid in self._keep_open_sids:
+                self._stop_close_overridden += 1
+                continue
             runner = runner_by_sid.get(sid)
             if runner is None or runner.status != "ACTIVE":
                 continue

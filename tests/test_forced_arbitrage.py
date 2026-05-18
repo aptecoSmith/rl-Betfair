@@ -4891,3 +4891,151 @@ class TestPairCountBudget:
         _, _, _, _, info = env.step(self._back_action())
         assert "opens_refused_pair_budget" in info
         assert info["opens_refused_pair_budget"] >= 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# E4 — keep_open inversion + MTM stop-loss (2026-05-18)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestKeepOpenInversion:
+    """E4: reinterpret the close_signal action column as keep_open.
+
+    When ``keep_open_inversion=True``:
+    - Raising close_signal for a runner this tick suppresses the
+      env's stop-loss auto-close for that runner's pairs.
+    - The agent loses the ability to actively close (the stop-loss
+      auto-closes drawdown pairs).
+    - The action space is unchanged; weights from non-inverted runs
+      cross-load. Only the column's interpretation changes.
+
+    See ``plans/EXPERIMENTS.md`` "E4: inverted keep_open action +
+    MTM stop-loss".
+    """
+
+    def _build_env(
+        self, scalping_config, *,
+        keep_open_inversion=False,
+        stop_loss_pnl_threshold=0.0,
+    ):
+        overrides = {}
+        if keep_open_inversion:
+            overrides["keep_open_inversion"] = keep_open_inversion
+        if stop_loss_pnl_threshold > 0:
+            overrides["stop_loss_pnl_threshold"] = stop_loss_pnl_threshold
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides=overrides or None,
+        )
+        env.reset()
+        return env
+
+    def _close_signal_action(self):
+        """Action with close_signal=1.0 on slot 0 (the runner with the
+        only open pair in the test fixtures)."""
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        # 7th per-runner action dim is close_signal (offset 6).
+        a[6 * 14 + 0] = 1.0
+        return a
+
+    # ── 1. Default-off byte-identical ──
+
+    def test_default_off_close_signal_still_closes(self, scalping_config):
+        """With ``keep_open_inversion=False`` (default), raising the
+        close_signal column triggers ``_attempt_close`` as before.
+        Pre-E4 byte-identical."""
+        env = self._build_env(scalping_config)
+        assert env._keep_open_inversion is False
+        # Open a pair first so close_signal has something to close.
+        open_action = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        open_action[0] = 1.0
+        open_action[14] = -0.8
+        open_action[28] = 1.0
+        open_action[56] = -1.0
+        env.step(open_action)
+        # Now raise close_signal. The env should attempt to close.
+        env.step(self._close_signal_action())
+        # Was a close attempted? Check action_debug.
+        close_attempts = sum(
+            1 for entry in env._last_action_debug.values()
+            if entry.get("close_attempted")
+        )
+        assert close_attempts >= 1, (
+            "Default-off mode should still trigger close_signal closes"
+        )
+        # Inversion-only state should remain empty.
+        assert env._keep_open_sids == set()
+        assert env._stop_close_overridden == 0
+
+    # ── 2. Inversion mode populates keep_open_sids ──
+
+    def test_inversion_mode_marks_keep_open_sids(self, scalping_config):
+        env = self._build_env(
+            scalping_config, keep_open_inversion=True,
+        )
+        assert env._keep_open_inversion is True
+        env.step(self._close_signal_action())
+        # Slot 0 -> sid mapping is set up by the env; just assert the
+        # set is non-empty (the action raised the column).
+        assert len(env._keep_open_sids) >= 1, (
+            f"Expected slot-0's sid in keep_open_sids; got "
+            f"{env._keep_open_sids}"
+        )
+
+    # ── 3. Inversion mode skips _attempt_close ──
+
+    def test_inversion_mode_does_not_attempt_close(self, scalping_config):
+        """Raising close_signal under inversion should NOT call
+        ``_attempt_close``."""
+        env = self._build_env(
+            scalping_config, keep_open_inversion=True,
+        )
+        # Open a pair first.
+        open_action = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        open_action[0] = 1.0
+        open_action[14] = -0.8
+        open_action[28] = 1.0
+        open_action[56] = -1.0
+        env.step(open_action)
+        # Reset _last_action_debug to a clean state for the close step.
+        env._last_action_debug = {}
+        env.step(self._close_signal_action())
+        # No close attempts should have been logged.
+        close_attempts = sum(
+            1 for entry in env._last_action_debug.values()
+            if entry.get("close_attempted")
+        )
+        assert close_attempts == 0, (
+            "Inversion mode should not trigger close_signal closes"
+        )
+
+    # ── 4. keep_open_sids is per-tick (resets each tick) ──
+
+    def test_keep_open_sids_resets_each_tick(self, scalping_config):
+        env = self._build_env(
+            scalping_config, keep_open_inversion=True,
+        )
+        # Tick 1: raise close_signal on slot 0.
+        env.step(self._close_signal_action())
+        n_first = len(env._keep_open_sids)
+        # Tick 2: lower close_signal on slot 0 (noop action).
+        noop = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        env.step(noop)
+        # Set should now be empty.
+        assert env._keep_open_sids == set(), (
+            f"keep_open_sids did not reset between ticks; was "
+            f"{env._keep_open_sids} after lowering the column"
+        )
+
+    # ── 5. Info dict exposes the override counter ──
+
+    def test_info_dict_exposes_stop_close_overridden(
+        self, scalping_config,
+    ):
+        env = self._build_env(
+            scalping_config, keep_open_inversion=True,
+        )
+        _, _, _, _, info = env.step(self._close_signal_action())
+        assert "stop_close_overridden" in info
+        assert info["stop_close_overridden"] == 0  # no stops triggered yet
