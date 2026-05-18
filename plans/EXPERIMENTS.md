@@ -758,15 +758,52 @@ identified (back-first opens at price 15-30 with 0% positive naked
 outcomes), and more importantly it kills the pre-off thin-liquidity
 opens that drive the bulk of fc cost.
 
-**Implementation brief.** _Pending._ New env kwarg
-`close_feasibility_max_cost_frac` (default `None` = disabled,
-byte-identical). At each open candidate, the matcher computes the
-top opposite-side price (with junk filter) and the hypothetical
-close-leg P&L at the prevailing spread; if `cost_to_close / stake >
-threshold`, refuse the open. Telemetry: new
-`opens_refused_close_feasibility` counter on info dict.
+**Implementation brief.** Landed in commit `f4e4a06`. New
+reward-override `close_feasibility_max_spread_pct` (default None
+= disabled, byte-identical). At each open candidate in
+`_process_action`, peek the opposite-side top price (junk-filtered
+via the matcher's `pick_top_price`) and the projected aggressive
+match price. Refuse the open if
+`|agg_price - close_price| / close_price > threshold` OR the close
+side is unpriceable. Telemetry: `opens_refused_close_feasibility`
+counter on info dict. 5 regression tests guard the gate. Cohort
+tag `_predictor_SCALPING_probe_e3_close_feas_1779142421`,
+override `close_feasibility_max_spread_pct=0.05` (refuse opens at
+>5% spread).
 
-**Result.** _Pending._
+**Result.** **BITES — first probe to clearly move the metrics
+across all 8 probes attempted (A/B/C/O/H/A2/D + E1/E2/E3).**
+5/5 agents finished 2026-05-18 23:18.
+
+| Metric | Baseline | E3 mean (5 agents) | Δ |
+|---|---:|---:|---:|
+| **pnl** | **−£46/d** | **+£59.4/d** | **+£105.4 ⭐** |
+| **fc_n** | **54** | **34.8** | **−19.2 (−36 %)** |
+| **fc_£** | **−£86** | **−£56** | **+£30 (35 % improvement)** |
+| locked | +£88 | +£107 | +£19 |
+| **maturation rate** | **~0.34** | **0.50** | **+0.16** |
+| bets | 178 | 147 | −31 |
+| cl_n | 9 | 6.1 | −2.9 |
+
+Per-agent pnl: +£72, +£86, −£29, +£136, +£32 — **4/5
+profitable**. The mechanism is exactly what the user's principle
+predicted: refusing opens whose close path would be too expensive
+prevents the worst pre-off thin-liquidity opens. Fewer bad opens
+→ remaining ones mature more reliably (mr 0.34→0.50), fc cost
+drops 35%, locked floor climbs.
+
+Naked variance still contributes ±£40+ swings per agent
+(c997b601 +£32, 8c8ea6c6 +£43, 1ea86cfe −£45, 3b73dfd7 +£73,
+2b462882 −£28) — the agent who got the worst naked draw
+(1ea86cfe) is the only loss. So the floor is real but the naked
+ceiling/cellar still in play. A full cohort at 12-agent × 8-gen
+should average this out.
+
+**Verdict: ESCALATE to full cohort.** Per the user's gate this
+goes into the queue for after all other probes finish (E4, E5,
+E6 still to run). Recipe: 12-agent × 8-gen × 13/10 day split,
+override `close_feasibility_max_spread_pct=0.05`, raceconf gate,
+fc=120 in training. Wall ~28h.
 
 ---
 
