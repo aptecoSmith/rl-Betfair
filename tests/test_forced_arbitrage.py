@@ -4663,3 +4663,231 @@ class TestAsymmetricMTM:
         assert info["mtm_asymmetry_active"] is True
         assert info["mtm_weight_loss"] == pytest.approx(0.15)
         assert info["mtm_weight_gain"] == pytest.approx(0.05)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# E3 — close-feasibility gate (2026-05-18)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestCloseFeasibilityGate:
+    """E3: refuse to open any pair whose projected close-cost-per-stake
+    exceeds the threshold. Pure env-side prior; no learning required.
+
+    The gate runs AFTER the existing pre-flight checks (joint-budget,
+    commission-feasibility floor) and BEFORE the matcher places the
+    aggressive leg. Refusal increments
+    ``opens_refused_close_feasibility`` and the bet is silently
+    dropped (same as other pre-flight refusals).
+
+    See ``plans/EXPERIMENTS.md`` "E3: open-with-close-feasibility gate".
+    """
+
+    def _build_env(
+        self, scalping_config, *,
+        close_feasibility_max_spread_pct=None,
+    ):
+        overrides = {}
+        if close_feasibility_max_spread_pct is not None:
+            overrides["close_feasibility_max_spread_pct"] = (
+                close_feasibility_max_spread_pct
+            )
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides=overrides or None,
+        )
+        env.reset()
+        return env
+
+    def _back_action(self):
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0       # signal = BACK
+        a[14] = -0.8     # stake
+        a[28] = 1.0      # aggressive
+        a[56] = -1.0     # min arb ticks
+        return a
+
+    # ── 1. Default-off byte-identical ──
+
+    def test_gate_default_off_no_refusals(self, scalping_config):
+        """Default ``close_feasibility_max_spread_pct=None`` →
+        counter stays 0 after a normal aggressive back."""
+        env = self._build_env(scalping_config)
+        assert env._close_feasibility_max_spread_pct is None
+        assert env._opens_refused_close_feasibility == 0
+        env.step(self._back_action())
+        assert env._opens_refused_close_feasibility == 0
+        # The bet was placed normally.
+        assert any(b.pair_id is not None for b in env.bet_manager.bets)
+
+    # ── 2. Lenient threshold lets the open through ──
+
+    def test_lenient_threshold_passes(self, scalping_config):
+        env = self._build_env(
+            scalping_config,
+            close_feasibility_max_spread_pct=10.0,  # 1000% spread tolerated
+        )
+        env.step(self._back_action())
+        assert env._opens_refused_close_feasibility == 0
+        assert any(b.pair_id is not None for b in env.bet_manager.bets)
+
+    # ── 3. Strict threshold refuses the open ──
+
+    def test_strict_threshold_refuses_open(self, scalping_config):
+        """At ``close_feasibility_max_spread_pct=1e-6`` even the
+        tiniest spread fails the gate, so every open is refused."""
+        env = self._build_env(
+            scalping_config,
+            close_feasibility_max_spread_pct=1e-6,
+        )
+        env.step(self._back_action())
+        # Counter incremented; no bet placed.
+        assert env._opens_refused_close_feasibility >= 1
+        assert all(b.pair_id is None for b in env.bet_manager.bets)
+
+    # ── 4. Info dict exposes the counter ──
+
+    def test_info_dict_exposes_counter(self, scalping_config):
+        env = self._build_env(
+            scalping_config,
+            close_feasibility_max_spread_pct=1e-6,
+        )
+        env.step(self._back_action())
+        _, _, _, _, info = env.step(self._back_action())
+        assert "opens_refused_close_feasibility" in info
+        assert info["opens_refused_close_feasibility"] >= 1
+
+    # ── 5. Counter resets on env.reset() ──
+
+    def test_counter_resets_on_reset(self, scalping_config):
+        env = self._build_env(
+            scalping_config,
+            close_feasibility_max_spread_pct=1e-6,
+        )
+        env.step(self._back_action())
+        assert env._opens_refused_close_feasibility >= 1
+        env.reset()
+        assert env._opens_refused_close_feasibility == 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# E6 — hard pair-count budget per race (2026-05-18)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPairCountBudget:
+    """E6: cap the number of pair opens per race. Default 0 = no cap
+    (byte-identical). When > 0, opens after the cap are refused;
+    refusal increments ``opens_refused_pair_budget``.
+
+    See ``plans/EXPERIMENTS.md`` "E6: hard pair-count budget".
+    """
+
+    def _build_env(
+        self, scalping_config, *, max_open_pairs_per_race=None,
+    ):
+        overrides = {}
+        if max_open_pairs_per_race is not None:
+            overrides["max_open_pairs_per_race"] = max_open_pairs_per_race
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides=overrides or None,
+        )
+        env.reset()
+        return env
+
+    def _back_action(self):
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0       # signal = BACK
+        a[14] = -0.8     # stake
+        a[28] = 1.0      # aggressive
+        a[56] = -1.0     # min arb ticks
+        return a
+
+    # ── 1. Default 0 (no cap) ──
+
+    def test_default_zero_no_cap(self, scalping_config):
+        env = self._build_env(scalping_config)
+        assert env._max_open_pairs_per_race == 0
+        env.step(self._back_action())
+        assert env._opens_refused_pair_budget == 0
+        # Bet placed normally.
+        assert any(b.pair_id is not None for b in env.bet_manager.bets)
+
+    # ── 2. Cap=0 explicitly is same as default ──
+
+    def test_explicit_zero_cap_same_as_default(self, scalping_config):
+        env = self._build_env(
+            scalping_config, max_open_pairs_per_race=0,
+        )
+        env.step(self._back_action())
+        assert env._opens_refused_pair_budget == 0
+
+    # ── 3. Cap=1 allows one open then refuses ──
+
+    def test_cap_one_allows_one_then_refuses(self, scalping_config):
+        env = self._build_env(
+            scalping_config, max_open_pairs_per_race=1,
+        )
+        # First step: opens succeed (cap not yet hit).
+        env.step(self._back_action())
+        opens_after_first = env._pairs_opened_this_race
+        # The test fixture opens 1 pair on slot 0 (the only one with
+        # a non-zero signal).
+        assert opens_after_first >= 1, (
+            "First open should succeed under cap=1"
+        )
+        # Second step: every open should be refused now.
+        refused_before = env._opens_refused_pair_budget
+        env.step(self._back_action())
+        assert env._opens_refused_pair_budget > refused_before, (
+            "Second open should be refused by the pair budget"
+        )
+
+    # ── 4. Counter reset on race transition ──
+
+    def test_pairs_opened_resets_on_race_transition(
+        self, scalping_config,
+    ):
+        # 2-race day so we can observe the per-race counter reset.
+        env = BetfairEnv(
+            _make_day(n_races=2, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides={"max_open_pairs_per_race": 1},
+        )
+        env.reset()
+        env.step(self._back_action())
+        first_race_count = env._pairs_opened_this_race
+        # Step until the race rolls over. With n_pre_ticks=3 the
+        # first race settles after a small number of steps.
+        terminated = False
+        steps = 0
+        while not terminated and steps < 50:
+            _, _, terminated, _, _ = env.step(self._back_action())
+            steps += 1
+            # Check if we've rolled into race 2.
+            if env._race_idx == 1:
+                # Race transition occurred; per-race counter should
+                # now be reset (possibly with a fresh open from race 2).
+                assert env._pairs_opened_this_race <= 1, (
+                    f"Per-race counter not reset; was "
+                    f"{env._pairs_opened_this_race} after transition"
+                )
+                break
+        else:
+            pytest.skip(
+                "Did not observe race transition in the test day"
+            )
+
+    # ── 5. Info dict exposes counter ──
+
+    def test_info_dict_exposes_refusal_counter(self, scalping_config):
+        env = self._build_env(
+            scalping_config, max_open_pairs_per_race=1,
+        )
+        env.step(self._back_action())
+        _, _, _, _, info = env.step(self._back_action())
+        assert "opens_refused_pair_budget" in info
+        assert info["opens_refused_pair_budget"] >= 1

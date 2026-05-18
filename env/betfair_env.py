@@ -840,6 +840,24 @@ class BetfairEnv(gymnasium.Env):
         # = byte-identical settle-time delivery (pre-E1 behaviour).
         # See plans/EXPERIMENTS.md "E1: per-tick close credit".
         "per_tick_close_bonus",
+        # E3 (2026-05-18): close-feasibility gate. When set (default
+        # None = disabled, byte-identical), the env refuses to open
+        # any pair whose projected close-cost-per-stake exceeds this
+        # fraction. Computed as |agg_price - close_price| /
+        # close_price, where close_price is the opposite-side top
+        # picked by the matcher's junk-filtered ``pick_top_price``.
+        # Refusal increments ``opens_refused_close_feasibility``
+        # (surfaces on info dict). Pure env-side prior, no learning
+        # required. See plans/EXPERIMENTS.md "E3: open-with-close-
+        # feasibility gate".
+        "close_feasibility_max_spread_pct",
+        # E6 (2026-05-18): hard pair-count budget per race. When > 0,
+        # the env refuses any open after ``_pairs_opened_this_race``
+        # has reached this cap. Default 0 = no cap (byte-identical).
+        # Forces selectivity at the open by making opens scarce.
+        # Refusal increments ``opens_refused_pair_budget``. See
+        # plans/EXPERIMENTS.md "E6: hard pair-count budget".
+        "max_open_pairs_per_race",
         # Force-close-architecture Session 01 (2026-05-01): when
         # truthy, the agent's per-runner ``arb_spread`` action dim
         # reinterprets as a £-target ∈ [0.20, 5.00] and the env
@@ -1286,6 +1304,26 @@ class BetfairEnv(gymnasium.Env):
         self._per_tick_close_bonus: bool = bool(
             reward_cfg.get("per_tick_close_bonus", False)
         )
+        # E3 (2026-05-18). Close-feasibility gate threshold (fraction
+        # of stake). When set, opens are refused if
+        # ``|agg_price - close_price| / close_price > threshold``.
+        # None = disabled, byte-identical pre-E3.
+        _e3_raw = reward_cfg.get("close_feasibility_max_spread_pct", None)
+        self._close_feasibility_max_spread_pct: float | None = (
+            float(_e3_raw) if _e3_raw is not None else None
+        )
+        # Per-episode counter of opens refused by the gate (surfaces
+        # on info dict). Reset at episode start.
+        self._opens_refused_close_feasibility: int = 0
+        # E6 (2026-05-18). Hard pair-count budget per race. 0 = no
+        # cap = byte-identical.
+        self._max_open_pairs_per_race: int = int(
+            reward_cfg.get("max_open_pairs_per_race", 0)
+        )
+        # Per-race live count of opens (incremented on every successful
+        # pair_id placement, reset at race-start). Counter for refusals.
+        self._pairs_opened_this_race: int = 0
+        self._opens_refused_pair_budget: int = 0
         # Per-step accumulator for E1 close-bonus contributions.
         # Reset to 0.0 each step; pushed by ``_attempt_close`` on
         # agent-initiated success; folded into ``reward`` +
@@ -2536,6 +2574,16 @@ class BetfairEnv(gymnasium.Env):
                 self._force_close_refusals["above_cap"]
             ),
             "force_close_via_evicted": self._force_close_via_evicted,
+            # E3 (2026-05-18). Per-episode counter of opens refused
+            # by the close-feasibility gate (None threshold → always 0).
+            "opens_refused_close_feasibility": (
+                self._opens_refused_close_feasibility
+            ),
+            # E6 (2026-05-18). Per-episode counter of opens refused
+            # by the pair-count budget gate (0 cap → always 0).
+            "opens_refused_pair_budget": (
+                self._opens_refused_pair_budget
+            ),
             # Force-close-architecture Session 01 (2026-05-01).
             # Per-episode count of pair opens refused because the
             # solved target-£ passive price was non-physical
@@ -2606,6 +2654,12 @@ class BetfairEnv(gymnasium.Env):
         # at episode start (mirrors the open-cost pair).
         self._race_close_bonus_shaped_pnl = 0.0
         self._step_close_bonus_pnl = 0.0
+        # E3 (2026-05-18). Per-episode counter reset.
+        self._opens_refused_close_feasibility = 0
+        # E6 (2026-05-18). Per-race live count + per-episode refusals
+        # reset at episode start.
+        self._pairs_opened_this_race = 0
+        self._opens_refused_pair_budget = 0
         self._cum_spread_cost = 0.0  # episode-cumulative weighted spread cost (≤ 0)
         # Shaped-penalty warmup scale used by the last settle step —
         # emitted via info/JSONL telemetry. Initialised here so
@@ -2807,6 +2861,9 @@ class BetfairEnv(gymnasium.Env):
             # reset at race transition. Step-level accumulator
             # is reset every step at the top of ``step()``.
             self._race_close_bonus_shaped_pnl = 0.0
+            # E6 (2026-05-18). Per-race live pair-count reset at
+            # race transition. Per-episode refusal counter persists.
+            self._pairs_opened_this_race = 0
 
             # Reset BetManager and windowed history for the next race.
             if self._race_idx < self._total_races:
@@ -3043,6 +3100,23 @@ class BetfairEnv(gymnasium.Env):
                 # ── Aggressive path (cross the spread) ───────────────
                 pair_id: str | None = None
                 if self.scalping_mode:
+                    # E6 (2026-05-18). Hard per-race pair-count budget
+                    # gate. Refuse before generating a pair_id or
+                    # running pre-flight checks — earliest possible
+                    # exit. ``max_open_pairs_per_race == 0`` disables.
+                    if (
+                        self._max_open_pairs_per_race > 0
+                        and self._pairs_opened_this_race
+                        >= self._max_open_pairs_per_race
+                    ):
+                        self._opens_refused_pair_budget += 1
+                        action_debug[sid] = {
+                            "aggressive_placed": False,
+                            "passive_placed": False,
+                            "cancelled": did_cancel,
+                            "skipped_reason": "max_open_pairs_per_race",
+                        }
+                        continue
                     # Lazily generate a short unique id for this pair.
                     import uuid as _uuid
                     pair_id = _uuid.uuid4().hex[:12]
@@ -3131,6 +3205,74 @@ class BetfairEnv(gymnasium.Env):
                                     "skipped_reason": "scalping_joint_budget_too_small",
                                 }
                                 continue
+
+                    # E3 (2026-05-18). Close-feasibility gate. After all
+                    # other pre-flight checks have passed, peek the
+                    # opposite-side top (the side a hypothetical close
+                    # would cross to) and refuse the open if the
+                    # projected close-cost-per-stake exceeds the
+                    # configured threshold. Pure env-side prior — the
+                    # agent doesn't have to learn this. No-op when
+                    # ``close_feasibility_max_spread_pct`` is None.
+                    if (
+                        self.scalping_mode
+                        and self._close_feasibility_max_spread_pct is not None
+                    ):
+                        ltp = runner.last_traded_price
+                        if ltp is not None and ltp > 0.0:
+                            if side == BetSide.BACK:
+                                # For an aggressive back at agg_price
+                                # (top of available_to_back), the close
+                                # is a lay against available_to_lay.
+                                close_price_est = bm.matcher.pick_top_price(
+                                    runner.available_to_lay,
+                                    reference_price=ltp,
+                                    lower_is_better=True,
+                                )
+                                agg_p = agg_price_est
+                            else:
+                                # For aggressive lay at agg_price (top
+                                # of available_to_lay), the close is a
+                                # back against available_to_back.
+                                close_price_est = bm.matcher.pick_top_price(
+                                    runner.available_to_back,
+                                    reference_price=ltp,
+                                    lower_is_better=False,
+                                )
+                                agg_p = agg_price_est
+                            if (
+                                close_price_est is None
+                                or close_price_est <= 0.0
+                                or agg_p is None
+                                or agg_p <= 0.0
+                            ):
+                                # Can't price the close side → by
+                                # definition can't close it.
+                                self._opens_refused_close_feasibility += 1
+                                action_debug[sid] = {
+                                    "aggressive_placed": False,
+                                    "passive_placed": False,
+                                    "cancelled": did_cancel,
+                                    "skipped_reason": (
+                                        "close_feasibility_unpriceable"
+                                    ),
+                                }
+                                continue
+                            spread_pct = (
+                                abs(agg_p - close_price_est)
+                                / close_price_est
+                            )
+                            if spread_pct > self._close_feasibility_max_spread_pct:
+                                self._opens_refused_close_feasibility += 1
+                                action_debug[sid] = {
+                                    "aggressive_placed": False,
+                                    "passive_placed": False,
+                                    "cancelled": did_cancel,
+                                    "skipped_reason": (
+                                        "close_feasibility_spread_too_wide"
+                                    ),
+                                }
+                                continue
                 if side == BetSide.BACK and runner.available_to_lay:
                     bet = bm.place_back(
                         runner, stake, market_id=race.market_id,
@@ -3151,6 +3293,11 @@ class BetfairEnv(gymnasium.Env):
                         # directly. Refund (or not) decided later
                         # in env.step()'s resolution sweep.
                         self._charge_open_cost(pair_id)
+                        # E6 (2026-05-18). Bump live per-race pair
+                        # count on successful pair placement (only
+                        # in scalping_mode; pair_id is None otherwise).
+                        if self.scalping_mode and pair_id is not None:
+                            self._pairs_opened_this_race += 1
                         action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
                         action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_back_failed"}
@@ -3170,6 +3317,10 @@ class BetfairEnv(gymnasium.Env):
                         ) if self.scalping_mode else False
                         # See above — symmetric charge for lay-aggressive.
                         self._charge_open_cost(pair_id)
+                        # E6 (2026-05-18). Bump live per-race pair
+                        # count on successful pair placement.
+                        if self.scalping_mode and pair_id is not None:
+                            self._pairs_opened_this_race += 1
                         action_debug[sid] = {"aggressive_placed": True, "passive_placed": passive_placed, "cancelled": did_cancel, "skipped_reason": None}
                     else:
                         action_debug[sid] = {"aggressive_placed": False, "passive_placed": False, "cancelled": did_cancel, "skipped_reason": "aggressive_lay_failed"}
