@@ -885,15 +885,49 @@ per-pair returns much more cleanly than per-race noise. E1 is a
 special case of this for close events; E5 covers the natural-mature,
 force-close, and naked-at-settle cases too.
 
-**Implementation brief.** _Pending._ Refactor `_settle_current_race`
-to compute per-pair P&L at the moment each pair resolves
-(naturally-mature when both legs match; closed when close_leg
-posts; force-closed when env triggers; naked when race settles with
-only one leg). Emit each pair's P&L as that step's reward instead of
-accumulating into `race_pnl` and dumping at settle. Maintain a race
-P&L invariant test.
+**Implementation brief.** Landed in commit `6596b17`. Minimal
+shaped-channel telescope version (not the full raw-channel
+rewrite). New reward-override
+`per_pair_reward_at_resolution` (default False, byte-identical).
+When True: `_emit_per_pair_resolution_pnl` walks bm.bets each step,
+finds newly-resolved pairs (both legs matched, not in
+`_paid_pair_ids`), computes locked P&L = `min(win_pnl, lose_pnl)`
+using the un-floored BetManager formula, pushes into a per-step
+accumulator. End-of-step folds into reward + cum_shaped (mirror of
+E1 close-bonus path). Settle subtracts the cumulative emitted
+amount from `shaped` — per-race telescope so raw+shaped sum is
+preserved; only delivery TIMING changes. 5 regression tests.
+Cohort tag `_predictor_SCALPING_probe_e5_per_pair_1779154427`.
 
-**Result.** _Pending._
+**Result.** **MARGINAL BITE.** 5/5 agents finished 2026-05-19
+01:39.
+
+| Metric | Baseline | E5 mean | Δ |
+|---|---:|---:|---:|
+| pnl | −£46/d | −£16.3/d | +£29.7 |
+| **locked** | **+£88** | **+£106.7** | **+£18.7 (HIGHEST of any probe)** |
+| fc_n | 54 | 52.8 | −1.2 |
+| fc_£ | −£86 | −£98 | −£12 (worse per event) |
+| cl_n | 9 | 7.3 | −1.7 |
+| bets | 178 | 176 | flat |
+
+Per-agent pnl: −£11, +£13, −£45, +£4, −£43 — 2/5 profitable but
+mean dragged by two −£40+ losses (c4e74275 and 7abeffa0 both
+caught significant naked losses).
+
+The mechanism worked — credit lands at the resolution tick (verified
+in tests), and the policy responds by locking more reliably
+(+£18.7 locked floor — the highest of any probe across all 12
+probes tried, including E3/E4). But unlike E3, the open-rate is
+unchanged (bets ~176), so the pair count keeps growing, fc cost
+grows in proportion (−£98 vs −£86), and the net pnl improvement
+is moderate.
+
+**Verdict: BITE on locked-floor mechanism, weak on cohort pnl.**
+Probably benefits more from full-cohort GA selection (where the
+"open less, lock cleaner" subset gets selected for) than from a
+small probe. Worth escalating but at LOWER priority than E3
+and E4.
 
 ---
 
