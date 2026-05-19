@@ -1221,7 +1221,68 @@ Cohort tag prefix `_predictor_SCALPING_probe_r1r3r4_*`. 14
 regression tests pass (TestSortinoComposite,
 TestQuadraticNakedLossPenalty, TestLiquidityFloorGate).
 
-**Result.** _Pending (auto-fires after E3+E4 combo probe)._
+**Result.** **NET NEGATIVE vs E3 alone** (probe scale). 5/5
+finished 2026-05-19 23:30.
+
+| Metric | E3 alone (probe) | R1+R3+R4 combined | Δ |
+|---|---:|---:|---:|
+| pnl mean | +£59 | +£28.9 | **−£30** |
+| profitable | 4/5 | 4/5 | tie |
+| pnl peak | +£136 | +£64 | −£72 |
+| pnl trough | −£29 | −£38 | −£9 |
+| locked | +£107 | +£111 | +£4 |
+| fc_n | 35 | 36 | flat |
+| cl_n | 6.1 | 6.3 | **preserved** (unlike E3+E4 combo) |
+| bets | 147 | 150 | +3 |
+
+Per-agent pnl: +£64, +£59, **−£38**, +£31, +£28. The
+distribution is TIGHTER than E3 alone (range £102 vs E3's
+£165) but the mean is lower because the upside is capped much
+more than the downside. One agent still caught a deep naked
+(a0011a52, naked −£56) — R3 (β=0.001) and R4 (depth floor
+£10) didn't prevent it.
+
+**R1 is inactive at probe scale.** ``composite_score_mode=
+sortino`` with ``--generations 1`` means no breeding round, so
+the selector never feeds back into reproduction. The probe
+effectively tested **R3+R4** stacked on E3. R1 needs the full
+cohort test (queued at
+`C:\tmp\cohort_e3_sortino.ps1`) for its real signal.
+
+**Mechanism diagnosis: R3+R4 push in the right direction at
+TOO-WEAK strength.** Three candidate explanations:
+
+1. **R3 β=0.001 too weak.** A −£100 naked costs only β×10,000 =
+   £10 in shaped, vs the £100 in raw. The shaped term is
+   one-tenth of the natural raw signal — barely registers in
+   PPO's gradient. Probably needs β ≥ 0.01 to actually shift
+   behaviour.
+2. **R4 depth floor £10 too lenient.** Most opposite-side books
+   already > £10 at the top level. Gate rarely fires. Needs a
+   higher floor (£30-50) to actually catch thin books.
+3. **The mechanisms compete with each other** — both refuse
+   "borderline" opens but in different dimensions, so their
+   aggregate effect is a smaller set of refusals than each
+   would produce alone.
+
+Critically, cl_n is **preserved** at 6.3 (vs 6.1 baseline,
+unlike E3+E4 which forced cl_n=0). The agent still actively
+manages closes; the R3+R4 stack just doesn't add enough gradient
+or constraint pressure to move the worst-case agent's behaviour.
+
+**Verdict: tentatively net negative; ablations + retuning
+needed.** Next steps queued:
+1. R3 alone — does R3's quadratic loss penalty help by itself?
+2. R4 alone — does R4's depth floor help by itself?
+3. E4b — attributes the E4 combo's subtraction.
+4. E3+Sortino full cohort — R1's REAL test at multi-gen scale.
+
+If R3 alone or R4 alone bites, that mechanism gets retuned
+(higher β / higher floor) and stacked. If neither bites alone,
+the direction is rejected at probe scale and we focus on R1's
+cohort + the layq-style baseline.
+
+---
 
 ---
 
