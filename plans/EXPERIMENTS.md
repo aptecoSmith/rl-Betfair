@@ -805,6 +805,72 @@ E6 still to run). Recipe: 12-agent × 8-gen × 13/10 day split,
 override `close_feasibility_max_spread_pct=0.05`, raceconf gate,
 fc=120 in training. Wall ~28h.
 
+### E3 full cohort — STRONG band confirmed (2026-05-19, stopped at gen 3)
+
+Cohort tag `_predictor_SCALPING_e3_full_cohort_1779172530`.
+Launched 2026-05-19 ~17:35, stopped 2026-05-19 ~20:20 after gen
+3 partial (44/96 agents trained). Stopped on mechanism analysis —
+the trajectory peaked at gen 2 (+£28/d mean) and dipped at gen 3
+partial (+£16/d), classic inverted-U; remaining 14h GPU rerouted
+to the robust-phenotype plan (R1+R3+R4).
+
+**In-sample trajectory (10-day eval):**
+
+| Gen | n | mean pnl | best | profitable | mean locked | mean fc£ |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 | 12 | +£9 | +£41 | 9/12 | +£110 | −£62 |
+| 1 | 12 | +£24 | +£65 | 9/12 | +£116 | −£63 |
+| 2 | 12 | +£28 | +£65 | **11/12** | +£116 | −£62 |
+| 3 (8/12) | 8 | +£16 | +£63 | 7/8 | +£111 | −£64 |
+
+**Held-out reeval (7-day forward window 2026-05-07..05-13)** —
+top-5 by deployable composite (positive in-sample pnl, penalised
+by worst-day < −£30 AND naked_worst < −£40):
+
+| Agent | Gen | In-sample | **fc=120** | **fc=0** | locked (fc=120) | naked (fc=120) |
+|---|---:|---:|---:|---:|---:|---:|
+| cea2ee94 | 1 | +£65 | **+£72** | +£215 | +£114 | +£9 |
+| f89b9b94 | 3 | +£63 | **+£63** | +£25 | +£101 | +£11 |
+| 11099f65 | 2 | +£32 | **+£49** | +£117 | +£101 | +£5 |
+| 57a42db5 | 2 | +£48 | **+£48** | +£114 | +£101 | −£6 |
+| 850522b9 | 2 | +£65 | +£45 | +£12 | +£109 | −£10 |
+| **MEAN** | — | — | **+£55.4** | **+£96.7** | **+£105** | **+£2** |
+
+**5/5 agents profitable on BOTH fc=0 AND fc=120.** Compare:
+- tnv2 fc=120 newwindow: 0/10 profitable, mean −£177/d (regression baseline)
+- layq fc=120 newwindow: mean +£26/d (prior deployment best)
+- **E3 cohort fc=120 newwindow: +£55/d (+£29 vs layq, +£232 vs tnv2)**
+
+**Band: STRONG.** Clears `mean ≥ +£50/d AND ≥4/5 prof AND fc=120
+deeply positive`. First strong-band cohort in the project's
+history.
+
+**Phenotype reads.** Three distinct deployment shapes surfaced:
+
+1. **11099f65 + 57a42db5 (twins, gen 2):** ROBUST shape. Locked
+   ~£100/d, naked modest-positive, fc cost ~£40, span tight.
+   Held up cleanly on BOTH fc settings (+£48-49 fc=120, +£114-117
+   fc=0). The recommended deployment candidates — consistent
+   £45-50/d after force-close cost, with modest +£20-30 naked
+   tailwind available in non-fc days.
+2. **cea2ee94 (gen 1):** HIGH-UPSIDE shape. Locked +£114, naked
+   +£115 on fc=0 (some tailwind contribution), +£9 on fc=120.
+   Most profitable in absolute terms but partly tailwind-dependent;
+   smaller naked-positive expected on a different forward window.
+3. **850522b9 (gen 2, in-sample gold standard) + f89b9b94 (gen 3):**
+   OVERFIT shapes. 850522b9 in-sample +£65 → held-out +£45 (still
+   profitable but dropped £20); f89b9b94's naked turned negative
+   on fc=0 (locked floor still kept it +£25). Real but degraded
+   shapes.
+
+**Decision: deploy candidates are 11099f65 and 57a42db5.** Cea2ee94
+is a candidate too if next-window reeval confirms the naked-tail
+holds. The cohort verdict supports E3 as the production lever
+going forward.
+
+Next: E3+E4 combo probe (auto-firing now); R1+R3+R4 next big
+bet (plans/robust-phenotype/).
+
 ---
 
 ## 2026-05-18 — E4: inverted keep_open action + MTM stop-loss [QUEUED]
