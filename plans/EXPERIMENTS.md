@@ -823,14 +823,50 @@ one). The expected base rate of "agent decided to keep underwater
 position" is much lower than "agent decided to close any pair", so
 the gradient SNR per `keep_open` invocation is much higher.
 
-**Implementation brief.** _Pending._ Adds `keep_open` action head
-column replacing `close_signal` column (action-space inversion).
-New env kwarg `mtm_stop_loss_threshold` (default 0.0 = disabled).
-When pair MTM < threshold AND agent didn't fire `keep_open` that
-tick, env auto-closes via `_attempt_close(stop_close=True)`. Breaks
-architecture-hash. Pre-plan weights cannot cross-load.
+**Implementation brief.** Landed in commit `69d2263`. Less
+invasive than first sketched: the existing `close_signal` action
+column is REINTERPRETED at action-processing time when
+`keep_open_inversion=True`. Raised → mark runner's pairs as
+keep-open this tick (suppress stop-loss auto-close). Lowered →
+env's stop-loss runs as normal. Agent loses ability to initiate
+close — by design. Stop-loss path already existed (uses
+`stop_loss_pnl_threshold`); E4 just adds the override layer.
+Action-space unchanged, no architecture-hash break.
+Cohort tag `_predictor_SCALPING_probe_e4_keep_open_1779150400`,
+overrides `keep_open_inversion=true stop_loss_pnl_threshold=0.10`.
 
-**Result.** _Pending._
+**Result.** **BITES — second probe to clearly move metrics.**
+5/5 agents finished 2026-05-19 00:32.
+
+| Metric | Baseline | E4 mean | Δ |
+|---|---:|---:|---:|
+| **pnl** | **−£46/d** | **−£2.4/d** | **+£43.6 (vs E3's +£105)** |
+| cl_n | 9 | **0** | by design (close suppressed) |
+| fc_n | 54 | 45.3 | −8.7 |
+| fc_£ | −£86 | −£80 | +£5.8 |
+| **locked** | **+£88** | **+£100** | **+£12** |
+| naked_span | £227 | £128 | −£99 (tighter dispersion) |
+| bets | 178 | 164 | −14 |
+| cl_£ | −£13 | £0 | by design (no close-leg losses) |
+
+Per-agent pnl: +£9, +£36, −£24, −£5, −£28. 2/5 profitable.
+Locked floor solid across all 5 (+£82 to +£118 range).
+
+**CAVEAT — bite is confounded.** E4 stacks two interventions
+together: keep_open inversion AND stop_loss=0.10. The bite could
+be entirely from the env's stop-loss mechanism (which existed
+pre-E4 but was never tested with this gate combination). To
+attribute properly: **queue an E4b ablation with
+`stop_loss_pnl_threshold=0.10` only (no inversion, agent still
+controls close_signal)**. If E4b matches E4 → stop-loss is doing
+the work, inversion is dead weight. If E4b ≪ E4 → the action
+reframe matters too.
+
+**Verdict: ESCALATE.** Same as E3, queued for full-cohort run
+after probes finish. The mean lift is half of E3's, so E3 is the
+higher-priority full cohort. But E4 is a complementary lever
+(close-side via env automation) and the COMBINED cohort
+(E3 + E4) is the obvious next-tier candidate.
 
 ---
 
