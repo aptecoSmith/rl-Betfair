@@ -1209,17 +1209,73 @@ Composes with E3's `close_feasibility_max_spread_pct=0.05` —
 this run stacks four mechanisms total (E3 + R1 + R3 + R4) and is
 the prime candidate for full-cohort escalation if it bites.
 
-**Implementation brief.** _Pending._ Probe launcher
-`C:\tmp\probe_r1r3r4_robust_phenotype.ps1`. Combines:
+**Implementation brief.** Landed commit `0a176b7`. Probe
+launcher `C:\tmp\probe_r1r3r4_robust_phenotype.ps1`. Combines:
 - `--composite-score-mode sortino` (R1)
 - `--reward-overrides naked_loss_quadratic_beta=0.001
   opposite_side_depth_floor=10.0
   close_feasibility_max_spread_pct=0.05
   force_close_before_off_seconds=120`
 
-Cohort tag prefix `_predictor_SCALPING_probe_r1r3r4_*`.
+Cohort tag prefix `_predictor_SCALPING_probe_r1r3r4_*`. 14
+regression tests pass (TestSortinoComposite,
+TestQuadraticNakedLossPenalty, TestLiquidityFloorGate).
 
-**Result.** _Pending._
+**Result.** _Pending (auto-fires after E3+E4 combo probe)._
+
+---
+
+## 2026-05-19 — E3+E4 combo probe — NEGATIVE add-on
+
+**Intention.** Stack E3 (close-feasibility refusal) + E4
+(keep_open inversion + stop_loss=0.10) at probe scale to test
+whether the two biters compound. E3 attacks the open phase
+(refuse high-spread opens), E4 attacks the close phase
+(automate via stop-loss, agent loses active close). The
+mechanisms operate on different bet-lifecycle points so might
+compose.
+
+**Implementation brief.** Probe launcher
+`C:\tmp\probe_e34_combo.ps1`. Cohort tag
+`_predictor_SCALPING_probe_e34_combo_1779225377`. Same 5×7d
+shape as E1-E6.
+
+**Result.** **NEGATIVE ADD-ON.** E4 mildly subtracts from E3.
+5/5 finished 2026-05-19 22:23.
+
+| Metric | Baseline | E3 alone (probe) | E3+E4 combo | Δ vs E3 alone |
+|---|---:|---:|---:|---:|
+| pnl mean | −£46 | +£59 | **+£34** | **−£25** |
+| profitable | — | 4/5 | 4/5 | tie |
+| pnl peak | — | +£136 | +£95 | −£41 |
+| pnl trough | — | −£29 | −£26 | +£3 |
+| locked mean | +£88 | +£107 | +£118 | +£11 |
+| fc_£ | −£86 | −£56 | −£48 | +£8 |
+| cl_n | 9 | 6.1 | **0** | by-design (suppressed) |
+
+Per-agent pnl: −£26, +£17, +£22, +£61, +£95 — tighter
+distribution than E3 alone (range £121 vs E3's £165). The combo
+caps both upside AND downside. Locked floor up £11, fc cost
+down £8 — small wins. But the upside loss (peak −£41) outweighs
+those gains in the cohort mean.
+
+**Mechanism diagnosis.** Inversion forces `cl_n=0` (agent loses
+active close). The env stop-loss at 10% MTM drop handles
+obvious drawdowns but doesn't trigger on naked legs that aren't
+pair-MTM-losing at the close tick. Result: trades that the
+agent's `close_signal` would have actively closed for £-£5 of
+spread cost now ride to settle naked and pay full naked
+variance instead. The combo trades the £-bounded close-leg
+losses (−£8 fc improvement) for unbounded naked variance.
+Net negative.
+
+**Verdict: drop E4 from forward stacks.** The R1+R3+R4 launcher
+already excludes E4 (correct by accident — the plan
+prioritises R-series mechanisms). Queued the E4b ablation
+(`stop_loss=0.10` alone, no inversion) to attribute whether
+the inversion or the stop_loss was the load-bearing subtractor;
+useful intelligence but lower priority than the R1+R3+R4
+probe.
 
 ---
 
