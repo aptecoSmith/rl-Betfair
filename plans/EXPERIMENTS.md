@@ -1284,6 +1284,53 @@ cohort + the layq-style baseline.
 
 ---
 
+## 2026-05-19 — R3 alone (ablation) — IDENTICAL to combined
+
+**Intention.** Ablate R3 (quadratic naked-loss penalty β=0.001)
+on top of E3 (close_feasibility=0.05) with R4 removed. Attributes
+R3's contribution vs the R1+R3+R4 combined probe.
+
+**Result.** **IDENTICAL to R1+R3+R4 combined**, agent-by-agent
+to the penny:
+
+| Metric | R1+R3+R4 combined | R3 alone |
+|---|---:|---:|
+| pnl mean | +£28.9 | +£28.9 |
+| per-agent pnl | +£64, +£59, −£38, +£31, +£28 | **+£64, +£59, −£38, +£31, +£28** |
+| locked | +£111 | +£111 |
+| fc_n | 36 | 36 |
+| cl_n | 6.3 | 6.3 |
+
+**Key attribution:** R4 (depth_floor=£10) is **inert** at this
+strength — never refused enough opens to change behaviour.
+Typical opposite-side top-level size on the cohort's gate config
+exceeds £10 nearly always. **R3 alone accounts for the entire
+£30/d subtraction vs E3.**
+
+β=0.001 is enough to perturb policy behaviour but in the wrong
+net direction: the gradient pressure away from naked losses
+doesn't translate to fewer naked losses (a0011a52 still caught
+−£56 naked despite the penalty being active). PPO either:
+- Can't distinguish "naked likely" from "naked unlikely" at the
+  open decision (no representational pathway for it)
+- OR overcorrects on safe opens to avoid hypothetical naked
+  risk, suppressing profitable trades
+
+Cohort tag `_predictor_SCALPING_probe_r3_alone_1779233480`.
+
+**Verdict: R3 net negative at β=0.001.** Retune candidates:
+- β=0.01 (10× stronger gradient pressure) — would a −£100 naked
+  costing β×10,000=£100 of shaped (matching the raw cost)
+  shift the policy meaningfully? Worth a probe.
+- β=0.0001 (10× weaker) — at the limit of what PPO can
+  distinguish from noise; probably indistinguishable from E3
+  alone.
+
+R4 retune: depth floor would need to be ~£30-50 to actually
+fire on the cohort's gate. Queued for follow-on if needed.
+
+---
+
 ---
 
 ## 2026-05-19 — E3+E4 combo probe — NEGATIVE add-on
