@@ -235,6 +235,7 @@ def _compute_scalping_reward_terms(
     naked_loss_scale: float = 1.0,
     naked_variance_penalty_beta: float = 0.0,
     close_signal_bonus: float = CLOSE_SIGNAL_BONUS,
+    naked_loss_quadratic_beta: float = 0.0,
 ) -> tuple[float, float]:
     """Split a scalping race's settlement into raw and shaped terms.
 
@@ -321,7 +322,26 @@ def _compute_scalping_reward_terms(
     variance_penalty = -float(naked_variance_penalty_beta) * sum(
         p * p for p in naked_per_pair
     )
-    race_shaping = naked_winner_clip + close_bonus + variance_penalty
+    # robust-phenotype R3 (2026-05-19). Asymmetric quadratic loss
+    # penalty — applied ONLY to the loss side of naked per-pair
+    # P&L (winners untouched per
+    # plans/robust-phenotype/hard_constraints.md §3). A single
+    # −£100 naked costs beta×10,000 of shaped; ten −£10 nakeds
+    # cost beta×1,000 (10× difference even though aggregate £-loss
+    # is the same). Trains the policy to feel concentrated losses
+    # much more painfully than dispersed ones. Default 0.0 =
+    # byte-identical pre-R3. Composes with the existing symmetric
+    # ``naked_variance_penalty_beta`` (both can be set; their
+    # contributions sum).
+    quadratic_loss_penalty = -float(naked_loss_quadratic_beta) * sum(
+        min(0.0, p) ** 2 for p in naked_per_pair
+    )
+    race_shaping = (
+        naked_winner_clip
+        + close_bonus
+        + variance_penalty
+        + quadratic_loss_penalty
+    )
     return race_reward_pnl, race_shaping
 
 
@@ -840,6 +860,14 @@ class BetfairEnv(gymnasium.Env):
         # = byte-identical settle-time delivery (pre-E1 behaviour).
         # See plans/EXPERIMENTS.md "E1: per-tick close credit".
         "per_tick_close_bonus",
+        # R3 (robust-phenotype, 2026-05-19): asymmetric quadratic
+        # naked-LOSS penalty. Applied only to the loss side of
+        # naked per-pair P&L — naked winners untouched (per
+        # plans/robust-phenotype/hard_constraints.md §3). Default
+        # 0.0 = byte-identical. Composes with the symmetric
+        # naked_variance_penalty_beta (both can be set; contributions
+        # sum). Lands in the SHAPED channel.
+        "naked_loss_quadratic_beta",
         # E3 (2026-05-18): close-feasibility gate. When set (default
         # None = disabled, byte-identical), the env refuses to open
         # any pair whose projected close-cost-per-stake exceeds this
@@ -851,6 +879,16 @@ class BetfairEnv(gymnasium.Env):
         # required. See plans/EXPERIMENTS.md "E3: open-with-close-
         # feasibility gate".
         "close_feasibility_max_spread_pct",
+        # R4 (robust-phenotype, 2026-05-19): liquidity-floor open
+        # gate. Extends E3 with a depth check — refuse opens where
+        # the post-junk-filter opposite-side top level has size <
+        # threshold (£). Targets the thin-book pre-off opens that
+        # passed E3's spread check (priceable) but only against a
+        # tiny opposite-side line. Refusal increments
+        # ``opens_refused_liquidity_floor``. Default None =
+        # byte-identical. See plans/robust-phenotype/
+        # hard_constraints.md §5, §8.
+        "opposite_side_depth_floor",
         # E6 (2026-05-18): hard pair-count budget per race. When > 0,
         # the env refuses any open after ``_pairs_opened_this_race``
         # has reached this cap. Default 0 = no cap (byte-identical).
@@ -1340,6 +1378,15 @@ class BetfairEnv(gymnasium.Env):
         # Per-episode counter of opens refused by the gate (surfaces
         # on info dict). Reset at episode start.
         self._opens_refused_close_feasibility: int = 0
+        # R4 (robust-phenotype, 2026-05-19). Liquidity-floor open
+        # gate. When set (£), refuse opens where the post-junk-filter
+        # opposite-side top level's size < threshold. None = disabled
+        # = byte-identical pre-R4.
+        _r4_raw = reward_cfg.get("opposite_side_depth_floor", None)
+        self._opposite_side_depth_floor: float | None = (
+            float(_r4_raw) if _r4_raw is not None else None
+        )
+        self._opens_refused_liquidity_floor: int = 0
         # E6 (2026-05-18). Hard pair-count budget per race. 0 = no
         # cap = byte-identical.
         self._max_open_pairs_per_race: int = int(
@@ -1401,6 +1448,13 @@ class BetfairEnv(gymnasium.Env):
         # See hard_constraints.md §7-§11.
         self._naked_variance_penalty_beta: float = float(
             reward_cfg.get("naked_variance_penalty_beta", 0.0)
+        )
+        # R3 (robust-phenotype, 2026-05-19). Asymmetric loss-only
+        # quadratic naked penalty (winners untouched). Default 0.0
+        # = byte-identical. See plans/robust-phenotype/
+        # hard_constraints.md §3.
+        self._naked_loss_quadratic_beta: float = float(
+            reward_cfg.get("naked_loss_quadratic_beta", 0.0)
         )
         if not (0.0 <= self._naked_variance_penalty_beta
                 <= NAKED_VARIANCE_PENALTY_BETA_MAX):
@@ -2638,6 +2692,11 @@ class BetfairEnv(gymnasium.Env):
             "opens_refused_close_feasibility": (
                 self._opens_refused_close_feasibility
             ),
+            # R4 (robust-phenotype, 2026-05-19). Per-episode counter
+            # of opens refused by the liquidity-floor gate.
+            "opens_refused_liquidity_floor": (
+                self._opens_refused_liquidity_floor
+            ),
             # E6 (2026-05-18). Per-episode counter of opens refused
             # by the pair-count budget gate (0 cap → always 0).
             "opens_refused_pair_budget": (
@@ -2719,6 +2778,8 @@ class BetfairEnv(gymnasium.Env):
         self._step_close_bonus_pnl = 0.0
         # E3 (2026-05-18). Per-episode counter reset.
         self._opens_refused_close_feasibility = 0
+        # R4 (robust-phenotype, 2026-05-19). Per-episode counter reset.
+        self._opens_refused_liquidity_floor = 0
         # E6 (2026-05-18). Per-race live count + per-episode refusals
         # reset at episode start.
         self._pairs_opened_this_race = 0
@@ -3365,6 +3426,47 @@ class BetfairEnv(gymnasium.Env):
                                     "cancelled": did_cancel,
                                     "skipped_reason": (
                                         "close_feasibility_spread_too_wide"
+                                    ),
+                                }
+                                continue
+
+                    # R4 (robust-phenotype, 2026-05-19). Liquidity-
+                    # floor open gate. Composes with E3 (above):
+                    # check the post-junk-filter close-side top
+                    # level's SIZE; refuse if below threshold. The
+                    # depth read uses ``pick_top_level`` so the
+                    # junk-filter is applied (per hard_constraints
+                    # §5). Runs after E3's spread check so an open
+                    # has to pass BOTH gates.
+                    if (
+                        self.scalping_mode
+                        and self._opposite_side_depth_floor is not None
+                    ):
+                        ltp = runner.last_traded_price
+                        if ltp is not None and ltp > 0.0:
+                            if side == BetSide.BACK:
+                                close_lv = bm.matcher.pick_top_level(
+                                    runner.available_to_lay,
+                                    reference_price=ltp,
+                                    lower_is_better=True,
+                                )
+                            else:
+                                close_lv = bm.matcher.pick_top_level(
+                                    runner.available_to_back,
+                                    reference_price=ltp,
+                                    lower_is_better=False,
+                                )
+                            if (
+                                close_lv is None
+                                or close_lv.size < self._opposite_side_depth_floor
+                            ):
+                                self._opens_refused_liquidity_floor += 1
+                                action_debug[sid] = {
+                                    "aggressive_placed": False,
+                                    "passive_placed": False,
+                                    "cancelled": did_cancel,
+                                    "skipped_reason": (
+                                        "liquidity_floor"
                                     ),
                                 }
                                 continue
@@ -5143,6 +5245,9 @@ class BetfairEnv(gymnasium.Env):
                     self._naked_variance_penalty_beta
                 ),
                 close_signal_bonus=_settle_close_bonus,
+                naked_loss_quadratic_beta=(
+                    self._naked_loss_quadratic_beta
+                ),
             )
             shaped += race_shaping
             # Realised per-race variance-penalty contribution. Recomputed

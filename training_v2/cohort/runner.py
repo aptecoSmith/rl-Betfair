@@ -107,14 +107,40 @@ COMPOSITE_SCORE_MODE_LOCKED_PER_STD = "locked_per_std"
 # 3 in-sample-eval days), but at 10+ eval days the noise drops
 # √(10/3) ≈ 1.8× — should be enough.
 COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD = "day_pnl_per_std"
+# robust-phenotype R1 (2026-05-19). Sortino-shaped selector. The E3 full
+# cohort surfaced agents with similar mean pnl but wildly different
+# per-day spans — 571f6eda mean +£41 (worst day -£105, best +£313) vs
+# 850522b9 mean +£65 (worst -£20, best +£160). The day_pnl_per_std
+# selector treats positive and negative variance the same in the
+# denominator, so it can't distinguish the left-tail-truncated 850522b9
+# shape from the symmetric-high-variance 571f6eda shape.
+#
+# Formula (additive form per hard_constraints §4): score =
+# mean(day_pnl) - λ × downside_deviation. downside_deviation =
+# sqrt(mean(min(0, day_pnl)²)) — penalises ONLY sub-zero days.
+# Default λ = 1.0; lives as a CLI flag. Mean of positive days is
+# untouched; agents free to chase upside without selection pressure
+# capping it.
+#
+# See plans/robust-phenotype/{purpose.md, hard_constraints.md §4}.
+COMPOSITE_SCORE_MODE_SORTINO = "sortino"
 COMPOSITE_SCORE_MODES = (
     COMPOSITE_SCORE_MODE_TOTAL_REWARD,
     COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
     COMPOSITE_SCORE_MODE_TIGHT_VARIANCE,
     COMPOSITE_SCORE_MODE_LOCKED_PER_STD,
     COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD,
+    COMPOSITE_SCORE_MODE_SORTINO,
 )
 LOCKED_WEIGHTED_NAKED_COEFFICIENT = 0.25
+# robust-phenotype R1 — default penalty weight on downside deviation.
+# 1.0 = a £1 in worst-day downside cancels £1 of mean pnl. Tuneable
+# via --sortino-lambda CLI flag.
+SORTINO_DEFAULT_LAMBDA = 1.0
+# Module-level mutable so the CLI flag can override without threading
+# through every _composite_score call site. Set by the CLI handler
+# (search for ``_SORTINO_LAMBDA = ``) before run_cohort() is invoked.
+_SORTINO_LAMBDA: float = SORTINO_DEFAULT_LAMBDA
 # scalping-tight-naked-variance hard_constraints.md §5 — module-level
 # constants for grep-ability. Mirror values from the report tool
 # (``tools/build_naked_variance_report.py``).
@@ -125,7 +151,18 @@ TIGHT_VARIANCE_NAKED_COEF = 0.25
 def _composite_score(
     eval_stats, maturation_bonus_weight: float,
     composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
+    sortino_lambda: float | None = None,
 ) -> float:
+    """GA selection score. See module-level constants for modes.
+
+    ``sortino_lambda``: only consumed when
+    ``composite_score_mode == 'sortino'``. ``None`` (the default)
+    reads the module-level ``_SORTINO_LAMBDA`` (settable via the
+    ``--sortino-lambda`` CLI flag); passing an explicit value
+    overrides for direct callers (tests).
+    """
+    if sortino_lambda is None:
+        sortino_lambda = _SORTINO_LAMBDA
     """GA selection score.
 
     Two modes:
@@ -218,6 +255,30 @@ def _composite_score(
         variance = sum((x - mean) ** 2 for x in naked_daily) / (n - 1)
         naked_std = variance ** 0.5
         return float(eval_stats.day_pnl) / (1.0 + naked_std)
+    if composite_score_mode == COMPOSITE_SCORE_MODE_SORTINO:
+        # robust-phenotype R1 (2026-05-19). Sortino-shaped score:
+        # ``score = mean(day_pnl) - λ × downside_deviation`` where
+        # ``downside_deviation = sqrt(mean(min(0, day_pnl)²))``.
+        # Penalises ONLY sub-zero days; positive-day variance is free.
+        #
+        # Fallback to locked_weighted when n_eval_days < 2 — Sortino
+        # needs at least 2 days to estimate downside deviation.
+        # Matches the other Sharpe-shaped selectors' fallback contract.
+        per_day = list(getattr(eval_stats, "per_day", []) or [])
+        if len(per_day) < 2:
+            return (
+                float(eval_stats.locked_pnl)
+                + LOCKED_WEIGHTED_NAKED_COEFFICIENT
+                * float(eval_stats.naked_pnl)
+            )
+        day_pnls = [float(d.day_pnl) for d in per_day]
+        n = len(day_pnls)
+        mean = sum(day_pnls) / n
+        # Downside deviation: RMS of negative-only day_pnls. min(0, x)
+        # zeroes positive days so they contribute nothing.
+        downside_sq = sum(min(0.0, x) ** 2 for x in day_pnls) / n
+        downside_dev = downside_sq ** 0.5
+        return mean - float(sortino_lambda) * downside_dev
     n_completed = (
         int(eval_stats.arbs_completed) + int(eval_stats.arbs_closed)
     )
@@ -1181,6 +1242,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--sortino-lambda", type=float, default=SORTINO_DEFAULT_LAMBDA,
+        metavar="FLOAT",
+        help=(
+            "Penalty weight on the downside-deviation term in the "
+            "sortino composite_score_mode. Default %(default)s = a "
+            "GBP1 increase in downside_dev cancels GBP1 of mean pnl. "
+            "Only consumed when --composite-score-mode=sortino. "
+            "See plans/robust-phenotype/ for the formula."
+        ),
+    )
+    p.add_argument(
         "--maturation-bonus-weight", type=float, default=0.0,
         metavar="FLOAT",
         help=(
@@ -1403,6 +1475,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     args = _parse_args(argv if argv is not None else sys.argv[1:])
+
+    # robust-phenotype R1. Set the module-level sortino_lambda from
+    # the CLI BEFORE any _composite_score calls happen (the function
+    # reads _SORTINO_LAMBDA when its ``sortino_lambda`` param is
+    # left None). Default value preserves byte-identity when the
+    # flag is unset.
+    global _SORTINO_LAMBDA
+    _SORTINO_LAMBDA = float(args.sortino_lambda)
 
     server: WebSocketBroadcastServer | None = None
     emitter: Callable[[dict], None] | None = None

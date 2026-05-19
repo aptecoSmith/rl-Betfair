@@ -5208,3 +5208,285 @@ class TestPerPairResolutionReward:
         # The +5 must appear in cum_shaped (other shaping terms can
         # add too — assert ≥).
         assert delta >= 5.0 - 1e-6
+
+
+# ────────────────────────────────────────────────────────────────────────
+# R3 — quadratic per-pair naked-LOSS penalty (2026-05-19, robust-phenotype)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestQuadraticNakedLossPenalty:
+    """R3: asymmetric quadratic naked-LOSS penalty.
+
+    ``shaped -= β × sum(min(0, p)² for p in naked_per_pair)``.
+    Loss-only by construction; naked winners untouched.
+
+    See ``plans/robust-phenotype/hard_constraints.md §3``.
+    """
+
+    def test_default_zero_byte_identical(self):
+        """β=0 → contribution is exactly 0. Pre-R3 byte-identical."""
+        r, s = _compute_scalping_reward_terms(
+            race_pnl=20.0,
+            naked_per_pair=[100.0, -80.0],
+            n_close_signal_successes=0,
+            naked_loss_quadratic_beta=0.0,
+        )
+        # Expected (pre-R3): raw=20 (race_pnl); shaped = -95 (winner clip)
+        assert r == pytest.approx(20.0)
+        assert s == pytest.approx(-95.0)
+
+    def test_loss_only_winner_untouched(self):
+        """Winner +£100 should contribute nothing to the quadratic term
+        regardless of β. Loser −£80 contributes β × 80² = β × 6400."""
+        r, s = _compute_scalping_reward_terms(
+            race_pnl=20.0,
+            naked_per_pair=[100.0, -80.0],
+            n_close_signal_successes=0,
+            naked_loss_quadratic_beta=0.001,
+        )
+        # winner_clip = -95 (unchanged), quadratic_loss = -0.001 * 6400 = -6.4
+        assert s == pytest.approx(-95.0 - 6.4)
+
+    def test_concentrated_vs_dispersed_loss_asymmetry(self):
+        """The key property: one big naked loss costs MORE than many
+        small ones of the same total magnitude."""
+        # One -£100: quadratic = 0.001 * 10000 = -10.0
+        _, s_big = _compute_scalping_reward_terms(
+            race_pnl=-100.0,
+            naked_per_pair=[-100.0],
+            n_close_signal_successes=0,
+            naked_loss_quadratic_beta=0.001,
+        )
+        # Ten -£10: quadratic = 0.001 * 10 * 100 = -1.0
+        _, s_dispersed = _compute_scalping_reward_terms(
+            race_pnl=-100.0,
+            naked_per_pair=[-10.0] * 10,
+            n_close_signal_successes=0,
+            naked_loss_quadratic_beta=0.001,
+        )
+        # Concentrated loss is 10× more painful in shaped reward.
+        # Both have aggregate naked loss -£100, same winner_clip=0.
+        # Difference is purely the quadratic term.
+        assert s_big < s_dispersed - 8.0, (
+            f"big={s_big}, dispersed={s_dispersed}: concentrated loss "
+            "should be substantially more painful"
+        )
+
+    def test_pure_winners_have_zero_quadratic_contribution(self):
+        """No losses → quadratic term is 0 regardless of β."""
+        _, s = _compute_scalping_reward_terms(
+            race_pnl=300.0,
+            naked_per_pair=[100.0, 100.0, 100.0],
+            n_close_signal_successes=0,
+            naked_loss_quadratic_beta=1.0,  # large β; winners shouldn't care
+        )
+        # Only the winner clip matters: -0.95 * 300 = -285. No quadratic.
+        assert s == pytest.approx(-285.0)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# R4 — liquidity-floor open gate (2026-05-19, robust-phenotype)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLiquidityFloorGate:
+    """R4: refuse opens where the post-junk-filter opposite-side top
+    level has size < threshold (£).
+
+    Extends E3 (spread check). Both gates compose — an open must pass
+    BOTH to be placed.
+
+    See ``plans/robust-phenotype/hard_constraints.md §5, §8``.
+    """
+
+    def _build_env(self, scalping_config, *, opposite_side_depth_floor=None):
+        overrides = {}
+        if opposite_side_depth_floor is not None:
+            overrides["opposite_side_depth_floor"] = opposite_side_depth_floor
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            reward_overrides=overrides or None,
+        )
+        env.reset()
+        return env
+
+    def _back_action(self):
+        a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a[0] = 1.0
+        a[14] = -0.8
+        a[28] = 1.0
+        a[56] = -1.0
+        return a
+
+    def test_default_off_byte_identical(self, scalping_config):
+        env = self._build_env(scalping_config)
+        assert env._opposite_side_depth_floor is None
+        assert env._opens_refused_liquidity_floor == 0
+        env.step(self._back_action())
+        assert env._opens_refused_liquidity_floor == 0
+        assert any(b.pair_id is not None for b in env.bet_manager.bets)
+
+    def test_lenient_threshold_passes(self, scalping_config):
+        env = self._build_env(
+            scalping_config, opposite_side_depth_floor=0.01,
+        )
+        env.step(self._back_action())
+        assert env._opens_refused_liquidity_floor == 0
+        assert any(b.pair_id is not None for b in env.bet_manager.bets)
+
+    def test_strict_threshold_refuses(self, scalping_config):
+        """At a wildly high floor (£1e9), every open should be refused."""
+        env = self._build_env(
+            scalping_config, opposite_side_depth_floor=1e9,
+        )
+        env.step(self._back_action())
+        assert env._opens_refused_liquidity_floor >= 1
+        assert all(b.pair_id is None for b in env.bet_manager.bets)
+
+    def test_info_dict_exposes_counter(self, scalping_config):
+        env = self._build_env(
+            scalping_config, opposite_side_depth_floor=1e9,
+        )
+        env.step(self._back_action())
+        _, _, _, _, info = env.step(self._back_action())
+        assert "opens_refused_liquidity_floor" in info
+        assert info["opens_refused_liquidity_floor"] >= 1
+
+    def test_picks_top_level_returns_post_filter_size(self):
+        """The matcher's new ``pick_top_level`` method must apply the
+        junk filter (hard_constraints §5). A £1000 junk-priced level
+        outside the filter must be ignored even if it has the most
+        size."""
+        from env.exchange_matcher import ExchangeMatcher
+        from dataclasses import dataclass
+        @dataclass
+        class L:
+            price: float
+            size: float
+        m = ExchangeMatcher(max_price_deviation_pct=0.5)
+        # LTP=5. Junk filter: prices in [2.5, 7.5].
+        # Inside band: 5.5 with size 10.
+        # Outside band (junk): 1000.0 with size 1000.0 — must be ignored.
+        levels = [L(5.5, 10.0), L(1000.0, 1000.0)]
+        top = m.pick_top_level(
+            levels, reference_price=5.0, lower_is_better=False,
+        )
+        assert top.price == 5.5
+        assert top.size == 10.0  # post-filter, NOT the £1000 size
+
+
+# ────────────────────────────────────────────────────────────────────────
+# R1 — Sortino composite_score_mode (2026-05-19, robust-phenotype)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSortinoComposite:
+    """R1: ``mean(day_pnl) - λ × downside_dev`` where
+    ``downside_dev = sqrt(mean(min(0, day_pnl)²))``. Penalises only
+    sub-zero days.
+
+    See ``plans/robust-phenotype/hard_constraints.md §4``.
+    """
+
+    class _MockPerDay:
+        def __init__(self, day_pnl):
+            self.day_pnl = day_pnl
+
+    class _MockEval:
+        def __init__(self, per_day_pnls, locked=0.0, naked=0.0):
+            self.per_day = [
+                TestSortinoComposite._MockPerDay(p) for p in per_day_pnls
+            ]
+            self.day_pnl = sum(per_day_pnls) / max(len(per_day_pnls), 1)
+            self.locked_pnl = locked
+            self.naked_pnl = naked
+            self.total_reward = 0.0
+            self.arbs_completed = 0
+            self.arbs_closed = 0
+
+    def test_sortino_no_bad_days_no_penalty(self):
+        """All positive days → downside_dev = 0 → score = mean."""
+        from training_v2.cohort.runner import (
+            _composite_score, COMPOSITE_SCORE_MODE_SORTINO,
+        )
+        e = self._MockEval([+10, +20, +30, +40])
+        score = _composite_score(
+            e, maturation_bonus_weight=0.0,
+            composite_score_mode=COMPOSITE_SCORE_MODE_SORTINO,
+            sortino_lambda=1.0,
+        )
+        # mean = 25, downside_dev = 0 → score = 25
+        assert score == pytest.approx(25.0)
+
+    def test_sortino_penalises_only_downside(self):
+        """One -£20 day: downside_dev = sqrt(20²/4) = 10.
+        score = mean - 1*10."""
+        from training_v2.cohort.runner import (
+            _composite_score, COMPOSITE_SCORE_MODE_SORTINO,
+        )
+        e = self._MockEval([-20, +40, +40, +40])
+        # mean = 25, downside_sq = 400/4 = 100, downside_dev = 10
+        # score (λ=1) = 25 - 10 = 15
+        score = _composite_score(
+            e, maturation_bonus_weight=0.0,
+            composite_score_mode=COMPOSITE_SCORE_MODE_SORTINO,
+            sortino_lambda=1.0,
+        )
+        assert score == pytest.approx(15.0)
+
+    def test_sortino_lambda_scales_penalty(self):
+        """λ=2 doubles the downside penalty contribution."""
+        from training_v2.cohort.runner import (
+            _composite_score, COMPOSITE_SCORE_MODE_SORTINO,
+        )
+        e = self._MockEval([-20, +40, +40, +40])
+        # downside_dev = 10 → score (λ=2) = 25 - 20 = 5
+        score = _composite_score(
+            e, maturation_bonus_weight=0.0,
+            composite_score_mode=COMPOSITE_SCORE_MODE_SORTINO,
+            sortino_lambda=2.0,
+        )
+        assert score == pytest.approx(5.0)
+
+    def test_sortino_discriminates_left_tail_shapes(self):
+        """The load-bearing E3 case: 850522b9 (mean +65, worst -20)
+        vs 571f6eda (mean +41, worst -105). Sortino should rank the
+        former higher despite the latter's near-equal mean."""
+        from training_v2.cohort.runner import (
+            _composite_score, COMPOSITE_SCORE_MODE_SORTINO,
+        )
+        # Stylised 10-day reconstructions matching the cohort numbers
+        # (rough; just want the order property to hold).
+        # 850522b9: roughly +60 average with one -20 worst.
+        e_robust = self._MockEval(
+            [+60, +70, +80, +50, +90, +60, -20, +75, +85, +70]
+        )
+        # 571f6eda: high variance, big swings.
+        e_fragile = self._MockEval(
+            [+60, +313, +20, -50, +10, -70, -105, +100, +50, +80]
+        )
+        s_robust = _composite_score(
+            e_robust, 0.0, COMPOSITE_SCORE_MODE_SORTINO, sortino_lambda=1.0,
+        )
+        s_fragile = _composite_score(
+            e_fragile, 0.0, COMPOSITE_SCORE_MODE_SORTINO, sortino_lambda=1.0,
+        )
+        # Sortino reads the left tail. 850522b9 should rank higher.
+        assert s_robust > s_fragile, (
+            f"Expected robust agent ({s_robust:.1f}) to outscore "
+            f"fragile agent ({s_fragile:.1f})"
+        )
+
+    def test_sortino_falls_back_with_too_few_days(self):
+        """n_eval_days < 2 → fallback to locked_weighted formula."""
+        from training_v2.cohort.runner import (
+            _composite_score, COMPOSITE_SCORE_MODE_SORTINO,
+        )
+        e = self._MockEval([+50], locked=100.0, naked=40.0)
+        score = _composite_score(
+            e, 0.0, COMPOSITE_SCORE_MODE_SORTINO, sortino_lambda=1.0,
+        )
+        # Fallback: locked_pnl + 0.25 * naked_pnl = 100 + 10 = 110
+        assert score == pytest.approx(110.0)

@@ -154,6 +154,46 @@ class ExchangeMatcher:
 
     # ── Public API ──────────────────────────────────────────────────
 
+    def pick_top_level(
+        self,
+        levels: Iterable[PriceLevel],
+        reference_price: float,
+        lower_is_better: bool,
+        *,
+        force_close: bool = False,
+    ) -> "PriceLevel | None":
+        """Return the best post-filter ``PriceLevel`` (price + size).
+
+        Mirrors :meth:`pick_top_price` but returns the full level so
+        callers can inspect both price AND size. Used by R4
+        (robust-phenotype, 2026-05-19) — the liquidity-floor open
+        gate refuses opens when the post-junk-filter top level's
+        ``size`` is below threshold. Returning the level rather than
+        re-filtering in the caller keeps the junk-filter contract in
+        ONE place (hard_constraints §5 of robust-phenotype).
+        """
+        lst = list(levels)
+        if not lst:
+            return None
+        valid = [lv for lv in lst if lv.price > 0.0 and lv.size > 0.0]
+        if not valid:
+            return None
+        if force_close:
+            filtered = valid
+        else:
+            if reference_price is None or reference_price <= 0.0:
+                return None
+            lo = reference_price * (1.0 - self.max_price_deviation_pct)
+            hi = reference_price * (1.0 + self.max_price_deviation_pct)
+            filtered = [lv for lv in valid if lo <= lv.price <= hi]
+        if not filtered:
+            return None
+        return (
+            min(filtered, key=lambda lv: lv.price)
+            if lower_is_better
+            else max(filtered, key=lambda lv: lv.price)
+        )
+
     def pick_top_price(
         self,
         levels: Iterable[PriceLevel],
