@@ -1011,3 +1011,150 @@ bite, the curriculum need is reduced. Skipping for now per
 
 ---
 
+## 2026-05-19 — R1: Sortino-style composite selector [QUEUED]
+
+**Intention.** E3 full cohort (in-flight as of writing) surfaced
+agents with similar mean pnl but wildly different per-day spans —
+top-pnl 571f6eda had worst day −£105 / best +£313 (span £418)
+while top-pnl 850522b9 had worst −£20 / best +£160 (span £180).
+The `day_pnl_per_std` selector treats positive and negative
+variance the same in the denominator, so it can't distinguish
+850522b9's left-tail-truncated shape from 571f6eda's symmetric
+high-variance shape.
+
+R1 replaces the denominator with downside-deviation
+(`sqrt(mean(min(0, day_pnl)²))`) — penalises ONLY sub-zero days.
+Re-ranks the population to surface the bounded-worst-day
+phenotype the user wants for deployment.
+
+**Implementation brief.** _Pending._ New
+`composite_score_mode=sortino` branch in
+`training_v2/cohort/runner.py::_score_one_agent`. Additive form
+(`mean - λ × downside_dev`) for numerical stability per
+`plans/robust-phenotype/hard_constraints.md §4`. Pure selection
+change; doesn't touch reward or env.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-19 — R2: worst-day floor selector [QUEUED]
+
+**Intention.** Hard-quadratic alternative to R1's Sortino — a
+selector that's flat above the worst-day threshold and
+quadratically punishing below it. Cleaner ranking signal than
+Sortino under small eval-window noise (Sortino's denominator can
+swing on 1-2 bad days when n_eval_days is small).
+
+`composite = mean(pnl) − λ × max(0, −X − worst_day)²` where X
+defaults to £30. Above the floor, score = mean(pnl); below, the
+penalty grows quadratically with the breach.
+
+**Implementation brief.** _Pending._ New
+`composite_score_mode=worst_day_floor` branch. Two CLI knobs:
+`--worst-day-floor` (default −30.0) and
+`--worst-day-floor-lambda` (default 1.0).
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-19 — R3: quadratic per-pair naked-loss penalty [QUEUED]
+
+**Intention.** Reward-side intervention that makes the agent's
+PPO gradient feel concentrated naked losses much more painfully
+than dispersed ones. A −£100 single-pair naked costs β×10,000;
+ten −£10 nakeds cost β×1,000 — 10× difference even though
+aggregate £-loss is the same. Trains the policy to avoid the
+trades that produce the deep worst-days in the E3 cohort.
+
+Replaces the existing symmetric `naked_variance_penalty_beta`
+with a loss-only quadratic form. Naked WINNERS untouched (the
+existing `naked_winner_clip` already neutralises 95% of them per
+`plans/naked-clip-and-stability`).
+
+**Implementation brief.** _Pending._ New reward-override
+`naked_loss_quadratic_beta` (default 0.0 = byte-identical). Lands
+in shaped channel per `plans/robust-phenotype/hard_constraints.md
+§2`. Formula:
+`shaped -= β × sum(min(0, p)² for p in naked_per_pair)`.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-19 — R4: liquidity-floor open gate [QUEUED]
+
+**Intention.** Extends E3 (close-feasibility spread gate) with a
+ladder-depth check. Most of the −£80 to −£125 worst days in the
+E3 cohort came from thin pre-off books where the projected close
+was technically priceable (passed E3's 5% spread gate) but only
+against a £5 sitting opposite — once gone, the next level was
+junk-far. R4 adds a depth check that complements the spread
+check.
+
+Refuse opens when post-junk-filter opposite-side ladder depth at
+top level < £X. New refusal counter
+`opens_refused_liquidity_floor`.
+
+**Implementation brief.** _Pending._ New env kwarg
+`opposite_side_depth_floor` (default None = disabled). Read
+post-junk-filter via the existing matcher accessors per
+`hard_constraints.md §5`. Refusal in same code path as E3 (after
+joint-budget, before placement). Adds the depth check AFTER E3's
+spread check so they compose cleanly when both engaged.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-19 — R5: velocity-aware open mask [QUEUED]
+
+**Intention.** When recent LTP velocity is high on a runner, the
+market is moving — scalp opens are likely to drift adversely
+before maturation. Reading the existing `ltp_velocity_30` feature
+(already in the obs slice; no new feature engineering), mask
+OPEN_BACK / OPEN_LAY actions for that runner when velocity
+exceeds threshold Y.
+
+Queued as follow-on if R1+R3+R4 leaves residual fragility on the
+worst-day metric.
+
+**Implementation brief.** _Pending._ New env kwarg
+`open_mask_max_ltp_velocity` (default None). In `_process_action`
+aggressive path, check the current tick's
+`runner.ltp_velocity_30` (computed by feature_engineer.py); if
+above threshold, refuse the open. Counter
+`opens_refused_velocity_mask`.
+
+**Result.** _Pending._
+
+---
+
+## 2026-05-19 — R1+R3+R4 combined probe [QUEUED]
+
+**Intention.** Test all three angles simultaneously at probe
+scale (5×7d, ~2h GPU). The three mechanisms are clearly
+non-overlapping (selection × reward × env-side), so attribution
+is clean: a bite tells us the combination works without needing
+to disentangle.
+
+Composes with E3's `close_feasibility_max_spread_pct=0.05` —
+this run stacks four mechanisms total (E3 + R1 + R3 + R4) and is
+the prime candidate for full-cohort escalation if it bites.
+
+**Implementation brief.** _Pending._ Probe launcher
+`C:\tmp\probe_r1r3r4_robust_phenotype.ps1`. Combines:
+- `--composite-score-mode sortino` (R1)
+- `--reward-overrides naked_loss_quadratic_beta=0.001
+  opposite_side_depth_floor=10.0
+  close_feasibility_max_spread_pct=0.05
+  force_close_before_off_seconds=120`
+
+Cohort tag prefix `_predictor_SCALPING_probe_r1r3r4_*`.
+
+**Result.** _Pending._
+
+---
+
+
