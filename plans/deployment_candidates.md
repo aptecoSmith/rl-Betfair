@@ -21,6 +21,14 @@ worst-naked-day breach < −£40.
 **Best single agent in the pool.** Held-up cleanly on BOTH fc
 settings with minimal naked dependence.
 
+**Note on cohort provenance**: 1df49aa0 is a **gen 1** agent —
+trained BEFORE Sortino's selection started affecting breeding
+(selection only diverges from `day_pnl_per_std` at gen 2). The
+agent wasn't *shaped* by Sortino; it was *found* by the Sortino
+cohort's scoreboard. Its in-sample stats nearly match E3
+cohort's cea2ee94 (also gen 1) but they're separate weights —
+they diverge on held-out reeval.
+
 - **In-sample**: pnl +£65/d, span £270, worst day −£23,
   naked_worst −£76
 - **Held-out fc=120**: **+£63/d** (regressed only −£2),
