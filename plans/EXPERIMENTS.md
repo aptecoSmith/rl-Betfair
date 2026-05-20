@@ -1531,6 +1531,70 @@ probe** — R4's mechanism is real but the bandwidth where it
 helps without over-clipping is narrow, and R3's mechanism (at
 β=0.01) showed more promising probe-scale per-agent dynamics.
 
+### R3-extra (β=0.05) — plateau, β=0.01 confirmed optimum
+
+5/5 finished 2026-05-20 05:11. **R3 has a clear sweet spot:**
+
+| β | pnl mean | locked | per-agent range | best | worst |
+|---:|---:|---:|---:|---:|---:|
+| 0.001 | +£29 | +£111 | −£38 to +£64 | +£64 | −£38 |
+| **0.01** | **+£42** | **+£113** | −£25 to +£76 | +£76 | −£25 |
+| 0.05 | +£36 | +£115 | −£27 to +£61 | +£61 | −£27 |
+
+**Locked floor monotonically lifts with β.** The penalty IS
+reliably pushing PPO toward more reliable scalping — every
+order-of-magnitude bump in β added ~£2 to locked. But upside
+caps as β grows (peak +£76 → +£61). β=0.01 is the optimum
+trade-off at probe scale; β=0.05 over-constrains.
+
+Cohort tag `_predictor_SCALPING_probe_r3_extra_1779253511`.
+
+Per-agent R3 extra: +£48, +£51, **−£27**, +£61, +£49. One naked
+tail still got through (naked −£48 → day −£27) — the gradient
+isn't strong enough to fully kill the tail even at β=0.05.
+
+**R3 verdict: real mechanism, sweet spot at β=0.01, probe-scale
+mean improvement bounded by upside-response variance.** The
+per-agent dynamics (locked floor lift, worst-day truncation,
+high-variance upside response) are EXACTLY what the
+robust-phenotype plan predicted — they just need GA breeding
+to amplify. **The natural full-cohort test is R3 β=0.01 +
+Sortino selector** (Sortino selects for the bounded-worst-day
+phenotype R3 produces).
+
+---
+
+## 2026-05-20 — Probe chain complete; attribution table
+
+After 19 probes, the attribution of stacked-on-E3 mechanisms is
+clear:
+
+| Add-on | Mechanism | Net pnl Δ vs E3 | Verdict |
+|---|---|---:|---|
+| R1 (Sortino) | selector | **inactive at probe** | Needs full cohort to fire |
+| R3 β=0.001 | reward — quadratic naked-loss | −£30 | Too weak |
+| **R3 β=0.01** | reward — quadratic naked-loss | **−£17** | **Sweet spot; promising mechanism dynamics** |
+| R3 β=0.05 | reward — quadratic naked-loss | −£23 | Plateaus / over-constrains |
+| R4 £10 | env — depth floor | ±£0 | Inert |
+| R4 £30 | env — depth floor | −£23 | Over-aggressive |
+| R3 β=0.001 + R4 £10 | combined | −£30 | Identical to R3-alone (R4 inert) |
+| E4 combo (inv + stop_loss) | action + env | −£25 | stop_loss subtractor |
+| E4b stop_loss alone | env | −£23 | Confirms stop_loss is the load-bearing subtractor |
+
+**E3 alone is the local optimum at probe scale.** Every close-
+side / naked-side add-on tested has net-subtracted. R3 at
+β=0.01 produces high-variance per-agent responses with the
+right shape (locked up, worst-day truncated) — the cleanest
+candidate for GA-scale amplification.
+
+**Next moves:**
+1. **E3 + Sortino full cohort** (R1 isolation per user's ask)
+   — auto-firing next, ~28h.
+2. **Flagged for after Sortino cohort: E3 + R3 β=0.01 + Sortino
+   full cohort** — the most natural next-tier test if R3's
+   probe-scale dynamics compound under GA selection. Not auto-
+   queued; needs user decision after Sortino-only completes.
+
 ---
 
 
