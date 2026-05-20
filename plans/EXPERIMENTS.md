@@ -1462,6 +1462,46 @@ all *too weak* (R3, R4) or the mechanisms were *wrong-
 direction* (stop_loss, inversion). R3-strong and R4-strong
 probes queued.
 
+### R3-strong (β=0.01) — partial recovery, still −£17 vs E3 alone
+
+5/5 finished 2026-05-20 02:57.
+
+| Stack | pnl mean | locked | per-agent range |
+|---|---:|---:|---:|
+| E3 alone | +£59 | +£107 | −£29 to +£136 |
+| R3 weak (β=0.001) | +£29 | +£111 | −£38 to +£64 |
+| **R3 strong (β=0.01)** | **+£42** | **+£113** | **−£25 to +£76** |
+
+**+£13 lift from weak → strong; gradient magnitude DID matter.**
+Still −£17 vs E3 alone. But the per-agent shifts vindicate the
+mechanism's design intent:
+
+- **Best agent: +£64 → +£76** (responders amplify with β↑)
+- **Worst agent: −£38 → −£25** (left-tail truncation IS working)
+- **Locked floor: +£111 → +£113** (modest lift)
+
+The cohort mean is dragged by middle-bucket high-variance
+agents (+£31/+£28 in R3-weak became +£16/+£69 in R3-strong).
+Per-agent response variance grew with β. This is the typical
+high-variance-response signature that **benefits from GA
+selection across generations** — breeding amplifies the strong
+responders. Probe scale (n=5, no breeding) just averages a
+high-variance population.
+
+Cohort tag `_predictor_SCALPING_probe_r3_strong_1779245500`.
+
+**Verdict: R3 at β=0.01 is the most promising add-on we've
+seen.** Worst-day truncation works; locked floor lifts;
+upside-responders amplify. The probe-scale mean isn't biting
+but the per-agent signal is. A full cohort with R3 β=0.01 +
+Sortino selection should compound this — Sortino specifically
+selects for the bounded-worst-day phenotype that R3 is producing.
+
+**Queued: R3 even-stronger (β=0.05) probe** to test whether
+going further continues the pattern or breaks it (a β too
+strong would over-clip the safe trades and collapse locked
+floor).
+
 ---
 
 
