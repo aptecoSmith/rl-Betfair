@@ -16,18 +16,39 @@ worst-naked-day breach < −£40.
 
 ## Tier 1 — primary deployment pool
 
-### ⭐ 1df49aa0 (Sortino cohort, gen 1) — the CLEAN-NAKED EARNER ⭐
+### ⭐ cea2ee94 / 1df49aa0 (gen 1 — SAME AGENT, two IDs) ⭐
 
-**Best single agent in the pool.** Held-up cleanly on BOTH fc
-settings with minimal naked dependence.
+**CRITICAL: these are the same agent under different uuids.**
+Deep compare (2026-05-20) confirmed:
+- Identical eval stats to 12 decimal places (eval_day_pnl
+  65.11172469282474 exactly equal in both cohorts' scoreboards)
+- Identical hyperparameters/genes
+- Different md5 hashes ONLY because the .pt file stores
+  agent_id metadata inline
 
-**Note on cohort provenance**: 1df49aa0 is a **gen 1** agent —
-trained BEFORE Sortino's selection started affecting breeding
-(selection only diverges from `day_pnl_per_std` at gen 2). The
-agent wasn't *shaped* by Sortino; it was *found* by the Sortino
-cohort's scoreboard. Its in-sample stats nearly match E3
-cohort's cea2ee94 (also gen 1) but they're separate weights —
-they diverge on held-out reeval.
+The reason: both cohorts used `--seed 42`, identical gates,
+identical training data. Gen 1 agents were bred from gen 0
+top performers; the two selectors (day_pnl_per_std and
+sortino) ranked gen 0 the SAME WAY at this particular sample
+of agents → bred identical parents → produced identical
+gen 1 offspring. Selection only meaningfully diverges from
+gen 2 onwards.
+
+**Held-out reeval numbers differ slightly** (cea2ee94 +£72 vs
+1df49aa0 +£63 on fc=120) but only because reeval uses
+stochastic action sampling (Categorical/Beta heads), and the
+per-agent RNG seed is derived from the agent uuid. Same
+weights + different RNG = different bet sequences = different
+P&L. **The shape is the same; the noise is sampling-only.**
+
+**Deploy ONE of them** (recommend cea2ee94 — higher reeval
+numbers from happier RNG; or use `--argmax-eval` for a
+deterministic comparison). Deploying both is duplicate
+exposure, NOT diversification.
+
+Combined held-out shape (averaging across both RNG samples):
+- fc=120: ~+£68/d, naked ~+£3
+- fc=0:   ~+£168/d, naked ~+£63 (high-upside; partly tailwind)
 
 - **In-sample**: pnl +£65/d, span £270, worst day −£23,
   naked_worst −£76
@@ -69,20 +90,11 @@ they diverge on held-out reeval.
 
 ## Tier 2 — secondary / higher-variance picks
 
-### cea2ee94 (E3 cohort, gen 1) — the HIGH-UPSIDE PICK
+### cea2ee94 — see ⭐ entry above (merged with 1df49aa0)
 
-- **In-sample**: pnl +£65/d, span £270, worst −£23, naked_worst
-  −£76
-- **Held-out fc=120**: +£72/d (held up cleanly)
-- **Held-out fc=0**: **+£215/d**, naked +£115 (large positive
-  tailwind contribution)
-- **Shape**: locked +£114 (strong), naked +£9 on fc=120, naked
-  +£115 on fc=0
-- **Why deploy with caveat**: highest upside of any candidate,
-  but the fc=0 win has significant naked-tailwind contribution.
-  Add to the pool for absolute pnl chase, but size smaller than
-  Tier 1 — the +£115 naked is luckier than the +£2 to +£30
-  range of Tier 1 candidates.
+This was previously listed separately. Subsequent deep compare
+(2026-05-20) showed cea2ee94 ≡ 1df49aa0 are the same agent
+with different uuids — see the Tier 1 ⭐ entry.
 
 ### 850522b9 (E3 cohort, gen 2) — the IN-SAMPLE GOLD that REGRESSED
 
