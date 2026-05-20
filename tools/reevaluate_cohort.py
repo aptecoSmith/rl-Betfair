@@ -162,6 +162,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "activate force-close-at-T-N on already-trained agents."
         ),
     )
+    p.add_argument(
+        "--starting-budget", type=float, default=None,
+        metavar="GBP",
+        help=(
+            "Override the env's per-race starting_budget (default reads "
+            "from config.yaml: 100.0). Lets you reeval trained agents at "
+            "different capital allocations to test scale invariance / "
+            "minimum viable deployment budget. The agent observes "
+            "budget as a FRACTION of starting_budget so behaviour is "
+            "approximately scale-invariant above the MIN_BET_STAKE=£2 "
+            "floor (~2 %% of trained £100 budget; binds harder at lower "
+            "budgets). See plans/EXPLORATIONS.md for the budget-sweep "
+            "design rationale."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -257,6 +272,21 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = scalping_train_config()
     starting_budget = float(cfg["training"]["starting_budget"])
+    # Budget-sweep support (2026-05-20): operator can override the
+    # env's starting_budget per reeval to test scale invariance and
+    # minimum viable deployment budget. Default None reads from
+    # config.yaml (typically £100). Logged loudly so the JSONL
+    # caller knows which budget produced its row.
+    if args.starting_budget is not None:
+        override_budget = float(args.starting_budget)
+        logger.info(
+            "starting_budget overridden: config=£%.2f -> CLI=£%.2f "
+            "(budget-sweep mode; MIN_BET_STAKE=£2 becomes %.1f%% of "
+            "budget — invariance breaks if this exceeds ~5%%)",
+            starting_budget, override_budget,
+            (2.0 / override_budget) * 100.0,
+        )
+        starting_budget = override_budget
     cfg["training"]["starting_budget"] = starting_budget
     max_runners = int(cfg["training"]["max_runners"])
     if args.strategy_mode is not None:
