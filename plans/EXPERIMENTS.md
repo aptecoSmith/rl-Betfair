@@ -1597,4 +1597,47 @@ candidate for GA-scale amplification.
 
 ---
 
+## 2026-05-20 — E3+Sortino full cohort — RETIRED selector
+
+**Cohort tag** `_predictor_SCALPING_e3_sortino_cohort_1779257540`.
+Stopped at gen 3 (48/96 agents) when in-sample mean dropped to
++£8/d (vs E3 cohort gen 3 +£16/d) — Sortino was breeding
+weaker-upside lineages. Held-out reeval on top-5 by deployable
+composite confirmed Sortino loses to `day_pnl_per_std`:
+
+**Held-out 7-day forward window (2026-05-07..05-13):**
+
+| Cell | Sortino mean | E3 cohort mean | Δ |
+|---|---:|---:|---:|
+| fc=120 | +£48.6/d | +£55.4/d | −£7 |
+| **fc=0** | **+£51.9/d** | **+£96.7/d** | **−£45** |
+
+**The fc=0 gap is the story.** Sortino penalises downside-
+variance, so the GA breeds agents that open fewer/safer pairs.
+Fewer pairs = fewer naked-win opportunities = lower fc=0 cash.
+At fc=120 the naked tail is bounded by force-close, so the
+selector's downside-aversion bites less (-£7). At fc=0 where
+the naked tailwind drives wins (E3 cohort's cea2ee94 hit +£215
+on fc=0 vs +£72 on fc=120), Sortino's prevention costs us
+heavily.
+
+**One Sortino agent worth keeping: 1df49aa0** (gen 1):
+- fc=120: +£63/d, naked **−£3** (cleanest tailwind dependence)
+- fc=0: +£121/d, naked **+£11**
+
+This is the locked-floor-driven shape the robust-phenotype plan
+was hunting for. Added to `plans/deployment_candidates.md`
+Tier 1 alongside E3 cohort's 11099f65 and 57a42db5.
+
+**Sortino selector retired.** The current best selector is
+`day_pnl_per_std` (the E3 cohort's choice).
+
+**Next: E3+R3 β=0.01 full cohort** — R3's probe-scale dynamics
+(locked-floor lift + worst-day truncation + high-variance upside
+response) should compound under GA breeding with the proven
+`day_pnl_per_std` selector. ~28h GPU. Budget-sweep on existing
+deploy candidates running in parallel on CPU.
+
+---
+
 

@@ -16,6 +16,25 @@ worst-naked-day breach < −£40.
 
 ## Tier 1 — primary deployment pool
 
+### ⭐ 1df49aa0 (Sortino cohort, gen 1) — the CLEAN-NAKED EARNER ⭐
+
+**Best single agent in the pool.** Held-up cleanly on BOTH fc
+settings with minimal naked dependence.
+
+- **In-sample**: pnl +£65/d, span £270, worst day −£23,
+  naked_worst −£76
+- **Held-out fc=120**: **+£63/d** (regressed only −£2),
+  locked +£123, naked **−£3**
+- **Held-out fc=0**: **+£121/d**, locked +£119, naked **+£11**
+- **Shape**: locked +£123 (highest of any deploy candidate),
+  naked near-zero on both fc settings. Held-out is essentially
+  pure locked-floor.
+- **Why deploy first**: cleanest tailwind-independent shape in
+  the entire deploy pool. Locked floor doing virtually all the
+  work; the +£63 on fc=120 holds up to a live audit because the
+  naked is bench-flat. The agent you'd put in front of a
+  compliance reviewer.
+
 ### 11099f65 (E3 cohort, gen 2) — the CONSISTENT EARNER
 
 - **In-sample**: pnl +£32/d, **span only £96** (tightest in cohort),
@@ -39,20 +58,6 @@ worst-naked-day breach < −£40.
 - **Why deploy**: paired with 11099f65 these are the
   "850522b9-shape" robust agents the plan was hunting for. Run
   both as a diversified pair.
-
-### 1df49aa0 (Sortino cohort, gen 1) — the CLEAN-NAKED EARNER
-
-- **In-sample**: pnl +£65/d, span £270, worst day −£23,
-  naked_worst −£76
-- **Held-out fc=120**: **+£63/d** (regressed only −£2)
-- **Held-out fc=0**: TBD (fc=0 reeval pending as of writing)
-- **Shape**: locked +£123 (highest of any deploy candidate),
-  naked −£3 on held-out (lowest tailwind-dependence of any
-  candidate). Held-out shape is virtually pure locked-floor.
-- **Why deploy**: cleanest single-agent shape in the deploy
-  pool. Locked floor doing essentially all the work; almost
-  zero naked dependence on held-out. The agent that would
-  bench-test the cleanest in a live-trading audit.
 
 ## Tier 2 — secondary / higher-variance picks
 
