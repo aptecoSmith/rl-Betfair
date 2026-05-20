@@ -1331,6 +1331,38 @@ fire on the cohort's gate. Queued for follow-on if needed.
 
 ---
 
+## 2026-05-19/20 — R4 alone (ablation) — INERT at £10
+
+**Intention.** Confirm R4's inertness by running it alone (no R3).
+Predicted to match E3 alone exactly if R4 at depth_floor=£10
+never fires.
+
+**Result.** **IDENTICAL to E3 alone, agent-by-agent:**
+
+| Agent | E3 alone pnl | R4 alone pnl |
+|---|---:|---:|
+| 1 | +£72 | **+£72** |
+| 2 | +£86 | **+£86** |
+| 3 | −£29 | **−£29** |
+| 4 | +£136 | **+£136** |
+| 5 | +£32 | **+£32** |
+| **mean** | **+£59.4** | **+£59.4** |
+
+Locked, fc_n, fc_£, cl_n, bets — every metric matches. R4 at
+depth_floor=£10 is a complete no-op on the cohort's gate config
+(raceconf + pwin gates + lay_price_max). Cohort tag
+`_predictor_SCALPING_probe_r4_alone_1779237489`.
+
+**Verdict: R4 needs retuning to bind.** Floor at £10 too lenient;
+opposite-side top-level size routinely exceeds it on the
+admitted races. Strong-variant probe at floor=£30 queued
+(`C:\tmp\probe_r4_strong.ps1`) — if it bites the depth-floor
+mechanism is real but underweight here; if it ALSO matches E3
+alone, the mechanism is structurally inactive on this gate
+config and we'd need much higher floors (£100+) to fire at all.
+
+---
+
 ---
 
 ## 2026-05-19 — E3+E4 combo probe — NEGATIVE add-on
