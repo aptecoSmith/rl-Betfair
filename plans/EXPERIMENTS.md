@@ -1502,6 +1502,35 @@ going further continues the pattern or breaks it (a β too
 strong would over-clip the safe trades and collapse locked
 floor).
 
+### R4-strong (floor=£30) — over-aggressive
+
+5/5 finished 2026-05-20 04:04.
+
+| Stack | pnl mean | locked | bets | fc_n | fc_£ |
+|---|---:|---:|---:|---:|---:|
+| E3 alone | +£59 | +£107 | 147 | 35 | −£56 |
+| R4 weak (£10) | +£59 | +£107 | 147 | 35 | −£56 (inert) |
+| **R4 strong (£30)** | **+£36** | **+£71** | **101** | **27.5** | **−£43** |
+
+Per-agent: −£26, **+£137**, −£7, +£3, +£72. The +£137 agent
+caught a +£105 naked tailwind. Strip that outlier and the
+remaining 4 average +£10.5 — clearly worse than E3.
+
+Cohort tag `_predictor_SCALPING_probe_r4_strong_1779249521`.
+
+**Mechanism diagnosis:** £30 floor refuses ~30 % of opens (bets
+147 → 101). Catches some bad opens (fc cost down £13/d) but
+also a lot of profitable opens (locked floor crashed £36/d).
+The cohort's raceconf + pwin 0.20/0.40 gate already restricts to
+relatively-liquid races; a £30 floor is over-aggressive — many
+profitable scalps happen against £15-25 books.
+
+Sweet-spot floor for R4 (if any) is between £10 (inert) and
+£30 (over-aggressive). Probably £15-20. **Not worth another
+probe** — R4's mechanism is real but the bandwidth where it
+helps without over-clipping is narrow, and R3's mechanism (at
+β=0.01) showed more promising probe-scale per-agent dynamics.
+
 ---
 
 
