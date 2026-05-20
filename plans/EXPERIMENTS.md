@@ -1417,6 +1417,51 @@ the inversion or the stop_loss was the load-bearing subtractor;
 useful intelligence but lower priority than the R1+R3+R4
 probe.
 
+### E4b ablation (stop_loss alone, no inversion) — confirms stop_loss is the subtractor
+
+5/5 finished 2026-05-20 01:50.
+
+| Stack | pnl mean | Δ vs E3 alone |
+|---|---:|---:|
+| E3 alone | +£59 | baseline |
+| E3 + E4 (inversion + stop_loss) | +£34 | −£25 |
+| **E3 + stop_loss alone (E4b)** | **+£36** | **−£23** |
+
+E4b matches E4 combo to within £2. **The stop_loss IS the load-
+bearing subtractor; inversion alone was roughly neutral or
+marginally helpful.** Cohort tag
+`_predictor_SCALPING_probe_e4b_stoploss_only_1779241480`.
+
+**Mechanism diagnosis:** `cl_n` dropped from baseline 9 to 4.7
+(vs E3's 6.1). The stop_loss closes ~4 pairs/race that the
+agent's `close_signal` would have managed itself, AT WORSE
+PRICES — stop_loss fires once MTM has drifted 10% against the
+pair, by which point the cost-to-close is higher than the
+agent's optimal earlier exit. Earlier-but-bigger losses instead
+of later-but-smaller losses.
+
+Also: stop_loss can auto-close pairs that would naturally have
+matured profitably (the 10% MTM drift was a temporary mid-race
+swing; the price recovers and the pair completes positively).
+Stop_loss kills those by force-closing prematurely.
+
+**Combined attribution: ALL three add-on stacks tested net-
+subtract from E3 alone:**
+
+| Add-on | Mechanism class | Δ vs E3 |
+|---|---|---:|
+| R3 β=0.001 | reward (quadratic naked-loss) | −£30 |
+| R4 floor=£10 | env (depth gate) | ±£0 (inert) |
+| E4 inv + stop_loss | env+action (close-side) | −£25 |
+| stop_loss alone | env (close-side) | −£23 |
+
+E3 alone is a strong local optimum; every close-side or
+naked-side mechanism tested adds net negative at probe scale.
+The remaining hypothesis to test is that the magnitudes were
+all *too weak* (R3, R4) or the mechanisms were *wrong-
+direction* (stop_loss, inversion). R3-strong and R4-strong
+probes queued.
+
 ---
 
 
