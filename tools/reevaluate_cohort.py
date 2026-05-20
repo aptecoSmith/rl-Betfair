@@ -196,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     from training_v2.cohort.worker import (
         EvalSummary,
         _build_env_for_day,
+        _build_eval_bet_records,
         _build_per_agent_reward_overrides,
         _build_per_agent_scalping_overrides,
         _eval_rollout_stats,
@@ -203,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         scalping_train_config,
     )
     from training_v2.discrete_ppo.rollout import RolloutCollector
+    from registry.model_store import ModelStore
 
     cohort_dir: Path = args.cohort_dir
     if not cohort_dir.exists():
@@ -213,6 +215,17 @@ def main(argv: list[str] | None = None) -> int:
     weights_dir = cohort_dir / "weights"
     if not weights_dir.exists():
         raise SystemExit(f"{weights_dir} not found")
+
+    # 2026-05-20: ALWAYS capture per-bet records to parquet during
+    # reeval. This is deployment-critical behavioural data: what did
+    # the agent back/lay, when, for how much, and how did it resolve.
+    # Files land at cohort_dir/bet_logs/reeval_<output_stem>/<agent_id>/<date>.parquet
+    # via the model_store helper.
+    bet_log_store = ModelStore(
+        db_path=cohort_dir / "models.db",
+        weights_dir=weights_dir,
+        bet_logs_dir=cohort_dir / "bet_logs",
+    )
 
     eval_days: list[str] = list(args.eval_days)
     for ed in eval_days:
@@ -429,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
 
             # Eval each day
             per_day_summaries: list[EvalSummary] = []
+            per_day_peaks: list[dict] = []
             for ed in eval_days:
                 eval_t0 = time.perf_counter()
                 try:
@@ -464,6 +478,41 @@ def main(argv: list[str] | None = None) -> int:
                     last_info=eval_collector.last_info,
                     action_space=eval_shim.action_space,
                 )
+
+                # 2026-05-20: capture per-bet records to parquet.
+                # Run-id namespaces this reeval's logs from any
+                # in-sample bet_logs that may exist alongside.
+                run_id = f"reeval_{output_path.stem}_{agent_id}"
+                try:
+                    bet_records = _build_eval_bet_records(
+                        env=eval_shim.env,
+                        day=eval_shim.env.day,
+                        starting_budget=float(
+                            eval_shim.env.starting_budget
+                        ),
+                    )
+                    for r in bet_records:
+                        r.run_id = run_id
+                    if bet_records:
+                        bet_log_store.write_bet_logs_parquet(
+                            run_id=run_id, date=ed, records=bet_records,
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "%s [%s]: bet-log capture failed (%s)",
+                        agent_id[:12], ed, e,
+                    )
+
+                # 2026-05-20: read peak deployment-economics metrics
+                # from the env's per-step trackers (set during
+                # rollout, surfaced on info dict).
+                last_info = eval_collector.last_info or {}
+                peak_liability_day = float(
+                    last_info.get("peak_open_liability", 0.0)
+                )
+                peak_drawdown_day = float(
+                    last_info.get("peak_drawdown_from_high", 0.0)
+                )
                 per_day_summaries.append(EvalSummary(
                     eval_day=ed,
                     total_reward=partial.total_reward,
@@ -490,6 +539,14 @@ def main(argv: list[str] | None = None) -> int:
                     stop_closed_pnl=partial.stop_closed_pnl,
                     wall_time_sec=time.perf_counter() - eval_t0,
                 ))
+                # Parallel tracking of deployment-economics peaks
+                # per day (kept outside EvalSummary to avoid touching
+                # the dataclass schema).
+                per_day_peaks.append({
+                    "eval_day": ed,
+                    "peak_open_liability": peak_liability_day,
+                    "peak_drawdown_from_high": peak_drawdown_day,
+                })
                 logger.info(
                     "[%d/%d] %s [%s] reward=%+.2f pnl=%+.2f bets=%d "
                     "arbs=%d/%d locked=%+.2f naked=%+.2f wall=%.1fs",
@@ -537,6 +594,31 @@ def main(argv: list[str] | None = None) -> int:
                 "reeval_stop_closed_pnl": agg.stop_closed_pnl,
                 "reeval_maturation_rate": mat_rate,
                 "reeval_mode": "argmax" if args.argmax_eval else "stochastic",
+                # 2026-05-20 deployment-economics telemetry.
+                # peak_open_liability: max reserved capital observed
+                # at any tick during the day (= what bank must
+                # cover for ONE concurrent race; multiply by typical
+                # race-clock concurrency for total bank estimate).
+                # peak_drawdown_from_high: worst trough from running
+                # high-water mark of day_pnl (bank also covers this).
+                # Aggregates: max across the eval window.
+                "reeval_peak_open_liability_max": max(
+                    (p["peak_open_liability"] for p in per_day_peaks),
+                    default=0.0,
+                ),
+                "reeval_peak_drawdown_from_high_max": max(
+                    (p["peak_drawdown_from_high"] for p in per_day_peaks),
+                    default=0.0,
+                ),
+                "reeval_peak_open_liability_mean": (
+                    sum(p["peak_open_liability"] for p in per_day_peaks)
+                    / len(per_day_peaks)
+                ) if per_day_peaks else 0.0,
+                "reeval_peak_drawdown_from_high_mean": (
+                    sum(p["peak_drawdown_from_high"] for p in per_day_peaks)
+                    / len(per_day_peaks)
+                ) if per_day_peaks else 0.0,
+                "reeval_per_day_peaks": per_day_peaks,
                 # Per-day breakdown for variance inspection
                 "reeval_per_day": [
                     {

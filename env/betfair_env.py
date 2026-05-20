@@ -2850,6 +2850,20 @@ class BetfairEnv(gymnasium.Env):
         # reflection-symmetry proof of zero-mean shaping holds.
         self._day_pnl_peak = 0.0
         self._day_pnl_trough = 0.0
+        # Deployment-economics telemetry (2026-05-20). Tracks peak
+        # capital reservation observed at any tick during the
+        # episode. Lets the operator estimate the BANK requirement
+        # (≠ per-race budget) needed to fund the strategy in live
+        # trading. Set unconditionally — overhead is one float
+        # comparison per step.
+        self._peak_open_liability: float = 0.0
+        self._peak_naked_exposure: float = 0.0
+        # Worst trough below the running peak of day_pnl. Captures
+        # the largest drawdown the agent experiences within a day
+        # — bank must cover this PLUS the peak open_liability to
+        # avoid going broke mid-day. Computed as
+        # max(day_pnl_peak - day_pnl) over the day.
+        self._peak_drawdown_from_high: float = 0.0
         # P1c runtime windowed history — reset to empty at episode start.
         self._windowed_history = {}
         self._prev_total_matched_rt = {}
@@ -3103,6 +3117,27 @@ class BetfairEnv(gymnasium.Env):
             reward += self._step_per_pair_pnl
             self._cum_shaped_reward += self._step_per_pair_pnl
 
+        # Deployment-economics telemetry (2026-05-20). Update peak
+        # open_liability and peak naked exposure trackers EVERY tick
+        # — these accumulate across the episode and surface on info
+        # at episode end. Cheap (3 float comparisons per step) so
+        # always-on. ``bm.open_liability`` represents currently-
+        # reserved capital from open passive orders and matched lay
+        # legs; naked exposure is the worst-case £-loss across all
+        # unhedged pairs (computed via bm.get_naked_per_pair_pnls).
+        if self.bet_manager is not None:
+            cur_liab = float(self.bet_manager.open_liability)
+            if cur_liab > self._peak_open_liability:
+                self._peak_open_liability = cur_liab
+            # Day-pnl peak/trough — also tracked here unconditionally
+            # for telemetry (the drawdown-shaping path tracks them
+            # separately, gated on weight>0).
+            if self._day_pnl > self._day_pnl_peak:
+                self._day_pnl_peak = self._day_pnl
+            cur_dd = self._day_pnl_peak - self._day_pnl
+            if cur_dd > self._peak_drawdown_from_high:
+                self._peak_drawdown_from_high = cur_dd
+
         obs = self._get_obs() if not terminated else self._terminal_obs()
         info = self._get_info()
         info["mtm_delta"] = float(mtm_delta)
@@ -3114,6 +3149,9 @@ class BetfairEnv(gymnasium.Env):
         info["mtm_asymmetry_active"] = bool(self._mtm_asymmetry_active)
         info["mtm_weight_loss"] = float(self._mark_to_market_weight_loss)
         info["mtm_weight_gain"] = float(self._mark_to_market_weight_gain)
+        # Deployment-economics telemetry on info dict (2026-05-20).
+        info["peak_open_liability"] = float(self._peak_open_liability)
+        info["peak_drawdown_from_high"] = float(self._peak_drawdown_from_high)
         return obs, reward, terminated, False, info
 
     # ── P1c runtime windowed history ──────────────────────────────────────
