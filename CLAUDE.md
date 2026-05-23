@@ -189,6 +189,42 @@ rejected — each of those independently caused the phantom-profit bug.
 
 ---
 
+## CLOSE_SIGNAL_BONUS halved 1.0 → 0.5 (2026-05-23)
+
+`env/betfair_env.py::CLOSE_SIGNAL_BONUS` reduced from 1.0 to 0.5.
+The constant is the shaped reward credited per `close_signal`
+success — a positive nudge added on top of the close leg's
+realised cash P&L to give close_signal a learning gradient even
+when its cash impact is near-zero.
+
+The £1 default was tuned when pairs locked £5-£10 cash each (old
+fixed-20-tick design pre 2026-05-23 redesigns). Under the
+price-adaptive arb_spread + equal-profit floor fix, tight-target
+agents (target_lock_pct=0.005-0.015) lock £0.05-£0.50 per pair.
+At those magnitudes a £1 bonus per close was **5-10× the actual
+cash signal**, over-rewarding close_signal vs natural maturation.
+Halving brings the bonus closer to the per-pair cash scale while
+preserving the positive-gradient property; if still dominant we
+can drop further or zero entirely.
+
+Concretely for a typical observed agent: 22 closes/day × £1
+= +£22/day shaped (pre-fix) vs cash-impact ~£2-£10. Post-fix:
+22 closes × £0.5 = +£11/day shaped — same order of magnitude as
+the cash signal.
+
+**Scoreboard comparability.** Reward-scale change. Post-2026-05-23
+runs are NOT directly comparable to earlier runs on `shaped_bonus`
+or `total_reward` magnitudes; `raw_pnl_reward` is unchanged.
+Operator can pin via `--reward-overrides close_signal_bonus=N` at
+runtime if they want to compare against the old default or test a
+different value.
+
+Load-bearing regression guards in `tests/test_forced_arbitrage.py::
+TestScalpingReward` — all the close-bonus assertions were updated
+to the new 0.5 default in the same commit.
+
+---
+
 ## Price-adaptive arb_spread (2026-05-23)
 
 The per-pair tick offset between the aggressive leg and its

@@ -132,23 +132,36 @@ def _format(
             f"{nprof}/{len(rs):>9} {ml:>+12.0f} {mnk:>+11.0f} {mfc:>+12.0f} {mb:>10.0f}"
         )
 
-    # Top-10 by eval_day_pnl
+    # Top-10 by eval_day_pnl.
+    # ``mat%`` = natural-maturation rate (passive hit at original target).
+    # ``cls%`` = agent close_signal rate (mid-race bail by the agent).
+    # The remainder of opened pairs is force_closed + naked. Pre-2026-05-23
+    # this table had a single ``mr`` column showing (matured + closed) /
+    # opened — easily mistaken for the natural-maturation rate but
+    # dominated in practice by close_signal closes. Splitting the two
+    # makes the design property of the price-adaptive arb_spread visible:
+    # tight target_lock_pct agents should show mat% rising, profit-seeker
+    # agents should show mat% small but cls% high.
     ranked = sorted(rows, key=lambda r: -r.get("eval_day_pnl", 0))
     out.append("")
     out.append("Top-10 agents by eval_day_pnl:")
-    out.append(f"  {'agent':<10} {'gen':>4} {'pnl':>8} {'locked':>8} {'naked':>8} {'bets':>5} {'mr':>5}")
+    out.append(
+        f"  {'agent':<10} {'gen':>4} {'pnl':>8} {'locked':>8} {'naked':>8} "
+        f"{'bets':>5} {'mat%':>5} {'cls%':>5}"
+    )
     for r in ranked[:10]:
         opened = r.get("eval_pairs_opened", 0)
         comp = r.get("eval_arbs_completed", 0)
         clos = r.get("eval_arbs_closed", 0)
-        mr = (comp + clos) / opened if opened > 0 else 0
+        mat_pct = 100.0 * comp / opened if opened > 0 else 0.0
+        cls_pct = 100.0 * clos / opened if opened > 0 else 0.0
         out.append(
             f"  {r['agent_id'][:8]:<10} {r.get('generation', 0):>4} "
             f"{r.get('eval_day_pnl', 0):>+8.0f} "
             f"{r.get('eval_locked_pnl', 0):>+8.0f} "
             f"{r.get('eval_naked_pnl', 0):>+8.0f} "
             f"{r.get('eval_bet_count', 0):>5} "
-            f"{mr:>5.3f}"
+            f"{mat_pct:>5.1f} {cls_pct:>5.1f}"
         )
     out.append("")
     out.append("Bottom-3 agents by eval_day_pnl:")
@@ -156,14 +169,15 @@ def _format(
         opened = r.get("eval_pairs_opened", 0)
         comp = r.get("eval_arbs_completed", 0)
         clos = r.get("eval_arbs_closed", 0)
-        mr = (comp + clos) / opened if opened > 0 else 0
+        mat_pct = 100.0 * comp / opened if opened > 0 else 0.0
+        cls_pct = 100.0 * clos / opened if opened > 0 else 0.0
         out.append(
             f"  {r['agent_id'][:8]:<10} {r.get('generation', 0):>4} "
             f"{r.get('eval_day_pnl', 0):>+8.0f} "
             f"{r.get('eval_locked_pnl', 0):>+8.0f} "
             f"{r.get('eval_naked_pnl', 0):>+8.0f} "
             f"{r.get('eval_bet_count', 0):>5} "
-            f"{mr:>5.3f}"
+            f"{mat_pct:>5.1f} {cls_pct:>5.1f}"
         )
 
     # Per-agent naked range across the in-sample-eval days. "Range"

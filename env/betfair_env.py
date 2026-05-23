@@ -169,7 +169,21 @@ MAX_ARB_TICKS: int = 25
 # of the raw per-race cash P&L. See hard_constraints §5 and §6 and
 # ``plans/naked-clip-and-stability/purpose.md`` for the motivation.
 NAKED_WINNER_CLIP_FRACTION: float = 0.95
-CLOSE_SIGNAL_BONUS: float = 1.0
+# Halved 1.0 → 0.5 on 2026-05-23 as part of
+# plans/force_close_and_arb_spread/. The original £1 bonus per
+# close_signal success was tuned when pairs locked £5-£10 cash each
+# (CLOSE_SIGNAL_BONUS was an exploration nudge on top of a meaningful
+# cash signal). Under the price-adaptive arb_spread design, tight-
+# target agents lock £0.05-£0.50 per pair, and the £1 bonus was
+# 5-10× the actual cash signal per close — over-rewarding close_signal
+# and dampening the natural-maturation incentive. Halving brings the
+# bonus closer to the cash magnitude while preserving the positive
+# gradient property. If still too dominant we can drop further or
+# zero entirely. Cohort runs at this default are NOT directly
+# comparable to pre-2026-05-23 runs on shaped_bonus magnitudes (raw
+# P&L is unchanged). Reward-scale change. Operator can pin via
+# --reward-overrides close_signal_bonus=N at runtime.
+CLOSE_SIGNAL_BONUS: float = 0.5
 
 # scalping-tight-naked-variance Phase 2A (2026-05-15). L2 per-pair
 # naked-pnl variance penalty applied in the SHAPED channel only —
