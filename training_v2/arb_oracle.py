@@ -212,8 +212,14 @@ def scan_day(
                     continue
 
                 # ── Step 8: confirmed profitable ─────────────────────────────
+                # The oracle scans back-first scalps (agg back, passive lay).
+                # Equal-profit sizing matters here: a leg labelled
+                # "profitable" must remain profitable under the env's
+                # actual placement formula, not the legacy equal-exposure
+                # form. See plans/force_close_and_arb_spread/ 2026-05-23.
                 expected_locked_pnl = locked_pnl_per_unit_stake(
-                    back_price, lay_price, commission
+                    back_price, lay_price, commission,
+                    aggressive_side="back",
                 )
                 if expected_locked_pnl <= 0.0:
                     continue

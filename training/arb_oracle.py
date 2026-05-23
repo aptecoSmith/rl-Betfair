@@ -169,8 +169,11 @@ def scan_day(
                     continue
 
                 # ── Step 8: confirmed profitable ─────────────────────────────
+                # v1 oracle, back-first scalps. Equal-profit sizing per
+                # 2026-05-23 plans/force_close_and_arb_spread/ fix.
                 expected_locked_pnl = locked_pnl_per_unit_stake(
-                    back_price, lay_price, commission
+                    back_price, lay_price, commission,
+                    aggressive_side="back",
                 )
                 if expected_locked_pnl <= 0.0:
                     # Sanity guard — should be positive by construction.

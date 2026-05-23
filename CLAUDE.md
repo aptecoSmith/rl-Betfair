@@ -275,6 +275,78 @@ See `plans/force_close_and_arb_spread/findings.md` (empirical
 motivation) and the operator conversation in the same plan
 folder for the gene-vs-flag decision rationale.
 
+### Floor function uses equal-profit sizing (2026-05-23 fix)
+
+`min_arb_ticks_for_profit` and its underlying
+`locked_pnl_per_unit_stake` previously used the legacy EQUAL-EXPOSURE
+sizing rule (`S_pass = S_agg × P_agg / P_pass`) while the env's
+actual placement path uses EQUAL-PROFIT (see "Equal-profit pair
+sizing" below). This mismatch made the floor 2-5× larger than the
+real commission breakeven at typical scalping prices, which fed
+into the price-adaptive arb_spread formula and pushed passives much
+wider than they needed to be.
+
+The operator's "back £10 at 12.0, lay £11.51 at 10.0 → locks +£0.93
+both outcomes" case (a 4-tick scalp at price 12) exposed the
+discrepancy — the floor function had been claiming this trade was
+catastrophically -£1.35 per £1 stake (equal-exposure) when the env
+actually placed it at +£0.09 per £1 stake (equal-profit). See
+`plans/force_close_and_arb_spread/` and the operator chat log.
+
+Corrected `locked_pnl_per_unit_stake(back_price, lay_price, c,
+aggressive_side="back")`:
+
+- Uses `equal_profit_lay_stake` / `equal_profit_back_stake` per side.
+- New required `aggressive_side` parameter (defaults to `"back"` for
+  back-compat) because under equal-profit the per-aggressive-stake
+  locked value is NOT symmetric in (P_back, P_lay) — back-first at
+  P_b=12/P_l=10 locks +£0.093/£1 of back stake; lay-first at the
+  same prices locks +£0.081/£1 of lay stake.
+- At `c=0` the equal-profit formula collapses to the legacy
+  equal-exposure formula (no change at zero commission).
+
+Corrected floor table at c=5%:
+
+| agg back | TRUE floor (ticks) | target lay | % move needed | was (legacy) |
+|---:|---:|---:|---:|---:|
+| 1.20 | 2 | 1.18 | 1.7 % | 7 |
+| 2.00 | 10 | 1.90 | 5.0 % | 11 |
+| 4.20 | 5 | 3.85 | 8.3 % | 10 |
+| 6.00 | 5 | 5.50 | 8.3 % | 12 |
+| 10.00 | 5 | 9.00 | 10.0 % | 16 |
+| 12.00 | 3 | 10.50 | 12.5 % | 16 |
+| 15.00 | 3 | 13.50 | 10.0 % | 16 |
+| 20.00 | 4 | 18.00 | 10.0 % | 20 |
+
+The corrected story: % price move needed to clear commission is
+roughly constant ~5-15 % across the whole scalping ladder, not
+ballooning with price. Scalping high-odds horses IS viable; the
+back-price-max env-prior idea I floated earlier is wrong.
+
+**Scoreboard comparability — additional caveat.** Runs after this
+fix are NOT comparable to runs between the initial 2026-05-23
+price-adaptive landing and this fix on the same day. The first
+arb_headroom probe (`cohort_1779539571`, 1 agent completed) used
+the buggy floor and was killed before completion for this reason.
+Compare against runs at or after the fix commit only.
+
+Load-bearing regression guards in
+`tests/test_scalping_math.py::TestLockedPnlEqualProfit`:
+
+- `test_operator_worked_example_back_12_lay_10` — operator's case
+  must lock +£0.093/£1 (not -£0.35 from the legacy formula).
+- `test_floor_at_back_12_is_few_ticks_not_sixteen` — floor at
+  price 12 must be ≤ 5 ticks (was 16 under legacy).
+- `test_back_vs_lay_aggressive_side_not_symmetric` — under
+  equal-profit, `back_first != lay_first` for the same price pair.
+- `test_floor_pct_move_roughly_constant_across_price_ladder` —
+  the corrected "~5-15% across ladder" property.
+
+Three downstream call sites updated to pass `aggressive_side`:
+`env/betfair_env.py::_attempt_requote` (feasibility check),
+`training_v2/arb_oracle.py` (oracle label generation),
+`training/arb_oracle.py` (v1 oracle).
+
 ---
 
 ## Equal-profit pair sizing (scalping)

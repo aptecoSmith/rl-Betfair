@@ -4011,9 +4011,14 @@ class BetfairEnv(gymnasium.Env):
         # hedge survives.
         if agg_bet.side is BetSide.BACK:
             b_price, l_price = agg_bet.average_price, new_price
+            agg_side_str = "back"
         else:
             b_price, l_price = new_price, agg_bet.average_price
-        if locked_pnl_per_unit_stake(b_price, l_price, self._commission) <= 0.0:
+            agg_side_str = "lay"
+        if locked_pnl_per_unit_stake(
+            b_price, l_price, self._commission,
+            aggressive_side=agg_side_str,  # type: ignore[arg-type]
+        ) <= 0.0:
             _mark(requote_attempted=True, requote_failed=True,
                   requote_reason="commission_infeasible")
             return

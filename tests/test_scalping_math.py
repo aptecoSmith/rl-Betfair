@@ -116,13 +116,18 @@ class TestMinArbTicksForProfit:
                 )
 
     def test_returns_none_when_unscalpable(self):
-        """At c=15% and P=10.00 the price is effectively unscalpable
-        within the default 25-tick search."""
+        """At very high commission and short search depth the function
+        eventually returns None. Pre-2026-05-23 the threshold was
+        c=15%/P=10/max=25, but the equal-profit fix made many former
+        "unscalpable" cases actually scalpable — see CLAUDE.md
+        "Price-adaptive arb_spread (2026-05-23)" for the formula
+        change. Updated guard: c=30% at P=15 within 5 ticks.
+        """
         floor = min_arb_ticks_for_profit(
-            aggressive_price=10.00,
+            aggressive_price=15.00,
             aggressive_side="back",
-            commission=0.15,
-            max_ticks=25,
+            commission=0.30,
+            max_ticks=5,
         )
         assert floor is None
 
@@ -253,6 +258,129 @@ class TestEqualProfitSizing:
             equal_profit_lay_stake(10.0, 4.0, 0.05, 0.05)
         with pytest.raises(ValueError):
             equal_profit_lay_stake(10.0, 4.0, 0.04, 0.05)
+
+
+# -- equal-profit locked_pnl + floor (2026-05-23 fix) ---------------------
+
+
+class TestLockedPnlEqualProfit:
+    """Regression tests for the 2026-05-23 fix: locked_pnl_per_unit_stake
+    + min_arb_ticks_for_profit now use the EQUAL-PROFIT sizing the env
+    actually places at, not the legacy EQUAL-EXPOSURE form. See
+    CLAUDE.md "Price-adaptive arb_spread (2026-05-23)" and
+    plans/force_close_and_arb_spread/ for the empirical motivation.
+
+    Load-bearing: a regression here means the floor is back to
+    over-stating, the price-adaptive formula targets passives much
+    too wide, and natural fill rates collapse.
+    """
+
+    def test_operator_worked_example_back_12_lay_10(self):
+        """The case that exposed the bug: back £1 at 12.0, equal-profit
+        lay at 10.0, c=5%, locks +£0.0907 per £1 back stake. Pre-fix
+        (equal-exposure) returned -£0.35 — wrong by sign as well as
+        magnitude.
+        """
+        locked = locked_pnl_per_unit_stake(
+            back_price=12.0, lay_price=10.0, commission=0.05,
+            aggressive_side="back",
+        )
+        # Manual calculation from equal_profit_lay_stake:
+        # S_lay = (12*0.95 + 0.05) / (10 - 0.05) = 11.45 / 9.95 = 1.15076
+        # lose = -1 + 1.15076 * 0.95 = +0.09322  (and win equals lose by
+        # construction, modulo float rounding).
+        assert locked == pytest.approx(0.09322, abs=1e-4)
+        assert locked > 0  # vs legacy -0.35
+
+    def test_floor_at_back_12_is_few_ticks_not_sixteen(self):
+        """At price 12 with c=5%, the equal-profit floor is just 3 ticks
+        (target lay @10.50). The legacy formula returned 16. The whole
+        force_close_and_arb_spread analysis turned on this difference.
+        """
+        floor = min_arb_ticks_for_profit(12.0, "back", 0.05)
+        assert floor is not None
+        assert floor <= 5, (
+            f"floor at back 12 should be ~3 ticks under equal-profit, "
+            f"got {floor} — formula has reverted to equal-exposure"
+        )
+
+    def test_back_vs_lay_aggressive_side_not_symmetric(self):
+        """Under equal-profit sizing, the per-aggressive-stake locked
+        value depends on which leg carries the unit stake. The legacy
+        formula was symmetric in (P_back, P_lay) — verifying that
+        symmetry would mean the fix has been reverted."""
+        back_first = locked_pnl_per_unit_stake(
+            12.0, 10.0, 0.05, aggressive_side="back",
+        )
+        lay_first = locked_pnl_per_unit_stake(
+            12.0, 10.0, 0.05, aggressive_side="lay",
+        )
+        assert back_first != pytest.approx(lay_first, abs=1e-4)
+        # Both still profitable (equal-profit means both outcomes
+        # equal — sign of the lock is the same per side):
+        assert back_first > 0
+        assert lay_first > 0
+
+    def test_aggressive_side_default_is_back(self):
+        """Backward-compatibility default: callers that don't pass
+        ``aggressive_side`` get back-first behaviour. Important for
+        existing call sites that haven't been updated."""
+        explicit = locked_pnl_per_unit_stake(
+            5.0, 4.5, 0.05, aggressive_side="back",
+        )
+        default = locked_pnl_per_unit_stake(5.0, 4.5, 0.05)
+        assert default == pytest.approx(explicit, abs=1e-9)
+
+    def test_locked_matches_equal_profit_lay_stake_manual(self):
+        """End-to-end consistency: the locked value reported by
+        locked_pnl_per_unit_stake must match what you'd compute by
+        hand using equal_profit_lay_stake at the same prices."""
+        P_b, P_l, c = 4.40, 3.80, 0.05
+        # Reference: directly compute via equal_profit_lay_stake.
+        S_l = equal_profit_lay_stake(
+            back_stake=1.0, back_price=P_b, lay_price=P_l, commission=c,
+        )
+        ref_win = (P_b - 1) * (1 - c) - S_l * (P_l - 1)
+        ref_lose = -1.0 + S_l * (1 - c)
+        ref_locked = min(ref_win, ref_lose)
+        # The function under test.
+        actual = locked_pnl_per_unit_stake(
+            P_b, P_l, c, aggressive_side="back",
+        )
+        assert actual == pytest.approx(ref_locked, abs=1e-9)
+
+    def test_zero_commission_collapses_to_legacy_formula(self):
+        """At c=0 the equal-profit lay stake is S_back × P_back / P_lay
+        (same as legacy equal-exposure), so the locked value collapses
+        to ``P_back/P_lay - 1`` per back-first unit stake. The pre-fix
+        test in TestLockedPnlPerUnitStake covers this — keep it intact
+        as the cross-check that c=0 is the unique commission level
+        where the two formulas agree."""
+        locked = locked_pnl_per_unit_stake(
+            4.00, 3.95, 0.0, aggressive_side="back",
+        )
+        expected = (4.00 / 3.95) - 1.0  # 0.01266
+        assert abs(locked - expected) < 1e-9
+
+    def test_floor_pct_move_roughly_constant_across_price_ladder(self):
+        """A sanity-check for the corrected story: under equal-profit
+        sizing the % price move needed to clear the commission floor
+        is roughly constant ~6-15 % across the scalping price range.
+        Under the legacy formula it ballooned with price.
+
+        Allows wider band than the canonical 10 % to absorb
+        ladder-discretisation quirks at band boundaries.
+        """
+        from env.tick_ladder import tick_offset
+        for price in (2.00, 4.00, 6.00, 10.00, 12.00):
+            floor = min_arb_ticks_for_profit(price, "back", 0.05)
+            assert floor is not None, f"price {price} should be scalpable"
+            target = tick_offset(price, floor, -1)
+            pct_move = (price - target) / price
+            assert 0.01 <= pct_move <= 0.20, (
+                f"price {price}: floor={floor} target={target} pct={pct_move:.3f} "
+                f"outside expected ~6-15% band"
+            )
 
 
 # -- solve_lay_price_for_target_pnl / solve_back_price_for_target_pnl ----
