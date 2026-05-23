@@ -854,6 +854,15 @@ class BetfairEnv(gymnasium.Env):
         # into a flat per-race penalty.
         "matured_arb_expected_random",
         "matured_arb_bonus_cap",
+        # naked-variance Phase 2A (2026-05-15) L2 per-pair penalty
+        # coefficient. Already read from reward_cfg.get(...) by the env
+        # and flows through _PHASE5_GENES_VIA_REWARD_OVERRIDES, but was
+        # never whitelisted — so any --enable-gene
+        # naked_variance_penalty_beta or --reward-overrides value was
+        # silently dropped (the gene has been effectively inert for any
+        # cohort that tried to use it). Added 2026-05-23 during the
+        # same audit that caught matured_arb_expected_random.
+        "naked_variance_penalty_beta",
         # Arb-curriculum Session 03 (2026-04-19): per-pair loss-side
         # scalar on naked cash flows. Whitelisted so the generation-level
         # annealed effective scale flows through as a per-agent override.

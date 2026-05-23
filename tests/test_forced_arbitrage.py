@@ -5779,3 +5779,63 @@ class TestPriceAdaptiveArbSpread:
                 f"target {target} — formula's overshoot is excessive"
             )
 
+
+class TestRewardOverridesWhitelistCovers_RewardCfgReads:
+    """Regression guard for the recurring whitelist-out-of-sync bug.
+
+    Every key the env reads via ``reward_cfg.get(...)`` in its
+    constructor MUST appear in ``BetfairEnv._REWARD_OVERRIDE_KEYS``;
+    otherwise ``--reward-overrides KEY=VALUE`` is silently dropped at
+    config merge time (the unknown-key debug log fires, the override
+    has zero effect on the env's reward shape).
+
+    This class of bug bit twice on 2026-05-23: first
+    ``matured_arb_expected_random``, then ``naked_variance_penalty_beta``.
+    Both had been read by the env for weeks (months for the latter)
+    but any cohort that tried to override them got no effect.
+
+    The test parses env/betfair_env.py source for ``reward_cfg.get(...)``
+    string-literal keys and asserts each one is whitelisted. Source-
+    text parsing (vs. exercising at runtime) catches keys gated behind
+    conditionals that wouldn't fire under a test env config.
+    """
+
+    def test_every_reward_cfg_get_key_is_whitelisted(self):
+        import re
+        from pathlib import Path
+        env_src = (
+            Path(__file__).resolve().parents[1]
+            / "env" / "betfair_env.py"
+        ).read_text(encoding="utf-8")
+        # Match ``reward_cfg.get("KEY", ...)`` and
+        # ``reward_cfg.get(\n            "KEY", ...)`` — keys are
+        # always quoted with " or '. The ``[\s\S]`` form spans newlines
+        # because re.MULTILINE/. doesn't cover ``.`` across \n by default.
+        pattern = re.compile(
+            r"reward_cfg\.get\s*\(\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']"
+        )
+        keys_read = set(pattern.findall(env_src))
+        # Also pick up multi-line .get(\n    "key"... cases
+        pattern_ml = re.compile(
+            r"reward_cfg\.get\s*\(\s*\n\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']"
+        )
+        keys_read |= set(pattern_ml.findall(env_src))
+        # Direct reward_cfg[key] reads (no .get) — these REQUIRE the
+        # key, fall back to config.yaml default, so they're not really
+        # "overridable" the same way — but include them anyway so the
+        # whitelist mention is just documentation.
+        pattern_direct = re.compile(
+            r'reward_cfg\[[\"\']([A-Za-z_][A-Za-z0-9_]*)[\"\']]'
+        )
+        keys_read |= set(pattern_direct.findall(env_src))
+
+        whitelist = BetfairEnv._REWARD_OVERRIDE_KEYS
+        missing = keys_read - whitelist
+        assert not missing, (
+            f"env/betfair_env.py reads reward_cfg.get() / reward_cfg[] "
+            f"for keys that are NOT in BetfairEnv._REWARD_OVERRIDE_KEYS "
+            f"— overrides for these keys are silently dropped at the "
+            f"config-merge unknown-keys log. Add them to the whitelist:\n"
+            f"  {sorted(missing)}"
+        )
+
