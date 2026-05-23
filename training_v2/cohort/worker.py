@@ -88,10 +88,9 @@ __all__ = [
 
 
 # Phase 5 (2026-05-03): genes that flow through the env's
-# ``reward_overrides`` passthrough. ``arb_spread_scale`` lives in
-# ``scalping_overrides`` instead (handled separately below); ``alpha_lr``
-# is trainer-only and not currently consumed by either path (the v2
-# trainer doesn't yet accept an alpha_lr hyperparameter — see
+# ``reward_overrides`` passthrough. ``alpha_lr`` is trainer-only and
+# not currently consumed by either path (the v2 trainer doesn't yet
+# accept an alpha_lr hyperparameter — see
 # plans/rewrite/phase-5-restore-genes/session_prompts/02_*.md
 # §"Stop conditions"; the gene is still recorded on the CohortGenes
 # row so future trainer support can read it without a schema bump).
@@ -111,12 +110,12 @@ _PHASE5_GENES_VIA_REWARD_OVERRIDES: frozenset[str] = frozenset({
 })
 
 _PHASE5_GENES_VIA_SCALPING_OVERRIDES: frozenset[str] = frozenset({
-    "arb_spread_scale",
-    # Price-adaptive arb_spread (2026-05-23, plans/force_close_and_arb_spread/).
-    # Always active in the env when scalping_mode=True; gene-evolved when
-    # opted in via --enable-gene arb_spread_headroom_ticks, otherwise
-    # pinned to the cohort-wide default (PHASE5_GENE_DEFAULTS["arb_spread_headroom_ticks"]=2.0).
-    "arb_spread_headroom_ticks",
+    # Price-adaptive arb_spread, redesigned 2026-05-23
+    # (plans/force_close_and_arb_spread/). Always active in the env
+    # when scalping_mode=True; gene-evolved when opted in via
+    # --enable-gene arb_spread_target_lock_pct, otherwise pinned to
+    # the cohort-wide default 0.02 (2% lock per pair).
+    "arb_spread_target_lock_pct",
 })
 
 # Phase 7 Session 02 (2026-05-04). The three auxiliary-head loss
@@ -618,8 +617,8 @@ def _build_per_agent_scalping_overrides(
 ) -> dict | None:
     """Build the per-agent ``scalping_overrides`` dict from gene values.
 
-    Currently only ``arb_spread_scale`` lives in scalping_overrides;
-    other Phase 5 genes flow via ``reward_overrides``.
+    Currently only ``arb_spread_target_lock_pct`` lives in
+    scalping_overrides; other Phase 5 genes flow via ``reward_overrides``.
     """
     out: dict = {}
     for name in _PHASE5_GENES_VIA_SCALPING_OVERRIDES:
@@ -903,8 +902,7 @@ def train_one_agent(
     bc_pretrain_steps_override: int | None = None,
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
-    arb_spread_scale_override: float | None = None,
-    arb_spread_headroom_ticks_override: float | None = None,
+    arb_spread_target_lock_pct_override: float | None = None,
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
@@ -1008,22 +1006,14 @@ def train_one_agent(
         genes=genes,
         enabled_set=enabled_set,
     )
-    # Cohort-wide pin for arb_spread_scale wins over the gene/enable
-    # path. The runner's CLI guard rejects --arb-spread-scale combined
-    # with --enable-gene arb_spread_scale, so we don't need to merge.
-    if arb_spread_scale_override is not None:
+    # Cohort-wide pin for arb_spread_target_lock_pct wins over the
+    # gene/enable path. The runner's CLI guard rejects
+    # --arb-spread-target-lock-pct combined with --enable-gene
+    # arb_spread_target_lock_pct (one source of truth per knob).
+    if arb_spread_target_lock_pct_override is not None:
         per_agent_scalping_overrides = dict(per_agent_scalping_overrides or {})
-        per_agent_scalping_overrides["arb_spread_scale"] = float(
-            arb_spread_scale_override,
-        )
-    # Cohort-wide pin for arb_spread_headroom_ticks wins over the gene/
-    # enable path (mirrors arb_spread_scale_override above). The runner's
-    # CLI guard rejects --arb-spread-headroom-ticks combined with
-    # --enable-gene arb_spread_headroom_ticks.
-    if arb_spread_headroom_ticks_override is not None:
-        per_agent_scalping_overrides = dict(per_agent_scalping_overrides or {})
-        per_agent_scalping_overrides["arb_spread_headroom_ticks"] = float(
-            arb_spread_headroom_ticks_override,
+        per_agent_scalping_overrides["arb_spread_target_lock_pct"] = float(
+            arb_spread_target_lock_pct_override,
         )
     # Phase 7 Session 02 (Path A). Pre-merge any reward_overrides for
     # trainer-side keys into the per-agent hp dict so the trainer's

@@ -192,18 +192,29 @@ rejected — each of those independently caused the phantom-profit bug.
 ## Price-adaptive arb_spread (2026-05-23)
 
 The per-pair tick offset between the aggressive leg and its
-auto-paired passive is computed from the commission floor + a
-per-agent headroom gene, NOT from any policy action. Formula in
-`env/betfair_env.py::_process_action` (open path) and
+auto-paired passive is computed from a single per-agent gene
+expressing the agent's TARGET LOCKED-PROFIT FRACTION, NOT from
+any policy action. The env passes the gene through to
+`min_arb_ticks_for_profit` as its `profit_floor` argument.
+Formula in `env/betfair_env.py::_process_action` (open path) and
 `_attempt_requote` (re-quote path):
 
-    floor      = min_arb_ticks_for_profit(agg_price, side, commission,
-                                           max_ticks=MAX_ARB_TICKS)
-    if floor is None: refuse pair (commission_infeasible)
-    raw_ticks  = (floor + arb_spread_headroom_ticks) * arb_spread_scale
-    arb_ticks  = clip(round(raw_ticks), MIN_ARB_TICKS=1, MAX_ARB_TICKS=25)
+    arb_ticks = min_arb_ticks_for_profit(
+        agg_price, side, commission,
+        profit_floor=arb_spread_target_lock_pct,
+        max_ticks=MAX_ARB_TICKS,
+    )
+    if arb_ticks is None: refuse pair (commission_infeasible)
+    arb_ticks = clip(arb_ticks, MIN_ARB_TICKS=1, MAX_ARB_TICKS=25)
 
-Pre-plan behaviour was: policy emits a per-runner `arb_spread`
+`min_arb_ticks_for_profit` walks the Betfair tick ladder from
+`agg_price` and returns the smallest tick offset whose
+equal-profit-sized scalp locks at least `profit_floor` per £1
+aggressive stake. So if the gene = 0.02 (the default), the env
+finds the tightest tick offset whose pair would lock ≥ 2 % of
+aggressive stake.
+
+Pre-plan behaviour: policy emits a per-runner `arb_spread`
 action dim ∈ [-1, 1]; env maps it through `frac=(raw+1)/2;
 ticks = MIN + frac*(MAX-MIN)` (so default-shim raw of ~0.583 →
 20 ticks for v2, where the shim hardcodes the input); the
@@ -214,23 +225,30 @@ typical scalping prices was far outside what the market actually
 traded inside the `[open, T-force_close_before_off_seconds]`
 window.
 
-Two genes are now genuinely orthogonal:
+**The phenotype handle (operator framing).** One gene replaces
+the prior `arb_spread_headroom_ticks` + `arb_spread_scale` pair
+(both retired earlier the same day):
 
-* `arb_spread_headroom_ticks` ∈ [0.0, 10.0] uniform (Phase 5,
-  cohort-wide default 2.0) — additive ticks above the commission
-  floor. 0 = "just clear breakeven, maximum fill probability,
-  minimum locked profit"; 10 ≈ "approximately the old fixed
-  target at mid prices".
-* `arb_spread_scale` ∈ [0.5, 2.0] uniform (Phase 5, default 1.0)
-  — multiplicative scalar on the formula output. Same semantics
-  as pre-plan.
+* `arb_spread_target_lock_pct` ∈ [0.005, 0.05] uniform (Phase 5,
+  cohort-wide default 0.02 = 2 %).
+  - **0.005 (0.5 %)** — "fill-seeker" phenotype: tight passives,
+    high fill rate, tiny locked profit per pair.
+  - **0.02 (2 %)** — balanced default.
+  - **0.05 (5 %)** — "profit-seeker" phenotype: wide passives,
+    lower fill rate, big lock per pair when they do fill.
+
+The same gene value produces roughly the same locked-% lock
+regardless of price (different tick counts at different prices,
+constant fraction of stake locked). This is the design property
+that makes the gene a clean handle for selection / phenotype
+analysis.
 
 Always active in the env when `scalping_mode=True`. There is no
 opt-in flag — earlier "operator forgot to flip the override"
 incidents motivated removing the gating bool (operator decision,
 2026-05-23). Operator pinning available via the cohort runner's
-`--arb-spread-headroom-ticks HEADROOM` flag (mutually exclusive
-with `--enable-gene arb_spread_headroom_ticks`).
+`--arb-spread-target-lock-pct PCT` flag (mutually exclusive
+with `--enable-gene arb_spread_target_lock_pct`).
 
 **The policy's per-runner `arb_spread` action dim is dead code
 post-plan.** v2's `DiscreteActionShim` already hardcoded it; v1's
@@ -256,7 +274,8 @@ realisation of pair lifecycles into raw cash moves.
 parameter passed by its caller and recomputes from the formula
 using the existing pair's aggressive matched price. The
 `commission_infeasible` refusal path is the same as the open
-path (defensive — handles a mid-race commission config change).
+path (defensive — handles a mid-race commission config change
+or a market that has drifted past the agent's target lock).
 
 **Force-close path is UNAFFECTED.** `_attempt_close` with
 `force_close=True` uses the relaxed matcher that takes any
@@ -265,15 +284,26 @@ elsewhere in this file). The formula above governs the OPEN
 passive's resting price; force-close crosses the spread at
 market and doesn't go through `tick_offset(agg_price, ticks, ±1)`.
 
-Load-bearing regression guard: `tests/test_forced_arbitrage.py::
+Load-bearing regression guards: `tests/test_forced_arbitrage.py::
 TestPriceAdaptiveArbSpread`. The
 `test_passive_price_matches_formula`, `test_action_arb_spread_
-input_is_ignored`, and `test_locked_pnl_remains_positive_at_
-default_headroom` tests are the formula's correctness signature.
+input_is_ignored`, `test_locked_pnl_meets_target`, and
+`test_target_lock_pct_delivers_roughly_constant_pct_across_prices`
+tests are the formula's correctness signature.
+
+**Same-day redesign history.** This was an iterative design. Two
+earlier versions landed the same day:
+1. **First commit (`ae0d38d`)** — `arb_spread_headroom_ticks` +
+   `arb_spread_scale`: "ticks above floor" with a multiplier.
+2. **Second commit (`438cc99`)** — corrected the floor function
+   (`min_arb_ticks_for_profit`) to use equal-profit sizing
+   (was equal-exposure → produced 2-5× higher floors).
+3. **Third commit (this one)** — replaced the headroom+scale
+   pair with a single `arb_spread_target_lock_pct` gene that
+   expresses the design intent directly (locked-profit fraction).
 
 See `plans/force_close_and_arb_spread/findings.md` (empirical
-motivation) and the operator conversation in the same plan
-folder for the gene-vs-flag decision rationale.
+motivation) and the operator chat log for the design rationale.
 
 ### Floor function uses equal-profit sizing (2026-05-23 fix)
 

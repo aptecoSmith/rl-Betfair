@@ -557,8 +557,7 @@ def run_cohort(
     bc_pretrain_steps_override: int | None = None,
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
-    arb_spread_scale_override: float | None = None,
-    arb_spread_headroom_ticks_override: float | None = None,
+    arb_spread_target_lock_pct_override: float | None = None,
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
@@ -879,9 +878,8 @@ def run_cohort(
                         bc_target_entropy_warmup_eps_override=(
                             bc_target_entropy_warmup_eps_override
                         ),
-                        arb_spread_scale_override=arb_spread_scale_override,
-                        arb_spread_headroom_ticks_override=(
-                            arb_spread_headroom_ticks_override
+                        arb_spread_target_lock_pct_override=(
+                            arb_spread_target_lock_pct_override
                         ),
                         predictor_bundle=predictor_bundle,
                         strategy_mode=strategy_mode,
@@ -1542,7 +1540,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "--reward-overrides for the same gene name. Valid names: "
             "open_cost, matured_arb_bonus_weight, "
             "mark_to_market_weight, naked_loss_scale, "
-            "stop_loss_pnl_threshold, arb_spread_scale, "
+            "stop_loss_pnl_threshold, arb_spread_target_lock_pct, "
             "fill_prob_loss_weight, mature_prob_loss_weight, "
             "risk_loss_weight, alpha_lr, reward_clip."
         ),
@@ -1774,31 +1772,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--arb-spread-scale", type=float, default=None, metavar="SCALE",
+        "--arb-spread-target-lock-pct", type=float, default=None,
+        metavar="PCT",
         help=(
-            "Cohort-wide pin for ``arb_spread_scale`` (Phase 5 gene). "
-            "Multiplies the per-pair tick spread used by the auto-paired "
-            "passive when scalping_mode is on. Default ``None`` = leave "
-            "each agent at its gene draw / default (1.0). Useful for "
-            "ablation probes where the operator wants every agent to "
-            "use the same spread (e.g. 0.5 = halve the spread, "
-            "expected to lift natural fill rate but reduce per-pair "
-            "locked P&L). Mutually exclusive with --enable-gene "
-            "arb_spread_scale."
-        ),
-    )
-    p.add_argument(
-        "--arb-spread-headroom-ticks", type=float, default=None,
-        metavar="HEADROOM",
-        help=(
-            "Cohort-wide pin for ``arb_spread_headroom_ticks`` (Phase 5 "
-            "gene). Tick count added on top of the commission floor when "
-            "the env computes the auto-paired passive's tick offset: "
-            "arb_ticks = clip(round((floor + headroom) * arb_spread_scale), "
-            "1, 25). Default ``None`` = leave each agent at its gene "
-            "draw / default (2.0). Mutually exclusive with --enable-gene "
-            "arb_spread_headroom_ticks. See "
-            "plans/force_close_and_arb_spread/findings.md."
+            "Cohort-wide pin for ``arb_spread_target_lock_pct`` "
+            "(Phase 5 gene, redesigned 2026-05-23). Fraction of "
+            "aggressive stake the agent wants locked per scalped pair. "
+            "The env passes this to ``min_arb_ticks_for_profit`` as the "
+            "profit_floor and uses the returned tick count for the "
+            "passive's offset. Higher values = wider passive = lower "
+            "fill rate but more locked profit per fill. Range "
+            "[0.005, 0.05]. Default ``None`` = leave each agent at its "
+            "gene draw / default (0.02 = 2%% lock per pair). Mutually "
+            "exclusive with --enable-gene arb_spread_target_lock_pct. "
+            "See plans/force_close_and_arb_spread/findings.md."
         ),
     )
     p.add_argument(
@@ -1988,26 +1975,15 @@ def main(argv: list[str] | None = None) -> int:
             "BC pretrain: cohort-wide pin target_entropy_warmup_eps=%d",
             int(args.bc_target_entropy_warmup_eps),
         )
-    if args.arb_spread_scale is not None:
+    if args.arb_spread_target_lock_pct is not None:
         logger.info(
-            "Scalping: cohort-wide pin arb_spread_scale=%g",
-            float(args.arb_spread_scale),
+            "Scalping: cohort-wide pin arb_spread_target_lock_pct=%g",
+            float(args.arb_spread_target_lock_pct),
         )
-        if "arb_spread_scale" in enabled_set:
+        if "arb_spread_target_lock_pct" in enabled_set:
             raise ValueError(
-                "Cannot combine --arb-spread-scale with "
-                "--enable-gene arb_spread_scale (one source of truth "
-                "per knob per run).",
-            )
-    if args.arb_spread_headroom_ticks is not None:
-        logger.info(
-            "Scalping: cohort-wide pin arb_spread_headroom_ticks=%g",
-            float(args.arb_spread_headroom_ticks),
-        )
-        if "arb_spread_headroom_ticks" in enabled_set:
-            raise ValueError(
-                "Cannot combine --arb-spread-headroom-ticks with "
-                "--enable-gene arb_spread_headroom_ticks (one source "
+                "Cannot combine --arb-spread-target-lock-pct with "
+                "--enable-gene arb_spread_target_lock_pct (one source "
                 "of truth per knob per run).",
             )
 
@@ -2072,13 +2048,9 @@ def main(argv: list[str] | None = None) -> int:
                 int(args.bc_target_entropy_warmup_eps)
                 if args.bc_target_entropy_warmup_eps is not None else None
             ),
-            arb_spread_scale_override=(
-                float(args.arb_spread_scale)
-                if args.arb_spread_scale is not None else None
-            ),
-            arb_spread_headroom_ticks_override=(
-                float(args.arb_spread_headroom_ticks)
-                if args.arb_spread_headroom_ticks is not None else None
+            arb_spread_target_lock_pct_override=(
+                float(args.arb_spread_target_lock_pct)
+                if args.arb_spread_target_lock_pct is not None else None
             ),
             predictor_bundle=predictor_bundle,
             strategy_mode=args.strategy_mode,

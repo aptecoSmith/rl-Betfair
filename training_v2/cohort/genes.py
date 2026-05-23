@@ -23,8 +23,7 @@ matured_arb_bonus_weight         [0.0, 5.0]   uniform         0.0
 mark_to_market_weight            [0.0, 0.10]  uniform         0.05
 naked_loss_scale                 [0.0, 1.0]   uniform         1.0
 stop_loss_pnl_threshold          [0.0, 0.30]  uniform         0.0
-arb_spread_scale                 [0.5, 2.0]   uniform         1.0
-arb_spread_headroom_ticks        [0.0, 10.0]  uniform         2.0
+arb_spread_target_lock_pct       [0.005, 0.05] uniform        0.02
 fill_prob_loss_weight            [0.0, 0.30]  uniform         0.0
 mature_prob_loss_weight          [1.0, 5.0]   uniform         0.0
 risk_loss_weight                 [0.0, 0.30]  uniform         0.0
@@ -60,17 +59,29 @@ MATURED_ARB_BONUS_WEIGHT_RANGE: tuple[float, float] = (0.0, 5.0)
 MARK_TO_MARKET_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.10)
 NAKED_LOSS_SCALE_RANGE: tuple[float, float] = (0.0, 1.0)
 STOP_LOSS_PNL_THRESHOLD_RANGE: tuple[float, float] = (0.0, 0.30)
-ARB_SPREAD_SCALE_RANGE: tuple[float, float] = (0.5, 2.0)
-# Price-adaptive arb_spread (2026-05-23, plans/force_close_and_arb_spread/).
-# Tick count added on top of the commission floor when sizing the passive
-# leg of a scalping pair. The env computes
-#   arb_ticks = clip(round((floor + headroom) * arb_spread_scale), 1, 25)
-# where floor = ``min_arb_ticks_for_profit(agg_price, side, commission)``.
-# Stored as float so the GA explores continuously; env rounds to int at
-# use time. Default 2.0 = "two ticks above breakeven" — a small slack for
-# fill probability without wasting locked profit. Range upper bound 10.0
-# roughly emulates the pre-plan fixed 20-tick target at mid prices.
-ARB_SPREAD_HEADROOM_TICKS_RANGE: tuple[float, float] = (0.0, 10.0)
+# Price-adaptive arb_spread, redesigned 2026-05-23 (plans/force_close_and_arb_spread/).
+# Fraction of aggressive stake the agent wants locked per scalped pair.
+# The env passes this directly to ``min_arb_ticks_for_profit`` as the
+# ``profit_floor`` argument:
+#   arb_ticks = min_arb_ticks_for_profit(agg_price, side, commission,
+#                                         profit_floor=target_lock_pct)
+# Returns None (pair refused) if the target lock can't be reached
+# within MAX_ARB_TICKS at the current price + commission. Otherwise
+# returns the smallest tick offset that delivers >= target_lock_pct
+# locked per £1 aggressive stake. Naturally adapts across the price
+# ladder — same gene value gives roughly the same % locked at every
+# price (different tick counts, same target %).
+#
+# Phenotype handle:
+#   0.005 (0.5%) — "fill-seeker": tight passives, high fill rate,
+#                  tiny profit per pair
+#   0.02  (2.0%) — balanced default
+#   0.05  (5.0%) — "profit-seeker": wide passives, lower fill rate,
+#                  big lock per pair when they do fill
+# Range upper bound 0.05 chosen because higher targets are
+# commonly unreachable within MAX_ARB_TICKS at typical scalping
+# prices under 5% commission.
+ARB_SPREAD_TARGET_LOCK_PCT_RANGE: tuple[float, float] = (0.005, 0.05)
 FILL_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.30)
 MATURE_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (1.0, 5.0)
 RISK_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.30)
@@ -126,13 +137,11 @@ PHASE5_GENE_DEFAULTS: dict[str, float] = {
     "mark_to_market_weight": 0.05,
     "naked_loss_scale": 1.0,
     "stop_loss_pnl_threshold": 0.0,
-    "arb_spread_scale": 1.0,
-    # Price-adaptive arb_spread (2026-05-23). Default 2.0 = "two ticks
-    # above the commission floor". Always active in the env (no opt-in
-    # flag) — operator-pinning behaviour available via cohort runner's
-    # --arb-spread-headroom-ticks flag, GA evolution via
-    # --enable-gene arb_spread_headroom_ticks.
-    "arb_spread_headroom_ticks": 2.0,
+    # Price-adaptive arb_spread, redesigned 2026-05-23. Default 0.02 =
+    # "lock 2% of stake per pair". Always active in the env (no opt-in
+    # flag) — operator-pinning via --arb-spread-target-lock-pct,
+    # GA evolution via --enable-gene arb_spread_target_lock_pct.
+    "arb_spread_target_lock_pct": 0.02,
     "fill_prob_loss_weight": 0.0,
     "mature_prob_loss_weight": 0.0,
     "risk_loss_weight": 0.0,
@@ -172,8 +181,7 @@ _PHASE5_RANGES: dict[str, tuple[float, float]] = {
     "mark_to_market_weight": MARK_TO_MARKET_WEIGHT_RANGE,
     "naked_loss_scale": NAKED_LOSS_SCALE_RANGE,
     "stop_loss_pnl_threshold": STOP_LOSS_PNL_THRESHOLD_RANGE,
-    "arb_spread_scale": ARB_SPREAD_SCALE_RANGE,
-    "arb_spread_headroom_ticks": ARB_SPREAD_HEADROOM_TICKS_RANGE,
+    "arb_spread_target_lock_pct": ARB_SPREAD_TARGET_LOCK_PCT_RANGE,
     "fill_prob_loss_weight": FILL_PROB_LOSS_WEIGHT_RANGE,
     "mature_prob_loss_weight": MATURE_PROB_LOSS_WEIGHT_RANGE,
     "risk_loss_weight": RISK_LOSS_WEIGHT_RANGE,
@@ -229,11 +237,13 @@ class CohortGenes:
     mark_to_market_weight: float = 0.05
     naked_loss_scale: float = 1.0
     stop_loss_pnl_threshold: float = 0.0
-    arb_spread_scale: float = 1.0
-    # Price-adaptive arb_spread (2026-05-23, plans/force_close_and_arb_spread/).
-    # See ARB_SPREAD_HEADROOM_TICKS_RANGE doc-comment for the formula.
-    # Stored as float; env rounds to int at use time.
-    arb_spread_headroom_ticks: float = 2.0
+    # Price-adaptive arb_spread, redesigned 2026-05-23
+    # (plans/force_close_and_arb_spread/). See
+    # ARB_SPREAD_TARGET_LOCK_PCT_RANGE doc-comment. Replaced the prior
+    # arb_spread_scale + arb_spread_headroom_ticks pair from earlier
+    # the same day — both became redundant once the gene expresses
+    # the locked-profit target directly.
+    arb_spread_target_lock_pct: float = 0.02
     fill_prob_loss_weight: float = 0.0
     mature_prob_loss_weight: float = 0.0
     risk_loss_weight: float = 0.0
@@ -319,8 +329,7 @@ class CohortGenes:
             "mark_to_market_weight": float(self.mark_to_market_weight),
             "naked_loss_scale": float(self.naked_loss_scale),
             "stop_loss_pnl_threshold": float(self.stop_loss_pnl_threshold),
-            "arb_spread_scale": float(self.arb_spread_scale),
-            "arb_spread_headroom_ticks": float(self.arb_spread_headroom_ticks),
+            "arb_spread_target_lock_pct": float(self.arb_spread_target_lock_pct),
             "fill_prob_loss_weight": float(self.fill_prob_loss_weight),
             "mature_prob_loss_weight": float(self.mature_prob_loss_weight),
             "risk_loss_weight": float(self.risk_loss_weight),

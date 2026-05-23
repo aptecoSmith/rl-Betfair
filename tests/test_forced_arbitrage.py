@@ -1197,21 +1197,11 @@ class TestScalpingGenes:
             for a in agents:
                 assert a.hyperparameters["scalping_mode"] is True
 
-    def test_env_respects_arb_spread_scale_override(self, scalping_config):
-        """arb_spread_scale flows through ``scalping_overrides`` to the
-        env attribute used by the price-adaptive arb_spread formula.
-
-        Behavioural effect: ``arb_ticks = clip(round((floor + headroom)
-        * arb_spread_scale), 1, 25)``. Scale=0.5 halves the formula
-        output; default 1.0 leaves it unchanged.
-        """
-        day = _make_day(n_races=1, n_pre_ticks=3)
-        env_fast = BetfairEnv(day, scalping_config,
-                              scalping_overrides={"arb_spread_scale": 0.5})
-        env_default = BetfairEnv(day, scalping_config)
-
-        assert env_fast._arb_spread_scale == 0.5
-        assert env_default._arb_spread_scale == 1.0
+    # test_env_respects_arb_spread_scale_override removed 2026-05-23 —
+    # arb_spread_scale gene was retired in the
+    # plans/force_close_and_arb_spread/ target-lock-pct redesign. The
+    # new scalping_overrides knob is arb_spread_target_lock_pct;
+    # tests for it live in TestPriceAdaptiveArbSpread further down.
 
     def test_env_reward_overrides_naked_penalty_weight(self, scalping_config):
         """naked_penalty_weight flows through the existing reward-override
@@ -1562,11 +1552,14 @@ class TestScalpingRequote:
         # price equals tick_offset(current_ltp, arb_ticks, direction)
         # proves the placement did not spill across levels.
         #
-        # Price-adaptive arb_spread (2026-05-23,
+        # Price-adaptive arb_spread (2026-05-23 redesign,
         # plans/force_close_and_arb_spread/): the action input is no
         # longer consumed; the env computes
-        #   arb_ticks = clip(round((floor + headroom) * arb_spread_scale), 1, 25)
-        # where floor = min_arb_ticks_for_profit(agg_price, side, commission).
+        #   arb_ticks = min_arb_ticks_for_profit(
+        #       agg.average_price, "back", commission,
+        #       profit_floor=target_lock_pct,
+        #       max_ticks=MAX_ARB_TICKS,
+        #   )
         # Re-derive the expected tick count the same way the env does
         # so this test remains a pure "no ladder walk" guard rather
         # than an accidental regression on the formula constants.
@@ -1574,17 +1567,13 @@ class TestScalpingRequote:
         tick = env.day.races[0].ticks[env._tick_idx - 1]
         runner = next(r for r in tick.runners if r.selection_id == agg.selection_id)
         ltp = runner.last_traded_price
-        floor = min_arb_ticks_for_profit(
+        expected_ticks = min_arb_ticks_for_profit(
             agg.average_price, "back", env._commission,
+            profit_floor=env._arb_spread_target_lock_pct,
             max_ticks=MAX_ARB_TICKS,
         )
-        assert floor is not None, "synthetic agg price should be scalpable"
-        raw_ticks = (
-            (floor + env._arb_spread_headroom_ticks) * env._arb_spread_scale
-        )
-        expected_ticks = int(round(
-            max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks)),
-        ))
+        assert expected_ticks is not None, "synthetic agg price should be scalpable"
+        expected_ticks = max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, expected_ticks))
         expected_price = tick_offset(ltp, expected_ticks, -1)
         assert new_order.price == expected_price
         # Single resting order — we never doubled up on fills.
@@ -5551,10 +5540,16 @@ class TestSortinoComposite:
 
 
 class TestPriceAdaptiveArbSpread:
-    """The env's per-pair tick count is derived from the commission
-    floor + per-agent headroom gene, NOT from the agent's per-runner
+    """The env's per-pair tick count is derived from the per-agent
+    ``arb_spread_target_lock_pct`` gene (passed as ``profit_floor`` to
+    ``min_arb_ticks_for_profit``), NOT from the agent's per-runner
     arb_spread action dim. See CLAUDE.md "Price-adaptive arb_spread
-    (2026-05-23)".
+    (2026-05-23)" and plans/force_close_and_arb_spread/.
+
+    Same-day redesign: an earlier "ticks above floor" gene
+    (arb_spread_headroom_ticks) + an "arb_spread_scale" multiplier
+    were both retired in favour of expressing the target as a fraction
+    of stake locked, which adapts across the price ladder naturally.
     """
 
     def _open_pair(self, env: BetfairEnv) -> tuple:
@@ -5578,48 +5573,44 @@ class TestPriceAdaptiveArbSpread:
         )
         return agg, passive
 
-    def _expected_ticks(
-        self, env: BetfairEnv, agg, side: str,
-    ) -> int:
+    def _expected_ticks(self, env: BetfairEnv, agg, side: str) -> int:
         from env.scalping_math import min_arb_ticks_for_profit
-        floor = min_arb_ticks_for_profit(
+        ticks = min_arb_ticks_for_profit(
             agg.average_price, side, env._commission,
+            profit_floor=env._arb_spread_target_lock_pct,
             max_ticks=MAX_ARB_TICKS,
         )
-        assert floor is not None
-        raw = (
-            (floor + env._arb_spread_headroom_ticks)
-            * env._arb_spread_scale
-        )
-        return int(round(max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw))))
+        assert ticks is not None
+        return max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, ticks))
 
-    def test_default_headroom_is_2(self, scalping_config):
-        """Cohort-wide default = gene default = 2.0 ticks above floor."""
+    def test_default_target_lock_pct_is_2pct(self, scalping_config):
+        """Cohort-wide default = gene default = 0.02 (2% lock per pair)."""
         env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
-        assert env._arb_spread_headroom_ticks == 2.0
+        assert env._arb_spread_target_lock_pct == 0.02
 
-    def test_scalping_overrides_sets_headroom(self, scalping_config):
+    def test_scalping_overrides_sets_target_lock_pct(self, scalping_config):
         """The worker's scalping_overrides dict reaches the env attribute."""
         env = BetfairEnv(
             _make_day(n_races=1, n_pre_ticks=3),
             scalping_config,
-            scalping_overrides={"arb_spread_headroom_ticks": 5.0},
+            scalping_overrides={"arb_spread_target_lock_pct": 0.04},
         )
-        assert env._arb_spread_headroom_ticks == 5.0
+        assert env._arb_spread_target_lock_pct == 0.04
 
-    def test_negative_headroom_clamps_to_zero(self, scalping_config):
-        """A bad gene value can't put the passive INSIDE the commission
-        floor — that would lock negative P&L by construction."""
+    def test_negative_target_lock_pct_clamps_to_zero(self, scalping_config):
+        """A bad gene value can't ask for negative lock — that would
+        accept tick offsets below the commission breakeven."""
         env = BetfairEnv(
             _make_day(n_races=1, n_pre_ticks=3),
             scalping_config,
-            scalping_overrides={"arb_spread_headroom_ticks": -3.0},
+            scalping_overrides={"arb_spread_target_lock_pct": -0.05},
         )
-        assert env._arb_spread_headroom_ticks == 0.0
+        assert env._arb_spread_target_lock_pct == 0.0
 
     def test_passive_price_matches_formula(self, scalping_config):
-        """``arb_ticks = clip(round((floor + headroom) * scale), 1, 25)``
-        and ``passive_price = tick_offset(agg_price, arb_ticks, ±1)``.
+        """``arb_ticks = min_arb_ticks_for_profit(price, side, c,
+        profit_floor=target_lock_pct, max_ticks=MAX_ARB_TICKS)`` and
+        ``passive_price = tick_offset(agg_price, arb_ticks, ±1)``.
 
         Load-bearing — this is the regression guard on the entire
         plan. If the formula drifts (or someone reintroduces the
@@ -5665,87 +5656,57 @@ class TestPriceAdaptiveArbSpread:
         )
         assert passive_lo.price == passive_hi.price
 
-    def test_higher_headroom_widens_spread(self, scalping_config):
-        """Bigger headroom gene → bigger tick count → passive further
-        from the aggressive fill price (for back-first pairs, further
-        DOWN; for lay-first, further UP)."""
+    def test_higher_target_lock_pct_widens_spread(self, scalping_config):
+        """Bigger target lock % → bigger tick count → passive further
+        from the aggressive fill price."""
         day = _make_day(n_races=1, n_pre_ticks=3)
-        env_narrow = BetfairEnv(
+        env_tight = BetfairEnv(
             day, scalping_config,
-            scalping_overrides={"arb_spread_headroom_ticks": 0.0},
+            scalping_overrides={"arb_spread_target_lock_pct": 0.005},
         )
         env_wide = BetfairEnv(
             day, scalping_config,
-            scalping_overrides={"arb_spread_headroom_ticks": 10.0},
+            scalping_overrides={"arb_spread_target_lock_pct": 0.05},
         )
-        env_narrow.reset()
+        env_tight.reset()
         env_wide.reset()
-        _, passive_narrow = self._open_pair(env_narrow)
+        _, passive_tight = self._open_pair(env_tight)
         _, passive_wide = self._open_pair(env_wide)
         # Back-first pairs → passive lay BELOW the back fill price.
-        # Bigger headroom = lower lay price.
-        assert passive_wide.price < passive_narrow.price
+        # Bigger target lock = lower lay price (further down ladder).
+        assert passive_wide.price < passive_tight.price
 
-    def test_headroom_composes_with_arb_spread_scale(self, scalping_config):
-        """``arb_spread_scale`` multiplies the formula output."""
-        day = _make_day(n_races=1, n_pre_ticks=3)
-        env_unscaled = BetfairEnv(
-            day, scalping_config,
-            scalping_overrides={"arb_spread_headroom_ticks": 4.0},
-        )
-        env_halved = BetfairEnv(
-            day, scalping_config,
-            scalping_overrides={
-                "arb_spread_headroom_ticks": 4.0,
-                "arb_spread_scale": 0.5,
-            },
-        )
-        env_unscaled.reset()
-        env_halved.reset()
-        agg_u, passive_u = self._open_pair(env_unscaled)
-        agg_h, passive_h = self._open_pair(env_halved)
-        # Same agg price on both envs (same fixture, same action).
-        assert agg_u.average_price == agg_h.average_price
-        # ``(floor + 4) * 0.5`` is roughly half of ``(floor + 4) * 1.0``;
-        # halved scale → smaller spread → lay closer to back price.
-        assert passive_h.price > passive_u.price
-
-    def test_genes_dict_carries_headroom(self):
-        """``CohortGenes.to_dict`` exposes arb_spread_headroom_ticks
+    def test_genes_dict_carries_target_lock_pct(self):
+        """``CohortGenes.to_dict`` exposes arb_spread_target_lock_pct
         so registry persistence + scoreboard rows pick it up."""
-        from training_v2.cohort.genes import CohortGenes, sample_genes
+        from training_v2.cohort.genes import sample_genes
         import random
         g = sample_genes(random.Random(42), enabled_set=frozenset())
         d = g.to_dict()
-        assert "arb_spread_headroom_ticks" in d
+        assert "arb_spread_target_lock_pct" in d
         # Disabled gene → cohort-wide default.
-        assert d["arb_spread_headroom_ticks"] == 2.0
+        assert d["arb_spread_target_lock_pct"] == 0.02
 
     def test_genes_sample_in_range_when_enabled(self):
-        """With ``--enable-gene arb_spread_headroom_ticks`` the GA
-        samples uniformly in [0.0, 10.0]."""
+        """With ``--enable-gene arb_spread_target_lock_pct`` the GA
+        samples uniformly in [0.005, 0.05]."""
         from training_v2.cohort.genes import (
-            ARB_SPREAD_HEADROOM_TICKS_RANGE, sample_genes,
+            ARB_SPREAD_TARGET_LOCK_PCT_RANGE, sample_genes,
         )
         import random
-        lo, hi = ARB_SPREAD_HEADROOM_TICKS_RANGE
-        enabled = frozenset({"arb_spread_headroom_ticks"})
+        lo, hi = ARB_SPREAD_TARGET_LOCK_PCT_RANGE
+        enabled = frozenset({"arb_spread_target_lock_pct"})
         for seed in range(20):
             g = sample_genes(random.Random(seed), enabled_set=enabled)
-            assert lo <= g.arb_spread_headroom_ticks <= hi
+            assert lo <= g.arb_spread_target_lock_pct <= hi
 
-    def test_locked_pnl_remains_positive_at_default_headroom(
-        self, scalping_config,
-    ):
-        """Default headroom=2 + floor by construction → passive sits
-        STRICTLY above the commission breakeven → locked_pnl > 0.
-
-        The pre-plan test
-        ``TestScalpingReward::test_completed_arb_locks_real_pnl_via_race_pnl``
-        relied on MAX_ARB_TICKS being huge. The new formula uses a
-        smaller spread but its lower bound is guaranteed positive.
+    def test_locked_pnl_meets_target(self, scalping_config):
+        """The pair locks AT LEAST the gene's target_lock_pct
+        per £1 aggressive stake. This is the contract — the env
+        guarantees the agent's target is met (or refuses the pair).
         """
         from env.bet_manager import Bet
+        from env.scalping_math import locked_pnl_per_unit_stake
 
         env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
         env.reset()
@@ -5768,5 +5729,43 @@ class TestPriceAdaptiveArbSpread:
             market_id=agg.market_id, commission=0.05,
         )
         assert pairs and pairs[0]["complete"]
-        assert pairs[0]["locked_pnl"] > 0.0
+        # The locked_pnl on the pair must be at least the gene's
+        # target × the aggressive stake (with a small tolerance for
+        # the ladder-discretisation overshoot — the env returns the
+        # SMALLEST tick count whose lock clears the target, but the
+        # tick after that may overshoot).
+        target_lock = env._arb_spread_target_lock_pct * agg.matched_stake
+        assert pairs[0]["locked_pnl"] >= target_lock - 1e-3
+
+    def test_target_lock_pct_delivers_roughly_constant_pct_across_prices(
+        self, scalping_config,
+    ):
+        """Same gene → roughly the same locked % across the price
+        ladder. This is the design property — ticks shift with price
+        to deliver the agent's chosen lock fraction. Sanity-check on
+        the gene's "phenotype handle" meaning (operator wording).
+        """
+        from env.scalping_math import min_arb_ticks_for_profit, locked_pnl_per_unit_stake
+        from env.tick_ladder import tick_offset
+
+        target = 0.02
+        for agg_price in (2.0, 4.0, 6.0, 10.0, 12.0):
+            ticks = min_arb_ticks_for_profit(
+                agg_price, "back", 0.05,
+                profit_floor=target, max_ticks=25,
+            )
+            assert ticks is not None, (
+                f"target {target:.1%} should be reachable at price {agg_price}"
+            )
+            lay_price = tick_offset(agg_price, ticks, -1)
+            realised = locked_pnl_per_unit_stake(
+                agg_price, lay_price, 0.05, aggressive_side="back",
+            )
+            # Realised >= target by construction; should also be
+            # within roughly 1 tick's worth of overshoot.
+            assert realised >= target
+            assert realised < target + 0.05, (
+                f"price {agg_price}: realised {realised:.4f} far above "
+                f"target {target} — formula's overshoot is excessive"
+            )
 

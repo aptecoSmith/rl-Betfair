@@ -1569,35 +1569,43 @@ class BetfairEnv(gymnasium.Env):
             reward_cfg.get("matured_arb_expected_random", 2.0)
         )
 
-        # Scalping mechanics overrides (Issue 05, session 3). arb_spread_scale
-        # stretches / compresses the agent's [-1, 1] → tick-count mapping so
-        # the genetic search can tune how aggressively it spaces the second
-        # leg. 1.0 = default mapping (byte-identical to pre-session 3).
         scalping_overrides = scalping_overrides or {}
-        self._arb_spread_scale = float(scalping_overrides.get("arb_spread_scale", 1.0))
-        if self._arb_spread_scale <= 0.0:
-            # Bad gene value → fall back to default rather than divide by zero
-            # in the mapping below.
-            self._arb_spread_scale = 1.0
-        # Price-adaptive arb_spread (2026-05-23,
-        # plans/force_close_and_arb_spread/). Tick count added on top of
-        # the commission floor when sizing the passive leg of a scalping
-        # pair. ALWAYS active in the formula — there is no opt-in flag.
-        # Default 2.0 matches PHASE5_GENE_DEFAULTS["arb_spread_headroom_ticks"]
-        # in training_v2/cohort/genes.py. When the GA evolves this gene
-        # (--enable-gene arb_spread_headroom_ticks) it lands here per-agent
-        # via scalping_overrides; otherwise this read returns the default.
-        # The agent's per-runner ``arb_spread`` action dim is no longer
+        # Price-adaptive arb_spread, redesigned 2026-05-23
+        # (plans/force_close_and_arb_spread/). Fraction of aggressive
+        # stake the agent wants locked per scalped pair. The env passes
+        # this directly to ``min_arb_ticks_for_profit`` as the
+        # ``profit_floor`` argument:
+        #
+        #     arb_ticks = min_arb_ticks_for_profit(
+        #         agg_price, side, commission,
+        #         profit_floor=target_lock_pct,
+        #         max_ticks=MAX_ARB_TICKS,
+        #     )
+        #
+        # If the function returns None — i.e. the target lock can't be
+        # reached within MAX_ARB_TICKS at the current price + commission
+        # — the env refuses the pair (commission_infeasible).
+        # Otherwise the smallest tick offset that delivers
+        # ``>= target_lock_pct`` locked per £1 aggressive stake is used.
+        #
+        # ALWAYS active in the formula (no opt-in flag). Default 0.02 =
+        # "lock 2% of stake per pair" matches
+        # PHASE5_GENE_DEFAULTS["arb_spread_target_lock_pct"] in
+        # training_v2/cohort/genes.py.
+        #
+        # The agent's per-runner ``arb_spread`` action dim is NOT
         # consumed for the standard placement path — see CLAUDE.md
-        # "Price-adaptive arb_spread (2026-05-23)" for the rationale and
-        # the scoreboard-comparability note.
-        self._arb_spread_headroom_ticks = float(
-            scalping_overrides.get("arb_spread_headroom_ticks", 2.0),
+        # "Price-adaptive arb_spread (2026-05-23)" for the rationale.
+        # Replaced the earlier arb_spread_scale + arb_spread_headroom_ticks
+        # pair from earlier 2026-05-23 — both became redundant once
+        # the gene expresses the locked-profit target directly.
+        self._arb_spread_target_lock_pct = float(
+            scalping_overrides.get("arb_spread_target_lock_pct", 0.02),
         )
-        if self._arb_spread_headroom_ticks < 0.0:
-            # Defensive — a negative headroom would put the passive
-            # INSIDE the commission floor, locking negative P&L.
-            self._arb_spread_headroom_ticks = 0.0
+        if self._arb_spread_target_lock_pct < 0.0:
+            # Defensive — a negative target would let the floor function
+            # return tick counts that don't actually clear commission.
+            self._arb_spread_target_lock_pct = 0.0
 
         # Predictor-integration Session 02 (early-resolved): the flag
         # state + bundle reference must be set BEFORE `_precompute`
@@ -3306,23 +3314,20 @@ class BetfairEnv(gymnasium.Env):
             action_signal = float(action[slot_idx])
             stake_raw = float(action[self.max_runners + slot_idx])
             aggression_raw = float(action[2 * self.max_runners + slot_idx])
-            # Scalping: 5th dim controls the tick offset of the auto-paired
-            # passive counter-order. Defaults to mid-range when disabled.
+            # Scalping: the 5th action dim (arb_raw) used to control the
+            # tick offset. Post-2026-05-23 (plans/force_close_and_arb_spread/)
+            # arb_ticks is computed from the agent's per-agent target lock %
+            # gene inside the aggressive pre-flight below — the value
+            # assigned here is a placeholder only used if pre-flight is
+            # skipped (no LTP, in which case the matcher refuses anyway).
+            # arb_frac is still read because target_pnl_pair_sizing reads
+            # it on a different code path.
             if self.scalping_mode and apr > 4:
                 arb_raw = float(action[4 * self.max_runners + slot_idx])
                 arb_frac = float(np.clip((arb_raw + 1.0) / 2.0, 0.0, 1.0))
-                # arb_spread_scale stretches / compresses the mapped range.
-                # Always clamped to [MIN_ARB_TICKS, MAX_ARB_TICKS] so a gene
-                # out of bounds can't place a passive at a silly tick.
-                raw_ticks = (
-                    MIN_ARB_TICKS
-                    + arb_frac * (MAX_ARB_TICKS - MIN_ARB_TICKS)
-                ) * self._arb_spread_scale
-                arb_ticks = int(round(
-                    max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks))
-                ))
             else:
-                arb_ticks = MIN_ARB_TICKS
+                arb_frac = 0.0
+            arb_ticks = MIN_ARB_TICKS
             # Map [-1, 1] → [0, 1] for stake fraction
             stake_fraction = np.clip((stake_raw + 1.0) / 2.0, 0.0, 1.0)
             stake = stake_fraction * bm.budget
@@ -3421,10 +3426,22 @@ class BetfairEnv(gymnasium.Env):
                         # prices; the pair is refused entirely in that
                         # case rather than left as a naked directional.
                         if agg_price_est is not None:
+                            # Price-adaptive arb_spread (2026-05-23,
+                            # plans/force_close_and_arb_spread/). The
+                            # smallest tick offset that delivers the
+                            # agent's target locked-pnl fraction (gene
+                            # ``arb_spread_target_lock_pct``). Returns
+                            # None if no tick count within MAX_ARB_TICKS
+                            # at the current commission can reach the
+                            # target — that's a genuine commission
+                            # infeasibility AT THIS TARGET, refuse the
+                            # pair. See CLAUDE.md
+                            # "Price-adaptive arb_spread (2026-05-23)".
                             floor = min_arb_ticks_for_profit(
                                 agg_price_est,
                                 agg_side_str,  # type: ignore[arg-type]
                                 self._commission,
+                                profit_floor=self._arb_spread_target_lock_pct,
                                 max_ticks=MAX_ARB_TICKS,
                             )
                             if floor is None:
@@ -3435,23 +3452,10 @@ class BetfairEnv(gymnasium.Env):
                                     "skipped_reason": "commission_infeasible",
                                 }
                                 continue
-                            # Price-adaptive arb_spread (2026-05-23,
-                            # plans/force_close_and_arb_spread/). Replace
-                            # the action-derived arb_ticks entirely with
-                            # ``floor + headroom``, then apply the per-
-                            # agent arb_spread_scale gene as a multiplier.
-                            # Final clamp to [MIN_ARB_TICKS, MAX_ARB_TICKS]
-                            # so the formula can never produce a passive
-                            # at a silly tick. See CLAUDE.md
-                            # "Price-adaptive arb_spread (2026-05-23)".
-                            raw_ticks = (
-                                (floor + self._arb_spread_headroom_ticks)
-                                * self._arb_spread_scale
-                            )
-                            arb_ticks = int(round(max(
+                            arb_ticks = max(
                                 MIN_ARB_TICKS,
-                                min(MAX_ARB_TICKS, raw_ticks),
-                            )))
+                                min(MAX_ARB_TICKS, floor),
+                            )
                         if side == BetSide.BACK:
                             if agg_price_est is not None:
                                 lay_leg_price = tick_offset(
@@ -3674,10 +3678,10 @@ class BetfairEnv(gymnasium.Env):
                 # plans/force_close_and_arb_spread/). The action-derived
                 # arb_ticks is no longer used; _attempt_requote recomputes
                 # arb_ticks internally from the existing pair's aggressive
-                # matched price using the formula
-                # ``(floor + headroom) * arb_spread_scale``. The placeholder
-                # ``MIN_ARB_TICKS`` here is documentation — the actual value
-                # is overwritten inside _attempt_requote.
+                # matched price using
+                # ``min_arb_ticks_for_profit(profit_floor=target_lock_pct)``.
+                # The placeholder ``MIN_ARB_TICKS`` here is documentation —
+                # the actual value is overwritten inside _attempt_requote.
                 arb_ticks = MIN_ARB_TICKS
                 time_to_off = (
                     race.market_start_time - tick.timestamp
@@ -3961,35 +3965,28 @@ class BetfairEnv(gymnasium.Env):
 
         # Price-adaptive arb_spread (2026-05-23,
         # plans/force_close_and_arb_spread/). Recompute arb_ticks from
-        # the original aggressive matched price using the formula
-        #   arb_ticks = clip(round((floor + headroom) * scale), 1, 25)
-        # where floor = min_arb_ticks_for_profit(agg_bet.average_price, ...).
-        # The ``arb_ticks`` parameter passed by the caller is IGNORED —
-        # the re-quote always anchors on the commission floor, not the
-        # agent's per-tick action input. See CLAUDE.md
-        # "Price-adaptive arb_spread (2026-05-23)".
+        # the original aggressive matched price + the agent's target
+        # lock %. The ``arb_ticks`` parameter passed by the caller is
+        # IGNORED — the re-quote always anchors on the commission floor
+        # at the target lock, not the agent's per-tick action input.
+        # See CLAUDE.md "Price-adaptive arb_spread (2026-05-23)".
         agg_side_str = "back" if agg_bet.side is BetSide.BACK else "lay"
         floor = min_arb_ticks_for_profit(
             agg_bet.average_price,
             agg_side_str,  # type: ignore[arg-type]
             self._commission,
+            profit_floor=self._arb_spread_target_lock_pct,
             max_ticks=MAX_ARB_TICKS,
         )
         if floor is None:
             # Same refusal semantics as the open path — if the original
-            # agg price is no longer scalpable at the current commission
-            # (e.g. config change mid-race), don't re-post a passive that
-            # would lock negative P&L.
+            # agg price can no longer reach the agent's target lock at
+            # the current commission, don't re-post a passive that
+            # wouldn't deliver the requested lock.
             _mark(requote_attempted=True, requote_failed=True,
                   requote_reason="commission_infeasible")
             return
-        raw_ticks = (
-            (floor + self._arb_spread_headroom_ticks)
-            * self._arb_spread_scale
-        )
-        arb_ticks = int(round(max(
-            MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks),
-        )))
+        arb_ticks = max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, floor))
 
         if agg_bet.side is BetSide.BACK:
             new_price = tick_offset(ltp, arb_ticks, -1)
