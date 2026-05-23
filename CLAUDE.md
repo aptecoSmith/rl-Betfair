@@ -189,6 +189,94 @@ rejected — each of those independently caused the phantom-profit bug.
 
 ---
 
+## Price-adaptive arb_spread (2026-05-23)
+
+The per-pair tick offset between the aggressive leg and its
+auto-paired passive is computed from the commission floor + a
+per-agent headroom gene, NOT from any policy action. Formula in
+`env/betfair_env.py::_process_action` (open path) and
+`_attempt_requote` (re-quote path):
+
+    floor      = min_arb_ticks_for_profit(agg_price, side, commission,
+                                           max_ticks=MAX_ARB_TICKS)
+    if floor is None: refuse pair (commission_infeasible)
+    raw_ticks  = (floor + arb_spread_headroom_ticks) * arb_spread_scale
+    arb_ticks  = clip(round(raw_ticks), MIN_ARB_TICKS=1, MAX_ARB_TICKS=25)
+
+Pre-plan behaviour was: policy emits a per-runner `arb_spread`
+action dim ∈ [-1, 1]; env maps it through `frac=(raw+1)/2;
+ticks = MIN + frac*(MAX-MIN)` (so default-shim raw of ~0.583 →
+20 ticks for v2, where the shim hardcodes the input); the
+commission floor then bumps UP if 20 ticks wouldn't clear
+commission at the current price. In live cohort 1779530050 this
+produced a 76 % aggregate force-close rate because 20 ticks at
+typical scalping prices was far outside what the market actually
+traded inside the `[open, T-force_close_before_off_seconds]`
+window.
+
+Two genes are now genuinely orthogonal:
+
+* `arb_spread_headroom_ticks` ∈ [0.0, 10.0] uniform (Phase 5,
+  cohort-wide default 2.0) — additive ticks above the commission
+  floor. 0 = "just clear breakeven, maximum fill probability,
+  minimum locked profit"; 10 ≈ "approximately the old fixed
+  target at mid prices".
+* `arb_spread_scale` ∈ [0.5, 2.0] uniform (Phase 5, default 1.0)
+  — multiplicative scalar on the formula output. Same semantics
+  as pre-plan.
+
+Always active in the env when `scalping_mode=True`. There is no
+opt-in flag — earlier "operator forgot to flip the override"
+incidents motivated removing the gating bool (operator decision,
+2026-05-23). Operator pinning available via the cohort runner's
+`--arb-spread-headroom-ticks HEADROOM` flag (mutually exclusive
+with `--enable-gene arb_spread_headroom_ticks`).
+
+**The policy's per-runner `arb_spread` action dim is dead code
+post-plan.** v2's `DiscreteActionShim` already hardcoded it; v1's
+continuous-action policy emitted it and the env consumed it, but
+the new formula ignores the env-side read entirely. v1 isn't in
+active training so this is academic. The `arb_frac` derived from
+the same action input is still read on the
+`target_pnl_pair_sizing_enabled` path (a different mechanism that
+re-interprets the action as a £-target — see
+`plans/rewrite/phase-3-followups/force-close-architecture/`).
+
+**Scoreboard comparability.** This is a structural change to the
+mechanism that sizes the passive leg. Post-plan runs are NOT
+directly comparable to pre-plan runs on `locked_pnl`, `naked_pnl`,
+`scalping_arbs_force_closed`, `scalping_arbs_closed`, force-close
+rate, or any per-pair P&L distribution. `raw_pnl_reward` and
+`total_reward` still mean the same things but their distributions
+shift. The shaped channels (matured-arb bonus, selective-open
+shaping, etc.) are unaffected by the change — only the
+realisation of pair lifecycles into raw cash moves.
+
+**Re-quote path.** `_attempt_requote` ignores the `arb_ticks`
+parameter passed by its caller and recomputes from the formula
+using the existing pair's aggressive matched price. The
+`commission_infeasible` refusal path is the same as the open
+path (defensive — handles a mid-race commission config change).
+
+**Force-close path is UNAFFECTED.** `_attempt_close` with
+`force_close=True` uses the relaxed matcher that takes any
+priceable opposite-side level (see "Force-close at T−N"
+elsewhere in this file). The formula above governs the OPEN
+passive's resting price; force-close crosses the spread at
+market and doesn't go through `tick_offset(agg_price, ticks, ±1)`.
+
+Load-bearing regression guard: `tests/test_forced_arbitrage.py::
+TestPriceAdaptiveArbSpread`. The
+`test_passive_price_matches_formula`, `test_action_arb_spread_
+input_is_ignored`, and `test_locked_pnl_remains_positive_at_
+default_headroom` tests are the formula's correctness signature.
+
+See `plans/force_close_and_arb_spread/findings.md` (empirical
+motivation) and the operator conversation in the same plan
+folder for the gene-vs-flag decision rationale.
+
+---
+
 ## Equal-profit pair sizing (scalping)
 
 The auto-paired passive (and the closing leg from

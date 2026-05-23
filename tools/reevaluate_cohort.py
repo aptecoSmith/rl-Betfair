@@ -163,6 +163,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--market-type-filter", type=str, default=None,
+        choices=["WIN", "EACH_WAY", "BOTH", "FREE_CHOICE"],
+        help=(
+            "Override the env's market_type_filter for reeval. "
+            "WIN excludes Each Way markets; EACH_WAY keeps only EW; "
+            "BOTH / FREE_CHOICE include everything (default). "
+            "Probes whether removing a market class improves results "
+            "for agents trained with market_type_filter=BOTH."
+        ),
+    )
+    p.add_argument(
         "--starting-budget", type=float, default=None,
         metavar="GBP",
         help=(
@@ -411,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
                     direction_gate_enabled=bool(args.direction_gate_enabled),
                     race_confidence_threshold=float(args.race_confidence_threshold),
                     lay_price_max=float(args.lay_price_max),
+                    market_type_filter=args.market_type_filter,
                 )
             except Exception as e:
                 logger.warning(
@@ -460,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
                         direction_gate_enabled=bool(args.direction_gate_enabled),
                         race_confidence_threshold=float(args.race_confidence_threshold),
                         lay_price_max=float(args.lay_price_max),
+                        market_type_filter=args.market_type_filter,
                     )
                 except Exception as e:
                     logger.warning(

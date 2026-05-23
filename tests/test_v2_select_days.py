@@ -115,3 +115,100 @@ def test_exclude_days_works_with_n_days_above_leak_boundary(
             )
         # Sanity: filtered pool size is 38-3=35; last-n_days is selected.
         assert len(training) + len(eval_days) == n_days
+
+
+# ── 2026-05-22: explicit-lists path for overfitting-prevention ────────
+
+
+def test_explicit_eval_days_uses_them_verbatim(tmp_path: Path) -> None:
+    """cohort_eval_days overrides chronological auto-selection.
+
+    Lets the operator specify a non-contiguous eval pool spanning
+    multiple weeks to break the single-contiguous-week bias.
+    """
+    _touch_days(
+        tmp_path,
+        [
+            "2026-04-07", "2026-04-08", "2026-04-09",
+            "2026-04-14", "2026-04-15", "2026-04-16",
+            "2026-04-21", "2026-04-22", "2026-04-23",
+        ],
+    )
+
+    training, eval_days = train_mod.select_days(
+        data_dir=tmp_path,
+        n_days=1,  # ignored when explicit lists are set
+        day_shuffle_seed=42,
+        cohort_eval_days=["2026-04-08", "2026-04-15", "2026-04-22"],
+    )
+
+    assert set(eval_days) == {"2026-04-08", "2026-04-15", "2026-04-22"}
+    # Training = everything else (no explicit train, no excludes).
+    assert set(training) == {
+        "2026-04-07", "2026-04-09", "2026-04-14",
+        "2026-04-16", "2026-04-21", "2026-04-23",
+    }
+
+
+def test_explicit_training_and_eval_disjoint(tmp_path: Path) -> None:
+    """When both explicit lists are given, they must not overlap."""
+    _touch_days(
+        tmp_path,
+        ["2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10"],
+    )
+    import pytest
+    with pytest.raises(ValueError, match="overlap"):
+        train_mod.select_days(
+            data_dir=tmp_path,
+            n_days=1, day_shuffle_seed=42,
+            cohort_eval_days=["2026-04-08"],
+            training_days_explicit=["2026-04-08"],
+        )
+
+
+def test_monitor_days_disjoint_from_eval_and_train(tmp_path: Path) -> None:
+    """monitor_days must not overlap eval or train pools."""
+    _touch_days(
+        tmp_path,
+        ["2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10"],
+    )
+    import pytest
+    with pytest.raises(ValueError, match="overlap"):
+        train_mod.select_days(
+            data_dir=tmp_path,
+            n_days=1, day_shuffle_seed=42,
+            cohort_eval_days=["2026-04-08"],
+            monitor_days=["2026-04-08"],
+        )
+
+
+def test_explicit_eval_with_monitor_set_excluded(tmp_path: Path) -> None:
+    """monitor_days are NOT included in training_days by default."""
+    _touch_days(
+        tmp_path,
+        ["2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10"],
+    )
+    training, eval_days = train_mod.select_days(
+        data_dir=tmp_path,
+        n_days=1, day_shuffle_seed=42,
+        cohort_eval_days=["2026-04-08"],
+        monitor_days=["2026-04-10"],
+    )
+    assert "2026-04-10" not in training
+    assert "2026-04-10" not in eval_days
+    assert set(training) == {"2026-04-07", "2026-04-09"}
+    assert eval_days == ["2026-04-08"]
+
+
+def test_legacy_chronological_path_unchanged(tmp_path: Path) -> None:
+    """Without any explicit-list flags, behaviour matches pre-2026-05-22."""
+    _touch_days(
+        tmp_path,
+        ["2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10", "2026-04-11"],
+    )
+    training, eval_days = train_mod.select_days(
+        data_dir=tmp_path,
+        n_days=4, day_shuffle_seed=42, n_eval_days=2,
+    )
+    assert eval_days == ["2026-04-10", "2026-04-11"]
+    assert set(training) == {"2026-04-08", "2026-04-09"}

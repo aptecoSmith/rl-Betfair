@@ -189,6 +189,16 @@ class PassiveOrder:
     # per-runner obs feature in scalping mode. 0.0 for orders placed
     # outside scalping mode or before this field was introduced.
     placed_time_to_off: float = 0.0
+    # Crossing gate (2026-05-21 passive-fill bug fix): real Betfair limit
+    # orders only fill when the matching-side top-of-book reaches the
+    # resting price. For a BACK at limit P, the relevant signal is the
+    # max(atb) observed since placement — fills only when max_seen >= P
+    # (i.e. existing lay offers at or above P become available). For a
+    # LAY at limit P, it's min(atl) <= P. Without this gate, the
+    # traded-volume-only fill model silently fills passive orders at
+    # prices the visible market never crossed (phantom fills). See
+    # plans/passive_fill_bug_investigation/findings.md.
+    crossed: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -734,6 +744,39 @@ class PassiveOrderBook:
                 if order.pair_id is not None:
                     self._paired_fill_skips_ltp_filter += 1
                 continue
+
+            # Crossing gate (2026-05-21 passive-fill bug fix): real
+            # Betfair limit orders only fill when the matching-side top-
+            # of-book reaches the resting price. Update the per-order
+            # `crossed` latch from the current tick's ladder, then refuse
+            # fill until the latch is set. See
+            # plans/passive_fill_bug_investigation/findings.md.
+            #
+            # - BACK at limit P fills when max(available_to_back) >= P
+            #   (an existing lay offer is now at or above the resting
+            #   limit). available_to_back == atb.
+            # - LAY at limit P fills when min(available_to_lay) <= P
+            #   (an existing back offer is now at or below the resting
+            #   limit). available_to_lay == atl.
+            if not order.crossed:
+                if order.side is BetSide.BACK:
+                    levels = snap.available_to_back or []
+                    tops = [
+                        lv.price for lv in levels
+                        if lv.price > 0.0 and lv.size > 0.0
+                    ]
+                    if tops and max(tops) >= order.price - 1e-9:
+                        order.crossed = True
+                else:  # LAY
+                    levels = snap.available_to_lay or []
+                    tops = [
+                        lv.price for lv in levels
+                        if lv.price > 0.0 and lv.size > 0.0
+                    ]
+                    if tops and min(tops) <= order.price + 1e-9:
+                        order.crossed = True
+                if not order.crossed:
+                    continue
 
             # Passive self-depletion: shift the threshold by how much stake
             # has already been filled at this own-side price level this race.

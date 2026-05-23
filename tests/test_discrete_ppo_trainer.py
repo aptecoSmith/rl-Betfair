@@ -450,3 +450,116 @@ def test_uses_stake_mask_blocks_stake_grad_for_noop_actions():
                 f"(|grad|_max={max_abs!r}) on an all-NOOP rollout — "
                 "the uses_stake mask is not blocking the stake gradient"
             )
+
+
+# ── phase-3 Option A: split-device regression ─────────────────────────────
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="split-device path requires CUDA",
+)
+def test_split_device_round_trip_keeps_policy_on_rollout_device_after_update():
+    """phase-3 Option A. When the trainer is built with
+    ``device='cuda'`` and ``rollout_device='cpu'``, ``train_episode``
+    must:
+
+      1. run the rollout on CPU (policy params on CPU during
+         ``_collector.collect_episode``),
+      2. move the policy + optimizer state to CUDA for the PPO update,
+      3. move them BACK to CPU before returning (the next rollout
+         expects CPU again).
+
+    A regression on any of the three drops the speedup OR crashes the
+    next episode with a device-mismatch error. Verify with three
+    snapshots: (a) before train_episode → CPU, (b) after → CPU again,
+    (c) optimizer state on CPU after.
+    """
+    from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+    from agents_v2.env_shim import DiscreteActionShim
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+    env = BetfairEnv(
+        _make_day(n_races=2, n_pre_ticks=10, n_inplay_ticks=2),
+        _scalping_config(),
+    )
+    shim = DiscreteActionShim(env)
+    policy = DiscreteLSTMPolicy(
+        obs_dim=shim.obs_dim,
+        action_space=shim.action_space,
+        hidden_size=16,
+    )
+    trainer = DiscretePPOTrainer(
+        policy=policy, shim=shim,
+        mini_batch_size=4, ppo_epochs=1,
+        kl_early_stop_threshold=10.0,  # disable early-stop
+        device="cuda",
+        rollout_device="cpu",
+    )
+    # (a) before train_episode — params should be parked on CPU
+    p_dev_before = next(trainer.policy.parameters()).device
+    assert p_dev_before.type == "cpu", (
+        f"policy parked on {p_dev_before} before train_episode; "
+        f"expected cpu so the rollout runs there."
+    )
+
+    stats = trainer.train_episode()
+    assert stats.n_steps > 0
+    assert stats.n_updates_run > 0
+
+    # (b) after train_episode — params back on CPU
+    p_dev_after = next(trainer.policy.parameters()).device
+    assert p_dev_after.type == "cpu", (
+        f"policy left on {p_dev_after} after train_episode; "
+        f"the next rollout will pay CUDA-launch overhead per step."
+    )
+    # (c) optimizer state also returned to CPU
+    for state in trainer.optimiser.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                assert v.device.type == "cpu", (
+                    f"optimizer state {k} on {v.device} after "
+                    f"train_episode; should be CPU."
+                )
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="split-device path requires CUDA",
+)
+def test_split_device_default_disabled_is_byte_identical_to_pre_plan():
+    """Trainer constructed WITHOUT ``rollout_device`` keeps single-
+    device behaviour: policy stays on ``device`` throughout. Catches
+    accidental enablement of the split-device path.
+    """
+    from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+    from agents_v2.env_shim import DiscreteActionShim
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+    env = BetfairEnv(
+        _make_day(n_races=2, n_pre_ticks=10, n_inplay_ticks=2),
+        _scalping_config(),
+    )
+    shim = DiscreteActionShim(env)
+    policy = DiscreteLSTMPolicy(
+        obs_dim=shim.obs_dim,
+        action_space=shim.action_space,
+        hidden_size=16,
+    )
+    trainer = DiscretePPOTrainer(
+        policy=policy, shim=shim,
+        mini_batch_size=4, ppo_epochs=1,
+        device="cuda",
+        # rollout_device left at default
+    )
+    assert not trainer._split_device, (
+        "rollout_device unspecified should NOT enable split-device."
+    )
+    assert next(trainer.policy.parameters()).device.type == "cuda"
+    trainer.train_episode()
+    # Policy still on CUDA after episode (no round-trip happened)
+    assert next(trainer.policy.parameters()).device.type == "cuda"

@@ -392,6 +392,7 @@ def _load_direction(manifest: _Manifest) -> _DirectionPayload:
         quantiles=tuple(float(q) for q in quantiles),
         horizons=tuple(str(h) for h in horizons),
         time_window=int(time_window),
+        feature_variant=str(feature_variant),
     )
 
 
@@ -442,6 +443,8 @@ class _DirectionPayload:
     quantiles: tuple[float, ...]
     horizons: tuple[str, ...]
     time_window: int
+    feature_variant: str = "V2"  # 2026-05-22: env builder uses this to
+    # build the right (32, D) window shape. V2/V3/V4 supported.
 
 
 @dataclass

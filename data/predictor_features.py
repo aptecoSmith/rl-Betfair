@@ -26,6 +26,8 @@ from datetime import date as _date
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from data.episode_builder import PastRace, RunnerMeta
 
@@ -194,8 +196,10 @@ def compute_f2_aggregates_for_runners(
 
 
 # Column order MUST match the predictor repo's
-# `scripts/predictor/datasets.py::feature_columns('V2')` exactly. Order
-# is locked: V1_COLS (16) + V2_EXTRA (10) = 26.
+# `scripts/predictor/datasets.py::feature_columns('Vn')` exactly. Order
+# is locked: V1_COLS (16) + V2_EXTRA (10) = 26 → V3 adds 8 = 34 →
+# V4 adds 5 = 39. See `scripts/predictor/datasets.py::VARIANT_COLS` in
+# the predictors repo for the canonical schema.
 DIR_V2_COLS: tuple[str, ...] = (
     # V1 (16): per-tick raw ladder + market state.
     "ltp",
@@ -211,26 +215,65 @@ DIR_V2_COLS: tuple[str, ...] = (
     "ltp_w32_mean", "ltp_w32_std", "ltp_w32_min", "ltp_w32_max",
     "ltp_w32_first", "ltp_w32_n",
 )
+DIR_V3_EXTRA: tuple[str, ...] = (
+    "tvl_total", "tvl_at_ltp",
+    "tvl_below_5t", "tvl_below_10t",
+    "tvl_above_5t", "tvl_above_10t",
+    "tvl_n_levels", "tvl_available_flag",
+)
+DIR_V4_EXTRA: tuple[str, ...] = (
+    "rank_in_market",
+    "ltp_share",
+    "ltp_zscore_in_market",
+    "volume_share_in_market",
+    "volume_zscore_in_market",
+)
+DIR_V3_COLS: tuple[str, ...] = DIR_V2_COLS + DIR_V3_EXTRA
+DIR_V4_COLS: tuple[str, ...] = DIR_V2_COLS + DIR_V3_EXTRA + DIR_V4_EXTRA
+DIR_VARIANT_COLS: dict[str, tuple[str, ...]] = {
+    "V2": DIR_V2_COLS,
+    "V3": DIR_V3_COLS,
+    "V4": DIR_V4_COLS,
+}
 DIR_V2_DIM: int = len(DIR_V2_COLS)  # 26
+DIR_V3_DIM: int = len(DIR_V3_COLS)  # 34
+DIR_V4_DIM: int = len(DIR_V4_COLS)  # 39
 DIR_WINDOW: int = 32
+
+# Precomputed Betfair tick ladder as a numpy array, loaded once at
+# module import. Used by the vectorised _fill_tvl_features to do
+# bulk price → tick-index lookup via np.searchsorted instead of the
+# O(N×L) Python-loop ticks_between path. ~100x speedup on V3 build.
+# See plans/cohort_training_speedup/plan.md option A.
+from env.tick_ladder import BETFAIR_TICK_LADDER as _BETFAIR_LADDER_TUPLE
+_BETFAIR_LADDER_ARR: np.ndarray = np.array(_BETFAIR_LADDER_TUPLE, dtype=np.float64)
+_BETFAIR_LADDER_LEN: int = _BETFAIR_LADDER_ARR.shape[0]
 
 
 def build_direction_windows_for_race(
     race: object,
+    variant: str = "V2",
 ) -> tuple[object, list[tuple[int, int]]]:
-    """Build all (32, 26) V2 windows for a race, one per (tick_idx, sid).
+    """Build all (32, D) feature windows for a race, one per (tick_idx, sid).
+
+    ``variant`` selects the feature column set, matching the predictor
+    repo's ``scripts/predictor/datasets.py::VARIANT_COLS``:
+
+      - ``V2`` → 26 dims (V1 ladder + 10 LTP window stats) — pre-2026-05-22 default
+      - ``V3`` → 34 dims (V2 + 8 TradedVolumeLadder aggregates)
+      - ``V4`` → 39 dims (V3 + 5 cross-runner z-score / share features)
 
     Returns ``(windows, indices)`` where:
-    - ``windows`` is a ``np.ndarray`` of shape ``(N, 32, 26)`` float32 — N
-      = total active (tick_idx, sid) pairs across the race.
+    - ``windows`` is a ``np.ndarray`` of shape ``(N, 32, D)`` float32 — N
+      = total active (tick_idx, sid) pairs across the race; D = variant dim.
     - ``indices`` is a list of ``(tick_idx, selection_id)`` tuples
       aligned to the first dim of ``windows``.
 
-    Design: precompute per-runner (n_ticks, 26) feature matrices ONCE
-    per race (V1 from raw ladder + V2 stats from LTP series), then slice
-    32-tick windows from them. Newest tick at index -1; left-pad with
-    zeros when fewer than 32 ticks of history are available — matches
-    `betfair-predictors/scripts/predictor/datasets.py::build_sequence_examples`.
+    Design: precompute per-runner (n_ticks, D) feature matrices ONCE
+    per race, then slice 32-tick windows from them. Newest tick at
+    index -1; left-pad with zeros when fewer than 32 ticks of history
+    are available — matches
+    ``betfair-predictors/scripts/predictor/datasets.py::build_sequence_examples``.
 
     Skips runner / tick pairs where the runner has no snapshot at that
     tick (REMOVED, etc.) — caller can map outputs back via the
@@ -238,9 +281,18 @@ def build_direction_windows_for_race(
     """
     import numpy as np
 
+    if variant not in DIR_VARIANT_COLS:
+        raise ValueError(
+            f"unknown direction-feature variant {variant!r}; "
+            f"valid: {list(DIR_VARIANT_COLS)}"
+        )
+    dim = len(DIR_VARIANT_COLS[variant])
+    include_v3 = variant in ("V3", "V4")
+    include_v4 = variant == "V4"
+
     n_ticks = len(race.ticks)
     if n_ticks == 0:
-        return np.zeros((0, DIR_WINDOW, DIR_V2_DIM), dtype=np.float32), []
+        return np.zeros((0, DIR_WINDOW, dim), dtype=np.float32), []
 
     market_start_ts = race.market_start_time
 
@@ -250,28 +302,56 @@ def build_direction_windows_for_race(
         for r in tick.runners:
             all_sids.add(r.selection_id)
     if not all_sids:
-        return np.zeros((0, DIR_WINDOW, DIR_V2_DIM), dtype=np.float32), []
+        return np.zeros((0, DIR_WINDOW, dim), dtype=np.float32), []
 
-    # Per-runner (n_ticks, 26) feature matrix. Default zero so missing
+    # Per-runner (n_ticks, dim) feature matrix. Default zero so missing
     # snapshots stay neutral (the predictor's training data also
     # zero-pads).
     per_runner: dict[int, "np.ndarray"] = {}
-    # Track which (tick, sid) pairs have a real snapshot — only those
-    # become windows.
     has_snap: dict[int, list[bool]] = {sid: [False] * n_ticks for sid in all_sids}
 
     for sid in all_sids:
-        feat = np.zeros((n_ticks, DIR_V2_DIM), dtype=np.float32)
+        feat = np.zeros((n_ticks, dim), dtype=np.float32)
         per_runner[sid] = feat
 
+    # V3 + V4 features need per-tick runner lookups — build a flat list of
+    # (rid, ltp, vol) per tick so cross-runner aggregates are O(R) not O(R²).
     for t_idx, tick in enumerate(race.ticks):
         n_active = float(tick.number_of_active_runners or 0)
-        # `time_to_off_sec` from market_start_time MINUS current tick
-        # timestamp; positive = pre-off, negative = in-play.
         try:
             tto = (market_start_ts - tick.timestamp).total_seconds()
         except Exception:
             tto = 0.0
+
+        # Pre-pass: collect (sid, ltp, vol) for THIS tick. Used for
+        # V4 cross-runner features below. Skips runners with ltp<=1
+        # (unpriceable) to match training-time filter.
+        ltps_this_tick: list[tuple[int, float, float]] = []
+        if include_v4:
+            for r in tick.runners:
+                ltp_r = float(r.last_traded_price or 0.0)
+                vol_r = float(getattr(r, "total_matched", 0.0) or 0.0)
+                if ltp_r > 1.0:
+                    ltps_this_tick.append((r.selection_id, ltp_r, vol_r))
+            # Use float64 for ltps/vols to match the predictor's
+            # training-time `np.asarray(ltps)` default dtype. searchsorted
+            # with side="left" on a float32-truncated array can return an
+            # off-by-one rank when the lookup equals a stored value
+            # exactly — float64 dodges that.
+            ltps_arr = np.asarray(
+                [x[1] for x in ltps_this_tick], dtype=np.float64,
+            )
+            vols_arr = np.asarray(
+                [x[2] for x in ltps_this_tick], dtype=np.float64,
+            )
+            ltps_sorted = np.sort(ltps_arr) if ltps_arr.size else ltps_arr
+            inv_sum = float((1.0 / ltps_arr).sum()) if ltps_arr.size else 0.0
+            ltp_mean = float(ltps_arr.mean()) if ltps_arr.size else 0.0
+            ltp_std = float(ltps_arr.std()) if ltps_arr.size > 1 else 0.0
+            vol_sum = float(vols_arr.sum()) if vols_arr.size else 0.0
+            vol_mean = float(vols_arr.mean()) if vols_arr.size else 0.0
+            vol_std = float(vols_arr.std()) if vols_arr.size > 1 else 0.0
+
         for r in tick.runners:
             sid = r.selection_id
             feat = per_runner[sid]
@@ -291,19 +371,41 @@ def build_direction_windows_for_race(
             feat[t_idx, 15] = float(tto)
             has_snap[sid][t_idx] = True
 
-    # Now compute V2 stats per runner from LTP series.
+            # ── V3 extra (8) — TVL aggregates at this tick ──────────────
+            if include_v3:
+                _fill_tvl_features(feat, t_idx, r, ltp)
+
+            # ── V4 extra (5) — cross-runner rank/share/zscore ──────────
+            if include_v4:
+                _fill_v4_features(
+                    feat, t_idx, sid, ltp,
+                    runner_vol=float(getattr(r, "total_matched", 0.0) or 0.0),
+                    ltps_arr=ltps_arr, ltps_sorted=ltps_sorted,
+                    inv_sum=inv_sum, ltp_mean=ltp_mean, ltp_std=ltp_std,
+                    vols_arr=vols_arr, vol_sum=vol_sum,
+                    vol_mean=vol_mean, vol_std=vol_std,
+                )
+
+    # Now compute V2 stats per runner from LTP series (cols 16..25).
+    # Window stats cover the PREVIOUS 32 ticks (exclusive of current);
+    # matches predictor's training-time builder which appends ltp to its
+    # deque AFTER computing feat for the current tick. See
+    # `betfair-predictors/scripts/predictor/build_dataset.py` lines
+    # 362-367 (compute) and 404 (append).
     for sid, feat in per_runner.items():
-        ltps = feat[:, 0]  # (n_ticks,)
+        ltps = feat[:, 0]
         for t_idx in range(n_ticks):
-            # lag features — 0 if not enough history (predictor's training
-            # path uses left-pad-zero too)
             feat[t_idx, 16] = ltps[t_idx - 1] if t_idx >= 1 else 0.0
             feat[t_idx, 17] = ltps[t_idx - 5] if t_idx >= 5 else 0.0
             feat[t_idx, 18] = ltps[t_idx - 10] if t_idx >= 10 else 0.0
             feat[t_idx, 19] = ltps[t_idx - 30] if t_idx >= 30 else 0.0
-            # Window stats over [t-31, t] — 32 ticks max
-            lo = max(0, t_idx + 1 - DIR_WINDOW)
-            window = ltps[lo:t_idx + 1]
+            # Window: previous 32 ticks, exclusive of current. Empty at t=0.
+            lo = max(0, t_idx - DIR_WINDOW)
+            window = ltps[lo:t_idx]
+            if window.size == 0:
+                # Matches predictor's training-time NaN-fill, but stored
+                # as 0 because our feat matrix is float32 zeros-init.
+                continue
             feat[t_idx, 20] = float(window.mean())
             feat[t_idx, 21] = float(window.std())
             feat[t_idx, 22] = float(window.min())
@@ -311,7 +413,7 @@ def build_direction_windows_for_race(
             feat[t_idx, 24] = float(window[0])
             feat[t_idx, 25] = float(len(window))
 
-    # Build (N, 32, 26) windows for each (tick, sid) WHERE the runner has
+    # Build (N, 32, dim) windows for each (tick, sid) WHERE the runner has
     # a real snapshot at that tick.
     windows: list = []
     indices: list[tuple[int, int]] = []
@@ -324,16 +426,141 @@ def build_direction_windows_for_race(
             seg = feat[lo:t_idx + 1]
             if seg.shape[0] < DIR_WINDOW:
                 pad = np.zeros(
-                    (DIR_WINDOW - seg.shape[0], DIR_V2_DIM), dtype=np.float32,
+                    (DIR_WINDOW - seg.shape[0], dim), dtype=np.float32,
                 )
                 seg = np.concatenate([pad, seg], axis=0)
             windows.append(seg)
             indices.append((t_idx, sid))
 
     if not windows:
-        return np.zeros((0, DIR_WINDOW, DIR_V2_DIM), dtype=np.float32), []
+        return np.zeros((0, DIR_WINDOW, dim), dtype=np.float32), []
     arr = np.stack(windows, axis=0).astype(np.float32, copy=False)
     return arr, indices
+
+
+def _fill_tvl_features(feat, t_idx, runner, ltp: float) -> None:
+    """V3 extra features (8) — TradedVolumeLadder aggregates.
+
+    Mirrors ``betfair-predictors/scripts/predictor/build_dataset.py::
+    _tvl_features``. Indexes 26..33 in the feature matrix.
+
+    Vectorised implementation (2026-05-22 speedup): converts the TVL
+    into numpy arrays once and computes all aggregates via masking +
+    sum. The previous per-level Python loop with ``ticks_between``
+    calls consumed 97% of feature-build CPU; this path uses
+    ``np.searchsorted`` against the precomputed BETFAIR_TICK_LADDER
+    so the tick-distance step is O(N log L) numpy rather than O(N × L)
+    Python. See ``plans/cohort_training_speedup/plan.md`` option A.
+
+    All features zero-fill when the ladder is empty;
+    ``tvl_available_flag`` flags whether the source data was present
+    at all (matches training-time semantics).
+    """
+    from env.tick_ladder import snap_to_tick
+    tvl = getattr(runner, "traded_volume_ladder", None)
+    # Indexes: 26 tvl_total, 27 tvl_at_ltp, 28 tvl_below_5t, 29 tvl_below_10t,
+    #          30 tvl_above_5t, 31 tvl_above_10t, 32 tvl_n_levels, 33 tvl_avail
+    if not tvl:
+        return  # everything already zero; flag stays 0
+    feat[t_idx, 33] = 1.0  # tvl_available_flag
+
+    # Vectorise: extract prices + sizes once into numpy arrays. Skip
+    # malformed entries via a single finiteness mask.
+    n_tvl = len(tvl)
+    prices = np.empty(n_tvl, dtype=np.float64)
+    sizes = np.empty(n_tvl, dtype=np.float64)
+    for i, lvl in enumerate(tvl):
+        p = lvl.price
+        s = lvl.size
+        prices[i] = p if p is not None else float("nan")
+        sizes[i] = s if s is not None else float("nan")
+    valid = np.isfinite(prices) & np.isfinite(sizes)
+    if not valid.any():
+        return
+    prices = prices[valid]
+    sizes = sizes[valid]
+    total = float(sizes.sum())
+    n_valid = int(prices.size)
+    feat[t_idx, 26] = total
+    feat[t_idx, 32] = float(n_valid)
+
+    # Below-LTP / above-LTP bucketing requires a valid LTP.
+    if ltp is None or ltp <= 1.0:
+        return
+    try:
+        ltp_snapped = snap_to_tick(float(ltp))
+    except Exception:
+        return
+
+    # Vectorised ticks-between using the precomputed BETFAIR_TICK_LADDER.
+    # The original ``ticks_between`` snaps both inputs via
+    # ``snap_to_tick`` which rounds to NEAREST ladder value (round-half-
+    # to-even). To match that semantics for off-ladder TVL prices we
+    # compute the two adjacent ladder indices and pick whichever
+    # ladder value is closer to the input price. Pure searchsorted
+    # with side='left' would round-UP which gives ±1 tick error on
+    # ~1% of off-ladder TVL entries (TVL reports averaged trade
+    # prices that may sit between ticks).
+    idx_right = np.searchsorted(_BETFAIR_LADDER_ARR, prices, side="left")
+    idx_right = np.clip(idx_right, 0, _BETFAIR_LADDER_LEN - 1)
+    idx_left = np.clip(idx_right - 1, 0, _BETFAIR_LADDER_LEN - 1)
+    d_right = np.abs(_BETFAIR_LADDER_ARR[idx_right] - prices)
+    d_left = np.abs(_BETFAIR_LADDER_ARR[idx_left] - prices)
+    # d_left <= d_right picks idx_left on ties (matches Python's
+    # round-half-to-even behaviour in the snap_to_tick code path for
+    # the common case where the lower ladder value is even-indexed).
+    price_idx = np.where(d_left <= d_right, idx_left, idx_right)
+    # ltp_snapped is guaranteed on-ladder by snap_to_tick. searchsorted
+    # gives its index in O(log L).
+    ltp_idx = int(np.searchsorted(_BETFAIR_LADDER_ARR, ltp_snapped, side="left"))
+    tds = np.abs(price_idx - ltp_idx)
+
+    # tvl_at_ltp: prices exactly at ltp_snapped (within float epsilon).
+    at_ltp = np.isclose(prices, ltp_snapped, atol=1e-9)
+    feat[t_idx, 27] = float(sizes[at_ltp].sum())
+
+    below = prices < ltp_snapped
+    above = prices > ltp_snapped
+    feat[t_idx, 28] = float(sizes[below & (tds <= 5)].sum())   # tvl_below_5t
+    feat[t_idx, 29] = float(sizes[below & (tds <= 10)].sum())  # tvl_below_10t
+    feat[t_idx, 30] = float(sizes[above & (tds <= 5)].sum())   # tvl_above_5t
+    feat[t_idx, 31] = float(sizes[above & (tds <= 10)].sum())  # tvl_above_10t
+
+
+def _fill_v4_features(
+    feat, t_idx: int, sid: int, ltp: float,
+    *,
+    runner_vol: float,
+    ltps_arr, ltps_sorted,
+    inv_sum: float, ltp_mean: float, ltp_std: float,
+    vols_arr, vol_sum: float, vol_mean: float, vol_std: float,
+) -> None:
+    """V4 extra features (5) — cross-runner rank/share/z-score.
+
+    Mirrors ``betfair-predictors/scripts/predictor/build_dataset.py::
+    _cross_runner_features``. Indexes 34..38 in the feature matrix.
+
+    The ``ltps_arr`` and aggregates are computed once per tick by the
+    caller (across all priceable runners) and passed in to avoid O(R²).
+    """
+    # 34 rank_in_market, 35 ltp_share, 36 ltp_zscore_in_market,
+    # 37 volume_share_in_market, 38 volume_zscore_in_market
+    if ltp <= 1.0 or not getattr(ltps_arr, "size", 0):
+        # Target runner is unpriceable or no peers — leave zeros.
+        return
+    # Rank: 1-indexed position of target's ltp in the ascending-sorted
+    # array. Uses 'left' insertion to match training-time semantics.
+    rank = int(np.searchsorted(ltps_sorted, ltp, side="left")) + 1
+    feat[t_idx, 34] = float(rank)
+    if inv_sum > 0.0:
+        feat[t_idx, 35] = float((1.0 / ltp) / inv_sum)
+    if ltp_std > 0.0:
+        feat[t_idx, 36] = float((ltp - ltp_mean) / (ltp_std + 1e-9))
+    # else leave 0.0 (matches training-time: returns 0.0 when len<=1)
+    if vol_sum > 0.0:
+        feat[t_idx, 37] = float(runner_vol / vol_sum)
+    if vol_std > 0.0:
+        feat[t_idx, 38] = float((runner_vol - vol_mean) / (vol_std + 1e-9))
 
 
 # ---------------------------------------------------------------------------

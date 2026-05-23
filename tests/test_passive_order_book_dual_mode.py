@@ -132,6 +132,156 @@ class TestVolumeModeUnchanged:
         assert bm.bets[0].matched_stake == pytest.approx(20.0)
 
 
+class TestCrossingGate:
+    """Passive-fill crossing gate (2026-05-21 bug fix).
+
+    Real Betfair limit orders fill only when the matching-side top-of-
+    book reaches the resting price. The traded-volume-only fill model
+    that existed before this fix would phantom-fill resting orders at
+    prices the visible market never crossed.
+
+    See plans/passive_fill_bug_investigation/findings.md for the
+    Big Dispute reproducer and the bug's economic impact (~70% of
+    raw locked_pnl on held-out reevals was phantom).
+    """
+
+    def test_passive_back_does_not_fill_when_lay_side_never_reaches_limit(self):
+        """Big Dispute reproducer.
+
+        Passive back at 7.40 with atb consistently at 4.5-5.0. Even
+        with abundant traded volume on the runner, the back must NOT
+        fill because the lay side (atb in Betfair terms) never offers
+        at or above 7.40.
+        """
+        bm = BetManager(starting_budget=200.0, fill_mode="volume")
+        sid = 101
+        # t=0: LTP 5.1, atb=[4.5, 4.4, 4.3], atl=[4.7, 4.8, 4.9].
+        # Agent places passive back at 7.40 (the bug scenario — agent's
+        # chosen arb_spread target far above current top-of-book).
+        snap_t0 = RunnerSnap(
+            selection_id=sid, status="ACTIVE",
+            last_traded_price=5.1, total_matched=500.0,
+            starting_price_near=0.0, starting_price_far=0.0,
+            adjustment_factor=None, bsp=None, sort_priority=1, removal_date=None,
+            available_to_back=[
+                PriceSize(price=4.5, size=10.0),
+                PriceSize(price=4.4, size=20.0),
+                PriceSize(price=4.3, size=30.0),
+            ],
+            available_to_lay=[
+                PriceSize(price=4.7, size=10.0),
+                PriceSize(price=4.8, size=15.0),
+                PriceSize(price=4.9, size=20.0),
+            ],
+        )
+        order = bm.passive_book.place(
+            snap_t0, stake=10.0, side=BetSide.BACK, market_id="m1", tick_index=0,
+            price=7.40,  # explicit-price path (paired arb close leg)
+        )
+        assert order is not None
+        # t=1..3: book stays around the same range, but lots of volume
+        # accumulates at the visible LTP. Pre-fix this would have
+        # phantom-filled the back at 7.40.
+        for i in range(1, 4):
+            snap = RunnerSnap(
+                selection_id=sid, status="ACTIVE",
+                last_traded_price=5.1, total_matched=500.0 + i * 200.0,
+                starting_price_near=0.0, starting_price_far=0.0,
+                adjustment_factor=None, bsp=None, sort_priority=1,
+                removal_date=None,
+                available_to_back=[
+                    PriceSize(price=4.5, size=10.0),
+                    PriceSize(price=4.4, size=20.0),
+                ],
+                available_to_lay=[
+                    PriceSize(price=4.7, size=10.0),
+                    PriceSize(price=4.8, size=15.0),
+                ],
+            )
+            bm.passive_book.on_tick(_tick([snap], seq=i), tick_index=i)
+        # Post-fix: order must remain unfilled (no Bet created for it).
+        assert len(bm.bets) == 0, (
+            "passive back at 7.40 must not fill when atb never reaches 7.40; "
+            f"got {len(bm.bets)} bets"
+        )
+
+    def test_passive_back_fills_once_atb_top_crosses_limit(self):
+        """Symmetric positive case — confirm the gate doesn't block
+        legitimate fills.
+
+        Same setup as above, but at some point atb top rises to 7.40+
+        (a layer aggressively offers at high price). Order must fill.
+        """
+        bm = BetManager(starting_budget=200.0, fill_mode="volume")
+        sid = 101
+        snap_t0 = RunnerSnap(
+            selection_id=sid, status="ACTIVE",
+            last_traded_price=5.1, total_matched=500.0,
+            starting_price_near=0.0, starting_price_far=0.0,
+            adjustment_factor=None, bsp=None, sort_priority=1, removal_date=None,
+            available_to_back=[PriceSize(price=4.5, size=10.0)],
+            available_to_lay=[PriceSize(price=4.7, size=10.0)],
+        )
+        order = bm.passive_book.place(
+            snap_t0, stake=10.0, side=BetSide.BACK, market_id="m1", tick_index=0,
+            price=7.40,
+        )
+        assert order is not None
+        # t=1: market drifts wider; atb top reaches 7.50 (above our limit)
+        # AND a chunk of volume traded.
+        snap_t1 = RunnerSnap(
+            selection_id=sid, status="ACTIVE",
+            last_traded_price=7.0, total_matched=700.0,
+            starting_price_near=0.0, starting_price_far=0.0,
+            adjustment_factor=None, bsp=None, sort_priority=1, removal_date=None,
+            available_to_back=[PriceSize(price=7.50, size=15.0)],
+            available_to_lay=[PriceSize(price=7.80, size=15.0)],
+        )
+        bm.passive_book.on_tick(_tick([snap_t1], seq=1), tick_index=1)
+        assert len(bm.bets) == 1, (
+            "passive back at 7.40 should fill when atb top reaches 7.50; "
+            f"got {len(bm.bets)} bets"
+        )
+        # Fill price is the RESTING price, not the crossing price
+        # (passive orders fill at their posted price, not at the
+        # opposite-side top).
+        assert bm.bets[0].average_price == pytest.approx(7.40)
+
+    def test_passive_lay_does_not_fill_when_back_side_never_reaches_limit(self):
+        """Symmetric counterpart for lay orders."""
+        bm = BetManager(starting_budget=200.0, fill_mode="volume")
+        sid = 101
+        snap_t0 = RunnerSnap(
+            selection_id=sid, status="ACTIVE",
+            last_traded_price=5.1, total_matched=500.0,
+            starting_price_near=0.0, starting_price_far=0.0,
+            adjustment_factor=None, bsp=None, sort_priority=1, removal_date=None,
+            available_to_back=[PriceSize(price=4.5, size=10.0)],
+            available_to_lay=[PriceSize(price=4.7, size=10.0)],
+        )
+        # Passive lay at 3.0 with atl never reaching <= 3.0.
+        order = bm.passive_book.place(
+            snap_t0, stake=10.0, side=BetSide.LAY, market_id="m1", tick_index=0,
+            price=3.0,
+        )
+        assert order is not None
+        for i in range(1, 4):
+            snap = RunnerSnap(
+                selection_id=sid, status="ACTIVE",
+                last_traded_price=5.1, total_matched=500.0 + i * 200.0,
+                starting_price_near=0.0, starting_price_far=0.0,
+                adjustment_factor=None, bsp=None, sort_priority=1,
+                removal_date=None,
+                available_to_back=[PriceSize(price=4.5, size=10.0)],
+                available_to_lay=[PriceSize(price=4.7, size=10.0)],
+            )
+            bm.passive_book.on_tick(_tick([snap], seq=i), tick_index=i)
+        assert len(bm.bets) == 0, (
+            "passive lay at 3.0 must not fill when atl never reaches 3.0; "
+            f"got {len(bm.bets)} bets"
+        )
+
+
 class TestPragmaticMode:
     """Pragmatic mode prorates market-level traded-volume delta across
     runners by visible book size, applies the same crossability gate

@@ -112,6 +112,11 @@ _PHASE5_GENES_VIA_REWARD_OVERRIDES: frozenset[str] = frozenset({
 
 _PHASE5_GENES_VIA_SCALPING_OVERRIDES: frozenset[str] = frozenset({
     "arb_spread_scale",
+    # Price-adaptive arb_spread (2026-05-23, plans/force_close_and_arb_spread/).
+    # Always active in the env when scalping_mode=True; gene-evolved when
+    # opted in via --enable-gene arb_spread_headroom_ticks, otherwise
+    # pinned to the cohort-wide default (PHASE5_GENE_DEFAULTS["arb_spread_headroom_ticks"]=2.0).
+    "arb_spread_headroom_ticks",
 })
 
 # Phase 7 Session 02 (2026-05-04). The three auxiliary-head loss
@@ -441,10 +446,27 @@ def _build_env_for_day(
     direction_gate_enabled: bool = False,
     race_confidence_threshold: float = 0.0,
     lay_price_max: float = 0.0,
+    market_type_filter: str | None = None,
+    emit_debug_features: bool = False,
+    feature_cache: dict[str, list] | None = None,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
+    """Build a BetfairEnv + DiscreteActionShim for a single day.
+
+    2026-05-22 perf phase 2: ``emit_debug_features`` defaults to
+    False here. The env's default is True, but per-tick per-runner
+    OBI / microprice / traded_delta / mid_drift / book_churn
+    computations in `_get_info` consume ~25-40% of step time and are
+    NEVER read by the training rollout collector (only by tests +
+    replay UI). Setting False here speeds up cohort training by
+    8-12 min/agent with zero impact on the GA signal. See
+    plans/cohort_training_speedup/phase_2.md.
+
+    Pass True explicitly when the caller actually needs the debug
+    features (e.g. ad-hoc evaluation scripts that read
+    ``info["debug_features"]``).
+    """
     day = load_day(day_str, data_dir=data_dir)
-    env = BetfairEnv(
-        day, cfg,
+    env_kwargs = dict(
         reward_overrides=reward_overrides,
         scalping_overrides=scalping_overrides,
         predictor_bundle=predictor_bundle,
@@ -456,7 +478,18 @@ def _build_env_for_day(
         direction_gate_enabled=direction_gate_enabled,
         race_confidence_threshold=race_confidence_threshold,
         lay_price_max=lay_price_max,
+        emit_debug_features=emit_debug_features,
     )
+    if market_type_filter is not None:
+        env_kwargs["market_type_filter"] = market_type_filter
+    # phase-3 Option F.1: the env constructor accepts a
+    # feature_cache dict keyed by ``day.date``. When the cohort
+    # runner threads its per-run cache through, ``engineer_day``
+    # output is reused across agents in the same cohort, recovering
+    # ~10s of the 16s env-build wall (63% reduction, measured).
+    if feature_cache is not None:
+        env_kwargs["feature_cache"] = feature_cache
+    env = BetfairEnv(day, cfg, **env_kwargs)
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
 
@@ -609,8 +642,12 @@ def _rebind_trainer(
     trainer.shim = shim
     trainer.action_space = shim.action_space
     trainer.max_runners = shim.max_runners
+    # phase-3 Option A — rebind the collector to the trainer's rollout
+    # device, not its update device. Single-device runs see them equal
+    # so the rebind is byte-identical to pre-Option-A.
     trainer._collector = RolloutCollector(
-        shim=shim, policy=trainer.policy, device=str(trainer.device),
+        shim=shim, policy=trainer.policy,
+        device=str(trainer.rollout_device),
     )
     # Phase-13 S03 — direction-prob caches per-day labels keyed by
     # date+config; clear on rebind so the new day's labels load
@@ -867,6 +904,7 @@ def train_one_agent(
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
     arb_spread_scale_override: float | None = None,
+    arb_spread_headroom_ticks_override: float | None = None,
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
@@ -878,6 +916,7 @@ def train_one_agent(
     race_confidence_threshold: float = 0.0,
     lay_price_max: float = 0.0,
     composite_score_mode: str = "total_reward",
+    feature_cache: dict[str, list] | None = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -977,6 +1016,15 @@ def train_one_agent(
         per_agent_scalping_overrides["arb_spread_scale"] = float(
             arb_spread_scale_override,
         )
+    # Cohort-wide pin for arb_spread_headroom_ticks wins over the gene/
+    # enable path (mirrors arb_spread_scale_override above). The runner's
+    # CLI guard rejects --arb-spread-headroom-ticks combined with
+    # --enable-gene arb_spread_headroom_ticks.
+    if arb_spread_headroom_ticks_override is not None:
+        per_agent_scalping_overrides = dict(per_agent_scalping_overrides or {})
+        per_agent_scalping_overrides["arb_spread_headroom_ticks"] = float(
+            arb_spread_headroom_ticks_override,
+        )
     # Phase 7 Session 02 (Path A). Pre-merge any reward_overrides for
     # trainer-side keys into the per-agent hp dict so the trainer's
     # ``hp.get(name, 0.0)`` reads the override. NEVER add a config
@@ -1010,6 +1058,7 @@ def train_one_agent(
         direction_gate_enabled=direction_gate_enabled,
         race_confidence_threshold=race_confidence_threshold,
         lay_price_max=lay_price_max,
+        feature_cache=feature_cache,
     )
 
     # Phase-14 S03 — direction gate config flows through trainer_hp
@@ -1046,6 +1095,14 @@ def train_one_agent(
         enable_fc_prob_head=enable_fc_prob_head,
     )
 
+    # phase-3 Option A: when training on CUDA, the rollout's policy
+    # forward at batch=1 is dominated by per-op kernel-launch overhead;
+    # running it on CPU is ~33% faster end-to-end while the PPO update
+    # (mini-batch=64+) still benefits from CUDA. Single-device runs
+    # ("--device cpu") keep the rollout on CPU and so retain byte-
+    # identical behaviour. The trainer handles the policy + optimiser
+    # round-trip per episode.
+    rollout_device = "cpu" if str(device) == "cuda" else device
     trainer = DiscretePPOTrainer(
         policy=policy,
         shim=shim,
@@ -1059,6 +1116,7 @@ def train_one_agent(
         mini_batch_size=int(genes.mini_batch_size),
         max_grad_norm=0.5,
         device=device,
+        rollout_device=rollout_device,
         hp=trainer_hp,
     )
 
@@ -1377,6 +1435,7 @@ def train_one_agent(
                 direction_gate_enabled=direction_gate_enabled,
                 race_confidence_threshold=race_confidence_threshold,
                 lay_price_max=lay_price_max,
+                feature_cache=feature_cache,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -1586,9 +1645,16 @@ def train_one_agent(
             direction_gate_enabled=direction_gate_enabled,
             race_confidence_threshold=race_confidence_threshold,
             lay_price_max=lay_price_max,
+            feature_cache=feature_cache,
         )
+        # phase-3 Option A — eval has no PPO update so the rollout
+        # always uses the trainer's rollout_device (CPU when on CUDA).
+        # The policy was parked on rollout_device by the last
+        # _update_from_batch ``finally`` block; eval just continues
+        # from there.
         eval_collector = RolloutCollector(
-            shim=eval_shim, policy=policy, device=device,
+            shim=eval_shim, policy=policy,
+            device=str(trainer.rollout_device),
         )
         eval_batch = eval_collector.collect_episode(deterministic=argmax_eval)
         eval_summary_partial = _eval_rollout_stats(

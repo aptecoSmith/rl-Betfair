@@ -1579,6 +1579,25 @@ class BetfairEnv(gymnasium.Env):
             # Bad gene value → fall back to default rather than divide by zero
             # in the mapping below.
             self._arb_spread_scale = 1.0
+        # Price-adaptive arb_spread (2026-05-23,
+        # plans/force_close_and_arb_spread/). Tick count added on top of
+        # the commission floor when sizing the passive leg of a scalping
+        # pair. ALWAYS active in the formula — there is no opt-in flag.
+        # Default 2.0 matches PHASE5_GENE_DEFAULTS["arb_spread_headroom_ticks"]
+        # in training_v2/cohort/genes.py. When the GA evolves this gene
+        # (--enable-gene arb_spread_headroom_ticks) it lands here per-agent
+        # via scalping_overrides; otherwise this read returns the default.
+        # The agent's per-runner ``arb_spread`` action dim is no longer
+        # consumed for the standard placement path — see CLAUDE.md
+        # "Price-adaptive arb_spread (2026-05-23)" for the rationale and
+        # the scoreboard-comparability note.
+        self._arb_spread_headroom_ticks = float(
+            scalping_overrides.get("arb_spread_headroom_ticks", 2.0),
+        )
+        if self._arb_spread_headroom_ticks < 0.0:
+            # Defensive — a negative headroom would put the passive
+            # INSIDE the commission floor, locking negative P&L.
+            self._arb_spread_headroom_ticks = 0.0
 
         # Predictor-integration Session 02 (early-resolved): the flag
         # state + bundle reference must be set BEFORE `_precompute`
@@ -2033,8 +2052,17 @@ class BetfairEnv(gymnasium.Env):
         # Lazy import to keep env startup cheap when off.
         from data.predictor_features import build_direction_windows_for_race
 
+        # 2026-05-22: read feature_variant from the loaded direction
+        # payload so promoting a V3/V4 predictor doesn't require an env
+        # rebuild. Falls back to V2 (the pre-2026-05-22 default) when
+        # the bundle doesn't expose the field.
+        feat_variant = getattr(
+            self._predictor_bundle.direction, "feature_variant", "V2",
+        )
         try:
-            windows, indices = build_direction_windows_for_race(race)
+            windows, indices = build_direction_windows_for_race(
+                race, variant=feat_variant,
+            )
         except Exception:
             logger.exception(
                 "build_direction_windows_for_race failed for market %s; "
@@ -2057,25 +2085,51 @@ class BetfairEnv(gymnasium.Env):
             )
             return {}
 
-        # Map back. Manifest: 3 horizons × 3 quantiles. Order from the
-        # bundle's `direction.horizons` (1m, 3m, 7m) and `direction.quantiles`
-        # (0.1, 0.5, 0.9).
+        # Map back. The obs schema reserves 9 dir_qXX_Xm slots (3 horizons
+        # × 3 quantiles), named historically as ``_1m``, ``_3m``, ``_7m``.
+        # Different predictor manifests may declare different horizon
+        # tuples (the pre-2026-05-22 V2 champion used 1m/3m/7m; the V4
+        # champion uses 3m/7m/15m). To keep the obs schema fixed and let
+        # the agent re-train against whatever the current predictor
+        # provides, we emit the FIRST THREE of the predictor's horizons
+        # into the obs slots in declared order, preserving the existing
+        # key names as positional labels (the agent learns from
+        # positional features, not from the names). When the predictor
+        # has fewer than 3 horizons, missing slots zero-fill.
         per_tick: dict[tuple[int, int], dict[str, float]] = {}
-        h_idx = {h: i for i, h in enumerate(self._predictor_bundle.direction.horizons)}
+        h_horizons = tuple(self._predictor_bundle.direction.horizons)
         q_idx = {q: i for i, q in enumerate(self._predictor_bundle.direction.quantiles)}
+        # Pull q-indices defensively in case the predictor declares
+        # non-standard quantile order (e.g. [0.5, 0.1, 0.9]).
+        q10 = q_idx.get(0.1, 0)
+        q50 = q_idx.get(0.5, 1)
+        q90 = q_idx.get(0.9, 2)
+        # Fallback to zero for absent horizons.
+        h0 = 0 if len(h_horizons) > 0 else None
+        h1 = 1 if len(h_horizons) > 1 else None
+        h2 = 2 if len(h_horizons) > 2 else None
+
+        def _q(row_q, h_pos: int | None, q_pos: int) -> float:
+            if h_pos is None or h_pos >= row_q.shape[0]:
+                return 0.0
+            return float(row_q[h_pos, q_pos])
+
         for n, (t_idx, sid) in enumerate(indices):
             row_q = quantiles[n]
             row_f = fires[n]
             per_tick[(t_idx, sid)] = {
-                "dir_q10_1m": float(row_q[h_idx["1m"], q_idx[0.1]]),
-                "dir_q50_1m": float(row_q[h_idx["1m"], q_idx[0.5]]),
-                "dir_q90_1m": float(row_q[h_idx["1m"], q_idx[0.9]]),
-                "dir_q10_3m": float(row_q[h_idx["3m"], q_idx[0.1]]),
-                "dir_q50_3m": float(row_q[h_idx["3m"], q_idx[0.5]]),
-                "dir_q90_3m": float(row_q[h_idx["3m"], q_idx[0.9]]),
-                "dir_q10_7m": float(row_q[h_idx["7m"], q_idx[0.1]]),
-                "dir_q50_7m": float(row_q[h_idx["7m"], q_idx[0.5]]),
-                "dir_q90_7m": float(row_q[h_idx["7m"], q_idx[0.9]]),
+                # "_1m" slot ← predictor's 1st horizon (declared order)
+                "dir_q10_1m": _q(row_q, h0, q10),
+                "dir_q50_1m": _q(row_q, h0, q50),
+                "dir_q90_1m": _q(row_q, h0, q90),
+                # "_3m" slot ← predictor's 2nd horizon
+                "dir_q10_3m": _q(row_q, h1, q10),
+                "dir_q50_3m": _q(row_q, h1, q50),
+                "dir_q90_3m": _q(row_q, h1, q90),
+                # "_7m" slot ← predictor's 3rd horizon
+                "dir_q10_7m": _q(row_q, h2, q10),
+                "dir_q50_7m": _q(row_q, h2, q50),
+                "dir_q90_7m": _q(row_q, h2, q90),
                 "dir_fire_drift": float(row_f[0]),
                 "dir_fire_shorten": float(row_f[1]),
                 "dir_fire_no_signal": float(row_f[2]),
@@ -2545,7 +2599,17 @@ class BetfairEnv(gymnasium.Env):
             "races_completed": self._races_completed,
             "race_records": list(self._race_records),
             "debug_features": debug_features,
-            "passive_orders": [o.to_dict() for o in bm.passive_book.orders],
+            # 2026-05-22 perf: gate the heavy per-order to_dict() list
+            # build on the same emit_debug_features flag. During cohort
+            # training rollouts NOTHING reads info["passive_orders"]
+            # (only the replay UI does), so the per-step cost of
+            # serialising 50+ resting orders is pure waste. Cheap reads
+            # of last_fills / last_cancels stay on (they're just list
+            # references, no allocation).
+            "passive_orders": (
+                [o.to_dict() for o in bm.passive_book.orders]
+                if self._emit_debug_features else []
+            ),
             "passive_fills": bm.passive_book.last_fills,
             "passive_cancels": bm.passive_book.last_cancels,
             "action_debug": dict(self._last_action_debug),
@@ -3371,8 +3435,23 @@ class BetfairEnv(gymnasium.Env):
                                     "skipped_reason": "commission_infeasible",
                                 }
                                 continue
-                            if floor > arb_ticks:
-                                arb_ticks = floor
+                            # Price-adaptive arb_spread (2026-05-23,
+                            # plans/force_close_and_arb_spread/). Replace
+                            # the action-derived arb_ticks entirely with
+                            # ``floor + headroom``, then apply the per-
+                            # agent arb_spread_scale gene as a multiplier.
+                            # Final clamp to [MIN_ARB_TICKS, MAX_ARB_TICKS]
+                            # so the formula can never produce a passive
+                            # at a silly tick. See CLAUDE.md
+                            # "Price-adaptive arb_spread (2026-05-23)".
+                            raw_ticks = (
+                                (floor + self._arb_spread_headroom_ticks)
+                                * self._arb_spread_scale
+                            )
+                            arb_ticks = int(round(max(
+                                MIN_ARB_TICKS,
+                                min(MAX_ARB_TICKS, raw_ticks),
+                            )))
                         if side == BetSide.BACK:
                             if agg_price_est is not None:
                                 lay_leg_price = tick_offset(
@@ -3591,19 +3670,15 @@ class BetfairEnv(gymnasium.Env):
                 runner = runner_by_sid.get(sid)
                 if runner is None or runner.status != "ACTIVE":
                     continue
-                # Recompute arb_ticks from this tick's arb_raw, so the
-                # new passive price follows the current LTP with the
-                # agent's chosen spread — NOT the arb_raw that applied
-                # at the original aggressive fill.
-                arb_raw = float(action[4 * self.max_runners + slot_idx])
-                arb_frac = float(np.clip((arb_raw + 1.0) / 2.0, 0.0, 1.0))
-                raw_ticks = (
-                    MIN_ARB_TICKS
-                    + arb_frac * (MAX_ARB_TICKS - MIN_ARB_TICKS)
-                ) * self._arb_spread_scale
-                arb_ticks = int(round(
-                    max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks))
-                ))
+                # Price-adaptive arb_spread (2026-05-23,
+                # plans/force_close_and_arb_spread/). The action-derived
+                # arb_ticks is no longer used; _attempt_requote recomputes
+                # arb_ticks internally from the existing pair's aggressive
+                # matched price using the formula
+                # ``(floor + headroom) * arb_spread_scale``. The placeholder
+                # ``MIN_ARB_TICKS`` here is documentation — the actual value
+                # is overwritten inside _attempt_requote.
+                arb_ticks = MIN_ARB_TICKS
                 time_to_off = (
                     race.market_start_time - tick.timestamp
                 ).total_seconds()
@@ -3883,6 +3958,38 @@ class BetfairEnv(gymnasium.Env):
             _mark(requote_attempted=True, requote_failed=True,
                   requote_reason="no_ltp")
             return
+
+        # Price-adaptive arb_spread (2026-05-23,
+        # plans/force_close_and_arb_spread/). Recompute arb_ticks from
+        # the original aggressive matched price using the formula
+        #   arb_ticks = clip(round((floor + headroom) * scale), 1, 25)
+        # where floor = min_arb_ticks_for_profit(agg_bet.average_price, ...).
+        # The ``arb_ticks`` parameter passed by the caller is IGNORED —
+        # the re-quote always anchors on the commission floor, not the
+        # agent's per-tick action input. See CLAUDE.md
+        # "Price-adaptive arb_spread (2026-05-23)".
+        agg_side_str = "back" if agg_bet.side is BetSide.BACK else "lay"
+        floor = min_arb_ticks_for_profit(
+            agg_bet.average_price,
+            agg_side_str,  # type: ignore[arg-type]
+            self._commission,
+            max_ticks=MAX_ARB_TICKS,
+        )
+        if floor is None:
+            # Same refusal semantics as the open path — if the original
+            # agg price is no longer scalpable at the current commission
+            # (e.g. config change mid-race), don't re-post a passive that
+            # would lock negative P&L.
+            _mark(requote_attempted=True, requote_failed=True,
+                  requote_reason="commission_infeasible")
+            return
+        raw_ticks = (
+            (floor + self._arb_spread_headroom_ticks)
+            * self._arb_spread_scale
+        )
+        arb_ticks = int(round(max(
+            MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks),
+        )))
 
         if agg_bet.side is BetSide.BACK:
             new_price = tick_offset(ltp, arb_ticks, -1)

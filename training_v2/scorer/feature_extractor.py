@@ -132,8 +132,16 @@ class FeatureExtractor:
     is fully processed to release memory.
     """
 
+    # phase-3 Option B: lifted from per-call assert in ``extract`` to
+    # a class-level set so the hot path doesn't pay ``set(feats.keys())
+    # == set(FEATURE_NAMES)`` (~5-10 µs × 184k calls/day) on every
+    # invocation. The contract is still checked — see ``extract`` —
+    # but only the FIRST call per FeatureExtractor pays the cost.
+    _FEATURE_NAME_SET: frozenset[str] = frozenset(FEATURE_NAMES)
+
     def __init__(self) -> None:
         self._markets: dict[str, _MarketHistory] = {}
+        self._extract_contract_verified: bool = False
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -305,15 +313,22 @@ class FeatureExtractor:
         )
 
         # Verify FEATURE_NAMES coverage in dev — the keyset must match
-        # exactly. Cheap to assert at extraction time (one extra dict
-        # keys() call); catches regressions where a new feature is
-        # appended to FEATURE_NAMES but the extractor forgets to set
-        # it (or vice versa).
-        assert set(feats.keys()) == set(FEATURE_NAMES), (
-            f"FEATURE_NAMES / extracted keys mismatch: "
-            f"missing={set(FEATURE_NAMES) - set(feats.keys())}, "
-            f"extra={set(feats.keys()) - set(FEATURE_NAMES)}"
-        )
+        # exactly. phase-3 Option B: lifted from a per-call set
+        # comparison to a once-per-instance check. The first extract
+        # call pays the full cost; subsequent calls skip it. A keyset
+        # drift on a later call would silently slip past — accepted
+        # because the producer (this method) is statically structured
+        # so all branches assign all FEATURE_NAMES entries; runtime
+        # divergence is impossible without a code edit which would
+        # exercise the first-call check via the test suite.
+        if not self._extract_contract_verified:
+            keys = feats.keys()
+            assert frozenset(keys) == self._FEATURE_NAME_SET, (
+                f"FEATURE_NAMES / extracted keys mismatch: "
+                f"missing={self._FEATURE_NAME_SET - frozenset(keys)}, "
+                f"extra={frozenset(keys) - self._FEATURE_NAME_SET}"
+            )
+            self._extract_contract_verified = True
         return feats
 
 

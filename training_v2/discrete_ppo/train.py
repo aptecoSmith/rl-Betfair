@@ -253,6 +253,9 @@ def select_days(
     day_shuffle_seed: int,
     n_eval_days: int | None = None,
     exclude_days: list[str] | None = None,
+    cohort_eval_days: list[str] | None = None,
+    training_days_explicit: list[str] | None = None,
+    monitor_days: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Pick the training days + the held-out eval days.
 
@@ -280,6 +283,49 @@ def select_days(
     length ``n_days - n_eval_days`` and ``eval_days`` has length
     ``n_eval_days``.
     """
+    # ── Explicit-lists path (overfitting-fix 2026-05-22) ─────────────
+    # When the caller supplies cohort_eval_days and/or training_days_explicit,
+    # use them verbatim. monitor_days is also disjoint. The 'available
+    # minus excludes' check is applied as a sanity guard but n_days /
+    # n_eval_days are ignored. Used to break the single-contiguous-week
+    # eval bias that caused +£72/d → −£200/d regression on 2026-05-14
+    # week. See plans/EXPERIMENTS.md "overfitting prevention" entry.
+    if cohort_eval_days is not None or training_days_explicit is not None:
+        available_set = set(_enumerate_day_files(data_dir))
+        if exclude_days:
+            available_set -= set(exclude_days)
+        explicit_eval = list(cohort_eval_days) if cohort_eval_days else []
+        explicit_train = list(training_days_explicit) if training_days_explicit else []
+        explicit_monitor = list(monitor_days) if monitor_days else []
+        # Sanity: all explicit dates must exist on disk
+        for d in explicit_eval + explicit_train + explicit_monitor:
+            if d not in available_set and exclude_days and d in set(exclude_days):
+                # date explicitly listed AND excluded — operator override
+                continue
+            if d not in available_set:
+                raise RuntimeError(
+                    f"explicit date {d} not found in {data_dir} (or excluded)",
+                )
+        # Disjointness check
+        ets, tts, mts = set(explicit_eval), set(explicit_train), set(explicit_monitor)
+        if ets & tts:
+            raise ValueError(f"overlap between cohort_eval_days and training_days_explicit: {ets & tts}")
+        if ets & mts:
+            raise ValueError(f"overlap between cohort_eval_days and monitor_days: {ets & mts}")
+        if tts & mts:
+            raise ValueError(f"overlap between training_days_explicit and monitor_days: {tts & mts}")
+        # If training not specified, derive: all available minus eval, monitor, excludes
+        if not explicit_train:
+            explicit_train = sorted(available_set - ets - mts)
+        if not explicit_train:
+            raise RuntimeError("no training days remain after applying excludes / eval / monitor lists")
+        if not explicit_eval:
+            raise ValueError("cohort_eval_days must be non-empty when explicit lists are used")
+        rng = random.Random(int(day_shuffle_seed))
+        rng.shuffle(explicit_train)
+        return explicit_train, explicit_eval
+
+    # ── Legacy chronological path (unchanged) ────────────────────────
     if n_days < 2:
         raise ValueError(
             f"--days {n_days} must be >= 2 (one training day + one held-out "

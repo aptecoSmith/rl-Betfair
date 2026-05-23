@@ -13,6 +13,7 @@ from env.betfair_env import (
     MIN_ARB_TICKS,
     POSITION_DIM,
     SCALPING_ACTIONS_PER_RUNNER,
+    SCALPING_AGENT_STATE_DIM,
     SCALPING_POSITION_DIM,
     BetfairEnv,
     _compute_scalping_reward_terms,
@@ -245,11 +246,20 @@ class TestScalpingEnvSpaces:
     def test_obs_space_grows_when_scalping(self, scalping_config, legacy_config):
         env_on = BetfairEnv(_make_day(n_races=1), scalping_config)
         env_off = BetfairEnv(_make_day(n_races=1), legacy_config)
-        # Phase 2b of scalping-lay-quality-gate (2026-05-13) grew
-        # SCALPING_POSITION_DIM from 4 → 8 (added naked downside +
-        # cost-to-close + worst-case-naked features). 8 extra per
-        # runner + 2 global = 8*14 + 2 = 114 extra.
-        assert env_on.observation_space.shape[0] == env_off.observation_space.shape[0] + 114
+        # Scalping adds SCALPING_POSITION_DIM extra cols per runner plus
+        # SCALPING_AGENT_STATE_DIM globals. Derived from the constants
+        # rather than hardcoded so the assertion follows obs-schema
+        # bumps without manual maintenance — last bump was
+        # scalping-locked-fitness-and-age-obs (2026-05-14, dim 8 → 9,
+        # adding ``seconds_since_aggressive_placed``).
+        expected_delta = (
+            SCALPING_POSITION_DIM * env_on.max_runners
+            + SCALPING_AGENT_STATE_DIM
+        )
+        assert (
+            env_on.observation_space.shape[0]
+            == env_off.observation_space.shape[0] + expected_delta
+        )
 
     def test_legacy_step_matches_before_scalping(self, legacy_config):
         """Round-trip a random-seeded rollout to verify shape/behaviour invariance."""
@@ -346,19 +356,27 @@ class TestScalpingPairedPlacement:
         assert not any(o.pair_id for o in bm.passive_book.orders)
 
     def test_arb_ticks_mapping_respects_range(self, scalping_config):
-        """arb_spread=+1 → MAX ticks, -1 → MIN ticks (direction-aware)."""
+        """The passive leg lands inside [MIN_ARB_TICKS, MAX_ARB_TICKS]
+        regardless of the (now-ignored) action input.
+
+        Price-adaptive arb_spread (2026-05-23,
+        plans/force_close_and_arb_spread/): the action's per-runner
+        arb_spread dim is no longer consumed; the env derives the tick
+        count from the commission floor + headroom gene. This test
+        survives the rewrite as a structural "passive sits on the
+        correct side, within the clamp" guard — the specific tick
+        count is exercised in the regression test added by the same
+        plan (see TestPriceAdaptiveArbSpread below).
+        """
         env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
         env.reset()
         a = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
         a[0] = 1.0
         a[14] = -0.8
         a[28] = 1.0
-        a[56] = 1.0   # arb_spread = max
+        a[56] = 1.0   # ignored under price-adaptive arb_spread
         env.step(a)
         bm = env.bet_manager
-        # Aggressive back priced around 4.2 in synthetic data; 15 ticks down
-        # on the 1.01–2.00 and 2.00–3.00 and 3.00–4.00 ladder. Verify the
-        # resting passive lay rests strictly below the fill price.
         backs = [b for b in bm.bets if b.side is BetSide.BACK and b.pair_id]
         assert backs
         passive_lays = [
@@ -1180,11 +1198,13 @@ class TestScalpingGenes:
                 assert a.hyperparameters["scalping_mode"] is True
 
     def test_env_respects_arb_spread_scale_override(self, scalping_config):
-        """arb_spread_scale expands / compresses the mapped tick range
-        within the hard [MIN_ARB_TICKS, MAX_ARB_TICKS] clamp."""
-        # A scale of 0.5 with arb_frac=1.0 halves the mapped range, so the
-        # resulting tick count is below MAX_ARB_TICKS — proving the gene took
-        # effect.  Default 1.0 would give MAX_ARB_TICKS exactly.
+        """arb_spread_scale flows through ``scalping_overrides`` to the
+        env attribute used by the price-adaptive arb_spread formula.
+
+        Behavioural effect: ``arb_ticks = clip(round((floor + headroom)
+        * arb_spread_scale), 1, 25)``. Scale=0.5 halves the formula
+        output; default 1.0 leaves it unchanged.
+        """
         day = _make_day(n_races=1, n_pre_ticks=3)
         env_fast = BetfairEnv(day, scalping_config,
                               scalping_overrides={"arb_spread_scale": 0.5})
@@ -1388,14 +1408,17 @@ class TestScalpingRequote:
         agg, old_passive = self._place_initial_pair(env)
         bm = env.bet_manager
 
-        # Capture the old price so we can assert it moved.
-        old_price = old_passive.price
         old_id = id(old_passive)
 
-        # Fire requote at a wider offset. The placement path's tick math
-        # snaps price to tick grid, so the new price almost always differs
-        # unless arb_spread=-1 was used both times — here we flip to +1
-        # (MAX_ARB_TICKS) to force a large move.
+        # Fire requote. Under price-adaptive arb_spread (2026-05-23) the
+        # arb_spread action input is ignored; the env recomputes
+        # arb_ticks from the agg fill price + headroom gene. The
+        # passive's new price is ``tick_offset(current_ltp, arb_ticks, ±1)``
+        # so it moves iff LTP moved between open and requote. The
+        # structural cancel+replace properties below are the load-
+        # bearing assertions — a price-equality check is no longer a
+        # safe proxy because constant-LTP fixtures legitimately produce
+        # the same price on both placements.
         a = _scalping_action(requote=1.0, arb_spread=1.0)
         env.step(a)
 
@@ -1408,8 +1431,6 @@ class TestScalpingRequote:
             o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
         ]
         assert len(new_passives) == 1
-        new_order = new_passives[0]
-        assert new_order.price != old_price
         # Bet history unchanged (no new Bet created — the passive hasn't filled).
         assert len([b for b in bm.bets if b.pair_id is not None]) == 1
 
@@ -1540,11 +1561,31 @@ class TestScalpingRequote:
         # not walked into a deeper level of the ladder. Asserting the
         # price equals tick_offset(current_ltp, arb_ticks, direction)
         # proves the placement did not spill across levels.
+        #
+        # Price-adaptive arb_spread (2026-05-23,
+        # plans/force_close_and_arb_spread/): the action input is no
+        # longer consumed; the env computes
+        #   arb_ticks = clip(round((floor + headroom) * arb_spread_scale), 1, 25)
+        # where floor = min_arb_ticks_for_profit(agg_price, side, commission).
+        # Re-derive the expected tick count the same way the env does
+        # so this test remains a pure "no ladder walk" guard rather
+        # than an accidental regression on the formula constants.
+        from env.scalping_math import min_arb_ticks_for_profit
         tick = env.day.races[0].ticks[env._tick_idx - 1]
         runner = next(r for r in tick.runners if r.selection_id == agg.selection_id)
         ltp = runner.last_traded_price
-        # arb=1.0 → MAX_ARB_TICKS ticks at default spread_scale=1.0.
-        expected_price = tick_offset(ltp, MAX_ARB_TICKS, -1)
+        floor = min_arb_ticks_for_profit(
+            agg.average_price, "back", env._commission,
+            max_ticks=MAX_ARB_TICKS,
+        )
+        assert floor is not None, "synthetic agg price should be scalpable"
+        raw_ticks = (
+            (floor + env._arb_spread_headroom_ticks) * env._arb_spread_scale
+        )
+        expected_ticks = int(round(
+            max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw_ticks)),
+        ))
+        expected_price = tick_offset(ltp, expected_ticks, -1)
         assert new_order.price == expected_price
         # Single resting order — we never doubled up on fills.
         assert new_order.matched_stake == 0.0
@@ -1957,11 +1998,17 @@ class TestFillProbHead:
         book._orders.append(order)
         book._orders_by_sid.setdefault(101, []).append(order)
 
+        # Crossing-gate fix (2026-05-21): for a passive LAY at 4.1 to
+        # cross, min(available_to_lay) must be <= 4.1. Provide a
+        # crossable atl level so this inheritance-behaviour test
+        # exercises the same code path as before the gate landed.
+        from data.episode_builder import PriceSize as _PS
+
         class _Runner:
             selection_id = 101
             total_matched = 1000.0  # > 0 → traded_volume_since... > 0
             available_to_back: list = []
-            available_to_lay: list = []
+            available_to_lay: list = [_PS(price=4.0, size=50.0)]
             last_traded_price = 4.0
             status = "ACTIVE"
 
@@ -2441,11 +2488,15 @@ class TestRiskHead:
         book._orders.append(order)
         book._orders_by_sid.setdefault(101, []).append(order)
 
+        # Crossing-gate fix (2026-05-21): provide atl level so the
+        # passive lay at 4.1 can cross (min(atl) <= 4.1).
+        from data.episode_builder import PriceSize as _PS
+
         class _Runner:
             selection_id = 101
             total_matched = 1000.0
             available_to_back: list = []
-            available_to_lay: list = []
+            available_to_lay: list = [_PS(price=4.0, size=50.0)]
             last_traded_price = 4.0
             status = "ACTIVE"
 
@@ -2828,31 +2879,32 @@ class TestEqualProfitSizingEndToEnd:
         assert close_bet.requested_stake == pytest.approx(expected, rel=1e-6)
 
     def test_requote_resizes_at_new_lay_price(self, scalping_config):
-        """Re-quote re-sizes the passive at the new lay price — it does
-        NOT carry the old stake forward (hard_constraints §8 third bullet).
+        """Re-quote re-sizes the passive at the realised lay price using
+        ``equal_profit_lay_stake`` — hard_constraints §8 third bullet.
+
+        Price-adaptive arb_spread (2026-05-23): the test's correctness
+        signature is "new stake matches the helper's output at the new
+        passive price". Under constant-LTP synthetic fixtures the new
+        price may equal the old (deterministic formula), in which case
+        the new stake legitimately equals the old too. The load-bearing
+        assertion is the helper-match at line 2903; the brittle
+        "stake != old_stake" assertion was removed.
         """
         from env.scalping_math import equal_profit_lay_stake
 
         env = self._make_env(scalping_config)
         env.reset()
-        agg, old_passive = self._place_initial_pair(env)
+        agg, _ = self._place_initial_pair(env)
         bm = env.bet_manager
-        old_price = old_passive.price
-        old_stake = old_passive.requested_stake
 
-        # Re-quote at MAX arb offset so the new price differs meaningfully.
         a = _scalping_action(requote=1.0, arb_spread=1.0)
         env.step(a)
 
         new_passive = next(
             o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
         )
-        assert new_passive.price != old_price, (
-            "test setup failed: re-quote must move price to exercise re-sizing"
-        )
-        # Old behaviour would have kept the stake identical across prices.
-        assert new_passive.requested_stake != pytest.approx(old_stake, rel=1e-9)
-        # New stake must match the helper's output at the NEW price.
+        # Load-bearing: new stake matches the helper at the realised
+        # passive lay price, regardless of whether the price moved.
         c = scalping_config["reward"].get("commission", 0.05)
         expected = equal_profit_lay_stake(
             back_stake=agg.matched_stake,
@@ -5490,3 +5542,231 @@ class TestSortinoComposite:
         )
         # Fallback: locked_pnl + 0.25 * naked_pnl = 100 + 10 = 110
         assert score == pytest.approx(110.0)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Price-adaptive arb_spread (2026-05-23,
+# plans/force_close_and_arb_spread/)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPriceAdaptiveArbSpread:
+    """The env's per-pair tick count is derived from the commission
+    floor + per-agent headroom gene, NOT from the agent's per-runner
+    arb_spread action dim. See CLAUDE.md "Price-adaptive arb_spread
+    (2026-05-23)".
+    """
+
+    def _open_pair(self, env: BetfairEnv) -> tuple:
+        """Drive a single aggressive open and return ``(agg, passive)``."""
+        a = np.zeros(
+            14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32,
+        )
+        a[0] = 1.0           # BACK signal
+        a[14] = -0.8         # stake fraction
+        a[28] = 1.0          # aggressive
+        # Deliberately set arb_spread=+1 (would have meant MAX ticks
+        # under the pre-plan action-driven mapping). The new formula
+        # ignores it; the test asserts the actual placement matches
+        # the formula's output.
+        a[56] = 1.0
+        env.step(a)
+        bm = env.bet_manager
+        agg = next(b for b in bm.bets if b.pair_id is not None)
+        passive = next(
+            o for o in bm.passive_book.orders if o.pair_id == agg.pair_id
+        )
+        return agg, passive
+
+    def _expected_ticks(
+        self, env: BetfairEnv, agg, side: str,
+    ) -> int:
+        from env.scalping_math import min_arb_ticks_for_profit
+        floor = min_arb_ticks_for_profit(
+            agg.average_price, side, env._commission,
+            max_ticks=MAX_ARB_TICKS,
+        )
+        assert floor is not None
+        raw = (
+            (floor + env._arb_spread_headroom_ticks)
+            * env._arb_spread_scale
+        )
+        return int(round(max(MIN_ARB_TICKS, min(MAX_ARB_TICKS, raw))))
+
+    def test_default_headroom_is_2(self, scalping_config):
+        """Cohort-wide default = gene default = 2.0 ticks above floor."""
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        assert env._arb_spread_headroom_ticks == 2.0
+
+    def test_scalping_overrides_sets_headroom(self, scalping_config):
+        """The worker's scalping_overrides dict reaches the env attribute."""
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            scalping_overrides={"arb_spread_headroom_ticks": 5.0},
+        )
+        assert env._arb_spread_headroom_ticks == 5.0
+
+    def test_negative_headroom_clamps_to_zero(self, scalping_config):
+        """A bad gene value can't put the passive INSIDE the commission
+        floor — that would lock negative P&L by construction."""
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3),
+            scalping_config,
+            scalping_overrides={"arb_spread_headroom_ticks": -3.0},
+        )
+        assert env._arb_spread_headroom_ticks == 0.0
+
+    def test_passive_price_matches_formula(self, scalping_config):
+        """``arb_ticks = clip(round((floor + headroom) * scale), 1, 25)``
+        and ``passive_price = tick_offset(agg_price, arb_ticks, ±1)``.
+
+        Load-bearing — this is the regression guard on the entire
+        plan. If the formula drifts (or someone reintroduces the
+        action-derived path) this assertion catches it.
+        """
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        env.reset()
+        agg, passive = self._open_pair(env)
+
+        expected_ticks = self._expected_ticks(env, agg, "back")
+        expected_price = tick_offset(
+            agg.average_price, expected_ticks, -1,
+        )
+        assert passive.price == expected_price
+
+    def test_action_arb_spread_input_is_ignored(self, scalping_config):
+        """Two envs with identical state but opposite arb_spread action
+        inputs produce the SAME passive price. The pre-plan behaviour
+        would have placed them at MIN vs MAX ticks; the new formula
+        ignores the input entirely.
+        """
+        day = _make_day(n_races=1, n_pre_ticks=3)
+        env_lo = BetfairEnv(day, scalping_config)
+        env_hi = BetfairEnv(day, scalping_config)
+        env_lo.reset()
+        env_hi.reset()
+        a_lo = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        a_hi = np.zeros(14 * SCALPING_ACTIONS_PER_RUNNER, dtype=np.float32)
+        for a, arb in ((a_lo, -1.0), (a_hi, 1.0)):
+            a[0] = 1.0
+            a[14] = -0.8
+            a[28] = 1.0
+            a[56] = arb
+        env_lo.step(a_lo)
+        env_hi.step(a_hi)
+        passive_lo = next(
+            o for o in env_lo.bet_manager.passive_book.orders
+            if o.pair_id is not None
+        )
+        passive_hi = next(
+            o for o in env_hi.bet_manager.passive_book.orders
+            if o.pair_id is not None
+        )
+        assert passive_lo.price == passive_hi.price
+
+    def test_higher_headroom_widens_spread(self, scalping_config):
+        """Bigger headroom gene → bigger tick count → passive further
+        from the aggressive fill price (for back-first pairs, further
+        DOWN; for lay-first, further UP)."""
+        day = _make_day(n_races=1, n_pre_ticks=3)
+        env_narrow = BetfairEnv(
+            day, scalping_config,
+            scalping_overrides={"arb_spread_headroom_ticks": 0.0},
+        )
+        env_wide = BetfairEnv(
+            day, scalping_config,
+            scalping_overrides={"arb_spread_headroom_ticks": 10.0},
+        )
+        env_narrow.reset()
+        env_wide.reset()
+        _, passive_narrow = self._open_pair(env_narrow)
+        _, passive_wide = self._open_pair(env_wide)
+        # Back-first pairs → passive lay BELOW the back fill price.
+        # Bigger headroom = lower lay price.
+        assert passive_wide.price < passive_narrow.price
+
+    def test_headroom_composes_with_arb_spread_scale(self, scalping_config):
+        """``arb_spread_scale`` multiplies the formula output."""
+        day = _make_day(n_races=1, n_pre_ticks=3)
+        env_unscaled = BetfairEnv(
+            day, scalping_config,
+            scalping_overrides={"arb_spread_headroom_ticks": 4.0},
+        )
+        env_halved = BetfairEnv(
+            day, scalping_config,
+            scalping_overrides={
+                "arb_spread_headroom_ticks": 4.0,
+                "arb_spread_scale": 0.5,
+            },
+        )
+        env_unscaled.reset()
+        env_halved.reset()
+        agg_u, passive_u = self._open_pair(env_unscaled)
+        agg_h, passive_h = self._open_pair(env_halved)
+        # Same agg price on both envs (same fixture, same action).
+        assert agg_u.average_price == agg_h.average_price
+        # ``(floor + 4) * 0.5`` is roughly half of ``(floor + 4) * 1.0``;
+        # halved scale → smaller spread → lay closer to back price.
+        assert passive_h.price > passive_u.price
+
+    def test_genes_dict_carries_headroom(self):
+        """``CohortGenes.to_dict`` exposes arb_spread_headroom_ticks
+        so registry persistence + scoreboard rows pick it up."""
+        from training_v2.cohort.genes import CohortGenes, sample_genes
+        import random
+        g = sample_genes(random.Random(42), enabled_set=frozenset())
+        d = g.to_dict()
+        assert "arb_spread_headroom_ticks" in d
+        # Disabled gene → cohort-wide default.
+        assert d["arb_spread_headroom_ticks"] == 2.0
+
+    def test_genes_sample_in_range_when_enabled(self):
+        """With ``--enable-gene arb_spread_headroom_ticks`` the GA
+        samples uniformly in [0.0, 10.0]."""
+        from training_v2.cohort.genes import (
+            ARB_SPREAD_HEADROOM_TICKS_RANGE, sample_genes,
+        )
+        import random
+        lo, hi = ARB_SPREAD_HEADROOM_TICKS_RANGE
+        enabled = frozenset({"arb_spread_headroom_ticks"})
+        for seed in range(20):
+            g = sample_genes(random.Random(seed), enabled_set=enabled)
+            assert lo <= g.arb_spread_headroom_ticks <= hi
+
+    def test_locked_pnl_remains_positive_at_default_headroom(
+        self, scalping_config,
+    ):
+        """Default headroom=2 + floor by construction → passive sits
+        STRICTLY above the commission breakeven → locked_pnl > 0.
+
+        The pre-plan test
+        ``TestScalpingReward::test_completed_arb_locks_real_pnl_via_race_pnl``
+        relied on MAX_ARB_TICKS being huge. The new formula uses a
+        smaller spread but its lower bound is guaranteed positive.
+        """
+        from env.bet_manager import Bet
+
+        env = BetfairEnv(_make_day(n_races=1, n_pre_ticks=3), scalping_config)
+        env.reset()
+        agg, passive = self._open_pair(env)
+
+        # Materialise the passive as a matched Bet so the pair completes.
+        bm = env.bet_manager
+        bm.bets.append(Bet(
+            selection_id=passive.selection_id,
+            side=passive.side,
+            requested_stake=passive.requested_stake,
+            matched_stake=passive.requested_stake,
+            average_price=passive.price,
+            market_id=passive.market_id,
+            ltp_at_placement=passive.ltp_at_placement,
+            pair_id=passive.pair_id,
+            tick_index=2,
+        ))
+        pairs = bm.get_paired_positions(
+            market_id=agg.market_id, commission=0.05,
+        )
+        assert pairs and pairs[0]["complete"]
+        assert pairs[0]["locked_pnl"] > 0.0
+

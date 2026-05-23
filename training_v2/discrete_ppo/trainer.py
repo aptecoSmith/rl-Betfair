@@ -148,10 +148,44 @@ def _move_to_device(
     overlaps with downstream compute. ``pin_memory()`` errors on
     CPU-only torch builds, so the CPU branch short-circuits to a
     plain ``.to(device)``.
+
+    phase-3 Option A: ``pin_memory()`` also errors on already-CUDA
+    tensors. With the split-device path, the rollout's hidden-state
+    buffers can arrive on CPU OR on CUDA depending on whether the
+    trainer is in split-device mode AND whether the buffer was
+    written by the rollout collector or by a prior _ppo_update call.
+    Short-circuit when the source already lives on the target device.
     """
-    if device.type == "cuda":
+    if tensor.device == device:
+        return tensor
+    if device.type == "cuda" and tensor.device.type == "cpu":
         return tensor.pin_memory().to(device, non_blocking=non_blocking)
     return tensor.to(device)
+
+
+def _move_optim_state_to(
+    optimiser: torch.optim.Optimizer,
+    device: torch.device,
+) -> None:
+    """Move every tensor inside ``optimiser.state`` to ``device``.
+
+    phase-3 Option A. ``optimizer.state`` is a dict keyed by parameter
+    tensor → state-dict of buffer tensors (Adam's ``exp_avg`` and
+    ``exp_avg_sq`` plus ``step``). When the policy parameters move
+    between devices, the optimizer's state references stay bound to
+    the OLD device — silent device-mismatch crashes (or, on Windows
+    with cuDNN paths, silent NaN gradients).
+
+    Call this immediately after ``policy.to(target_device)`` so
+    optimiser.step() sees state on the same device as
+    parameter.grad.
+
+    No-op when ``optimiser.state`` is empty (pre-first-step).
+    """
+    for state in optimiser.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device, non_blocking=True)
 
 
 # ── Public dataclasses ─────────────────────────────────────────────────────
@@ -352,6 +386,7 @@ class DiscretePPOTrainer:
         max_grad_norm: float = 0.5,
         kl_early_stop_threshold: float = 0.15,
         device: str = "cpu",
+        rollout_device: str | None = None,
         hp: dict | None = None,
     ) -> None:
         self.policy = policy
@@ -368,6 +403,20 @@ class DiscretePPOTrainer:
         self.max_grad_norm = float(max_grad_norm)
         self.kl_early_stop_threshold = float(kl_early_stop_threshold)
         self.device = torch.device(device)
+        # phase-3 Option A — split-device. When ``rollout_device`` is
+        # supplied (typically "cpu" on a CUDA update path) the trainer
+        # runs ``collect_episode`` on the rollout device and moves the
+        # policy + optimizer state to ``self.device`` only for the PPO
+        # update. At ``hidden_size=128`` + batch=1 per env step, CUDA
+        # kernel-launch overhead dominates the policy forward; CPU is
+        # ~33% faster on the rollout (measured). The PPO update at
+        # mini-batch=64 amortises the launch cost so CUDA wins there.
+        # Default ``None`` = single-device behaviour, byte-identical
+        # to pre-plan.
+        self.rollout_device = torch.device(
+            rollout_device if rollout_device is not None else device
+        )
+        self._split_device = self.rollout_device != self.device
 
         # Phase 7 Session 02 — auxiliary-head loss weights, read from
         # the per-agent ``hp`` dict ONLY. NO config fallback. The
@@ -473,15 +522,23 @@ class DiscretePPOTrainer:
         )
         self._eps_since_bc: int = 0
 
+        # Build optimizer on the UPDATE device. The policy is then
+        # moved to the rollout device for collect_episode and round-
+        # tripped back to update device inside _ppo_update.
         self.policy.to(self.device)
         self.optimiser = torch.optim.Adam(
             self.policy.parameters(), lr=float(learning_rate),
         )
+        # Park the policy on rollout_device for the first rollout.
+        if self._split_device:
+            self.policy.to(self.rollout_device)
+            _move_optim_state_to(self.optimiser, self.rollout_device)
 
         # Bound to its own collector so the rollout-time forward pass
-        # uses the same device as the update.
+        # uses the rollout device.
         self._collector = RolloutCollector(
-            shim=self.shim, policy=self.policy, device=device,
+            shim=self.shim, policy=self.policy,
+            device=str(self.rollout_device),
         )
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -647,11 +704,29 @@ class DiscretePPOTrainer:
         # terminal step; the shim's info dict carries day_pnl).
         day_pnl = float((last_info or {}).get("day_pnl", 0.0))
 
-        update_log = self._ppo_update(
-            batch=batch,
-            advantages=advantages,
-            returns=returns,
-        )
+        # phase-3 Option A — split-device round-trip. When the rollout
+        # ran on a different device than the update (typically CPU
+        # rollout, CUDA update), move the policy + optimizer to the
+        # update device before the surrogate-loss work and move them
+        # back after so the next rollout sees the fast device. The
+        # ``finally`` guarantees restoration even on KL-early-stop or
+        # numerical-loss exits. No-op when ``_split_device`` is False
+        # (byte-identical to pre-Option-A behaviour).
+        if self._split_device:
+            self.policy.to(self.device)
+            _move_optim_state_to(self.optimiser, self.device)
+        try:
+            update_log = self._ppo_update(
+                batch=batch,
+                advantages=advantages,
+                returns=returns,
+            )
+        finally:
+            if self._split_device:
+                self.policy.to(self.rollout_device)
+                _move_optim_state_to(
+                    self.optimiser, self.rollout_device,
+                )
 
         wall = time.perf_counter() - t0
         # Capture warmup state BEFORE the post-episode increment, so
@@ -996,6 +1071,19 @@ class DiscretePPOTrainer:
         # ops (squeeze + permute) — no per-tick concat over N small
         # slices.
         packed_hidden = self.policy.pack_hidden_buffer(batch.hidden_state_in)
+        # phase-3 Option A — the rollout's hidden-state buffers live on
+        # ``rollout_device`` (CPU in split-device mode). Slice ops in the
+        # mini-batch loop use ``mb_idx`` which is on ``self.device``
+        # (CUDA), so the buffers must follow.
+        if self._split_device:
+            if isinstance(packed_hidden, tuple):
+                packed_hidden = tuple(
+                    t.to(self.device, non_blocking=True) for t in packed_hidden
+                )
+            else:
+                packed_hidden = packed_hidden.to(
+                    self.device, non_blocking=True,
+                )
 
         # ── Mini-batch loop ────────────────────────────────────────────
         policy_losses: list[float] = []
@@ -1598,8 +1686,14 @@ class DiscretePPOTrainer:
         Phase 4 Session 06 (2026-05-02): reads the final tick straight
         from the :class:`RolloutBatch` instead of a per-tick
         ``Transition``.
+
+        phase-3 Option A: when split-device, this runs BEFORE the
+        policy has moved to the update device (the move happens in
+        ``_update_from_batch`` only when we enter the PPO surrogate-
+        loss branch). Use the policy's current parameter device so
+        bootstrap is correct under both single- and split-device.
         """
-        device = self.device
+        device = next(self.policy.parameters()).device
         last = int(batch.n_steps) - 1
         obs_t = torch.from_numpy(
             np.ascontiguousarray(batch.obs[last])

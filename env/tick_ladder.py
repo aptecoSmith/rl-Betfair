@@ -44,6 +44,34 @@ MIN_PRICE: float = 1.01
 MAX_PRICE: float = 1000.0
 
 
+def _build_full_ladder() -> tuple[float, ...]:
+    """Generate the full Betfair tick ladder once, sorted ascending.
+
+    The ladder is ~350 fixed prices from 1.01 to 1000. Used by
+    consumers (e.g. ``data/predictor_features._fill_tvl_features``)
+    that need a vectorised "price → tick index" lookup; building the
+    table once at module load + searchsorted is ~100× faster than
+    calling ``ticks_between`` per-price in a hot Python loop.
+
+    Returns a frozen tuple of floats so accidental mutation is hard.
+    """
+    prices: list[float] = []
+    for lo, hi, step in _LADDER_BANDS:
+        # Each band: lo inclusive, hi exclusive (matches _band_for).
+        n_steps = int(round((hi - lo) / step))
+        for k in range(n_steps):
+            prices.append(round(lo + k * step, 2))
+    # Append the explicit upper endpoint 1000.0 (special-cased in
+    # _band_for; not generated above because hi is exclusive).
+    prices.append(MAX_PRICE)
+    # Dedupe + sort defensively.
+    return tuple(sorted(set(prices)))
+
+
+# Frozen Betfair tick ladder. Loaded once at module import.
+BETFAIR_TICK_LADDER: tuple[float, ...] = _build_full_ladder()
+
+
 def _band_for(price: float) -> tuple[float, float, float]:
     """Return the ladder band containing *price* (clamped to [MIN, MAX])."""
     if price <= MIN_PRICE:

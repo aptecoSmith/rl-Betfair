@@ -1640,4 +1640,273 @@ deploy candidates running in parallel on CPU.
 
 ---
 
+## 2026-05-21 — R3 β=0.01 + E3 full cohort — REGRESSION, R3 retired
 
+**Cohort tag** `_predictor_SCALPING_r3_e3_cohort_1779312440`.
+12×8gen × 13/10 day split, GPU. Selector `day_pnl_per_std` (E3
+cohort's choice, kept). Gene: `naked_loss_quadratic_beta=0.01`
+pinned cohort-wide on top of `close_feasibility_max_spread_pct=0.05`.
+
+**Intention:** R3 β=0.01's probe-scale promise (+£17/d locked-floor
+lift, worst-day truncation, retained tailwind response) should
+compound under GA breeding. The hypothesis was that the quadratic
+naked-loss penalty would suppress catastrophic naked-loss days
+without removing the upside response to naked tailwinds — a
+profile the day_pnl_per_std selector should breed for.
+
+**Implementation:** Stopped at gen 4 partial (70/96 agents). Gen-on-
+gen in-sample mean stayed flat (+£19 → +£25 across 5 gens), where
+the E3 cohort had been climbing past +£30 by gen 3. Top-5 by
+deployable composite filter reeval'd on the standard 7-day forward
+window (2026-05-07..05-13).
+
+**Held-out reeval (top-5 by deployable composite, stochastic):**
+
+| Agent | fc=120 day_pnl | locked | naked | fc=0 day_pnl |
+|---|---:|---:|---:|---:|
+| b4439dd4 | +£68 | +£113 | +£10 | +£48 |
+| ba15deda | +£70 | +£119 | +£6 | +£221 |
+| 5ed9504f | +£7 | +£109 | −£41 | +£77 |
+| 05b5d4bb | +£31 | +£114 | −£24 | −£62 |
+| 5862366d | +£60 | +£110 | +£3 | +£134 |
+| **mean** | **+£47** | **+£113** | **−£9** | **+£84** |
+
+**Comparison:**
+
+| Cell | R3+E3 mean | E3 cohort mean | Δ |
+|---|---:|---:|---:|
+| fc=120 | +£47 | +£55 | −£8 |
+| fc=0 | +£84 | +£97 | −£13 |
+
+**Result: REGRESSION on both fc settings.** R3 β=0.01's probe-scale
+promise did NOT compound. Cohort fell behind E3 cohort by £8/d at
+fc=120 and £13/d at fc=0.
+
+**R3 retired.** Same retire decision as Sortino — promising at
+probe-scale (5 agents, 5 gens), fails to compound under full
+12×8gen cohort breeding. The two retire decisions form a pattern:
+**probe-scale → full-cohort regressions are real and the GA can't
+be trusted to amplify a probe-scale signal under selection
+breeding.** Both R3 (quadratic naked-loss penalty) and Sortino
+(downside-aware selector) were modifications that targeted naked
+variance; both ended up breeding lower-mean lineages because the
+naked tailwind is too large a part of the recipe's edge to penalise
+without collateral damage.
+
+**However — 3 new individual agents from R3+E3 are deploy-worthy**
+on the strength of their personal locked-floor shapes (clean
+≥+£110 locked, near-zero naked on fc=120):
+
+- **ba15deda** (gen 0) — +£70/d fc=120, naked +£6 (cleanest); +£221
+  fc=0 (large naked tailwind there)
+- **b4439dd4** (gen 0) — +£68/d fc=120, naked +£10
+- **5862366d** (gen 4) — +£60/d fc=120, naked +£3
+
+These three pass the deployable filter independently and are added
+to `plans/deployment_candidates.md`. The cohort retire decision is
+about R3 as a recipe modification, not about these individual
+agents — they happened to be bred in this cohort but their shape
+is what we'd accept from any cohort.
+
+**Lesson for next experiment:** at full-cohort scale (12×8gen),
+naked-variance interventions don't compound. The next leverage point
+is on the opposite side — either env priors that REMOVE bad
+decisions (E3-style; the only intervention that scaled cleanly so
+far) or curriculum/data-side changes. Naked-loss reward shaping
+and selector-side changes are off the menu unless we find a
+mechanism that doesn't sacrifice mean for variance.
+
+**Argmax-eval probe (deploy-candidate sanity check, 2026-05-21).**
+Ran `--argmax-eval` (deterministic action selection — agent's
+most-likely action, no Categorical/Beta sampling) on cea2ee94 ≡
+1df49aa0 across both fc settings. Two findings:
+
+1. **cea2ee94 ≡ 1df49aa0 confirmed to the penny.** Argmax fc=120
+   produced identical day_pnl, locked, naked, bet count, mat rate
+   across both uuids. Argmax fc=0 also identical (cea2ee94 = −£7.44,
+   1df49aa0 = −£7.44, locked +£18.22, naked −£25.60, bets 14, mat
+   0.565). Confirms they are byte-identical weights with different
+   stored uuid metadata. **Deploy ONE, not both.**
+
+2. **Argmax-fc=0 vs stochastic-fc=0 diverge dramatically.** 1df49aa0
+   under argmax: day_pnl −£7/d, bets 14/d. Under stochastic: day_pnl
+   +£121/d, bets ~50/d. The argmax (most-likely-action) policy
+   trades 3× less and posts a sign-flip on net P&L. This is a
+   deployment-economics flag: **live action-mode choice matters
+   more than the held-out reeval numbers suggest.** If ai-betfair
+   integration uses argmax (deterministic = repeatable = easier to
+   audit), expect *much* lower trade volume than the stochastic
+   reeval shows. If it uses sampled actions, expect closer-to-
+   stochastic shape (and higher per-week variance). Resolve before
+   deploying capital.
+
+---
+
+## 2026-05-21 — EW-filter probe: WIN markets only, deploy candidates 7d [QUEUED]
+
+**What:** Evaluate a deployment-time env knob that prevents
+the agent from trading Each Way markets. Re-run the 6 Tier 1
+deployment candidates over the original 7-day held-out window
+(2026-05-07..05-13) with `--market-type-filter WIN` so the env
+hides Each Way markets from the agent. Both fc=0 and fc=120
+included. **No retraining** — this is purely an env-side filter
+that would be flipped at deploy time on the existing trained
+weights.
+
+**Intention:** Live bet-feed inspection during the fc=0 14-day
+reeval surfaced an observation: agents are placing scalping
+pairs on Each Way markets the same way they place them on Win
+markets. EW ladders are typically thinner, so the second leg
+of a pair matches less often → more naked exposure → more
+naked variance.
+
+Two specific examples from cea2ee94 day 2026-05-07 on the
+Huntingdon card:
+- Mcmurray (EW) back at 3.35 stake £57.47 → won outright; gross
+  £84.41, net £80.19 after commission. The back leg was supposed
+  to be one half of a scalping pair; the lay second leg never
+  matched, pair settled `naked` → +£80 windfall. Win-market pairs
+  see similar mismatch rates but Win ladders are usually thicker.
+- Inspection of other EW pairs in the same day's parquet showed
+  the same pattern: aggressive open leg fills cleanly on a
+  reasonable price, but the passive close leg sits unmatched on
+  a thin EW ladder until settle.
+
+If removing EW markets cleans up the naked-variance distribution
+without proportionally killing the locked-floor cash, EW is net-
+negative for this policy and we should retrain without it (or at
+least filter at deploy time).
+
+**Implementation:** Threaded `market_type_filter` through
+`tools/reevaluate_cohort.py` → `_build_env_for_day` → `BetfairEnv`
+(the knob already existed in the env's `__init__`, just not
+exposed by the reeval CLI or wired through the v2 build path).
+`market_type_filter` choices: `WIN | EACH_WAY | BOTH |
+FREE_CHOICE`. Default unchanged (None ⇒ env default "BOTH").
+Probe uses `WIN`.
+
+Queued to fire after the in-flight 14-day fc=0 + 14-day fc=120
+reevals (avoids GPU contention). ~45min GPU once it starts.
+
+**Baseline to compare against** (E3 cohort top-5 over 7-day
+held-out window, BOTH market types):
+
+| Setting | E3 cohort mean | R3+E3 cohort mean |
+|---|---:|---:|
+| fc=0 | +£97/d | +£84/d |
+| fc=120 | +£55/d | +£47/d |
+
+**Decision rule:** If `--market-type-filter WIN` lifts cohort
+mean **by ≥£5/d at fc=0** (i.e. clear of CPU-RNG sample noise)
+AND naked variance drops, ship the EW filter as a deploy-time
+flag in the ai-betfair integration. If gain is <£5/d or naked
+variance is unchanged, EW markets are roughly neutral and the
+filter isn't worth the operational complexity (one extra flag
+to set, one more thing that can be mis-configured at deploy).
+
+**Trained-with-BOTH caveat:** the deploy candidates were
+trained with `market_type_filter=BOTH`, so they expected EW
+opportunities to be available. At eval time the WIN filter just
+hides those races — the agent skips them rather than redirecting
+that capital into Win-market alternatives. So the result is "did
+the policy's EW bets, considered in isolation, drag the
+aggregate?" — which is the right question for the deploy
+decision: would flipping this flag at production time help?
+
+**Result:** TBD — outputs land at
+`registry/<cohort>/reeval_ewfilter_winonly_fc{0,120}_heldout7d.jsonl`.
+Compare per-agent fc=0 + fc=120 vs baseline (E3 cohort top-3
+stochastic 7d figures already in `plans/deployment_candidates.md`).
+
+---
+
+
+
+## 2026-05-22 — Overfitting prevention: rotating non-contiguous eval pool
+
+**Trigger:** the 14-day held-out reeval of pre-fix deploy candidates
+showed a catastrophic +£72/d → −£200/d swing between the first 7-day
+window (2026-05-07..05-13, original eval window) and the next 7-day
+window (2026-05-14..05-20, freshly loaded data). Six different agents,
+six different swings, all in the same direction. That's not noise —
+that's regime-fit to the original eval window.
+
+**Sources of overfit identified in the GA setup:**
+
+1. **Single contiguous eval window.** `--days 13 --n-eval-days 10`
+   picked 13 train + 10 eval days as one chronological block (the
+   tail of the data). Agents that exploit specific races / runners /
+   conditions in those 10 days reproduce; their offspring exploit
+   them harder. Over 5-8 generations the GA memorises that window.
+
+2. **Same eval window across all generations.** The eval set is
+   computed once at the top of `run_cohort` and unchanged. No
+   per-generation rotation = GA can effectively memorise specific
+   races present in the eval.
+
+3. **Naked-tail amplification.** A few lucky long-shot lays in the
+   eval window add £100+ per pair to fitness; the GA breeds toward
+   agents that take those bets. On a different week with one extra
+   long-shot winner, the same bets cost £100s.
+
+4. **Tiny effective sample.** 10 days × ~80 races = 800 races.
+   Selecting from a population of ~12 agents over 5-8 gens on 800
+   races is *very* easy to overfit.
+
+5. **Early-stop on the same signal.** `--early-stop-patience 3`
+   fires on eval-window improvement — but improvement on a memorised
+   window is indistinguishable from real progress.
+
+**Implementation — three additive flags on `training_v2.cohort.runner`:**
+
+- `--cohort-eval-days <date> ...` — EXPLICIT eval pool. Lets the
+  operator pick non-contiguous dates spanning multiple weeks so any
+  one week's quirks can't dominate fitness.
+- `--training-days-explicit <date> ...` — EXPLICIT training days.
+  Default: all available − excludes − eval pool − monitor.
+- `--monitor-days <date> ...` — OBSERVE-ONLY days. Disjoint from
+  train/eval; never used for selection. Reserved for post-cohort
+  reeval (the honest deployment number).
+- `--rotating-eval-sample N` — per-generation sample size from the
+  eval pool. 0 = use full pool every gen (legacy). N > 0 = sample N
+  days deterministically by `(seed, generation_idx)` each gen.
+
+Also `select_days` rewritten with a new explicit-lists path; the
+chronological auto-selection path is unchanged when no new flag is
+set, so existing scripts stay byte-identical.
+
+Regression guards in `tests/test_v2_select_days.py`:
+- `test_explicit_eval_days_uses_them_verbatim`
+- `test_explicit_training_and_eval_disjoint`
+- `test_monitor_days_disjoint_from_eval_and_train`
+- `test_explicit_eval_with_monitor_set_excluded`
+- `test_legacy_chronological_path_unchanged`
+
+**Recipe for the post-matcher-fix cohort** (queued in
+`C:\tmp\cohort_postfix_retrain.ps1`):
+
+- 16 explicit training days, non-contiguous across 2026-04-06..05-06
+- 12-day stratified eval pool (3 days × 4 weeks)
+- Per-gen sample: 8 of 12 random per generation (seed-deterministic)
+- 14-day monitor set (2026-05-07..05-20) reserved for post-cohort
+  reeval — never seen during training or selection
+- 5 gens × 12 agents, E3 recipe (close_feasibility=0.05), fc=120 in
+  training
+
+The 14-day monitor reeval at fc=0 is the honest deployment number.
+If the rotating-eval design works, the post-cohort monitor result
+should NOT show a catastrophic regression vs the in-training eval
+metric. If it still does, deeper changes are needed (e.g. add an
+in-training monitor that drives early-stop).
+
+**What's deliberately NOT done in this iteration:**
+
+- Per-generation monitor evaluation (would add compute; the
+  post-cohort reeval already gives us monitor numbers, just not in
+  real time during training). Defer until we see whether the
+  rotating-eval alone fixes it.
+- Walk-forward retraining / continuous validation. Same reason.
+- Ensemble-of-agents deployment. Worth considering after we have
+  the first honest single-agent baseline.
+
+---

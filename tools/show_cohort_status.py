@@ -270,6 +270,79 @@ def _format(
     return "\n".join(out)
 
 
+def _format_monitor_section(cohort_dir: Path) -> str:
+    """Append the overfit-tripwire monitor block when monitor_metrics.jsonl
+    exists. The runner writes one row per generation when
+    ``--monitor-eval-top-k > 0`` and ``--monitor-days ...`` were passed.
+    """
+    monitor_path = cohort_dir / "monitor_metrics.jsonl"
+    if not monitor_path.exists():
+        return ""
+    try:
+        rows: list[dict] = []
+        for line in monitor_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return ""
+    if not rows:
+        return ""
+
+    out: list[str] = ["", "Monitor metrics (overfit tripwire — top-K agents on sealed monitor_days):"]
+    out.append("  gen | gen_composite_mean | cohort_monitor_pnl/d | trend  | n_agents")
+    out.append("  ----+--------------------+----------------------+--------+---------")
+    prev_mon: float | None = None
+    for r in rows:
+        g = int(r.get("generation", 0))
+        comp = float(r.get("gen_composite_mean", 0.0))
+        mon = float(r.get("cohort_monitor_pnl_mean", 0.0))
+        n_agents = len(r.get("per_agent", []))
+        if prev_mon is None:
+            trend = "(first)"
+        else:
+            d = mon - prev_mon
+            if d >= 0.5:
+                trend = f"+{d:.1f}"
+            elif d <= -0.5:
+                trend = f"{d:.1f}"
+            else:
+                trend = "flat"
+        out.append(f"  {g:>3} | {comp:>+18.4f} | {mon:>+20.2f} | {trend:<6} | {n_agents:>8}")
+        prev_mon = mon
+
+    # Overfit-alarm summary
+    if len(rows) >= 2:
+        first = rows[0]
+        last = rows[-1]
+        c_delta = float(last.get("gen_composite_mean", 0.0)) - float(first.get("gen_composite_mean", 0.0))
+        m_delta = float(last.get("cohort_monitor_pnl_mean", 0.0)) - float(first.get("cohort_monitor_pnl_mean", 0.0))
+        out.append("")
+        if c_delta > 1e-4 and m_delta < -0.5:
+            out.append(
+                f"  >> OVERFIT ALARM: composite_mean rose by +{c_delta:.4f} but "
+                f"monitor_pnl fell by {m_delta:+.2f} per day. The GA is fitting "
+                f"the eval pool but failing to generalise."
+            )
+        elif c_delta > 1e-4 and m_delta > 0.5:
+            out.append(
+                f"  >> Generalising: composite_mean +{c_delta:.4f} AND monitor "
+                f"+{m_delta:.2f}/d both rising — selection is producing agents "
+                f"that improve on UNSEEN days too."
+            )
+        elif c_delta > 1e-4 and abs(m_delta) <= 0.5:
+            out.append(
+                f"  >> Mixed: composite_mean +{c_delta:.4f}, monitor flat "
+                f"({m_delta:+.2f}/d). GA improving in-sample without proportional "
+                f"out-of-sample gain — modest overfit risk."
+            )
+    return "\n" + "\n".join(out)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("cohort_dir", type=Path)
@@ -299,6 +372,8 @@ def main(argv: list[str] | None = None) -> int:
             total_target=args.target_rows,
             naked_range_by_model=naked_range,
         )
+        # Append monitor-eval section (2026-05-22) when present.
+        text += _format_monitor_section(cohort_dir)
         print(text)
         try:
             out_path.write_text(text, encoding="utf-8")

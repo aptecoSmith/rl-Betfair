@@ -1,0 +1,136 @@
+# phase_3 profile dump
+# day=2026-04-16 device=cuda n_steps=10419 rollout_wall_s=78.118 ms_per_step=7.498
+# obs_dim=574 action_n=43 max_runners=14 races=56
+# env+shim build_s=39.82
+# python=3.14.3 torch=2.11.0+cu126
+
+=== sorted by cumulative (top 50) ===
+         40642834 function calls (40205106 primitive calls) in 77.890 seconds
+
+   Ordered by: cumulative time
+   List reduced from 462 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.085    0.085   78.118   78.118 C:\Users\jsmit\source\repos\rl-betfair\training_v2\discrete_ppo\rollout.py:239(collect_episode)
+        1    1.363    1.363   78.032   78.032 C:\Users\jsmit\source\repos\rl-betfair\training_v2\discrete_ppo\rollout.py:271(_collect)
+    10419    0.113    0.000   32.359    0.003 C:\Users\jsmit\source\repos\rl-betfair\agents_v2\env_shim.py:241(step)
+229218/10419    0.473    0.000   26.466    0.003 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\module.py:1775(_wrapped_call_impl)
+229218/10419    0.910    0.000   26.404    0.003 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\module.py:1783(_call_impl)
+    10419    2.388    0.000   26.057    0.003 C:\Users\jsmit\source\repos\rl-betfair\agents_v2\discrete_policy.py:611(forward)
+    10419    1.554    0.000   18.289    0.002 C:\Users\jsmit\source\repos\rl-betfair\agents_v2\env_shim.py:334(compute_extended_obs)
+    10419    0.279    0.000   11.467    0.001 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:2923(step)
+   184766    3.675    0.000    9.942    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:194(extract)
+   125028    0.292    0.000    8.134    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\linear.py:130(forward)
+   125028    7.696    0.000    7.696    0.000 {built-in method torch._C._nn.linear}
+    31257    0.322    0.000    6.373    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\container.py:248(forward)
+    10419    0.149    0.000    5.301    0.001 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:2153(_get_obs)
+   622310    0.675    0.000    5.207    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\fromnumeric.py:2207(clip)
+   622310    0.719    0.000    4.532    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\fromnumeric.py:48(_wrapfunc)
+    10419    1.001    0.000    4.398    0.000 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:2189(_get_position_vector)
+    10419    0.173    0.000    4.304    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\categorical.py:144(sample)
+    41676    3.947    0.000    3.947    0.000 {method 'copy_' of 'torch._C.TensorBase' objects}
+     8484    0.902    0.000    3.877    0.000 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:3242(_process_action)
+   591599    1.118    0.000    3.495    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\fromnumeric.py:38(_wrapit)
+    10419    3.258    0.000    3.258    0.000 {built-in method torch.multinomial}
+    10361    0.012    0.000    2.931    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\sklearn\isotonic.py:459(predict)
+    10361    0.144    0.000    2.918    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\sklearn\isotonic.py:411(_transform)
+    10419    0.409    0.000    2.675    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\categorical.py:56(__init__)
+   905597    1.637    0.000    2.617    0.000 {built-in method builtins.sum}
+    10361    0.070    0.000    2.577    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\lightgbm\basic.py:4701(predict)
+    10419    0.187    0.000    2.510    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\rnn.py:1086(forward)
+    20838    2.366    0.000    2.366    0.000 {method 'item' of 'torch._C.TensorBase' objects}
+    10420    0.034    0.000    2.231    0.000 C:\Users\jsmit\source\repos\rl-betfair\agents_v2\env_shim.py:478(_update_history_for_current_tick)
+    10419    2.198    0.000    2.198    0.000 {method 'logsumexp' of 'torch._C.TensorBase' objects}
+    10419    0.744    0.000    2.171    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:140(update_history)
+    10361    0.109    0.000    2.165    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\lightgbm\basic.py:1100(predict)
+    10361    0.291    0.000    2.051    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\sklearn\utils\validation.py:725(check_array)
+   612321    0.371    0.000    2.009    0.000 {method 'clip' of 'numpy.ndarray' objects}
+    10361    0.039    0.000    1.970    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\lightgbm\basic.py:1327(__pred_for_np2d)
+    10361    1.359    0.000    1.928    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\lightgbm\basic.py:1286(__inner_predict_np2d)
+    10419    1.907    0.000    1.907    0.000 {built-in method torch.lstm}
+    10419    0.068    0.000    1.810    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\distribution.py:167(sample)
+   622310    1.689    0.000    1.689    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\_methods.py:96(_clip)
+    10420    0.380    0.000    1.612    0.000 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:2491(_get_info)
+    10419    0.035    0.000    1.589    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\beta.py:84(rsample)
+     4030    0.029    0.000    1.576    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\beta.py:87(log_prob)
+    10419    0.039    0.000    1.454    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\dirichlet.py:85(rsample)
+    10419    0.077    0.000    1.282    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\autograd\function.py:580(apply)
+     4030    0.354    0.000    1.242    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\dirichlet.py:90(log_prob)
+   164186    0.476    0.000    1.191    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:364(_spread_in_ticks)
+   369532    0.821    0.000    1.182    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:430(_delta_window)
+    31257    1.129    0.000    1.129    0.000 {built-in method torch.cat}
+   293713    0.519    0.000    1.127    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:327(_best_back)
+    31257    0.044    0.000    1.099    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\activation.py:139(forward)
+
+
+
+=== sorted by tottime (top 50) ===
+         40642834 function calls (40205106 primitive calls) in 77.890 seconds
+
+   Ordered by: internal time
+   List reduced from 462 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+   125028    7.696    0.000    7.696    0.000 {built-in method torch._C._nn.linear}
+    41676    3.947    0.000    3.947    0.000 {method 'copy_' of 'torch._C.TensorBase' objects}
+   184766    3.675    0.000    9.942    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:194(extract)
+    10419    3.258    0.000    3.258    0.000 {built-in method torch.multinomial}
+    10419    2.388    0.000   26.057    0.003 C:\Users\jsmit\source\repos\rl-betfair\agents_v2\discrete_policy.py:611(forward)
+    20838    2.366    0.000    2.366    0.000 {method 'item' of 'torch._C.TensorBase' objects}
+    10419    2.198    0.000    2.198    0.000 {method 'logsumexp' of 'torch._C.TensorBase' objects}
+    10419    1.907    0.000    1.907    0.000 {built-in method torch.lstm}
+   622310    1.689    0.000    1.689    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\_methods.py:96(_clip)
+   905597    1.637    0.000    2.617    0.000 {built-in method builtins.sum}
+    10419    1.554    0.000   18.289    0.002 C:\Users\jsmit\source\repos\rl-betfair\agents_v2\env_shim.py:334(compute_extended_obs)
+        1    1.363    1.363   78.032   78.032 C:\Users\jsmit\source\repos\rl-betfair\training_v2\discrete_ppo\rollout.py:271(_collect)
+    10361    1.359    0.000    1.928    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\lightgbm\basic.py:1286(__inner_predict_np2d)
+    31257    1.129    0.000    1.129    0.000 {built-in method torch.cat}
+   591599    1.118    0.000    3.495    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\fromnumeric.py:38(_wrapit)
+    41676    1.064    0.000    1.064    0.000 {built-in method torch.sigmoid}
+    10419    1.001    0.000    4.398    0.000 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:2189(_get_position_vector)
+    31257    0.999    0.000    0.999    0.000 {built-in method torch.relu}
+229218/10419    0.910    0.000   26.404    0.003 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\module.py:1783(_call_impl)
+     8484    0.902    0.000    3.877    0.000 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:3242(_process_action)
+    10419    0.837    0.000    0.837    0.000 {built-in method torch._sample_dirichlet}
+   369532    0.821    0.000    1.182    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:430(_delta_window)
+    10419    0.744    0.000    2.171    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:140(update_history)
+   622310    0.719    0.000    4.532    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\fromnumeric.py:48(_wrapfunc)
+   622310    0.675    0.000    5.207    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\numpy\_core\fromnumeric.py:2207(clip)
+  1325672    0.667    0.000    0.667    0.000 {built-in method builtins.round}
+   104190    0.627    0.000    0.627    0.000 {method 'unsqueeze' of 'torch._C.TensorBase' objects}
+    16810    0.621    0.000    0.621    0.000 {built-in method torch.zeros}
+    10419    0.607    0.000    0.607    0.000 {built-in method torch.layer_norm}
+    20838    0.575    0.000    0.575    0.000 {built-in method torch._C._nn.softplus}
+    10419    0.566    0.000    0.566    0.000 {method 'masked_fill' of 'torch._C.TensorBase' objects}
+    14452    0.555    0.000    0.555    0.000 {built-in method torch.stack}
+   246933    0.527    0.000    0.527    0.000 {built-in method numpy.asarray}
+   293713    0.519    0.000    1.127    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:327(_best_back)
+   164186    0.476    0.000    1.191    0.000 C:\Users\jsmit\source\repos\rl-betfair\training_v2\scorer\feature_extractor.py:364(_spread_in_ticks)
+     8060    0.474    0.000    0.474    0.000 {built-in method torch.lgamma}
+229218/10419    0.473    0.000   26.466    0.003 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\module.py:1775(_wrapped_call_impl)
+    10419    0.439    0.000    1.005    0.000 C:\Users\jsmit\source\repos\rl-betfair\agents_v2\discrete_policy.py:851(_apply_mask)
+    10419    0.439    0.000    0.439    0.000 {built-in method torch.embedding}
+    52095    0.426    0.000    0.426    0.000 {method 'reshape' of 'torch._C.TensorBase' objects}
+    10419    0.426    0.000    0.426    0.000 {method 'gather' of 'torch._C.TensorBase' objects}
+   229218    0.416    0.000    0.416    0.000 {built-in method torch._C._get_tracing_state}
+    10419    0.409    0.000    2.675    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\distributions\categorical.py:56(__init__)
+   716127    0.397    0.000    0.565    0.000 {built-in method builtins.max}
+    10420    0.380    0.000    1.612    0.000 C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:2491(_get_info)
+    10419    0.378    0.000    0.378    0.000 {method 'clamp' of 'torch._C.TensorBase' objects}
+   390594    0.378    0.000    0.378    0.000 <string>:2(__init__)
+   612321    0.371    0.000    2.009    0.000 {method 'clip' of 'numpy.ndarray' objects}
+   489693    0.369    0.000    0.369    0.000 C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\nn\modules\module.py:1955(__getattr__)
+    10419    0.369    0.000    0.369    0.000 {method 'softmax' of 'torch._C.TensorBase' objects}
+
+
+
+=== callers of env.step ===
+   Ordered by: cumulative time
+   List reduced from 462 to 50 due to restriction <50>
+   List reduced from 50 to 1 due to restriction <'betfair_env.py:.*step'>
+
+Function                                                              was called by...
+                                                                          ncalls  tottime  cumtime
+C:\Users\jsmit\source\repos\rl-betfair\env\betfair_env.py:2923(step)  <-   10419    0.279   11.467  C:\Users\jsmit\source\repos\rl-betfair\agents_v2\env_shim.py:241(step)
+
+

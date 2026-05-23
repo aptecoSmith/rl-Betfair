@@ -57,9 +57,18 @@ from training_v2.cohort.genes import (
     sample_genes,
 )
 from training_v2.cohort.batched_worker import train_cluster_batched
-from training_v2.cohort.worker import AgentResult, train_one_agent
+from training_v2.cohort.worker import (
+    AgentResult,
+    _build_env_for_day,
+    _eval_rollout_stats,
+    scalping_train_config,
+    train_one_agent,
+)
 from training_v2.discrete_ppo.batched_rollout import cluster_agents_by_arch
+from training_v2.discrete_ppo.rollout import RolloutCollector
 from training_v2.discrete_ppo.train import select_days
+from agents_v2.discrete_policy import DiscreteLSTMPolicy
+from agents_v2.env_shim import DEFAULT_SCORER_DIR
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -371,6 +380,161 @@ def _early_stop_improved(history: list[dict]) -> list[str]:
     return improved
 
 
+def _evaluate_agents_on_monitor_days(
+    *,
+    top_results: list[AgentResult],
+    monitor_days: list[str],
+    data_dir: Path,
+    cfg: dict,
+    device: str,
+    reward_overrides: dict | None,
+    predictor_bundle: object | None,
+    use_race_outcome_predictor: bool,
+    use_direction_predictor: bool,
+    predictor_lean_obs: bool,
+    predictor_p_win_back_threshold: float,
+    predictor_p_win_lay_threshold: float,
+    direction_gate_enabled: bool,
+    race_confidence_threshold: float,
+    lay_price_max: float,
+    feature_cache: dict[str, list] | None = None,
+) -> dict:
+    """In-training overfit monitor (2026-05-22 anti-overfit, follow-on).
+
+    Re-evaluate the top-K trained agents from this generation on a
+    sealed ``monitor_days`` set. The result is NEVER used for selection
+    or breeding — it is a tripwire metric that surfaces gen-on-gen when
+    the in-training composite_score is rising on the rotating eval but
+    monitor performance flattens or regresses (the classic overfit
+    fingerprint).
+
+    Each agent's weights are loaded from disk via ``r.weights_path``
+    (set inside ``train_one_agent`` after model_store.save_weights).
+    Architecture / hidden_size come from ``r.genes``.
+
+    Returns a dict of the form::
+
+        {
+            "per_agent": [
+                {"agent_id": str, "monitor_pnl_total": float,
+                 "monitor_pnl_mean": float, "monitor_per_day": [{...}]},
+                ...
+            ],
+            "cohort_monitor_pnl_mean": float,  # mean across top-K agents' totals
+        }
+
+    Cost: ``top_k × len(monitor_days)`` extra rollouts per generation.
+    For top_k=3, monitor=14 days, gens=5: ~210 rollouts (~1-3h GPU).
+    """
+    import torch
+    per_agent: list[dict] = []
+    for r in top_results:
+        if not r.weights_path:
+            logger.warning(
+                "monitor-eval: agent %s has empty weights_path; skipping",
+                r.agent_id[:12],
+            )
+            continue
+        # Build fresh env+shim from the FIRST monitor day just to size the
+        # policy's obs space; build policy; load weights; then loop days.
+        try:
+            env0, shim0 = _build_env_for_day(
+                day_str=monitor_days[0], data_dir=data_dir, cfg=cfg,
+                scorer_dir=DEFAULT_SCORER_DIR,
+                reward_overrides=reward_overrides,
+                predictor_bundle=predictor_bundle,
+                use_race_outcome_predictor=use_race_outcome_predictor,
+                use_direction_predictor=use_direction_predictor,
+                predictor_lean_obs=predictor_lean_obs,
+                predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+                predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+                direction_gate_enabled=direction_gate_enabled,
+                race_confidence_threshold=race_confidence_threshold,
+                lay_price_max=lay_price_max,
+                feature_cache=feature_cache,
+            )
+        except Exception as e:
+            logger.warning(
+                "monitor-eval: env build failed for %s on %s (%s); skipping agent",
+                r.agent_id[:12], monitor_days[0], e,
+            )
+            continue
+        policy = DiscreteLSTMPolicy(
+            obs_dim=shim0.obs_dim,
+            action_space=shim0.action_space,
+            hidden_size=int(r.genes.hidden_size),
+        )
+        try:
+            state = torch.load(
+                r.weights_path, weights_only=True, map_location="cpu",
+            )
+            if isinstance(state, dict) and "weights" in state:
+                state = state["weights"]
+            policy.load_state_dict(state, strict=True)
+        except Exception as e:
+            logger.warning(
+                "monitor-eval: load_state_dict failed for %s (%s); skipping",
+                r.agent_id[:12], e,
+            )
+            continue
+        policy.to(device)
+        policy.eval()
+
+        per_day: list[dict] = []
+        total_pnl = 0.0
+        for ed in monitor_days:
+            try:
+                _, shim = _build_env_for_day(
+                    day_str=ed, data_dir=data_dir, cfg=cfg,
+                    scorer_dir=DEFAULT_SCORER_DIR,
+                    reward_overrides=reward_overrides,
+                    predictor_bundle=predictor_bundle,
+                    use_race_outcome_predictor=use_race_outcome_predictor,
+                    use_direction_predictor=use_direction_predictor,
+                    predictor_lean_obs=predictor_lean_obs,
+                    predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+                    predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+                    direction_gate_enabled=direction_gate_enabled,
+                    race_confidence_threshold=race_confidence_threshold,
+                    lay_price_max=lay_price_max,
+                    feature_cache=feature_cache,
+                )
+            except Exception as e:
+                logger.warning(
+                    "monitor-eval: env build failed for %s on %s (%s)",
+                    r.agent_id[:12], ed, e,
+                )
+                continue
+            collector = RolloutCollector(
+                shim=shim, policy=policy, device=str(device),
+            )
+            batch = collector.collect_episode(deterministic=False)
+            stats = _eval_rollout_stats(
+                batch=batch,
+                last_info=collector.last_info,
+                action_space=shim.action_space,
+            )
+            per_day.append({"day": ed, "day_pnl": float(stats.day_pnl)})
+            total_pnl += float(stats.day_pnl)
+
+        n_days_done = len(per_day) or 1
+        per_agent.append({
+            "agent_id": r.agent_id,
+            "monitor_pnl_total": total_pnl,
+            "monitor_pnl_mean": total_pnl / n_days_done,
+            "monitor_per_day": per_day,
+        })
+
+    cohort_mean = (
+        sum(a["monitor_pnl_mean"] for a in per_agent) / len(per_agent)
+        if per_agent else 0.0
+    )
+    return {
+        "per_agent": per_agent,
+        "cohort_monitor_pnl_mean": cohort_mean,
+    }
+
+
 def run_cohort(
     *,
     n_agents: int,
@@ -394,6 +558,7 @@ def run_cohort(
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
     arb_spread_scale_override: float | None = None,
+    arb_spread_headroom_ticks_override: float | None = None,
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
@@ -408,6 +573,12 @@ def run_cohort(
     composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
     early_stop_patience: int = 0,
     early_stop_min_gens: int = 4,
+    cohort_eval_days: list[str] | None = None,
+    training_days_explicit: list[str] | None = None,
+    monitor_days: list[str] | None = None,
+    rotating_eval_sample: int = 0,
+    monitor_eval_top_k: int = 0,
+    monitor_early_stop_patience: int = 0,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -448,7 +619,10 @@ def run_cohort(
         raise ValueError(f"n_agents must be >= 2 for breeding, got {n_agents}")
     if n_generations < 1:
         raise ValueError(f"n_generations must be >= 1, got {n_generations}")
-    if days < 2:
+    # When using the explicit-lists path (2026-05-22 overfit fix),
+    # days is ignored — the sizes come from cohort_eval_days +
+    # training_days_explicit. Skip the >=2 guard in that case.
+    if days < 2 and (cohort_eval_days is None and training_days_explicit is None):
         raise ValueError(
             f"days must be >= 2 (training + eval), got {days}",
         )
@@ -467,21 +641,55 @@ def run_cohort(
     )
 
     # ── Day selection ────────────────────────────────────────────────
-    training_days, eval_days = select_days(
+    training_days, eval_pool = select_days(
         data_dir=data_dir, n_days=int(days), day_shuffle_seed=int(seed),
         n_eval_days=n_eval_days,
         exclude_days=list(exclude_days) if exclude_days else None,
+        cohort_eval_days=cohort_eval_days,
+        training_days_explicit=training_days_explicit,
+        monitor_days=monitor_days,
     )
-    eval_day_summary = (
-        eval_days[0] if len(eval_days) == 1
-        else f"{eval_days[0]}…{eval_days[-1]} ({len(eval_days)} days)"
+    # ``eval_pool`` is the full set the GA can sample from.
+    # ``eval_days`` (used per-generation) is either the full pool or a
+    # rotated subsample, set inside the gen loop below.
+    monitor_pool = list(monitor_days) if monitor_days else []
+
+    pool_summary = (
+        eval_pool[0] if len(eval_pool) == 1
+        else f"{eval_pool[0]}…{eval_pool[-1]} ({len(eval_pool)} days)"
+    )
+    rotation_note = (
+        f"; rotating {rotating_eval_sample}/{len(eval_pool)} per gen"
+        if rotating_eval_sample > 0 else ""
+    )
+    monitor_note = (
+        f"; monitor pool {len(monitor_pool)} days"
+        if monitor_pool else ""
     )
     logger.info(
         "Cohort: %d agents × %d generations on %d training days "
-        "(eval=%s); device=%s output_dir=%s",
-        n_agents, n_generations, len(training_days), eval_day_summary,
-        device, output_dir,
+        "(eval pool=%s%s%s); device=%s output_dir=%s",
+        n_agents, n_generations, len(training_days), pool_summary,
+        rotation_note, monitor_note, device, output_dir,
     )
+    if (
+        rotating_eval_sample > 0
+        and rotating_eval_sample > len(eval_pool)
+    ):
+        raise ValueError(
+            f"--rotating-eval-sample {rotating_eval_sample} > "
+            f"eval pool size {len(eval_pool)}",
+        )
+    if rotating_eval_sample > 0:
+        logger.info(
+            "Rotating eval is ON: each generation will sample %d days "
+            "from the %d-day eval pool deterministically by "
+            "(seed, generation_idx). Selection metrics are NOT "
+            "comparable gen-over-gen in absolute terms (different days "
+            "each gen); rely on the monitor metric for cross-gen "
+            "trend if a monitor pool is set.",
+            rotating_eval_sample, len(eval_pool),
+        )
 
     # ── Initial population (gen 0) ───────────────────────────────────
     rng = random.Random(int(seed))
@@ -503,6 +711,32 @@ def run_cohort(
     _early_stop_history: list[dict] = []
     _early_stop_stall = 0
 
+    # ── Monitor-eval state (2026-05-22 in-training overfit tripwire) ──
+    _monitor_history: list[dict] = []
+    _monitor_stall = 0
+    monitor_metrics_path = output_dir / "monitor_metrics.jsonl"
+    if monitor_metrics_path.exists():
+        monitor_metrics_path.unlink()
+    # Build a default training cfg here so the monitor eval can share it
+    # with the per-agent training calls (cfg is otherwise constructed
+    # per-agent inside ``train_one_agent``).
+    cfg = scalping_train_config()
+
+    # phase-3 Option F.1 — cohort-scoped feature cache. ``engineer_day``
+    # output is a pure function of (date, env feature knobs); the
+    # cohort runs N agents × G generations through the same date set,
+    # so caching its output recovers ~10s/env-build × (N-1) agents per
+    # gen × #days. Measured: cold env build 15.8s → warm 5.9s (63%).
+    # Cohort-scoped (not gen-scoped) is safe because all agents share
+    # the same feature knobs — only reward shaping / gene values
+    # differ. Memory: ~40 MB/day × #unique days; well under 1 GB for
+    # a typical 23-day cohort.
+    feature_cache: dict[str, list] = {}
+
+    # Initial eval_days = full pool (used for the cohort_started event;
+    # per-gen rotation re-samples inside the loop).
+    eval_days: list[str] = list(eval_pool)
+
     # ── Run-start event ──────────────────────────────────────────────
     if event_emitter is not None:
         try:
@@ -520,9 +754,23 @@ def run_cohort(
     with scoreboard_path.open("w", encoding="utf-8") as sf:
         for generation in range(n_generations):
             gen_t0 = time.perf_counter()
-            logger.info(
-                "── Generation %d/%d ──", generation + 1, n_generations,
-            )
+            # Per-generation eval rotation (2026-05-22 overfitting fix).
+            # When rotating is ON, sample N days from the pool using a
+            # deterministic RNG seeded by (cohort_seed, generation_idx)
+            # so the same gen always picks the same days for any given
+            # cohort_seed (debuggable / reproducible).
+            if rotating_eval_sample > 0:
+                rng_eval = random.Random((int(seed) << 16) ^ (generation + 1))
+                eval_days = sorted(rng_eval.sample(eval_pool, rotating_eval_sample))
+                logger.info(
+                    "── Generation %d/%d ── rotated eval days: %s",
+                    generation + 1, n_generations, eval_days,
+                )
+            else:
+                eval_days = list(eval_pool)
+                logger.info(
+                    "── Generation %d/%d ──", generation + 1, n_generations,
+                )
             agent_ids_gen = [str(uuid.uuid4()) for _ in cohort]
             per_agent_seeds = [
                 (int(seed) * 1_000_003 + generation * 10_000 + i) & 0x7FFFFFFF
@@ -632,6 +880,9 @@ def run_cohort(
                             bc_target_entropy_warmup_eps_override
                         ),
                         arb_spread_scale_override=arb_spread_scale_override,
+                        arb_spread_headroom_ticks_override=(
+                            arb_spread_headroom_ticks_override
+                        ),
                         predictor_bundle=predictor_bundle,
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
@@ -643,6 +894,7 @@ def run_cohort(
                         race_confidence_threshold=race_confidence_threshold,
                         lay_price_max=lay_price_max,
                         composite_score_mode=composite_score_mode,
+                        feature_cache=feature_cache,
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -729,6 +981,118 @@ def run_cohort(
                 )
 
             last_results = results
+
+            # ── Monitor eval (2026-05-22, in-training overfit tripwire) ──
+            # Evaluate top-K agents on the sealed monitor_days. NOT used
+            # for selection (already chose this gen's parents above), but
+            # logged so the operator can watch cohort_monitor_pnl_mean
+            # diverge from the in-training composite_score as a real-time
+            # overfitting signal.
+            if (
+                monitor_eval_top_k > 0
+                and monitor_days
+            ):
+                top_for_monitor = results[:int(monitor_eval_top_k)]
+                logger.info(
+                    "Monitor eval: top-%d agents x %d monitor days "
+                    "(starting at gen %d)",
+                    len(top_for_monitor), len(monitor_pool),
+                    generation + 1,
+                )
+                monitor_t0 = time.perf_counter()
+                m_eval = _evaluate_agents_on_monitor_days(
+                    top_results=top_for_monitor,
+                    monitor_days=list(monitor_pool),
+                    data_dir=data_dir,
+                    cfg=cfg,
+                    device=str(device),
+                    reward_overrides=reward_overrides,
+                    predictor_bundle=predictor_bundle,
+                    use_race_outcome_predictor=bool(use_race_outcome_predictor),
+                    use_direction_predictor=bool(use_direction_predictor),
+                    predictor_lean_obs=bool(predictor_lean_obs),
+                    predictor_p_win_back_threshold=float(predictor_p_win_back_threshold),
+                    predictor_p_win_lay_threshold=float(predictor_p_win_lay_threshold),
+                    direction_gate_enabled=bool(direction_gate_enabled),
+                    race_confidence_threshold=float(race_confidence_threshold),
+                    lay_price_max=float(lay_price_max),
+                    feature_cache=feature_cache,
+                )
+                # Take this gen's GA selection metric (mean composite_score
+                # across cohort) for comparison
+                gen_composite_mean = float(
+                    sum(
+                        _composite_score(
+                            r.eval, maturation_bonus_weight,
+                            composite_score_mode,
+                        )
+                        for r in results
+                    ) / len(results)
+                )
+                monitor_row = {
+                    "generation": generation + 1,
+                    "monitor_eval_top_k": int(monitor_eval_top_k),
+                    "monitor_days": list(monitor_pool),
+                    "wall_seconds": time.perf_counter() - monitor_t0,
+                    "gen_composite_mean": gen_composite_mean,
+                    **m_eval,
+                }
+                _monitor_history.append(monitor_row)
+                # Write to a separate monitor_metrics.jsonl so post-hoc
+                # tooling can plot eval vs monitor across gens.
+                with monitor_metrics_path.open("a", encoding="utf-8") as mf:
+                    mf.write(json.dumps(monitor_row) + "\n")
+                logger.info(
+                    "Monitor result gen %d: cohort_monitor_pnl_mean=%+.2f, "
+                    "gen_composite_mean=%+.4f, wall=%.1fs",
+                    generation + 1,
+                    m_eval["cohort_monitor_pnl_mean"],
+                    gen_composite_mean,
+                    monitor_row["wall_seconds"],
+                )
+
+                # ── Monitor-driven early stop ──────────────────────────
+                # Stop when monitor regresses for N consecutive gens past
+                # min_gens. This is the OVERFIT-specific early stop —
+                # distinct from the existing _early_stop_stall on
+                # composite. Catches the case where composite keeps
+                # rising on the rotating eval but monitor flattens or
+                # falls (the classic overfit signal).
+                if (
+                    monitor_early_stop_patience > 0
+                    and len(_monitor_history) >= early_stop_min_gens
+                ):
+                    best_so_far = max(
+                        h["cohort_monitor_pnl_mean"] for h in _monitor_history[:-1]
+                    ) if len(_monitor_history) > 1 else float("-inf")
+                    current_m = m_eval["cohort_monitor_pnl_mean"]
+                    if current_m + 0.5 < best_so_far:
+                        # Treat as a regression (tolerance £0.50/d)
+                        _monitor_stall += 1
+                        logger.info(
+                            "Monitor early-stop: gen %d regressed "
+                            "(%.2f vs best %.2f). Stall %d/%d.",
+                            generation + 1, current_m, best_so_far,
+                            _monitor_stall, monitor_early_stop_patience,
+                        )
+                        if _monitor_stall >= monitor_early_stop_patience:
+                            logger.info(
+                                "MONITOR EARLY STOP at gen %d/%d "
+                                "(monitor regression patience=%d). "
+                                "Saved ~%d remaining gens.",
+                                generation + 1, n_generations,
+                                monitor_early_stop_patience,
+                                n_generations - generation - 1,
+                            )
+                            break
+                    else:
+                        if _monitor_stall > 0:
+                            logger.info(
+                                "Monitor recovered (gen %d %.2f vs best %.2f). "
+                                "Stall reset.",
+                                generation + 1, current_m, best_so_far,
+                            )
+                        _monitor_stall = 0
 
             # ── Early-stop check (scalping-tight-naked-variance tnv3) ─────
             # Compare this gen's median_naked_std, median_composite_score,
@@ -1204,6 +1568,79 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--cohort-eval-days", nargs="+", default=None, metavar="YYYY-MM-DD",
+        help=(
+            "EXPLICIT eval pool — overrides the chronological 'last "
+            "n_eval_days from --days' auto-selection. Use to break the "
+            "single-contiguous-week bias by selecting eval days that "
+            "span multiple weeks (e.g. one from each of 4 different "
+            "weeks). Combined with --rotating-eval-sample, lets the GA "
+            "sample a different subset of these days each generation, "
+            "forcing the policy to generalise across regimes rather "
+            "than memorise one week's quirks. See "
+            "plans/EXPERIMENTS.md 2026-05-22 overfitting-prevention "
+            "entry for the motivating regression (+£72/d → −£200/d "
+            "swing on a different eval week)."
+        ),
+    )
+    p.add_argument(
+        "--training-days-explicit", nargs="+", default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "EXPLICIT training days — overrides 'last n_days minus "
+            "eval' auto-selection. Optional; defaults to "
+            "(all_available - excludes - eval - monitor)."
+        ),
+    )
+    p.add_argument(
+        "--monitor-days", nargs="+", default=None, metavar="YYYY-MM-DD",
+        help=(
+            "OBSERVE-ONLY day set. Each generation, after the GA "
+            "selection step, the top-K agents are also evaluated on "
+            "these days and the per-day metrics are logged to the "
+            "scoreboard / monitor_metrics.jsonl. NEVER used for "
+            "selection — they are the overfitting tripwire. Default: "
+            "none. Cost: M monitor days × top-K agents × rollouts "
+            "per generation in extra compute."
+        ),
+    )
+    p.add_argument(
+        "--monitor-eval-top-k", type=int, default=0, metavar="K",
+        help=(
+            "If > 0, after each generation evaluate the top-K agents "
+            "(by composite_score) on the --monitor-days set. The "
+            "result is logged but NEVER used for selection / breeding. "
+            "Serves as an overfitting tripwire: cohort_composite "
+            "should track cohort_monitor_pnl; if composite rises and "
+            "monitor flattens/falls, the GA is overfitting to the "
+            "eval pool. Cost: K × len(monitor_days) extra rollouts "
+            "per generation."
+        ),
+    )
+    p.add_argument(
+        "--monitor-early-stop-patience", type=int, default=0, metavar="N",
+        help=(
+            "Stop training when cohort_monitor_pnl_mean regresses for "
+            "N consecutive generations past --early-stop-min-gens. "
+            "Distinct from the composite-based early-stop: this fires "
+            "when the OUT-of-eval-pool metric flattens/falls even if "
+            "in-training composite keeps rising. Default 0 = disabled."
+        ),
+    )
+    p.add_argument(
+        "--rotating-eval-sample", type=int, default=0, metavar="N",
+        help=(
+            "Per-generation random sample size from --cohort-eval-days. "
+            "0 (default) = use the full eval pool every generation "
+            "(byte-identical pre-flag behaviour when --cohort-eval-days "
+            "is fixed). N > 0 = each generation samples N days from "
+            "the pool deterministically by (seed × generation). Forces "
+            "agents to perform well across many different day-slices, "
+            "not memorise one fixed eval set. Recommended: pool of 12-"
+            "20 days, sample 8 per generation."
+        ),
+    )
+    p.add_argument(
         "--early-stop-patience", type=int, default=0,
         help=(
             "GA early-stop: stop after this many consecutive non-improving "
@@ -1348,6 +1785,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "expected to lift natural fill rate but reduce per-pair "
             "locked P&L). Mutually exclusive with --enable-gene "
             "arb_spread_scale."
+        ),
+    )
+    p.add_argument(
+        "--arb-spread-headroom-ticks", type=float, default=None,
+        metavar="HEADROOM",
+        help=(
+            "Cohort-wide pin for ``arb_spread_headroom_ticks`` (Phase 5 "
+            "gene). Tick count added on top of the commission floor when "
+            "the env computes the auto-paired passive's tick offset: "
+            "arb_ticks = clip(round((floor + headroom) * arb_spread_scale), "
+            "1, 25). Default ``None`` = leave each agent at its gene "
+            "draw / default (2.0). Mutually exclusive with --enable-gene "
+            "arb_spread_headroom_ticks. See "
+            "plans/force_close_and_arb_spread/findings.md."
         ),
     )
     p.add_argument(
@@ -1548,6 +1999,17 @@ def main(argv: list[str] | None = None) -> int:
                 "--enable-gene arb_spread_scale (one source of truth "
                 "per knob per run).",
             )
+    if args.arb_spread_headroom_ticks is not None:
+        logger.info(
+            "Scalping: cohort-wide pin arb_spread_headroom_ticks=%g",
+            float(args.arb_spread_headroom_ticks),
+        )
+        if "arb_spread_headroom_ticks" in enabled_set:
+            raise ValueError(
+                "Cannot combine --arb-spread-headroom-ticks with "
+                "--enable-gene arb_spread_headroom_ticks (one source "
+                "of truth per knob per run).",
+            )
 
     # Predictor bundle (predictor-integration data-bridging).
     predictor_bundle = None
@@ -1614,6 +2076,10 @@ def main(argv: list[str] | None = None) -> int:
                 float(args.arb_spread_scale)
                 if args.arb_spread_scale is not None else None
             ),
+            arb_spread_headroom_ticks_override=(
+                float(args.arb_spread_headroom_ticks)
+                if args.arb_spread_headroom_ticks is not None else None
+            ),
             predictor_bundle=predictor_bundle,
             strategy_mode=args.strategy_mode,
             use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
@@ -1628,6 +2094,19 @@ def main(argv: list[str] | None = None) -> int:
             composite_score_mode=str(args.composite_score_mode),
             early_stop_patience=int(args.early_stop_patience),
             early_stop_min_gens=int(args.early_stop_min_gens),
+            cohort_eval_days=(
+                list(args.cohort_eval_days) if args.cohort_eval_days else None
+            ),
+            training_days_explicit=(
+                list(args.training_days_explicit)
+                if args.training_days_explicit else None
+            ),
+            monitor_days=(
+                list(args.monitor_days) if args.monitor_days else None
+            ),
+            rotating_eval_sample=int(args.rotating_eval_sample),
+            monitor_eval_top_k=int(args.monitor_eval_top_k),
+            monitor_early_stop_patience=int(args.monitor_early_stop_patience),
         )
     finally:
         if server is not None:
