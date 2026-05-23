@@ -169,21 +169,19 @@ MAX_ARB_TICKS: int = 25
 # of the raw per-race cash P&L. See hard_constraints §5 and §6 and
 # ``plans/naked-clip-and-stability/purpose.md`` for the motivation.
 NAKED_WINNER_CLIP_FRACTION: float = 0.95
-# Halved 1.0 → 0.5 on 2026-05-23 as part of
-# plans/force_close_and_arb_spread/. The original £1 bonus per
-# close_signal success was tuned when pairs locked £5-£10 cash each
-# (CLOSE_SIGNAL_BONUS was an exploration nudge on top of a meaningful
-# cash signal). Under the price-adaptive arb_spread design, tight-
-# target agents lock £0.05-£0.50 per pair, and the £1 bonus was
-# 5-10× the actual cash signal per close — over-rewarding close_signal
-# and dampening the natural-maturation incentive. Halving brings the
-# bonus closer to the cash magnitude while preserving the positive
-# gradient property. If still too dominant we can drop further or
-# zero entirely. Cohort runs at this default are NOT directly
-# comparable to pre-2026-05-23 runs on shaped_bonus magnitudes (raw
-# P&L is unchanged). Reward-scale change. Operator can pin via
-# --reward-overrides close_signal_bonus=N at runtime.
-CLOSE_SIGNAL_BONUS: float = 0.5
+# Zeroed 0.5 → 0.0 on 2026-05-23 (second adjustment same day).
+# Halving from 1.0 to 0.5 didn't materially change behaviour — first
+# 10/30 agents of the post-halving cohort still showed cls% at 26-40%
+# (essentially identical to pre-halving) and mat% remained 0-5%. The
+# core problem: even at 0.5 the bonus signals "any close action is
+# good", which competes against natural maturation (which gets no
+# bonus). With pairs now locking real cash (£0.20-£0.50 at tight
+# target_lock_pct), the cash signal is meaningful on its own; the
+# exploration-nudge purpose of the bonus is no longer needed. Zero
+# it and let the agent learn closing behaviour from raw P&L alone.
+# Operator can re-enable via --reward-overrides close_signal_bonus=N
+# at runtime if comparison desired.
+CLOSE_SIGNAL_BONUS: float = 0.0
 
 # scalping-tight-naked-variance Phase 2A (2026-05-15). L2 per-pair
 # naked-pnl variance penalty applied in the SHAPED channel only —
@@ -5183,12 +5181,18 @@ class BetfairEnv(gymnasium.Env):
 
         matured_arb_term = 0.0
         if self.scalping_mode and self._matured_arb_bonus_weight > 0.0:
-            # Matured-arb bonus counts ONLY pair maturations the agent
-            # caused — natural completions and close_signal-initiated
-            # closes. Force-closes at T−N are env-initiated and do NOT
-            # earn the agent credit (hard_constraints.md §7,
-            # plans/arb-signal-cleanup).
-            n_matured = scalping_arbs_completed + scalping_arbs_closed
+            # Matured-arb bonus counts ONLY natural maturation (passive
+            # at original target hit by market). Pre-2026-05-23 this
+            # also counted agent_close (close_signal) pairs as
+            # "matured", but that conflation was the same problem the
+            # mr→mat%/cls% rename fixed in show_cohort_status.py: it
+            # rewarded ANY close action and undermined the scalping
+            # incentive. Updated 2026-05-23 to count scalping_arbs_completed
+            # only — natural fills are now the only thing that wins
+            # this bonus. Force-closes and agent-closes earn nothing
+            # from this term; their reward signal is the raw cash
+            # delta only.
+            n_matured = scalping_arbs_completed
             raw_matured_contribution = (
                 self._matured_arb_bonus_weight
                 * (n_matured - self._matured_arb_expected_random)

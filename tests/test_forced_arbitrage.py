@@ -1038,12 +1038,12 @@ class TestNakedWinnerClipAndCloseBonus:
 
     def test_scalp_using_close_signal_earns_bonus(self):
         """Closed pair at +£2 cash → raw=+2, shaped=+CLOSE_SIGNAL_BONUS,
-        net=+2.5.
+        net=+2 (CLOSE_SIGNAL_BONUS zeroed on 2026-05-23 after the
+        halving was empirically insufficient — agents still over-closed).
 
         A profitable ``close_signal`` success contributes the pair's
         cash via ``race_pnl`` (the helper's raw channel) plus the
-        shaped per-close bonus. Default halved 1.0 → 0.5 on 2026-05-23
-        (plans/force_close_and_arb_spread/).
+        shaped per-close bonus, now zero by default.
         """
         raw, shaped = _compute_scalping_reward_terms(
             race_pnl=2.0,
@@ -1051,12 +1051,13 @@ class TestNakedWinnerClipAndCloseBonus:
             n_close_signal_successes=1,
         )
         assert raw == pytest.approx(2.0)
-        assert shaped == pytest.approx(0.5)
-        assert raw + shaped == pytest.approx(2.5)
+        assert shaped == pytest.approx(0.0)
+        assert raw + shaped == pytest.approx(2.0)
 
     def test_loss_closed_scalp_reports_full_loss_in_raw(self):
         """Close_signal closes a pair at −£5 cash → raw=−5,
-        shaped=+CLOSE_SIGNAL_BONUS=+0.5, net=−4.5.
+        shaped=+CLOSE_SIGNAL_BONUS=0.0, net=−5 (bonus zeroed
+        2026-05-23).
 
         Under Session 01's draft (raw = ``scalping_locked_pnl +
         sum(naked_per_pair)``) the pair's locked floor was 0, no naked
@@ -1075,12 +1076,13 @@ class TestNakedWinnerClipAndCloseBonus:
             n_close_signal_successes=1,
         )
         assert raw == pytest.approx(-5.0)
-        assert shaped == pytest.approx(0.5)
-        assert raw + shaped == pytest.approx(-4.5)
+        assert shaped == pytest.approx(0.0)
+        assert raw + shaped == pytest.approx(-5.0)
 
     def test_multiple_close_signal_successes_accumulate(self):
         """N closes in one race → shaped += N × CLOSE_SIGNAL_BONUS.
-        Default halved 1.0 → 0.5 on 2026-05-23."""
+        Default zeroed 0.5 → 0.0 on 2026-05-23 — close behaviour
+        learns from raw P&L only now."""
         for n in (2, 3, 5):
             raw, shaped = _compute_scalping_reward_terms(
                 race_pnl=0.0,
@@ -1088,7 +1090,7 @@ class TestNakedWinnerClipAndCloseBonus:
                 n_close_signal_successes=n,
             )
             assert raw == pytest.approx(0.0)
-            assert shaped == pytest.approx(0.5 * float(n))
+            assert shaped == pytest.approx(0.0)
 
     def test_raw_plus_shaped_invariant_with_new_terms(self):
         """Mixed race exercises every new term simultaneously:
@@ -1104,15 +1106,16 @@ class TestNakedWinnerClipAndCloseBonus:
         )
         # Raw: race_pnl = 5 + 50 + (−30) = +£25.
         assert raw == pytest.approx(25.0)
-        # Shaped: −0.95 × 50 + 2 × 0.5 = −47.5 + 1.0 = −£46.5
-        # (close bonus halved 1.0 → 0.5 on 2026-05-23).
-        assert shaped == pytest.approx(-46.5)
-        # Net: +25 + (−46.5) = −£21.5.
-        assert raw + shaped == pytest.approx(-21.5)
+        # Shaped: −0.95 × 50 + 2 × 0.0 = −47.5 + 0 = −£47.5
+        # (close bonus zeroed 0.5 → 0.0 on 2026-05-23).
+        assert shaped == pytest.approx(-47.5)
+        # Net: +25 + (−47.5) = −£22.5.
+        assert raw + shaped == pytest.approx(-22.5)
 
     def test_close_signal_bonus_default_matches_module_constant(self):
-        """Default close_signal_bonus equals CLOSE_SIGNAL_BONUS (0.5,
-        halved from the original 1.0 on 2026-05-23, see
+        """Default close_signal_bonus equals CLOSE_SIGNAL_BONUS (0.0
+        — zeroed 2026-05-23 after the earlier halving from 1.0 → 0.5
+        proved insufficient to dampen aggressive closing; see
         plans/force_close_and_arb_spread/)."""
         raw, shaped = _compute_scalping_reward_terms(
             race_pnl=0.0,
@@ -1120,8 +1123,8 @@ class TestNakedWinnerClipAndCloseBonus:
             n_close_signal_successes=3,
         )
         assert raw == pytest.approx(0.0)
-        # 3 × 0.5 = +£1.5 (only term contributing — no naked, no penalty).
-        assert shaped == pytest.approx(1.5)
+        # 3 × 0.0 = £0.0 (default zero — closes earn no shaped bonus).
+        assert shaped == pytest.approx(0.0)
 
     def test_close_signal_bonus_override_scales_close_contribution(self):
         """Override close_signal_bonus=10.0 → close contribution is
@@ -1142,9 +1145,10 @@ class TestNakedWinnerClipAndCloseBonus:
         """Cohort-level ``--reward-overrides close_signal_bonus=10.0`` flows
         through the env's ``reward_overrides`` channel and lands on
         ``env._close_signal_bonus``. Default (no override) stays at the
-        module constant 0.5 (halved from 1.0 on 2026-05-23)."""
+        module constant 0.0 (zeroed 2026-05-23 after the earlier
+        halving from 1.0 → 0.5 proved insufficient)."""
         env_default = BetfairEnv(_make_day(n_races=1), scalping_config)
-        assert env_default._close_signal_bonus == pytest.approx(0.5)
+        assert env_default._close_signal_bonus == pytest.approx(0.0)
         env_override = BetfairEnv(
             _make_day(n_races=1),
             scalping_config,

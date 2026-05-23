@@ -189,6 +189,50 @@ rejected — each of those independently caused the phantom-profit bug.
 
 ---
 
+## CLOSE_SIGNAL_BONUS zeroed 0.5 → 0.0 + matured_arb_bonus_weight scope narrowed (2026-05-23)
+
+**Two coupled reward changes on the same day after the halving from
+1.0 → 0.5 proved insufficient** (first 10/30 agents of the
+post-halving cohort showed cls% still at 26-40 %, mat% still 0-5 %).
+
+**1. CLOSE_SIGNAL_BONUS zeroed.** The shaped reward per
+`close_signal` success — previously £1, then £0.5 — is now £0.
+Closing behaviour learns from raw cash P&L only. The original
+exploration-nudge purpose (when close_signal was a new action) is
+no longer needed — close_signal is used heavily by every trained
+agent. The bonus was structurally competing against natural
+maturation, which had no equivalent shaped reward.
+
+**2. matured_arb_bonus_weight scope narrowed.** Previously the
+bonus counted `n_matured = scalping_arbs_completed +
+scalping_arbs_closed` — i.e. natural maturation OR agent close.
+Now it counts ONLY natural maturation:
+`n_matured = scalping_arbs_completed`. This is the same
+conflation-fix the `mr → mat%/cls%` rename did in
+show_cohort_status.py: agent-closed pairs are not scalping in the
+intended sense (the passive was cancelled and the spread crossed
+at market), so they shouldn't earn the matured-arb bonus. Force-
+closes and naked pairs were already excluded.
+
+**Combined effect (target_lock_pct + zero close bonus + narrowed
+matured bonus):** the agent now has positive shaped reward for
+natural maturation ONLY (when enabled), zero shaped reward for
+agent_close (only raw cash), zero shaped reward for force_close
+(only raw cash). The reward shape now correctly identifies what
+a scalper actually is — passive resting at a target, market
+walking through it naturally — and rewards that specifically.
+
+For probes: enable `--reward-overrides matured_arb_bonus_weight=2.0`
+(or similar) to give the agent a strong positive gradient for
+natural maturation. Cohort runs at any matured_arb_bonus_weight > 0
+are NOT directly comparable to pre-2026-05-23 runs on
+`shaped_bonus` magnitudes; `raw_pnl_reward` is unchanged.
+
+**Test guards:** the `TestScalpingReward` close-bonus assertions
+were updated to expect 0.0 default. No matured_arb_bonus_weight
+test directly asserted on the close-inclusive count, so the
+scope narrowing landed without test changes.
+
 ## CLOSE_SIGNAL_BONUS halved 1.0 → 0.5 (2026-05-23)
 
 `env/betfair_env.py::CLOSE_SIGNAL_BONUS` reduced from 1.0 to 0.5.
