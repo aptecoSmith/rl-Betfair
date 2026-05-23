@@ -36,9 +36,13 @@ def _scan_one(
     data_dir: Path,
     config: dict,
     scorer_dir: Path,
+    predictor_lean_obs: bool = False,
 ) -> None:
     n_ticks = count_pre_race_ticks(date, data_dir)
-    samples = scan_day(date, data_dir, config, scorer_dir=scorer_dir)
+    samples = scan_day(
+        date, data_dir, config, scorer_dir=scorer_dir,
+        predictor_lean_obs=predictor_lean_obs,
+    )
 
     if samples:
         obs_dim = samples[0].obs.shape[0]
@@ -48,7 +52,10 @@ def _scan_one(
         # contract that an empty .npz is shaped, not a placeholder.
         try:
             day = load_day(date, data_dir)
-            env = BetfairEnv(day, config, scalping_mode=True)
+            env = BetfairEnv(
+                day, config, scalping_mode=True,
+                predictor_lean_obs=predictor_lean_obs,
+            )
             shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
             obs_dim = int(shim.obs_dim)
         except Exception:
@@ -90,6 +97,16 @@ def main() -> None:
         default=str(DEFAULT_SCORER_DIR),
         help="Phase 0 scorer artefact directory (default: models/scorer_v1).",
     )
+    scan_p.add_argument(
+        "--predictor-lean-obs", action="store_true",
+        help=(
+            "Build the env with predictor_lean_obs=True (23 keys per "
+            "runner instead of 143). Required when the downstream cohort "
+            "uses --predictor-lean-obs — otherwise the cache's obs_dim "
+            "won't match the trainer's shim and BC pretrain will refuse "
+            "to load (see BetfairEnv LEAN_RUNNER_KEYS)."
+        ),
+    )
     args = ap.parse_args()
 
     dates: list[str] = (
@@ -103,7 +120,10 @@ def main() -> None:
     scorer_dir = Path(args.scorer_dir)
 
     for d in dates:
-        _scan_one(d, data_dir, config, scorer_dir)
+        _scan_one(
+            d, data_dir, config, scorer_dir,
+            predictor_lean_obs=bool(args.predictor_lean_obs),
+        )
 
 
 if __name__ == "__main__":

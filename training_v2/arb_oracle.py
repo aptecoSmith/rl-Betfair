@@ -96,6 +96,8 @@ def scan_day(
     data_dir: Path,
     config: dict,
     scorer_dir: Path = DEFAULT_SCORER_DIR,
+    *,
+    predictor_lean_obs: bool = False,
 ) -> list[OracleSample]:
     """Scan one day; return samples for every profitable reachable arb moment.
 
@@ -113,7 +115,10 @@ def scan_day(
     if not day.races:
         return []
 
-    env = BetfairEnv(day, config, scalping_mode=True)
+    env = BetfairEnv(
+        day, config, scalping_mode=True,
+        predictor_lean_obs=predictor_lean_obs,
+    )
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     max_runners: int = env.max_runners
 
