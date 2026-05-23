@@ -847,6 +847,13 @@ class BetfairEnv(gymnasium.Env):
         # on pair maturation. Whitelisted so a per-agent gene override
         # flows through.
         "matured_arb_bonus_weight",
+        # Companions to matured_arb_bonus_weight — also overridable so
+        # the operator can tune the bonus shape end-to-end. Added
+        # 2026-05-23 after probe2 discovered the override silently
+        # ignored matured_arb_expected_random and the bonus collapsed
+        # into a flat per-race penalty.
+        "matured_arb_expected_random",
+        "matured_arb_bonus_cap",
         # Arb-curriculum Session 03 (2026-04-19): per-pair loss-side
         # scalar on naked cash flows. Whitelisted so the generation-level
         # annealed effective scale flows through as a per-agent override.
