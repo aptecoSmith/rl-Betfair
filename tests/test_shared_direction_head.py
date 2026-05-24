@@ -202,6 +202,105 @@ class TestSharedDirectionHead:
         for name, param in p.direction_prob_head.named_parameters():
             assert param.requires_grad is True
 
+    def test_manifest_with_multi_layer_hidden_dims(
+        self, action_space, tmp_path: Path,
+    ):
+        """2026-05-24 sweep follow-up: the C11 winner has a 2-layer
+        head (hidden_dims=[256, 128]). The policy must build a head
+        matching `manifest.architecture.hidden_dims` when loading,
+        not assume the default 1-layer shape."""
+        import json
+        import torch.nn as nn
+
+        # Build a 2-layer head directly to mimic C11's shape.
+        head = nn.Sequential(
+            nn.LayerNorm(LEAN_RUNNER_DIM),
+            nn.Linear(LEAN_RUNNER_DIM, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2),
+        )
+        out_dir = tmp_path / "c11_head"
+        out_dir.mkdir()
+        torch.save(head.state_dict(), out_dir / "weights.pt")
+        (out_dir / "manifest.json").write_text(json.dumps({
+            "experiment_id": "test_c11",
+            "weights_path": "weights.pt",
+            "architecture": {
+                "family": "linear_mlp",
+                "input_dim": LEAN_RUNNER_DIM,
+                "output_dim": 2,
+                "hidden_dims": [256, 128],
+            },
+        }))
+
+        # Loading must succeed AND build the 2-layer head shape.
+        p = DiscreteLSTMPolicy(
+            obs_dim=LEAN_OBS_DIM,
+            action_space=action_space,
+            hidden_size=128,
+            runner_dim=LEAN_RUNNER_DIM,
+            frozen_direction_head_path=out_dir,
+        )
+        assert p._frozen_direction_head is True
+        # The policy's direction_prob_head should now have 6 modules
+        # (LayerNorm, Linear, ReLU, Linear, ReLU, Linear) not 4.
+        assert len(p.direction_prob_head) == 6
+        # Linear(in_features=23, 256) at position 1
+        assert p.direction_prob_head[1].in_features == LEAN_RUNNER_DIM
+        assert p.direction_prob_head[1].out_features == 256
+        # Linear(256, 128) at position 3
+        assert p.direction_prob_head[3].in_features == 256
+        assert p.direction_prob_head[3].out_features == 128
+        # Linear(128, 2) at position 5
+        assert p.direction_prob_head[5].in_features == 128
+        assert p.direction_prob_head[5].out_features == 2
+        # All frozen
+        for param in p.direction_prob_head.parameters():
+            assert not param.requires_grad
+
+    def test_manifest_input_dim_mismatch_raises(
+        self, action_space, tmp_path: Path,
+    ):
+        """The manifest's input_dim must match the policy's
+        `runner_dim`. A head trained for runner_dim=143 (full obs)
+        loaded into a runner_dim=23 (lean obs) policy must raise a
+        clear error — same bug class as the original 2026-05-24
+        lean-obs/runner_dim incident."""
+        import json
+        import torch.nn as nn
+
+        # Build a head with runner_dim=143 (full-obs sizing).
+        bad_head = nn.Sequential(
+            nn.LayerNorm(143),
+            nn.Linear(143, 64),
+            nn.ReLU(),
+            nn.Linear(64, 2),
+        )
+        out_dir = tmp_path / "wrong_dim_head"
+        out_dir.mkdir()
+        torch.save(bad_head.state_dict(), out_dir / "weights.pt")
+        (out_dir / "manifest.json").write_text(json.dumps({
+            "experiment_id": "test_wrong_dim",
+            "weights_path": "weights.pt",
+            "architecture": {
+                "family": "linear_mlp",
+                "input_dim": 143,
+                "output_dim": 2,
+                "hidden_dims": [64],
+            },
+        }))
+
+        with pytest.raises(ValueError, match="input_dim"):
+            DiscreteLSTMPolicy(
+                obs_dim=LEAN_OBS_DIM,
+                action_space=action_space,
+                hidden_size=128,
+                runner_dim=LEAN_RUNNER_DIM,  # 23
+                frozen_direction_head_path=out_dir,
+            )
+
 
 class TestRunnerMutex:
     """§c + §e: cohort runner refuses --direction-head-manifest

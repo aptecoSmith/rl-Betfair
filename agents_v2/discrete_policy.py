@@ -474,6 +474,14 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # squash without dataset-stats bookkeeping
         # (sense_check.md item 2 spec correction; see also
         # lessons_learnt.md "Saturation from raw obs scales").
+        # Default head: one hidden layer at actor_mlp_hidden. Used
+        # when no frozen-head manifest is supplied. When a manifest
+        # IS supplied, the head is REBUILT below to match whatever
+        # `architecture.hidden_dims` the manifest specifies — the
+        # sweep variants (C0-C20) explored 1- and 2-hidden-layer
+        # designs with varying widths, and the winner (C11) is a
+        # 2-layer head (256 → 128). See
+        # `plans/direction-head-architecture-sweep/`.
         self.direction_prob_head = nn.Sequential(
             nn.LayerNorm(self._runner_dim),
             nn.Linear(self._runner_dim, self.actor_mlp_hidden),
@@ -484,28 +492,83 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # 2026-05-24: optional load of a pre-trained shared direction
         # head, frozen. See ``plans/shared-direction-head/``. The
         # caller (cohort worker) passes a directory containing
-        # ``weights.pt`` (a flat state_dict matching the
-        # direction_prob_head's Sequential layers) + manifest.json.
-        # Cohort worker validates the manifest before reaching here.
-        # When supplied, the head's parameters are frozen via
-        # ``requires_grad_(False)`` — gradient still flows THROUGH
-        # the head (because actor_head reads its output) but the
-        # head's own weights stay fixed.
+        # ``weights.pt`` + ``manifest.json``. The manifest's
+        # ``architecture.hidden_dims`` field determines the head's
+        # shape — when it differs from the default, we REBUILD the
+        # head before loading weights. Frozen via
+        # ``requires_grad_(False)`` so gradient flows THROUGH the
+        # head (actor_head reads its output) but weights stay fixed.
         self._frozen_direction_head = False
         if frozen_direction_head_path is not None:
             from pathlib import Path as _Path
             import torch as _torch
+            import json as _json
             mp = _Path(frozen_direction_head_path)
             if mp.is_dir():
                 weights_path = mp / "weights.pt"
+                manifest_path = mp / "manifest.json"
             else:
                 weights_path = mp
+                manifest_path = mp.parent / "manifest.json"
             if not weights_path.exists():
                 raise FileNotFoundError(
                     f"frozen_direction_head_path: weights.pt not "
                     f"found at {weights_path}",
                 )
-            state = _torch.load(weights_path, map_location="cpu", weights_only=True)
+
+            # Read the manifest (when present) to recover the head's
+            # architecture. Pre-sweep manifests with a single
+            # hidden layer continue to work because hidden_dims
+            # defaults match the policy's default head shape.
+            hidden_dims: list[int] = [self.actor_mlp_hidden]
+            input_dim_manifest: int | None = None
+            if manifest_path.exists():
+                _manifest = _json.loads(
+                    manifest_path.read_text(encoding="utf-8"),
+                )
+                _arch = _manifest.get("architecture", {}) or {}
+                _hd = _arch.get("hidden_dims")
+                if _hd:
+                    hidden_dims = [int(h) for h in _hd]
+                input_dim_manifest = (
+                    int(_arch["input_dim"])
+                    if "input_dim" in _arch else None
+                )
+                # Refuse to load a head trained for a different
+                # per-runner input dim — the lean-obs/full-obs
+                # bug class (see plans/direction-predictor-label-
+                # alignment/) bit us with exactly this kind of
+                # silent dim mismatch.
+                if (
+                    input_dim_manifest is not None
+                    and input_dim_manifest != self._runner_dim
+                ):
+                    raise ValueError(
+                        f"direction-head manifest input_dim="
+                        f"{input_dim_manifest} does not match the "
+                        f"policy's per-runner dim {self._runner_dim}. "
+                        f"Re-train the head against the runner-dim "
+                        f"the policy uses (lean obs = 23, full obs "
+                        f"= 143)."
+                    )
+
+            # Rebuild the head to match the manifest's hidden_dims.
+            # Layer pattern: LayerNorm(input) -> [Linear -> ReLU]+ ->
+            # Linear(_, 2). Same shape as the training script's
+            # SimpleMLP / DeepMLP / WideMLP — see
+            # ``scripts/train_direction_head.py``.
+            layers: list[nn.Module] = [nn.LayerNorm(self._runner_dim)]
+            prev = self._runner_dim
+            for h in hidden_dims:
+                layers.append(nn.Linear(prev, h))
+                layers.append(nn.ReLU())
+                prev = h
+            layers.append(nn.Linear(prev, 2))
+            self.direction_prob_head = nn.Sequential(*layers)
+
+            state = _torch.load(
+                weights_path, map_location="cpu", weights_only=True,
+            )
             self.direction_prob_head.load_state_dict(state, strict=True)
             for param in self.direction_prob_head.parameters():
                 param.requires_grad_(False)

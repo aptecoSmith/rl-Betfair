@@ -1,0 +1,58 @@
+{
+  "experiment_id": "sweep_c14_round3",
+  "weights_path": "weights.pt",
+  "architecture": {
+    "family": "linear_mlp",
+    "variant": "c14",
+    "input_dim": 23,
+    "output_dim": 2,
+    "hidden_dims": [
+      256,
+      128,
+      64
+    ],
+    "dropout": 0.0,
+    "pos_weight_mode": "unweighted"
+  },
+  "training": {
+    "training_dates": [
+      "2026-04-06",
+      "2026-04-08",
+      "2026-04-09",
+      "2026-04-11",
+      "2026-04-12",
+      "2026-04-13",
+      "2026-04-15",
+      "2026-04-16",
+      "2026-04-19",
+      "2026-04-20",
+      "2026-04-22",
+      "2026-04-24",
+      "2026-04-26",
+      "2026-05-02",
+      "2026-05-04",
+      "2026-05-05"
+    ],
+    "label_version": "v1_threshold_crossing",
+    "direction_horizon_ticks": 60,
+    "direction_threshold_ticks": 5,
+    "force_close_before_off_seconds": 60.0,
+    "epochs": 50,
+    "lr": 0.001,
+    "batch_size": 4096,
+    "val_frac": 0.2,
+    "seed": 42,
+    "n_train": 828215,
+    "n_val": 207053
+  },
+  "val_metrics": {
+    "val_bce_back": 0.4225006699562073,
+    "val_bce_lay": 0.3970671594142914,
+    "pos_rate_back": 0.18325313925743103,
+    "pos_rate_lay": 0.18254438042640686
+  },
+  "obs_schema_version": 9,
+  "active_runner_dim": 23,
+  "created_at": "2026-05-24T16:29:00.865004+00:00",
+  "commit_sha": "8878e98c4b4748abc87a652db653e1d95dd2ffa2"
+}

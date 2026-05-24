@@ -125,16 +125,175 @@ def _load_day_obs_and_labels(
     }
 
 
-class DirectionHead(nn.Module):
-    """Match the architecture saved by train_direction_head.py."""
+class _SkipHead(nn.Module):
+    """Matches the c10 architecture in train_direction_head.py."""
+
     def __init__(self, input_dim: int, hidden: int) -> None:
         super().__init__()
+        self.layer_norm = nn.LayerNorm(input_dim)
+        self.fc1 = nn.Linear(input_dim, hidden)
+        self.fc_out = nn.Linear(hidden + input_dim, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_n = self.layer_norm(x)
+        h = torch.relu(self.fc1(x_n))
+        cat = torch.cat([h, x_n], dim=-1)
+        return self.fc_out(cat)
+
+
+class _PairwiseHead(nn.Module):
+    """Matches the c15 architecture in train_direction_head.py."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int],
+    ) -> None:
+        super().__init__()
+        expanded_dim = input_dim + input_dim * input_dim
+        self.input_dim = input_dim
+        self.expanded_dim = expanded_dim
         self.net = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hidden),
+            nn.LayerNorm(expanded_dim),
+            nn.Linear(expanded_dim, hidden_dims[0]),
             nn.ReLU(),
-            nn.Linear(hidden, 2),
+            nn.Linear(hidden_dims[0], hidden_dims[1]),
+            nn.ReLU(),
+            nn.Linear(hidden_dims[1], 2),
         )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        outer = (x.unsqueeze(-1) * x.unsqueeze(-2)).flatten(-2)
+        cat = torch.cat([x, outer], dim=-1)
+        return self.net(cat)
+
+
+class DirectionHead(nn.Module):
+    """Variant-aware head loader. Reconstructs the architecture from
+    a manifest field; falls back to the original 2-layer MLP when no
+    variant field is present (pre-2026-05-24 manifests).
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        variant: str = "c0",
+        hidden_dims: list[int] | None = None,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.variant = variant
+        if variant in ("c0", "c3"):
+            hd = hidden_dims or [64]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], 2),
+            )
+        elif variant in ("c1", "c6", "c7", "c8"):
+            if variant == "c1":
+                hd = hidden_dims or [256]
+            elif variant == "c6":
+                hd = hidden_dims or [512]
+            elif variant == "c7":
+                hd = hidden_dims or [1024]
+            else:  # c8
+                hd = hidden_dims or [256]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], 2),
+            )
+        elif variant == "c2":
+            hd = hidden_dims or [64, 32]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+        elif variant == "c4":
+            hd = hidden_dims or [128]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.BatchNorm1d(hd[0]),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hd[0], 2),
+            )
+        elif variant == "c9":
+            hd = hidden_dims or [256, 128]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+        elif variant == "c10":
+            hd = hidden_dims or [256]
+            self.net = _SkipHead(input_dim, hd[0])
+        elif variant == "c11":
+            hd = hidden_dims or [256, 128]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+        elif variant in ("c12", "c14"):
+            hd = hidden_dims or [256, 128, 64]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], hd[2]),
+                nn.ReLU(),
+                nn.Linear(hd[2], 2),
+            )
+        elif variant == "c13":
+            hd = hidden_dims or [512, 256]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+        elif variant == "c15":
+            hd = hidden_dims or [256, 128]
+            self.net = _PairwiseHead(input_dim, hd)
+        elif variant in ("c16", "c17", "c18", "c19", "c20"):
+            # Round-4 ablations: [256, 128] MLP. Only c19 uses GELU;
+            # the others use ReLU. Loss / optimizer / smoothing don't
+            # affect the eval-time forward pass.
+            hd = hidden_dims or [256, 128]
+            Act = nn.GELU if variant == "c19" else nn.ReLU
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                Act(),
+                nn.Linear(hd[0], hd[1]),
+                Act(),
+                nn.Linear(hd[1], 2),
+            )
+        else:
+            raise ValueError(
+                f"unknown variant {variant!r}; "
+                f"expected one of c0,c1,c2,c3,c4,c6,c7,c8,c9,c10,"
+                f"c11,c12,c13,c14,c15,c16,c17,c18,c19,c20"
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -147,9 +306,14 @@ def _load_head_from_manifest(
         (manifest_dir / "manifest.json").read_text(encoding="utf-8"),
     )
     arch = manifest["architecture"]
+    # Pre-sweep manifests (v1_2026-05-24) have no "variant" field;
+    # default to c0 which matches the original 2-layer MLP layout.
+    variant = str(arch.get("variant", "c0"))
     head = DirectionHead(
         input_dim=int(arch["input_dim"]),
-        hidden=int(arch["hidden_dims"][0]),
+        variant=variant,
+        hidden_dims=[int(h) for h in arch["hidden_dims"]],
+        dropout=float(arch.get("dropout", 0.0)),
     )
     state = torch.load(
         manifest_dir / manifest["weights_path"],

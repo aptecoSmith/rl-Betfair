@@ -204,23 +204,252 @@ def _load_day_obs_and_labels(
     }
 
 
-class DirectionHead(nn.Module):
-    """Same architecture as the per-agent direction_prob_head in
-    DiscreteLSTMPolicy: LayerNorm(input) -> Linear(input, hidden)
-    -> ReLU -> Linear(hidden, 2).
+class _SkipHead(nn.Module):
+    """C10 architecture: skip connection from raw input to penultimate
+    layer so the output linear sees BOTH the hidden activation and the
+    raw 23-d input. Tests whether the head needs direct access to
+    linear features that a single hidden layer might be approximating.
+    """
 
-    Output: (batch, 2) raw logits — [direction_back_logit,
+    def __init__(self, input_dim: int, hidden: int) -> None:
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(input_dim)
+        self.fc1 = nn.Linear(input_dim, hidden)
+        # Final layer sees concat([hidden activation, normalised raw input]).
+        self.fc_out = nn.Linear(hidden + input_dim, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_n = self.layer_norm(x)
+        h = torch.relu(self.fc1(x_n))
+        cat = torch.cat([h, x_n], dim=-1)
+        return self.fc_out(cat)
+
+
+class _PairwiseHead(nn.Module):
+    """C15 architecture: expands the 23-d input to
+    concat([x, flatten(outer_product(x, x))]) = 23 + 23*23 = 552
+    features before a standard 2-hidden-layer MLP. Tests whether
+    feature expressiveness — not architecture capacity — is the
+    binding ceiling, without changing the policy's per-runner
+    call-site contract.
+
+    The outer-product matrix is symmetric (x_i*x_j == x_j*x_i) so
+    half its entries are redundant; the post-expansion Linear
+    layer learns to ignore the redundancy. Carrying the full square
+    keeps the forward pass branchless / vectorised.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int],
+    ) -> None:
+        super().__init__()
+        assert len(hidden_dims) == 2, \
+            "C15 currently hardwires a 2-hidden-layer MLP after expansion"
+        expanded_dim = input_dim + input_dim * input_dim
+        self.input_dim = input_dim
+        self.expanded_dim = expanded_dim
+        self.net = nn.Sequential(
+            nn.LayerNorm(expanded_dim),
+            nn.Linear(expanded_dim, hidden_dims[0]),
+            nn.ReLU(),
+            nn.Linear(hidden_dims[0], hidden_dims[1]),
+            nn.ReLU(),
+            nn.Linear(hidden_dims[1], 2),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (..., input_dim). Pairwise outer product: (..., input_dim,
+        # input_dim), flattened to (..., input_dim*input_dim).
+        outer = (x.unsqueeze(-1) * x.unsqueeze(-2)).flatten(-2)
+        cat = torch.cat([x, outer], dim=-1)
+        return self.net(cat)
+
+
+def _act_for_variant(variant: str) -> type[nn.Module]:
+    """Pick the activation module class for a variant. Only C19
+    differs from ReLU (uses GELU); every other variant uses ReLU
+    so the round-4 ablations are minimal-delta against C11.
+    """
+    if variant == "c19":
+        return nn.GELU
+    return nn.ReLU
+
+
+class DirectionHead(nn.Module):
+    """Variant-aware direction head.
+
+    Variants (architecture-sweep, 2026-05-24, round 1):
+
+    * ``c0`` — LayerNorm -> Linear(input, 64) -> ReLU -> Linear(64, 2).
+      Original v1 architecture. ``hidden_dims=[64]``.
+    * ``c1`` — LayerNorm -> Linear(input, 256) -> ReLU -> Linear(256, 2).
+      4× width. ``hidden_dims=[256]``.
+    * ``c2`` — LayerNorm -> Linear(input, 64) -> ReLU -> Linear(64, 32)
+      -> ReLU -> Linear(32, 2). Deeper, narrower second layer.
+      ``hidden_dims=[64, 32]``.
+    * ``c3`` — Same arch as ``c0``; trained with ``pos_weight=1`` instead
+      of class-balanced. ``hidden_dims=[64]``.
+    * ``c4`` — LayerNorm -> Linear(input, 128) -> BatchNorm1d -> ReLU
+      -> Dropout(p) -> Linear(128, 2). ``hidden_dims=[128]``;
+      ``dropout=p``.
+
+    Round 2 (asked after round 1 showed C1 marginally beat C0):
+
+    * ``c6`` — Same as ``c1`` but ``hidden_dims=[512]``. Width keep
+      helping past 256?
+    * ``c7`` — Same as ``c1`` but ``hidden_dims=[1024]``. Where's the
+      overfit point?
+    * ``c8`` — Same architecture as ``c1`` (``hidden_dims=[256]``) but
+      trained with ``pos_weight=1`` (combines C1's wider lift + C3's
+      calibrated outputs).
+    * ``c9`` — LayerNorm -> Linear(input, 256) -> ReLU -> Linear(256,
+      128) -> ReLU -> Linear(128, 2). ``hidden_dims=[256, 128]``.
+      Wider+deeper.
+    * ``c10`` — LayerNorm + Linear(input, 256) + ReLU, then concat the
+      hidden activation with the normalised raw input before the output
+      linear (``Linear(256+23, 2)``). Skip from input to penultimate
+      layer. ``hidden_dims=[256]``.
+
+    Output: ``(batch, 2)`` raw logits — [direction_back_logit,
     direction_lay_logit]. Caller applies sigmoid for probabilities.
     """
 
-    def __init__(self, input_dim: int, hidden: int = 64) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        variant: str = "c0",
+        hidden_dims: list[int] | None = None,
+        dropout: float = 0.0,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 2),
-        )
+        self.variant = variant
+        if variant in ("c0", "c3"):
+            hd = hidden_dims or [64]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant in ("c1", "c6", "c7", "c8"):
+            if variant == "c1":
+                hd = hidden_dims or [256]
+            elif variant == "c6":
+                hd = hidden_dims or [512]
+            elif variant == "c7":
+                hd = hidden_dims or [1024]
+            else:  # c8
+                hd = hidden_dims or [256]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant == "c2":
+            hd = hidden_dims or [64, 32]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant == "c4":
+            hd = hidden_dims or [128]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.BatchNorm1d(hd[0]),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hd[0], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant == "c9":
+            hd = hidden_dims or [256, 128]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant == "c10":
+            hd = hidden_dims or [256]
+            # Skip from input to penultimate; not expressible as a
+            # flat Sequential.
+            self.net = _SkipHead(input_dim, hd[0])
+            self.hidden_dims = list(hd)
+        elif variant == "c11":
+            # Same architecture as c9 but trained with pos_weight=1.
+            hd = hidden_dims or [256, 128]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant in ("c12", "c14"):
+            hd = hidden_dims or [256, 128, 64]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], hd[2]),
+                nn.ReLU(),
+                nn.Linear(hd[2], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant == "c13":
+            hd = hidden_dims or [512, 256]
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                nn.ReLU(),
+                nn.Linear(hd[0], hd[1]),
+                nn.ReLU(),
+                nn.Linear(hd[1], 2),
+            )
+            self.hidden_dims = list(hd)
+        elif variant == "c15":
+            hd = hidden_dims or [256, 128]
+            self.net = _PairwiseHead(input_dim, hd)
+            self.hidden_dims = list(hd)
+        elif variant in ("c16", "c17", "c18", "c19", "c20"):
+            # Round-4 ablations on C11: same [256, 128] arch, only
+            # the training recipe / activation differs per variant.
+            # c19 swaps ReLU for GELU; all others use ReLU.
+            hd = hidden_dims or [256, 128]
+            Act = _act_for_variant(variant)
+            self.net = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hd[0]),
+                Act(),
+                nn.Linear(hd[0], hd[1]),
+                Act(),
+                nn.Linear(hd[1], 2),
+            )
+            self.hidden_dims = list(hd)
+        else:
+            raise ValueError(
+                f"unknown variant {variant!r}; "
+                f"expected one of c0,c1,c2,c3,c4,c6,c7,c8,c9,c10,"
+                f"c11,c12,c13,c14,c15,c16,c17,c18,c19,c20"
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -249,16 +478,104 @@ def main() -> int:
         help="Optional id string. Defaults to a timestamp.",
     )
     p.add_argument("--hidden", type=int, default=64)
+    p.add_argument(
+        "--variant", default="c0",
+        choices=[
+            "c0", "c1", "c2", "c3", "c4",
+            "c6", "c7", "c8", "c9", "c10",
+            "c11", "c12", "c13", "c14", "c15",
+            "c16", "c17", "c18", "c19", "c20",
+        ],
+        help=(
+            "Architecture variant for the head. c0=baseline 2-layer "
+            "MLP (default). c1=wider single layer (256). c2=deeper "
+            "(64->32). c3=baseline arch trained with pos_weight=1 "
+            "(unweighted BCE). c4=128 + BatchNorm + Dropout(p). "
+            "c6=hidden 512. c7=hidden 1024. c8=hidden 256 with "
+            "pos_weight=1. c9=[256,128] deeper+wider. c10=hidden 256 "
+            "with skip from input to penultimate layer. c11=c9 arch "
+            "with pos_weight=1. c12=[256,128,64] depth-3. "
+            "c13=[512,256] wider+deeper. c14=c12 arch with "
+            "pos_weight=1. c15=pairwise feature expansion (23->552) "
+            "then [256,128] MLP. c16=c11+AdamW(wd=1e-3). c17=c11+focal "
+            "loss(gamma=2). c18=c11+epochs=200+patience=20 (longer "
+            "training). c19=c11+GELU activation. c20=c11+label "
+            "smoothing(0.05)."
+        ),
+    )
+    p.add_argument(
+        "--dropout", type=float, default=0.2,
+        help="Dropout probability (used by variant c4 only).",
+    )
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--batch-size", type=int, default=4096)
     p.add_argument("--val-frac", type=float, default=0.20)
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
+    # Round-4 training-recipe knobs. Each round-4 variant pins exactly
+    # one of these to its non-default value; all other variants leave
+    # them at the defaults so behaviour is byte-identical to round 3.
+    p.add_argument(
+        "--optimizer", default="adam", choices=["adam", "adamw"],
+        help="Optimizer choice. c16 forces adamw with --weight-decay 1e-3.",
+    )
+    p.add_argument(
+        "--weight-decay", type=float, default=0.0,
+        help="AdamW weight_decay coefficient. c16 forces 1e-3.",
+    )
+    p.add_argument(
+        "--loss", default="bce", choices=["bce", "focal"],
+        help=(
+            "Per-sample loss. 'bce' is the default pos-weighted (or "
+            "unweighted) binary cross-entropy. 'focal' uses focal "
+            "loss with --focal-gamma; pos_weight is dropped under "
+            "focal since focal handles imbalance via the focusing "
+            "term. c17 forces focal."
+        ),
+    )
+    p.add_argument(
+        "--focal-gamma", type=float, default=2.0,
+        help="Focal loss gamma parameter (used with --loss focal).",
+    )
+    p.add_argument(
+        "--label-smoothing", type=float, default=0.0,
+        help=(
+            "Label smoothing factor alpha in [0, 0.5). Hard targets "
+            "y in {0,1} are mapped to y*(1-2a)+a, equivalent to soft "
+            "targets that never reach exactly 0 or 1. c20 forces "
+            "alpha=0.05."
+        ),
+    )
     p.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu",
     )
     args = p.parse_args()
+
+    # Round-4 variant-driven recipe overrides. Each round-4 variant
+    # pins exactly one knob away from the C11 baseline so the ablation
+    # is clean. The override is applied AFTER argparse so CLI flags
+    # alone still produce a non-overridden run (useful for sanity).
+    if args.variant == "c16":
+        args.optimizer = "adamw"
+        if args.weight_decay == 0.0:
+            args.weight_decay = 1e-3
+    elif args.variant == "c17":
+        args.loss = "focal"
+    elif args.variant == "c18":
+        # c18's question: is C11 under-trained at 50 epochs? Let it run
+        # up to 200 with a wider patience window.
+        if args.epochs == 50:
+            args.epochs = 200
+        if args.patience == 5:
+            args.patience = 20
+    elif args.variant == "c19":
+        # GELU is wired in via DirectionHead at construction; nothing
+        # to override on args.
+        pass
+    elif args.variant == "c20":
+        if args.label_smoothing == 0.0:
+            args.label_smoothing = 0.05
 
     training_dates = [d.strip() for d in args.training_dates.split(",")]
     if not training_dates:
@@ -302,26 +619,117 @@ def main() -> int:
     Xva = torch.from_numpy(X[val_idx]).to(args.device)
     Yva = torch.from_numpy(Y[val_idx]).to(args.device)
 
-    # Class-balance pos_weight per side
+    # Class-balance pos_weight per side. C3, C8, C11, C14 and all
+    # round-4 ablations (c16-c20) train unweighted — round 4 isolates
+    # ONE knob change from C11, so they all share its pos_weight=1.
     pos_rate_back = float(Y_back[train_idx].mean())
     pos_rate_lay = float(Y_lay[train_idx].mean())
-    pw_back = (1 - pos_rate_back) / max(pos_rate_back, 1e-9)
-    pw_lay = (1 - pos_rate_lay) / max(pos_rate_lay, 1e-9)
+    unweighted_variants = {
+        "c3", "c8", "c11", "c14",
+        "c16", "c17", "c18", "c19", "c20",
+    }
+    if args.variant in unweighted_variants:
+        pw_back = 1.0
+        pw_lay = 1.0
+    else:
+        pw_back = (1 - pos_rate_back) / max(pos_rate_back, 1e-9)
+        pw_lay = (1 - pos_rate_lay) / max(pos_rate_lay, 1e-9)
     pw = torch.tensor(
         [pw_back, pw_lay], dtype=torch.float32, device=args.device,
     )
     print(
         f"pos rates: back={pos_rate_back:.4f} lay={pos_rate_lay:.4f}  "
-        f"pos_weight: back={pw_back:.2f} lay={pw_lay:.2f}"
+        f"pos_weight: back={pw_back:.2f} lay={pw_lay:.2f}  "
+        f"variant={args.variant}"
     )
 
     torch.manual_seed(args.seed)
-    head = DirectionHead(LEAN_RUNNER_DIM, hidden=args.hidden).to(args.device)
-    opt = torch.optim.Adam(head.parameters(), lr=args.lr)
+    # For c0/c3, --hidden still controls the hidden dim (default 64).
+    # For c1, c2, c4: variant supplies a fixed hidden_dims list.
+    if args.variant in ("c0", "c3"):
+        hidden_dims = [args.hidden]
+    elif args.variant == "c1":
+        hidden_dims = [256]
+    elif args.variant == "c2":
+        hidden_dims = [64, 32]
+    elif args.variant == "c4":
+        hidden_dims = [128]
+    elif args.variant == "c6":
+        hidden_dims = [512]
+    elif args.variant == "c7":
+        hidden_dims = [1024]
+    elif args.variant == "c8":
+        hidden_dims = [256]
+    elif args.variant == "c9":
+        hidden_dims = [256, 128]
+    elif args.variant == "c10":
+        hidden_dims = [256]
+    elif args.variant == "c11":
+        hidden_dims = [256, 128]
+    elif args.variant in ("c12", "c14"):
+        hidden_dims = [256, 128, 64]
+    elif args.variant == "c13":
+        hidden_dims = [512, 256]
+    elif args.variant == "c15":
+        hidden_dims = [256, 128]
+    elif args.variant in ("c16", "c17", "c18", "c19", "c20"):
+        hidden_dims = [256, 128]
+    else:
+        raise ValueError(f"unknown variant {args.variant!r}")
+    head = DirectionHead(
+        LEAN_RUNNER_DIM,
+        variant=args.variant,
+        hidden_dims=hidden_dims,
+        dropout=args.dropout,
+    ).to(args.device)
+    if args.optimizer == "adamw":
+        opt = torch.optim.AdamW(
+            head.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+        )
+    else:
+        opt = torch.optim.Adam(head.parameters(), lr=args.lr)
+    print(
+        f"optimizer={args.optimizer} weight_decay={args.weight_decay}  "
+        f"loss={args.loss} focal_gamma={args.focal_gamma}  "
+        f"label_smoothing={args.label_smoothing}  "
+        f"epochs={args.epochs} patience={args.patience}"
+    )
 
     best_val = float("inf")
     best_state = None
     patience_counter = 0
+
+    def _compute_loss(
+        logits: torch.Tensor, y: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-batch loss honouring the round-4 recipe knobs.
+
+        * Label smoothing: maps hard targets ``y in {0, 1}`` to
+          ``y*(1-2a) + a`` so neither extreme is ever a "correct"
+          target. Compatible with both BCE and focal.
+        * Focal loss: ``alpha=1``, ``gamma=args.focal_gamma``. Drops
+          ``pos_weight`` (focal handles imbalance via the focusing
+          term — combining them double-weights minority examples).
+        * Plain BCE: pos-weighted by ``pw`` (which is [1,1] for the
+          unweighted variants).
+        """
+        a = args.label_smoothing
+        y_eff = y * (1.0 - 2.0 * a) + a if a > 0 else y
+        if args.loss == "focal":
+            # Numerically stable focal: compute p_t per-element from
+            # logits and the (smoothed) target, then
+            # focal = -((1 - p_t) ** gamma) * log(p_t).
+            p = torch.sigmoid(logits)
+            p_t = p * y_eff + (1.0 - p) * (1.0 - y_eff)
+            # log_p_t in a stable way via per-element BCE
+            bce_elem = F.binary_cross_entropy_with_logits(
+                logits, y_eff, reduction="none",
+            )
+            focal = ((1.0 - p_t) ** args.focal_gamma) * bce_elem
+            return focal.mean()
+        return F.binary_cross_entropy_with_logits(
+            logits, y_eff, pos_weight=pw,
+        )
 
     n_train = len(train_idx)
     for epoch in range(args.epochs):
@@ -336,10 +744,7 @@ def main() -> int:
             xb = Xtr[bi]
             yb = Ytr[bi]
             logits = head(xb)
-            # pos-weighted BCE; broadcast pw across batch.
-            loss = F.binary_cross_entropy_with_logits(
-                logits, yb, pos_weight=pw,
-            )
+            loss = _compute_loss(logits, yb)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -419,9 +824,14 @@ def main() -> int:
     # direction_prob_head module (so the cohort policy can call
     # ``policy.direction_prob_head.load_state_dict(...)`` directly).
     head_state = head.state_dict()
-    # Strip the "net." prefix that comes from `self.net = nn.Sequential(...)`.
+    # Strip the OUTER "net." prefix only — NOT a global replace.
+    # Inner submodules (e.g. c15's `_PairwiseHead.net = Sequential`)
+    # use the same name and would otherwise be over-stripped, leaving
+    # the eval loader unable to map keys back to the model.
+    _PREFIX = "net."
     flat_state = {
-        k.replace("net.", ""): v for k, v in head_state.items()
+        (k[len(_PREFIX):] if k.startswith(_PREFIX) else k): v
+        for k, v in head_state.items()
     }
     torch.save(flat_state, weights_path)
 
@@ -429,14 +839,57 @@ def main() -> int:
         args.experiment_id
         or f"directionhead_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     )
+    family_by_variant = {
+        "c0": "linear_mlp",
+        "c1": "linear_mlp",
+        "c2": "linear_mlp",
+        "c3": "linear_mlp",
+        "c4": "linear_mlp_bn_dropout",
+        "c6": "linear_mlp",
+        "c7": "linear_mlp",
+        "c8": "linear_mlp",
+        "c9": "linear_mlp",
+        "c10": "linear_mlp_skip",
+        "c11": "linear_mlp",
+        "c12": "linear_mlp",
+        "c13": "linear_mlp",
+        "c14": "linear_mlp",
+        "c15": "linear_mlp_pairwise",
+        # Round-4 ablations all share C11's [256, 128] arch, only the
+        # training recipe / activation differs.
+        "c16": "linear_mlp",
+        "c17": "linear_mlp",
+        "c18": "linear_mlp",
+        "c19": "linear_mlp",
+        "c20": "linear_mlp",
+    }
     manifest = {
         "experiment_id": experiment_id,
         "weights_path": "weights.pt",
         "architecture": {
-            "family": "linear_mlp",
+            "family": family_by_variant[args.variant],
+            "variant": args.variant,
             "input_dim": LEAN_RUNNER_DIM,
             "output_dim": 2,
-            "hidden_dims": [args.hidden],
+            "hidden_dims": head.hidden_dims,
+            "dropout": (
+                args.dropout if args.variant == "c4" else 0.0
+            ),
+            "pos_weight_mode": (
+                "unweighted"
+                if args.variant in unweighted_variants
+                else "balanced"
+            ),
+            "activation": "gelu" if args.variant == "c19" else "relu",
+        },
+        "training_recipe": {
+            "optimizer": args.optimizer,
+            "weight_decay": args.weight_decay,
+            "loss": args.loss,
+            "focal_gamma": (
+                args.focal_gamma if args.loss == "focal" else None
+            ),
+            "label_smoothing": args.label_smoothing,
         },
         "training": {
             "training_dates": sorted(training_dates),
@@ -474,7 +927,7 @@ def main() -> int:
         f"lay={final_bce_lay:.4f}"
     )
     print(
-        f"Acceptance (purpose.md): both ≤ 1.05 → "
+        f"Acceptance (purpose.md): both <= 1.05 -> "
         f"{'PASS' if (final_bce_back <= 1.05 and final_bce_lay <= 1.05) else 'FAIL'}"
     )
     return 0
