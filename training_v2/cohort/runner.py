@@ -940,12 +940,31 @@ def run_cohort(
         # of crashing 30s into agent 1.
         _cfg_for_preflight = scalping_train_config()
         try:
+            # Phase-15 fix (2026-05-24): thread the predictor flags
+            # so the pre-flight env matches the worker's env shape.
+            # Without these, --predictor-lean-obs cohorts saw the
+            # pre-flight derive obs_dim=2254 (full obs) and falsely
+            # reject 574-dim caches. The worker rebuilds the env per
+            # agent per day with these exact same flags downstream.
             _env_pf, _shim_pf = _build_env_for_day(
                 day_str=training_days[0],
                 data_dir=Path(data_dir),
                 cfg=_cfg_for_preflight,
                 scorer_dir=DEFAULT_SCORER_DIR,
                 reward_overrides=reward_overrides,
+                predictor_bundle=predictor_bundle,
+                use_race_outcome_predictor=use_race_outcome_predictor,
+                use_direction_predictor=use_direction_predictor,
+                predictor_lean_obs=predictor_lean_obs,
+                predictor_p_win_back_threshold=(
+                    predictor_p_win_back_threshold
+                ),
+                predictor_p_win_lay_threshold=(
+                    predictor_p_win_lay_threshold
+                ),
+                direction_gate_enabled=direction_gate_enabled,
+                race_confidence_threshold=race_confidence_threshold,
+                lay_price_max=lay_price_max,
             )
             _oracle_expected_dim = int(_shim_pf.obs_dim)
         except Exception as _exc:
