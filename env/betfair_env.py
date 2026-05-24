@@ -1702,6 +1702,13 @@ class BetfairEnv(gymnasium.Env):
         else:
             self._active_runner_keys = RUNNER_KEYS
             self._active_runner_dim = RUNNER_DIM
+        # Public alias so external consumers (policy construction,
+        # shim, diagnostic tools) can size per-runner head layers
+        # without having to recompute it from `predictor_lean_obs`.
+        # 2026-05-24: added when fixing the Phase-15 lean-obs/
+        # direction_prob_head dim mismatch — see
+        # plans/direction-predictor-label-alignment/.
+        self.active_runner_dim: int = self._active_runner_dim
 
         # Predictor p_win action gate. See constructor docstring.
         # Per-race cache populated lazily in _precompute alongside the

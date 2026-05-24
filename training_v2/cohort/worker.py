@@ -1166,6 +1166,15 @@ def train_one_agent(
         direction_gate_enabled=direction_gate_enabled,
         direction_gate_threshold=direction_gate_threshold,
         enable_fc_prob_head=enable_fc_prob_head,
+        # 2026-05-24 fix: forward the env's active runner-dim so
+        # direction_prob_head's LayerNorm + Linear are sized for
+        # the actual per-runner block (23 under lean-obs, 143 in
+        # full-obs mode). Previously the head was always built for
+        # 143 and the runner-block extractor fell into a zero-pad
+        # fallback when fed lean-obs — making the head's input
+        # structurally garbage. See plans/direction-predictor-
+        # label-alignment/.
+        runner_dim=int(getattr(shim.env, "active_runner_dim", 143)),
     )
 
     # phase-3 Option A: when training on CUDA, the rollout's policy

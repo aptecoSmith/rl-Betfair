@@ -353,9 +353,28 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         direction_gate_enabled: bool = False,
         direction_gate_threshold: float = 0.5,
         enable_fc_prob_head: bool = False,
+        runner_dim: int | None = None,
     ) -> None:
         super().__init__(obs_dim, action_space, hidden_size)
         self.num_layers = 1
+        # Phase-15 fix (2026-05-24): which RUNNER_KEYS variant the env
+        # uses (full=143 or lean=23) drives the per-slot input dim
+        # for direction_prob_head + the runner_block slicing in
+        # forward(). Default to the module-level RUNNER_DIM (full obs)
+        # for back-compat with existing test callers; lean-obs
+        # callers (the cohort, after Phase-15) MUST pass
+        # runner_dim=23 (or env.active_runner_dim). Bug history:
+        # before this, the head was built with LayerNorm(143) +
+        # Linear(143, …) regardless of obs layout, and the runner-
+        # block extractor fell into a zero-pad test-mode fallback
+        # under lean-obs — head input was structurally garbage.
+        self._runner_dim = int(
+            runner_dim if runner_dim is not None else RUNNER_DIM,
+        )
+        if self._runner_dim <= 0:
+            raise ValueError(
+                f"runner_dim must be positive, got {self._runner_dim!r}",
+            )
         self.runner_embed_dim = int(
             runner_embed_dim
             if runner_embed_dim is not None
@@ -455,8 +474,8 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # (sense_check.md item 2 spec correction; see also
         # lessons_learnt.md "Saturation from raw obs scales").
         self.direction_prob_head = nn.Sequential(
-            nn.LayerNorm(RUNNER_DIM),
-            nn.Linear(RUNNER_DIM, self.actor_mlp_hidden),
+            nn.LayerNorm(self._runner_dim),
+            nn.Linear(self._runner_dim, self.actor_mlp_hidden),
             nn.ReLU(),
             nn.Linear(self.actor_mlp_hidden, 2),
         )
@@ -482,7 +501,7 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # tests use a properly-sized obs (see
         # ``tests/test_v2_direction_prob_in_actor.py``).
         natural_offset = MARKET_DIM + VELOCITY_DIM
-        natural_size = self.max_runners * RUNNER_DIM
+        natural_size = self.max_runners * self._runner_dim
         self._runner_block_full_size = natural_size
         if natural_offset + natural_size <= self.obs_dim:
             self._runner_block_offset = natural_offset
@@ -698,7 +717,7 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             )
             runners_flat = torch.cat([runners_flat, pad], dim=-1)
         runner_feats_raw = runners_flat.view(
-            batch, self.max_runners, RUNNER_DIM,
+            batch, self.max_runners, self._runner_dim,
         )
 
         # Direction head reads the per-runner feature slice
@@ -706,7 +725,7 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # whole point of phase 15 is to bypass that bottleneck
         # (hard_constraints §2).
         direction_input_flat = runner_feats_raw.reshape(
-            batch * self.max_runners, RUNNER_DIM,
+            batch * self.max_runners, self._runner_dim,
         )
         direction_logits_flat = self.direction_prob_head(
             direction_input_flat,
