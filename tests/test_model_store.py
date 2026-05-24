@@ -588,6 +588,13 @@ class TestEvaluationBetsParquet:
             "runner_champion_p_win",
             "race_max_pwin",
             "final_outcome",
+            # v2-aux-head-bet-plumbing (2026-05-24) — additional aux-head
+            # snapshots captured by the v2 rollout collector at placement
+            # time. All three are nullable floats; reads on older files
+            # tolerate the columns being absent.
+            "mature_prob_at_placement",
+            "direction_back_prob_at_placement",
+            "direction_lay_prob_at_placement",
         }
         assert set(df.columns) == expected_cols
 

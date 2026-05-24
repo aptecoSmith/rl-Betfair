@@ -862,6 +862,20 @@ def _build_eval_bet_records(
             predicted_locked_stddev_at_placement=getattr(
                 bet, "predicted_locked_stddev_at_placement", None,
             ),
+            # v2-aux-head-bet-plumbing (2026-05-24) — additional per-runner
+            # aux-head snapshots the v2 rollout collector stamps at
+            # placement time. ``getattr`` with default-None keeps the
+            # call site backward-compatible with v1 bets and any legacy
+            # ``Bet`` objects without these slots.
+            mature_prob_at_placement=getattr(
+                bet, "mature_prob_at_placement", None,
+            ),
+            direction_back_prob_at_placement=getattr(
+                bet, "direction_back_prob_at_placement", None,
+            ),
+            direction_lay_prob_at_placement=getattr(
+                bet, "direction_lay_prob_at_placement", None,
+            ),
             close_leg=bool(getattr(bet, "close_leg", False)),
             force_close=bool(getattr(bet, "force_close", False)),
             stop_close=bool(getattr(bet, "stop_close", False)),
