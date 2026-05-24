@@ -248,8 +248,33 @@ class EvalSummary:
     closed_pnl: float = 0.0
     force_closed_pnl: float = 0.0
     stop_closed_pnl: float = 0.0
+    # Attribution counters (2026-05-24). Pure additive fields with
+    # falsy defaults so pre-2026-05-24 rows round-trip unchanged.
+    # See ``env/betfair_env.py`` __init__ for field semantics.
+    direction_gate_refusals: int = 0
+    pwin_back_gate_refusals: int = 0
+    pwin_lay_gate_refusals: int = 0
+    arb_realised_lock_pct: float = float("nan")
     wall_time_sec: float = 0.0
     per_day: list["EvalSummary"] = field(default_factory=list)
+
+
+def _nanmean_attr(summaries: list["EvalSummary"], attr: str) -> float:
+    """Mean over a list, skipping NaNs. Returns NaN if every value is NaN.
+
+    Used for ``arb_realised_lock_pct`` aggregation across per-day
+    summaries: a per-day NaN means "no filled pairs this day" rather
+    than "lock-pct was zero", so a plain mean would conflate the two
+    and a zero-default would be misleading.
+    """
+    vals: list[float] = []
+    for s in summaries:
+        v = float(getattr(s, attr, float("nan")))
+        if v == v:  # NaN ≠ NaN
+            vals.append(v)
+    if not vals:
+        return float("nan")
+    return sum(vals) / len(vals)
 
 
 def aggregate_eval_summaries(
@@ -300,6 +325,10 @@ def aggregate_eval_summaries(
             closed_pnl=s.closed_pnl,
             force_closed_pnl=s.force_closed_pnl,
             stop_closed_pnl=s.stop_closed_pnl,
+            direction_gate_refusals=s.direction_gate_refusals,
+            pwin_back_gate_refusals=s.pwin_back_gate_refusals,
+            pwin_lay_gate_refusals=s.pwin_lay_gate_refusals,
+            arb_realised_lock_pct=s.arb_realised_lock_pct,
             wall_time_sec=s.wall_time_sec,
             per_day=[s],
         )
@@ -348,6 +377,16 @@ def aggregate_eval_summaries(
         closed_pnl=mean("closed_pnl"),
         force_closed_pnl=mean("force_closed_pnl"),
         stop_closed_pnl=mean("stop_closed_pnl"),
+        # Attribution counters (2026-05-24). Means match the rest
+        # of the per-day rollup. ``arb_realised_lock_pct`` mean
+        # filters out per-day NaNs (no filled pairs ⇒ undefined,
+        # not zero); if every day was NaN the aggregate stays NaN.
+        direction_gate_refusals=int(round(mean("direction_gate_refusals"))),
+        pwin_back_gate_refusals=int(round(mean("pwin_back_gate_refusals"))),
+        pwin_lay_gate_refusals=int(round(mean("pwin_lay_gate_refusals"))),
+        arb_realised_lock_pct=_nanmean_attr(
+            summaries, "arb_realised_lock_pct",
+        ),
         wall_time_sec=total("wall_time_sec"),
         per_day=list(summaries),
     )
@@ -705,6 +744,21 @@ def _eval_rollout_stats(
     stop_closed_pnl = float(
         last_info.get("scalping_stop_closed_pnl", 0.0)
     )
+    # Attribution counters (2026-05-24). Pre-change rollouts emit no
+    # such keys; readers must default-tolerate. Defaults: integer
+    # counters → 0; arb_realised_lock_pct → NaN (no filled pairs).
+    direction_gate_refusals = int(
+        last_info.get("direction_gate_refusals", 0)
+    )
+    pwin_back_gate_refusals = int(
+        last_info.get("pwin_back_gate_refusals", 0)
+    )
+    pwin_lay_gate_refusals = int(
+        last_info.get("pwin_lay_gate_refusals", 0)
+    )
+    arb_realised_lock_pct = float(
+        last_info.get("arb_realised_lock_pct", float("nan"))
+    )
 
     bet_precision = (
         float(winning_bets) / float(bet_count) if bet_count > 0 else 0.0
@@ -735,6 +789,10 @@ def _eval_rollout_stats(
         closed_pnl=closed_pnl,
         force_closed_pnl=force_closed_pnl,
         stop_closed_pnl=stop_closed_pnl,
+        direction_gate_refusals=direction_gate_refusals,
+        pwin_back_gate_refusals=pwin_back_gate_refusals,
+        pwin_lay_gate_refusals=pwin_lay_gate_refusals,
+        arb_realised_lock_pct=arb_realised_lock_pct,
     )
 
 
@@ -1695,6 +1753,18 @@ def train_one_agent(
             closed_pnl=eval_summary_partial.closed_pnl,
             force_closed_pnl=eval_summary_partial.force_closed_pnl,
             stop_closed_pnl=eval_summary_partial.stop_closed_pnl,
+            direction_gate_refusals=(
+                eval_summary_partial.direction_gate_refusals
+            ),
+            pwin_back_gate_refusals=(
+                eval_summary_partial.pwin_back_gate_refusals
+            ),
+            pwin_lay_gate_refusals=(
+                eval_summary_partial.pwin_lay_gate_refusals
+            ),
+            arb_realised_lock_pct=(
+                eval_summary_partial.arb_realised_lock_pct
+            ),
             wall_time_sec=eval_wall,
         ))
         logger.info(

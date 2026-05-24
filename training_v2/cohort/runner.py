@@ -1378,6 +1378,22 @@ def _agent_result_to_scoreboard_row(
         "eval_closed_pnl": result.eval.closed_pnl,
         "eval_force_closed_pnl": result.eval.force_closed_pnl,
         "eval_stop_closed_pnl": result.eval.stop_closed_pnl,
+        # Attribution counters (2026-05-24). Default to 0 / NaN so
+        # pre-patch scoreboard.jsonl rows still parse with downstream
+        # readers that use ``.get(name, default)``. Same additive
+        # contract as ``train_mean_fill_prob_bce`` in Phase-13 S06.
+        "eval_direction_gate_refusals": (
+            result.eval.direction_gate_refusals
+        ),
+        "eval_pwin_back_gate_refusals": (
+            result.eval.pwin_back_gate_refusals
+        ),
+        "eval_pwin_lay_gate_refusals": (
+            result.eval.pwin_lay_gate_refusals
+        ),
+        "eval_arb_realised_lock_pct": (
+            result.eval.arb_realised_lock_pct
+        ),
         "eval_wall_time_sec": result.eval.wall_time_sec,
         # Composite — single scalar the UI sorts by AND the scalar GA
         # selection actually used. Equals ``total_reward`` when

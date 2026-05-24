@@ -465,6 +465,10 @@ def train_cluster_batched(
                 closed_pnl=partial.closed_pnl,
                 force_closed_pnl=partial.force_closed_pnl,
                 stop_closed_pnl=partial.stop_closed_pnl,
+                direction_gate_refusals=partial.direction_gate_refusals,
+                pwin_back_gate_refusals=partial.pwin_back_gate_refusals,
+                pwin_lay_gate_refusals=partial.pwin_lay_gate_refusals,
+                arb_realised_lock_pct=partial.arb_realised_lock_pct,
                 wall_time_sec=eval_wall,
             ))
         eval_summaries.append(aggregate_eval_summaries(per_day_summaries))

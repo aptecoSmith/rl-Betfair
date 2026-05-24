@@ -538,6 +538,34 @@ class RolloutCollector:
                         .cpu()
                         .numpy()
                     )
+                    # Attribution (2026-05-24): increment the env's
+                    # ``_direction_gate_refusals`` counter by the
+                    # number of OPEN_BACK_i / OPEN_LAY_i slots the
+                    # direction gate masked off post-legality on this
+                    # tick. ``mask_arr[n_steps]`` is the pre-gate
+                    # legality mask; ``gate_mask_arr[n_steps]`` is
+                    # legality AND gate. The (legal AND NOT
+                    # gate-passed) intersection, restricted to the
+                    # OPEN_BACK + OPEN_LAY range
+                    # (``[1, 1 + 2*max_runners)``), is the refusal
+                    # count we want. NOOP (index 0) and CLOSE
+                    # (last R indices) are never gated, so
+                    # restricting the range is load-bearing — counting
+                    # over the whole action space would always be 0
+                    # for those slots anyway, but the restriction
+                    # documents the semantics on the read side.
+                    legality = mask_arr[n_steps]
+                    gated = gate_mask_arr[n_steps]
+                    R = self.max_runners
+                    open_lo = 1
+                    open_hi = 1 + 2 * R
+                    legal_slice = legality[open_lo:open_hi]
+                    gate_slice = gated[open_lo:open_hi]
+                    refusal_count = int(
+                        np.count_nonzero(legal_slice & ~gate_slice)
+                    )
+                    if refusal_count:
+                        env._direction_gate_refusals += refusal_count
 
                 # Sample action and stake.
                 if deterministic:
