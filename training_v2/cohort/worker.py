@@ -1159,6 +1159,22 @@ def train_one_agent(
             "enable_fc_prob_head", False,
         ),
     )
+    # 2026-05-24 fix: env.active_runner_dim is REQUIRED — pre-fix
+    # the cohort silently defaulted to 143 (full obs) when the env
+    # was actually emitting 23-dim per-runner lean obs, producing
+    # structurally garbage head input. If a future env refactor
+    # drops the attribute, raise immediately rather than re-introduce
+    # the silent fallback. See plans/direction-predictor-label-
+    # alignment/.
+    if not hasattr(shim.env, "active_runner_dim"):
+        raise RuntimeError(
+            "shim.env is missing `active_runner_dim` — the env "
+            "must expose its per-runner block dim (23 under lean "
+            "obs, 143 under full obs) so the policy can size "
+            "direction_prob_head correctly. The cohort runner "
+            "REFUSES to fall back to a silent default of 143 "
+            "after the 2026-05-24 incident."
+        )
     policy = DiscreteLSTMPolicy(
         obs_dim=shim.obs_dim,
         action_space=shim.action_space,
@@ -1166,15 +1182,7 @@ def train_one_agent(
         direction_gate_enabled=direction_gate_enabled,
         direction_gate_threshold=direction_gate_threshold,
         enable_fc_prob_head=enable_fc_prob_head,
-        # 2026-05-24 fix: forward the env's active runner-dim so
-        # direction_prob_head's LayerNorm + Linear are sized for
-        # the actual per-runner block (23 under lean-obs, 143 in
-        # full-obs mode). Previously the head was always built for
-        # 143 and the runner-block extractor fell into a zero-pad
-        # fallback when fed lean-obs — making the head's input
-        # structurally garbage. See plans/direction-predictor-
-        # label-alignment/.
-        runner_dim=int(getattr(shim.env, "active_runner_dim", 143)),
+        runner_dim=int(shim.env.active_runner_dim),
     )
 
     # phase-3 Option A: when training on CUDA, the rollout's policy

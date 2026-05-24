@@ -510,6 +510,32 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             # Test-mode fallback: anchor at 0, take whatever fits.
             self._runner_block_offset = 0
             self._runner_block_size = max(0, min(self.obs_dim, natural_size))
+            # 2026-05-24 guard: in production this fallback is the
+            # symptom of an env/policy obs-layout mismatch (which
+            # silently bricked the Phase-15 cohort for 16 days
+            # before being caught). Tests deliberately use small
+            # obs_dim to skip the env build — heuristic threshold of
+            # 256 distinguishes "intentional test" from "production
+            # mistake." Adjust if a future obs config ever lives
+            # below this threshold legitimately.
+            _PROD_OBS_DIM_THRESHOLD = 256
+            if self.obs_dim >= _PROD_OBS_DIM_THRESHOLD:
+                import warnings as _warnings
+                _warnings.warn(
+                    f"DiscreteLSTMPolicy fell into the runner-block "
+                    f"test-mode fallback at obs_dim={self.obs_dim}. "
+                    f"Expected per-runner layout "
+                    f"max_runners={self.max_runners} × "
+                    f"runner_dim={self._runner_dim} = {natural_size} "
+                    f"would not fit after MARKET+VELOCITY offset "
+                    f"{natural_offset} within obs_dim. Most likely "
+                    f"the caller passed the wrong runner_dim — "
+                    f"production callers should pass "
+                    f"runner_dim=env.active_runner_dim. See "
+                    f"plans/direction-predictor-label-alignment/.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         # Per-runner actor (Phase 7 S01). The flat categorical from
         # Phase 1 is now produced by stitching: NOOP from noop_head + a
