@@ -70,6 +70,14 @@ from training_v2.discrete_ppo.train import select_days
 from agents_v2.discrete_policy import DiscreteLSTMPolicy
 from agents_v2.env_shim import DEFAULT_SCORER_DIR
 
+# Pre-flight cache schema check (2026-05-24). The direction-label
+# cache stores ``obs_schema_version`` from this module-level constant;
+# ``direction_label_scan`` imports it from ``env.betfair_env``, so we
+# read from there to keep the source of truth single-rooted.
+from training_v2.direction_label_scan import (
+    OBS_SCHEMA_VERSION as _DIRECTION_OBS_SCHEMA_VERSION,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "processed"
@@ -535,6 +543,210 @@ def _evaluate_agents_on_monitor_days(
     }
 
 
+# ── Pre-flight cache schema check (2026-05-24) ────────────────────────────
+
+
+def _preflight_cache_schema_check(
+    *,
+    training_days: list[str],
+    data_dir: Path,
+    needs_oracle: bool,
+    expected_oracle_obs_dim: int | None,
+    needs_direction: bool,
+    direction_horizon_ticks: int,
+    direction_threshold_ticks: int,
+    direction_force_close_seconds: float,
+) -> None:
+    """Fail-fast validation that all required caches match the env schema.
+
+    Walks every training date and verifies header metadata for the
+    caches that this run will actually consume. Raises a single
+    :class:`ValueError` listing every stale or missing cache, grouped
+    by cache type, with the exact re-scan command lines.
+
+    The check is a no-op when neither flag is set (``needs_oracle`` and
+    ``needs_direction`` both False) — covers the "byte-identical
+    pre-patch run" contract.
+
+    Read-only: never mutates any cache. Expected runtime <2s for a
+    16-day list (each header.json is a few hundred bytes).
+
+    Parameters
+    ----------
+    training_days:
+        Dates to validate, in ``YYYY-MM-DD`` form. Each date is
+        checked independently; failures accumulate.
+    data_dir:
+        Project ``data/processed`` (or test equivalent). The cache
+        directories sit alongside, at ``data_dir.parent /
+        oracle_cache_v2`` and ``data_dir.parent / direction_labels``
+        (same convention as ``arb_oracle.load_samples`` and
+        ``direction_label_scan.load_labels``).
+    needs_oracle:
+        True when any agent will run BC pretrain (operator override
+        or per-agent ``bc_pretrain_steps > 0``).
+    expected_oracle_obs_dim:
+        The ``shim.obs_dim`` the worker will pass as
+        ``expected_obs_dim`` to ``load_oracle_samples_for_dates``.
+        Required when ``needs_oracle`` is True; ignored otherwise.
+    needs_direction:
+        True when any direction-cache consumer is active
+        (``direction_prob_loss_weight > 0`` or
+        ``bc_direction_target_weight > 0``).
+    direction_horizon_ticks / direction_threshold_ticks /
+    direction_force_close_seconds:
+        The cache-naming triple. Defaults are 60 / 5 / 60.0; CLI /
+        reward_overrides can change them.
+    """
+    if not needs_oracle and not needs_direction:
+        return  # no-op fast path; byte-identical to pre-patch
+
+    if needs_oracle and expected_oracle_obs_dim is None:
+        raise ValueError(
+            "_preflight_cache_schema_check: needs_oracle=True requires "
+            "expected_oracle_obs_dim to be set.",
+        )
+
+    data_dir = Path(data_dir)
+    oracle_failures: list[str] = []   # human-readable bullet lines
+    oracle_stale_dates: list[str] = []  # for the re-scan command list
+    direction_failures: list[str] = []
+    direction_stale_dates: list[str] = []
+    direction_stem = ""  # bound when needs_direction is True
+
+    # ── Oracle cache check ─────────────────────────────────────────
+    if needs_oracle:
+        oracle_root = data_dir.parent / "oracle_cache_v2"
+        for date in training_days:
+            header_path = oracle_root / str(date) / "header.json"
+            if not header_path.exists():
+                oracle_failures.append(
+                    f"{date}: header.json missing "
+                    f"(expected at {header_path})"
+                )
+                oracle_stale_dates.append(date)
+                continue
+            try:
+                header = json.loads(header_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                oracle_failures.append(
+                    f"{date}: header.json unreadable ({exc})"
+                )
+                oracle_stale_dates.append(date)
+                continue
+            saved_dim = header.get("obs_dim")
+            if saved_dim is None:
+                oracle_failures.append(
+                    f"{date}: header.json has no 'obs_dim' field "
+                    "(pre-schema-bump cache)"
+                )
+                oracle_stale_dates.append(date)
+                continue
+            if int(saved_dim) != int(expected_oracle_obs_dim):
+                oracle_failures.append(
+                    f"{date}: obs_dim={int(saved_dim)} but env "
+                    f"expects {int(expected_oracle_obs_dim)}"
+                )
+                oracle_stale_dates.append(date)
+
+    # ── Direction-label cache check ────────────────────────────────
+    if needs_direction:
+        direction_root = data_dir.parent / "direction_labels"
+        fc = float(direction_force_close_seconds)
+        fc_token = f"{fc:g}".replace(".", "_")
+        direction_stem = (
+            f"horizon{int(direction_horizon_ticks)}"
+            f"_thresh{int(direction_threshold_ticks)}"
+            f"_fc{fc_token}"
+        )
+        for date in training_days:
+            header_path = (
+                direction_root / str(date)
+                / f"{direction_stem}_header.json"
+            )
+            if not header_path.exists():
+                direction_failures.append(
+                    f"{date}: {direction_stem}_header.json missing "
+                    f"(expected at {header_path})"
+                )
+                direction_stale_dates.append(date)
+                continue
+            try:
+                header = json.loads(header_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                direction_failures.append(
+                    f"{date}: {direction_stem}_header.json unreadable "
+                    f"({exc})"
+                )
+                direction_stale_dates.append(date)
+                continue
+            saved_v = header.get("obs_schema_version")
+            if saved_v is None:
+                direction_failures.append(
+                    f"{date}: header has no 'obs_schema_version' field "
+                    "(pre-schema-bump cache)"
+                )
+                direction_stale_dates.append(date)
+                continue
+            if int(saved_v) != int(_DIRECTION_OBS_SCHEMA_VERSION):
+                direction_failures.append(
+                    f"{date}: obs_schema_version={int(saved_v)} but env "
+                    f"expects {int(_DIRECTION_OBS_SCHEMA_VERSION)}"
+                )
+                direction_stale_dates.append(date)
+
+    # ── Aggregate + raise ──────────────────────────────────────────
+    if not oracle_failures and not direction_failures:
+        return  # all caches good
+
+    lines: list[str] = ["Pre-flight cache schema check FAILED."]
+    if oracle_failures:
+        lines.append("")
+        lines.append(
+            f"Oracle cache (data/oracle_cache_v2/<date>/header.json) "
+            f"— {len(oracle_failures)} stale/missing:"
+        )
+        for f in oracle_failures:
+            lines.append(f"  - {f}")
+    if direction_failures:
+        lines.append("")
+        lines.append(
+            f"Direction-label cache "
+            f"(data/direction_labels/<date>/{direction_stem}_header.json) "
+            f"— {len(direction_failures)} stale/missing:"
+        )
+        for f in direction_failures:
+            lines.append(f"  - {f}")
+
+    lines.append("")
+    lines.append("Re-scan commands (one-shot fixes the whole training set):")
+    if oracle_stale_dates:
+        # De-dupe + sort for a deterministic, copy-pasteable command.
+        unique_dates = sorted(set(oracle_stale_dates))
+        lines.append(
+            "  python -m training_v2.oracle_cli scan "
+            f"--dates {','.join(unique_dates)} "
+            "--predictor-lean-obs"
+        )
+    if direction_stale_dates:
+        unique_dates = sorted(set(direction_stale_dates))
+        lines.append(
+            "  python -m training_v2.direction_label_cli scan "
+            f"--dates {','.join(unique_dates)} "
+            f"--horizon-ticks {int(direction_horizon_ticks)} "
+            f"--threshold-ticks {int(direction_threshold_ticks)} "
+            "--force-close-before-off-seconds "
+            f"{int(direction_force_close_seconds)}"
+        )
+    lines.append("")
+    lines.append(
+        "Adjust the flags above to match the args used at launch "
+        "(e.g. --max-runners) before re-launching the cohort."
+    )
+
+    raise ValueError("\n".join(lines))
+
+
 def run_cohort(
     *,
     n_agents: int,
@@ -698,6 +910,70 @@ def run_cohort(
     parent_ids: list[tuple[str | None, str | None]] = [
         (None, None) for _ in range(n_agents)
     ]
+
+    # ── Pre-flight cache schema check (2026-05-24) ────────────────────
+    # Walk every training date and verify the caches this run will
+    # consume actually match the env's current schema. Crash fast at
+    # launch (with copy-pasteable re-scan commands) rather than 30s
+    # into agent 1's BC step. See ``_preflight_cache_schema_check``
+    # docstring + tests/test_v2_cohort_runner.py::TestPreflightCacheSchemaCheck.
+    _preflight_ro = dict(reward_overrides or {})
+    _needs_oracle = (
+        (bc_pretrain_steps_override is not None
+         and int(bc_pretrain_steps_override) > 0)
+        or any(
+            int(getattr(g, "bc_pretrain_steps", 0)) > 0 for g in cohort
+        )
+    )
+    _needs_direction = (
+        float(_preflight_ro.get("direction_prob_loss_weight", 0.0) or 0.0) > 0.0
+        or float(
+            _preflight_ro.get("bc_direction_target_weight", 0.0) or 0.0
+        ) > 0.0
+    )
+    _oracle_expected_dim: int | None = None
+    if _needs_oracle:
+        # Build one env on the first training day to recover the
+        # ``shim.obs_dim`` the worker will pass into BC. The worker
+        # builds the same env per agent per day; an extra single
+        # build at launch is cheap relative to the 28h cohort cost
+        # of crashing 30s into agent 1.
+        _cfg_for_preflight = scalping_train_config()
+        try:
+            _env_pf, _shim_pf = _build_env_for_day(
+                day_str=training_days[0],
+                data_dir=Path(data_dir),
+                cfg=_cfg_for_preflight,
+                scorer_dir=DEFAULT_SCORER_DIR,
+                reward_overrides=reward_overrides,
+            )
+            _oracle_expected_dim = int(_shim_pf.obs_dim)
+        except Exception as _exc:
+            # Defensive: if we can't build an env to derive obs_dim,
+            # surface the failure rather than silently skipping the
+            # check.
+            raise ValueError(
+                "Pre-flight cache schema check could not derive "
+                "expected obs_dim (failed to build env for "
+                f"{training_days[0]}): {_exc}"
+            ) from _exc
+    _preflight_cache_schema_check(
+        training_days=list(training_days),
+        data_dir=Path(data_dir),
+        needs_oracle=_needs_oracle,
+        expected_oracle_obs_dim=_oracle_expected_dim,
+        needs_direction=_needs_direction,
+        direction_horizon_ticks=int(
+            _preflight_ro.get("direction_horizon_ticks", 60) or 60,
+        ),
+        direction_threshold_ticks=int(
+            _preflight_ro.get("direction_threshold_ticks", 5) or 5,
+        ),
+        direction_force_close_seconds=float(
+            _preflight_ro.get("direction_force_close_seconds", 60.0)
+            or 60.0,
+        ),
+    )
 
     last_results: list[AgentResult] = []
     cohort_t0 = time.perf_counter()

@@ -13,6 +13,8 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from registry.model_store import ModelStore
 from training_v2.cohort import runner as runner_mod
 from training_v2.cohort.genes import CohortGenes, sample_genes
@@ -896,3 +898,304 @@ def test_scoreboard_row_persists_composite_score_field(tmp_path: Path) -> None:
         # Stub gives arbs_completed = arbs_closed = 0 by default ⇒
         # composite == total_reward.
         assert row["composite_score"] == row["eval_total_reward"]
+
+
+# ── Pre-flight cache schema check (2026-05-24) ────────────────────────────
+
+
+class TestPreflightCacheSchemaCheck:
+    """Unit tests for ``runner_mod._preflight_cache_schema_check``.
+
+    Today's bug (2026-05-24): a 12-agent × 3-gen cohort crashed 30s into
+    agent 1 because a direction-label cache was at
+    ``obs_schema_version=7`` while the env expected 9. The operator had
+    committed to ~28h of compute; ~5min of debug + relaunch was an
+    unnecessary cost when the failure was knowable at launch.
+
+    These tests cover the four contract points in the spec:
+
+    1. Stale oracle cache → ValueError naming the date + the oracle_cli
+       scan command.
+    2. Stale direction cache → ValueError naming the date + the
+       direction_label_cli scan command.
+    3. Both stale → ONE ValueError listing both groups.
+    4. Neither cache needed → no-op (no crash, no read).
+
+    The all-up-to-date case is covered by the byte-identity test below
+    (preflight passes silently when every header matches).
+    """
+
+    # Mirror direction_label_scan._cache_stem so the test stays
+    # self-contained and breaks LOUDLY if that naming convention drifts.
+    @staticmethod
+    def _direction_stem(
+        horizon: int = 60, threshold: int = 5, fc_seconds: float = 60.0,
+    ) -> str:
+        fc_token = f"{fc_seconds:g}".replace(".", "_")
+        return f"horizon{horizon}_thresh{threshold}_fc{fc_token}"
+
+    @staticmethod
+    def _write_oracle_header(
+        data_dir: Path, date: str, obs_dim: int,
+    ) -> None:
+        cache_dir = data_dir.parent / "oracle_cache_v2" / date
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "header.json").write_text(
+            json.dumps({"obs_dim": int(obs_dim)}),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def _write_direction_header(
+        cls, data_dir: Path, date: str, obs_schema_version: int,
+        horizon: int = 60, threshold: int = 5, fc_seconds: float = 60.0,
+    ) -> None:
+        cache_dir = data_dir.parent / "direction_labels" / date
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        stem = cls._direction_stem(horizon, threshold, fc_seconds)
+        (cache_dir / f"{stem}_header.json").write_text(
+            json.dumps({
+                "obs_schema_version": int(obs_schema_version),
+                "direction_horizon_ticks": int(horizon),
+                "direction_threshold_ticks": int(threshold),
+                "force_close_before_off_seconds": float(fc_seconds),
+            }),
+            encoding="utf-8",
+        )
+
+    # ── Contract point 1 ──────────────────────────────────────────
+
+    def test_stale_oracle_cache_raises_with_date_and_command(
+        self, tmp_path: Path,
+    ) -> None:
+        """One stale oracle header → ValueError mentions the date AND
+        the ``oracle_cli scan`` re-scan command."""
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        stale = "2026-04-21"
+        good = "2026-04-22"
+        # Operator-running env expects obs_dim=99; cache has 77.
+        self._write_oracle_header(data_dir, stale, obs_dim=77)
+        self._write_oracle_header(data_dir, good, obs_dim=99)
+
+        with pytest.raises(ValueError) as exc:
+            runner_mod._preflight_cache_schema_check(
+                training_days=[stale, good],
+                data_dir=data_dir,
+                needs_oracle=True,
+                expected_oracle_obs_dim=99,
+                needs_direction=False,
+                direction_horizon_ticks=60,
+                direction_threshold_ticks=5,
+                direction_force_close_seconds=60.0,
+            )
+
+        msg = str(exc.value)
+        assert "Pre-flight cache schema check FAILED" in msg
+        assert stale in msg
+        assert "obs_dim=77" in msg
+        assert "expects 99" in msg
+        assert "python -m training_v2.oracle_cli scan" in msg
+        assert f"--dates {stale}" in msg
+        # No direction command since needs_direction=False.
+        assert "direction_label_cli" not in msg
+
+    def test_missing_oracle_header_raises_with_rescan_command(
+        self, tmp_path: Path,
+    ) -> None:
+        """Missing header file is also a failure (treated as stale)."""
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        with pytest.raises(ValueError) as exc:
+            runner_mod._preflight_cache_schema_check(
+                training_days=["2026-04-21"],
+                data_dir=data_dir,
+                needs_oracle=True,
+                expected_oracle_obs_dim=99,
+                needs_direction=False,
+                direction_horizon_ticks=60,
+                direction_threshold_ticks=5,
+                direction_force_close_seconds=60.0,
+            )
+        msg = str(exc.value)
+        assert "header.json missing" in msg
+        assert "2026-04-21" in msg
+        assert "python -m training_v2.oracle_cli scan" in msg
+
+    # ── Contract point 2 ──────────────────────────────────────────
+
+    def test_stale_direction_cache_raises_with_date_and_command(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Stale direction header (obs_schema_version 7 when env expects
+        9) → ValueError mentions the date AND the ``direction_label_cli
+        scan`` re-scan command."""
+        # Pin the env's schema version inside the runner module to 9
+        # so the test is stable regardless of the live env constant.
+        monkeypatch.setattr(
+            runner_mod, "_DIRECTION_OBS_SCHEMA_VERSION", 9, raising=True,
+        )
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        stale = "2026-04-21"
+        self._write_direction_header(
+            data_dir, stale, obs_schema_version=7,
+        )
+
+        with pytest.raises(ValueError) as exc:
+            runner_mod._preflight_cache_schema_check(
+                training_days=[stale],
+                data_dir=data_dir,
+                needs_oracle=False,
+                expected_oracle_obs_dim=None,
+                needs_direction=True,
+                direction_horizon_ticks=60,
+                direction_threshold_ticks=5,
+                direction_force_close_seconds=60.0,
+            )
+
+        msg = str(exc.value)
+        assert "Pre-flight cache schema check FAILED" in msg
+        assert stale in msg
+        assert "obs_schema_version=7" in msg
+        assert "expects 9" in msg
+        assert "python -m training_v2.direction_label_cli scan" in msg
+        assert f"--dates {stale}" in msg
+        # The horizon/threshold/fc triple appears in the command.
+        assert "--horizon-ticks 60" in msg
+        assert "--threshold-ticks 5" in msg
+        assert "--force-close-before-off-seconds 60" in msg
+        # No oracle command since needs_oracle=False.
+        assert "oracle_cli" not in msg
+
+    # ── Contract point 3 ──────────────────────────────────────────
+
+    def test_both_stale_raises_one_error_listing_both(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Stale oracle AND stale direction → ONE ValueError grouping
+        both, with both re-scan commands."""
+        monkeypatch.setattr(
+            runner_mod, "_DIRECTION_OBS_SCHEMA_VERSION", 9, raising=True,
+        )
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        oracle_stale = "2026-04-21"
+        direction_stale = "2026-04-22"
+        self._write_oracle_header(data_dir, oracle_stale, obs_dim=77)
+        self._write_direction_header(
+            data_dir, direction_stale, obs_schema_version=7,
+        )
+
+        with pytest.raises(ValueError) as exc:
+            runner_mod._preflight_cache_schema_check(
+                training_days=[oracle_stale, direction_stale],
+                data_dir=data_dir,
+                needs_oracle=True,
+                expected_oracle_obs_dim=99,
+                needs_direction=True,
+                direction_horizon_ticks=60,
+                direction_threshold_ticks=5,
+                direction_force_close_seconds=60.0,
+            )
+
+        msg = str(exc.value)
+        # Single error covers both classes.
+        assert msg.count("Pre-flight cache schema check FAILED") == 1
+        # Both failure dates surface.
+        assert oracle_stale in msg
+        assert direction_stale in msg
+        # Both re-scan commands surface.
+        assert "python -m training_v2.oracle_cli scan" in msg
+        assert "python -m training_v2.direction_label_cli scan" in msg
+        # Each cache type has its own section header.
+        assert "Oracle cache" in msg
+        assert "Direction-label cache" in msg
+
+    # ── Contract point 4 ──────────────────────────────────────────
+
+    def test_neither_needed_is_noop_even_with_no_caches(
+        self, tmp_path: Path,
+    ) -> None:
+        """When neither oracle nor direction caches are needed, the
+        check is a no-op — no crash even with zero caches on disk."""
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        # No caches written. Should silently pass.
+        runner_mod._preflight_cache_schema_check(
+            training_days=["2026-04-21", "2026-04-22"],
+            data_dir=data_dir,
+            needs_oracle=False,
+            expected_oracle_obs_dim=None,
+            needs_direction=False,
+            direction_horizon_ticks=60,
+            direction_threshold_ticks=5,
+            direction_force_close_seconds=60.0,
+        )
+
+    # ── All-good passes silently ──────────────────────────────────
+
+    def test_all_caches_uptodate_passes_silently(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Every header matches → no raise, no log noise."""
+        monkeypatch.setattr(
+            runner_mod, "_DIRECTION_OBS_SCHEMA_VERSION", 9, raising=True,
+        )
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        for d in ("2026-04-21", "2026-04-22"):
+            self._write_oracle_header(data_dir, d, obs_dim=99)
+            self._write_direction_header(
+                data_dir, d, obs_schema_version=9,
+            )
+
+        # Must not raise.
+        runner_mod._preflight_cache_schema_check(
+            training_days=["2026-04-21", "2026-04-22"],
+            data_dir=data_dir,
+            needs_oracle=True,
+            expected_oracle_obs_dim=99,
+            needs_direction=True,
+            direction_horizon_ticks=60,
+            direction_threshold_ticks=5,
+            direction_force_close_seconds=60.0,
+        )
+
+    # ── Wiring guard (matches spec contract 4 end-to-end) ─────────
+
+    def test_run_cohort_with_no_bc_or_direction_does_not_crash_on_missing_caches(
+        self, tmp_path: Path,
+    ) -> None:
+        """End-to-end: a launch with ``bc_pretrain_steps_override=None``
+        (the default) and no direction-related reward_overrides MUST
+        proceed past the preflight even when no cache files exist on
+        disk.
+
+        This guards against the preflight ever being called when it
+        shouldn't be — the byte-identical pre-patch contract.
+        """
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        _populate_data_dir(data_dir, [
+            "2026-04-21", "2026-04-22", "2026-04-23",
+        ])
+        out_dir = tmp_path / "cohort_out"
+
+        last_results = runner_mod.run_cohort(
+            n_agents=2,
+            n_generations=1,
+            days=3,
+            data_dir=data_dir,
+            device="cpu",
+            seed=42,
+            output_dir=out_dir,
+            train_one_agent_fn=_stub_train_one_agent,
+            # No bc_pretrain_steps_override, no reward_overrides
+            # mentioning direction_* knobs.
+        )
+        # If preflight had run with needs_oracle/needs_direction True
+        # it would have crashed (no caches on disk); since both flags
+        # default to inert, it must short-circuit and the cohort
+        # completes.
+        assert len(last_results) == 2
