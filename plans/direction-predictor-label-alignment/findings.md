@@ -196,3 +196,75 @@ If backbone hidden state descents much less than full-obs logreg →
 backbone destroys signal → deeper fix needed (e.g. pass obs[dir_*]
 directly into actor_head bypassing backbone).
 
+## 2026-05-24 (evening) — final reframe (commit 2bfe4cc)
+
+The backbone probe (above) showed lstm_last has ~0% direction signal.
+That LED me to propose a "residual obs path into direction_prob_head"
+fix. While implementing it, I noticed the head's existing forward
+code at agents_v2/discrete_policy.py:704-713 ALREADY bypasses
+lstm_last and reads the per-runner obs feature slice directly.
+
+So why doesn't it learn? Loading agent 1's trained weights and
+inspecting:
+
+```
+Head architecture:
+  0.weight (LayerNorm): shape=(143,)
+  0.bias:               shape=(143,)
+  1.weight (Linear):    shape=(64, 143)
+  ...
+```
+
+**The head was sized for RUNNER_DIM=143 (full obs).** But the cohort
+runs with `--predictor-lean-obs`, which means env's per-runner block
+is 23 dims, not 143.
+
+The policy's runner-block extractor (lines 487-493 before fix) has a
+"test-mode fallback" that anchors at obs offset 0 (instead of
+MARKET_DIM+VELOCITY_DIM = 48) and takes whatever fits (574 for lean
+obs), padding with zeros up to 14*143 = 2002. Result: the head's
+"per-runner feature slice" for runner 0 = obs[0:143] = market state
++ velocity + runner 0's 23 actual features + part of runner 1's
+features. Runners 8+ see mostly zeros. Structurally garbage input.
+
+The head was trained for 16 days on garbage. BCE flat at the random
+floor because gradient updates on garbage input go nowhere useful.
+
+### The real fix (commit 2bfe4cc)
+
+* Surface `env.active_runner_dim` publicly.
+* Thread it into `DiscreteLSTMPolicy(runner_dim=…)`.
+* Use it instead of the module-level `RUNNER_DIM` constant in 5
+  places (LayerNorm dim, first Linear dim, `_runner_block_size`
+  computation, two view/reshape calls).
+* 7-test regression guard in `tests/test_v2_direction_head_runner_dim.py`.
+
+### Why all the false starts mattered
+
+Each false start eliminated a possibility:
+
+* "Pos-weighted floor not 0.693" → caught a measurement
+  misinterpretation, not a code bug
+* "Labels misaligned with predictor horizon" → led to a usable
+  v2 endpoint label mode (kept as inert infrastructure) but
+  wasn't the fix
+* "Oracle cache had zero predictor columns" → caught a real bug
+  in oracle_cli that would otherwise have broken every future
+  predictor diagnostic. Fixed.
+* "Backbone destroys signal" → true for lstm_last but
+  irrelevant; the head doesn't read lstm_last. The probe tool
+  is still valuable; the diagnosis pointed at the wrong fix.
+
+The actual cause was only findable by inspecting the trained
+head's weight SHAPES, which I did almost by accident while
+implementing the residual-obs fix proposal.
+
+### Expected post-fix behaviour
+
+Per the per-runner-obs logreg numbers (back: +5.7%, lay: +12.3%
+BCE descent), the head — a 2-layer MLP with more capacity than
+the logreg — should match or exceed those descents within a few
+days of training. The Phase-15 cohort relaunched on top of commit
+2bfe4cc should show `dir_bce_back` and `dir_bce_lay` descending
+below 1.10 within ~5 days.
+
