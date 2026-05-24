@@ -1126,11 +1126,22 @@ def train_one_agent(
     # Phase-14 S03 — direction gate config flows through trainer_hp
     # (which the cohort runner constructs from CohortGenes +
     # --reward-overrides). When ``direction_gate_enabled`` isn't in
-    # the override dict, the gene default (False) wins. The
-    # threshold gene evolves per-agent if the operator opted in via
-    # ``--enable-gene direction_gate_threshold``.
+    # the override dict, fall back to the function-arg (the cohort
+    # runner's ``--direction-gate-enabled`` CLI flag). The gene
+    # default (False) only wins when neither the override nor the
+    # CLI flag is set. The threshold gene evolves per-agent if the
+    # operator opted in via ``--enable-gene direction_gate_threshold``.
+    #
+    # 2026-05-24 fix: before this, the function-arg was silently
+    # overwritten by the trainer_hp default of False, so
+    # ``--direction-gate-enabled`` only flipped the ENV-side gate
+    # (build_env_for_day) — the POLICY-side gate (used by the rollout
+    # to compute action masks + the gate_refusals counter) stayed
+    # OFF unless the operator also passed
+    # ``--reward-overrides direction_gate_enabled=true``. Now either
+    # the override or the CLI flag enables the policy-side gate.
     direction_gate_enabled = bool(
-        trainer_hp.get("direction_gate_enabled", False),
+        trainer_hp.get("direction_gate_enabled", direction_gate_enabled),
     )
     direction_gate_threshold = float(
         trainer_hp.get(
