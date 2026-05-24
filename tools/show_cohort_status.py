@@ -146,8 +146,13 @@ def _format(
     out.append("")
     out.append("Top-10 agents by eval_day_pnl:")
     out.append(
-        f"  {'agent':<10} {'gen':>4} {'pnl':>8} {'locked':>8} {'naked':>8} "
-        f"{'bets':>5} {'mat%':>5} {'cls%':>5}"
+        "  (run = id of race_actions/<id>.txt and bet_logs/<id>/ — "
+        "DIFFERS from the model_id used in weights/<id>.pt; the "
+        "registry's evaluation_runs table maps the two.)"
+    )
+    out.append(
+        f"  {'agent':<10} {'run':<10} {'gen':>4} {'pnl':>8} "
+        f"{'locked':>8} {'naked':>8} {'bets':>5} {'mat%':>5} {'cls%':>5}"
     )
     for r in ranked[:10]:
         opened = r.get("eval_pairs_opened", 0)
@@ -156,7 +161,9 @@ def _format(
         mat_pct = 100.0 * comp / opened if opened > 0 else 0.0
         cls_pct = 100.0 * clos / opened if opened > 0 else 0.0
         out.append(
-            f"  {r['agent_id'][:8]:<10} {r.get('generation', 0):>4} "
+            f"  {r['agent_id'][:8]:<10} "
+            f"{(r.get('run_id') or '?')[:8]:<10} "
+            f"{r.get('generation', 0):>4} "
             f"{r.get('eval_day_pnl', 0):>+8.0f} "
             f"{r.get('eval_locked_pnl', 0):>+8.0f} "
             f"{r.get('eval_naked_pnl', 0):>+8.0f} "
@@ -172,7 +179,9 @@ def _format(
         mat_pct = 100.0 * comp / opened if opened > 0 else 0.0
         cls_pct = 100.0 * clos / opened if opened > 0 else 0.0
         out.append(
-            f"  {r['agent_id'][:8]:<10} {r.get('generation', 0):>4} "
+            f"  {r['agent_id'][:8]:<10} "
+            f"{(r.get('run_id') or '?')[:8]:<10} "
+            f"{r.get('generation', 0):>4} "
             f"{r.get('eval_day_pnl', 0):>+8.0f} "
             f"{r.get('eval_locked_pnl', 0):>+8.0f} "
             f"{r.get('eval_naked_pnl', 0):>+8.0f} "
@@ -236,7 +245,7 @@ def _format(
             "fc = env-initiated force-close at T-120; cl = agent close_signal."
         )
         out.append(
-            f"  {'agent':<10} {'gen':>4} {'evaluated_at':<20} "
+            f"  {'agent':<10} {'run':<10} {'gen':>4} {'evaluated_at':<20} "
             f"{'span':>7} {'naked':>8} {'locked':>8} {'fc_n':>6} {'fc_£':>8} "
             f"{'cl_n':>6} {'cl_£':>8} {'pnl':>8}"
         )
@@ -255,7 +264,9 @@ def _format(
             # seconds + 'T' separator) for readability.
             ts = (st.get("evaluated_at", "") or "")[:19].replace("T", " ")
             out.append(
-                f"  {model_id[:8]:<10} {sb.get('generation', 0):>4} "
+                f"  {model_id[:8]:<10} "
+                f"{(sb.get('run_id') or '?')[:8]:<10} "
+                f"{sb.get('generation', 0):>4} "
                 f"{ts:<20} "
                 f"{st['span']:>7.1f} {st['mean']:>+8.1f} "
                 f"{sb.get('eval_locked_pnl', 0):>+8.0f} "
