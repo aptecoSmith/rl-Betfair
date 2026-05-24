@@ -96,13 +96,18 @@ def _pos_weighted_bce(
     return float(bce.mean())
 
 
-def _load_day(date: str, oracle_root: Path, label_root: Path) -> dict | None:
+def _load_day(
+    date: str,
+    oracle_root: Path,
+    label_root: Path,
+    label_stem: str = "horizon60_thresh5_fc60",
+) -> dict | None:
     oracle_npz = oracle_root / date / "oracle_samples.npz"
-    label_npz = label_root / date / "horizon60_thresh5_fc60.npz"
+    label_npz = label_root / date / f"{label_stem}.npz"
     if not oracle_npz.exists() or not label_npz.exists():
         print(
             f"  SKIP {date}: oracle={oracle_npz.exists()} "
-            f"label={label_npz.exists()}",
+            f"label={label_npz.exists()} (looked for {label_stem})",
         )
         return None
 
@@ -227,6 +232,15 @@ def main() -> int:
         help="Direction-label cache root (default data/direction_labels).",
     )
     p.add_argument(
+        "--label-stem", default="horizon60_thresh5_fc60",
+        help=(
+            "Filename stem (no extension) inside each date dir. "
+            "Default `horizon60_thresh5_fc60` is the v1 tick-count "
+            "cache. For v2 time-endpoint caches, pass e.g. "
+            "`time_horizon420s_thresh5_fc60`."
+        ),
+    )
+    p.add_argument(
         "--c", type=float, default=1.0,
         help="LogisticRegression C param (inverse L2; default 1.0).",
     )
@@ -241,7 +255,7 @@ def main() -> int:
     lay_chunks: list[np.ndarray] = []
     print(f"Loading {len(args.dates)} day(s)...")
     for d in args.dates:
-        data = _load_day(d, oracle_root, label_root)
+        data = _load_day(d, oracle_root, label_root, args.label_stem)
         if data is None:
             continue
         print(

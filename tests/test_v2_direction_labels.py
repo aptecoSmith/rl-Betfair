@@ -491,7 +491,11 @@ class TestRoundTripSaveLoadStrict:
         # header value disagrees.
         import json
         cd = _cache_dir(data_dir, "2026-04-10")
-        stem = _cache_stem(60, 5, 0.0)
+        stem = _cache_stem(
+            direction_horizon_ticks=60,
+            direction_threshold_ticks=5,
+            force_close_before_off_seconds=0.0,
+        )
         header_path = cd / f"{stem}_header.json"
         h = json.loads(header_path.read_text())
         h["direction_horizon_ticks"] = 999
@@ -523,6 +527,10 @@ class TestRoundTripSaveLoadStrict:
         )
         import json
         cd = _cache_dir(data_dir, "2026-04-10")
-        stem = _cache_stem(60, 5, 0.0)
+        stem = _cache_stem(
+            direction_horizon_ticks=60,
+            direction_threshold_ticks=5,
+            force_close_before_off_seconds=0.0,
+        )
         header = json.loads((cd / f"{stem}_header.json").read_text())
         assert header["label_version"] == LABEL_VERSION

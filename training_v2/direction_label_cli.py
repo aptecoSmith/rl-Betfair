@@ -40,7 +40,8 @@ def _scan_one(
     data_dir: Path,
     config: dict,
     *,
-    horizon_ticks: int,
+    horizon_ticks: int | None,
+    horizon_seconds: float | None,
     threshold_ticks: int,
     force_close: float,
 ) -> float:
@@ -51,6 +52,7 @@ def _scan_one(
         data_dir,
         config,
         direction_horizon_ticks=horizon_ticks,
+        direction_horizon_seconds=horizon_seconds,
         direction_threshold_ticks=threshold_ticks,
         force_close_before_off_seconds=force_close,
     )
@@ -62,6 +64,7 @@ def _scan_one(
         data_dir,
         config,
         direction_horizon_ticks=horizon_ticks,
+        direction_horizon_seconds=horizon_seconds,
         direction_threshold_ticks=threshold_ticks,
         force_close_before_off_seconds=force_close,
         total_pre_race_ticks=n_ticks,
@@ -76,12 +79,16 @@ def _scan_one(
     pb = (n_back / n) if n > 0 else 0.0
     pl = (n_lay / n) if n > 0 else 0.0
     pboth = (n_both / n) if n > 0 else 0.0
+    horizon_label = (
+        f"horizon_seconds={horizon_seconds}" if horizon_seconds is not None
+        else f"horizon_ticks={horizon_ticks}"
+    )
     print(
         f"{date}: pre_race_ticks={n_ticks} labels_total={n}\n"
         f"        positive_back={pb:.4f} ({n_back}/{n})\n"
         f"        positive_lay={pl:.4f} ({n_lay}/{n})\n"
         f"        both_positive={pboth:.4f} ({n_both}/{n})\n"
-        f"        wall={wall:.1f}s horizon={horizon_ticks} "
+        f"        wall={wall:.1f}s {horizon_label} "
         f"thresh={threshold_ticks} fc={force_close}",
         flush=True,
     )
@@ -106,11 +113,27 @@ def main() -> None:
         default="data/processed",
         help="Processed data directory (default: data/processed).",
     )
-    scan_p.add_argument(
+    horizon_group = scan_p.add_mutually_exclusive_group(required=True)
+    horizon_group.add_argument(
         "--horizon-ticks",
         type=int,
-        required=True,
-        help="Tick-count horizon for the favourable-move scan.",
+        default=None,
+        help=(
+            "Tick-count horizon for the favourable-move scan "
+            "(v1_threshold_crossing mode, original 2026-05-06)."
+        ),
+    )
+    horizon_group.add_argument(
+        "--horizon-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Clock-time horizon in seconds (v2_time_endpoint_signed_tick "
+            "mode, 2026-05-24). Endpoint semantics: label = sign of "
+            "(LTP at T+horizon) − (LTP at T) in ticks. Default = 420 "
+            "(7 minutes) matches the betfair-predictors direction "
+            "model's primary fire horizon."
+        ),
     )
     scan_p.add_argument(
         "--threshold-ticks",
@@ -145,6 +168,7 @@ def main() -> None:
             data_dir,
             config,
             horizon_ticks=args.horizon_ticks,
+            horizon_seconds=args.horizon_seconds,
             threshold_ticks=args.threshold_ticks,
             force_close=args.force_close_before_off_seconds,
         )

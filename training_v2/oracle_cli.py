@@ -37,11 +37,17 @@ def _scan_one(
     config: dict,
     scorer_dir: Path,
     predictor_lean_obs: bool = False,
+    predictor_bundle: object | None = None,
+    use_race_outcome_predictor: bool = False,
+    use_direction_predictor: bool = False,
 ) -> None:
     n_ticks = count_pre_race_ticks(date, data_dir)
     samples = scan_day(
         date, data_dir, config, scorer_dir=scorer_dir,
         predictor_lean_obs=predictor_lean_obs,
+        predictor_bundle=predictor_bundle,
+        use_race_outcome_predictor=use_race_outcome_predictor,
+        use_direction_predictor=use_direction_predictor,
     )
 
     if samples:
@@ -52,10 +58,17 @@ def _scan_one(
         # contract that an empty .npz is shaped, not a placeholder.
         try:
             day = load_day(date, data_dir)
-            env = BetfairEnv(
-                day, config, scalping_mode=True,
+            env_kwargs = dict(
+                scalping_mode=True,
                 predictor_lean_obs=predictor_lean_obs,
             )
+            if predictor_bundle is not None:
+                env_kwargs["predictor_bundle"] = predictor_bundle
+            if use_race_outcome_predictor:
+                env_kwargs["use_race_outcome_predictor"] = True
+            if use_direction_predictor:
+                env_kwargs["use_direction_predictor"] = True
+            env = BetfairEnv(day, config, **env_kwargs)
             shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
             obs_dim = int(shim.obs_dim)
         except Exception:
@@ -107,6 +120,28 @@ def main() -> None:
             "to load (see BetfairEnv LEAN_RUNNER_KEYS)."
         ),
     )
+    scan_p.add_argument(
+        "--predictor-bundle-manifests", nargs=3, default=None,
+        metavar=("CHAMPION", "RANKER", "DIRECTION"),
+        help=(
+            "Three manifest.json paths (race-outcome champion, "
+            "race-outcome ranker, direction predictor). When supplied "
+            "together with --use-race-outcome-predictor and/or "
+            "--use-direction-predictor, the env populates the "
+            "predictor obs columns at scan time. Without this, those "
+            "obs columns are zero-filled and diagnostic scripts that "
+            "read them (e.g. tools/direction_signal_probe.py) see "
+            "only zeros. 2026-05-24."
+        ),
+    )
+    scan_p.add_argument(
+        "--use-race-outcome-predictor", action="store_true",
+        help="Inject race-outcome predictor outputs into obs at scan.",
+    )
+    scan_p.add_argument(
+        "--use-direction-predictor", action="store_true",
+        help="Inject direction predictor outputs into obs at scan.",
+    )
     args = ap.parse_args()
 
     dates: list[str] = (
@@ -119,10 +154,25 @@ def main() -> None:
     data_dir = Path(args.data_dir)
     scorer_dir = Path(args.scorer_dir)
 
+    predictor_bundle = None
+    if args.predictor_bundle_manifests:
+        from predictors import PredictorBundle
+        champ, rank, dirm = args.predictor_bundle_manifests
+        predictor_bundle = PredictorBundle.from_manifests(
+            champion_manifest=Path(champ),
+            ranker_manifest=Path(rank),
+            direction_manifest=Path(dirm),
+        )
+
     for d in dates:
         _scan_one(
             d, data_dir, config, scorer_dir,
             predictor_lean_obs=bool(args.predictor_lean_obs),
+            predictor_bundle=predictor_bundle,
+            use_race_outcome_predictor=bool(
+                args.use_race_outcome_predictor,
+            ),
+            use_direction_predictor=bool(args.use_direction_predictor),
         )
 
 

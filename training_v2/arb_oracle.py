@@ -98,6 +98,9 @@ def scan_day(
     scorer_dir: Path = DEFAULT_SCORER_DIR,
     *,
     predictor_lean_obs: bool = False,
+    predictor_bundle: object | None = None,
+    use_race_outcome_predictor: bool = False,
+    use_direction_predictor: bool = False,
 ) -> list[OracleSample]:
     """Scan one day; return samples for every profitable reachable arb moment.
 
@@ -105,6 +108,13 @@ def scan_day(
     placement). The shim's rolling-window ``FeatureExtractor`` is fed
     every tick (in-play included) so velocity features are correct on
     the pre-race ticks immediately following an in-play burst.
+
+    2026-05-24: optionally inject the race-outcome + direction
+    predictor outputs into the obs vector at scan time. Required when
+    the downstream cohort uses ``--use-direction-predictor`` —
+    otherwise the cache's 12 ``dir_*`` obs columns are zero-filled
+    placeholders and downstream diagnostics that read them (e.g.
+    ``tools/direction_signal_probe.py``) see only zeros.
 
     Samples are returned sorted by ``(tick_index, runner_idx)`` for
     determinism.
@@ -115,10 +125,17 @@ def scan_day(
     if not day.races:
         return []
 
-    env = BetfairEnv(
-        day, config, scalping_mode=True,
+    env_kwargs = dict(
+        scalping_mode=True,
         predictor_lean_obs=predictor_lean_obs,
     )
+    if predictor_bundle is not None:
+        env_kwargs["predictor_bundle"] = predictor_bundle
+    if use_race_outcome_predictor:
+        env_kwargs["use_race_outcome_predictor"] = True
+    if use_direction_predictor:
+        env_kwargs["use_direction_predictor"] = True
+    env = BetfairEnv(day, config, **env_kwargs)
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     max_runners: int = env.max_runners
 
