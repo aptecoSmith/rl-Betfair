@@ -790,6 +790,7 @@ def run_cohort(
     rotating_eval_sample: int = 0,
     monitor_eval_top_k: int = 0,
     monitor_early_stop_patience: int = 0,
+    frozen_direction_head_path: "Path | None" = None,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -1188,6 +1189,9 @@ def run_cohort(
                         lay_price_max=lay_price_max,
                         composite_score_mode=composite_score_mode,
                         feature_cache=feature_cache,
+                        frozen_direction_head_path=(
+                            frozen_direction_head_path
+                        ),
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -2219,6 +2223,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "plans/scalping-lay-quality-gate/."
         ),
     )
+    p.add_argument(
+        "--direction-head-manifest", default=None, metavar="PATH",
+        help=(
+            "Path to a directory containing weights.pt + "
+            "manifest.json for a pre-trained shared direction head. "
+            "When supplied, every agent's direction_prob_head is "
+            "loaded from this path and frozen (requires_grad=False). "
+            "Forces direction_prob_loss_weight + "
+            "bc_direction_target_weight to 0 (frozen weights aren't "
+            "trainable). Mutually exclusive with `--enable-gene "
+            "direction_prob_loss_weight` and `--enable-gene "
+            "bc_direction_target_weight`. See "
+            "plans/shared-direction-head/."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -2262,6 +2281,50 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("reward_overrides: %s", reward_overrides)
     if enabled_set:
         logger.info("Phase 5 enabled genes: %s", sorted(enabled_set))
+
+    # plans/shared-direction-head/hard_constraints.md §4: a frozen
+    # direction head has requires_grad=False on its parameters, so
+    # any supervised gradient ON the head is silently ignored. To
+    # avoid the misleading "BCE is being computed but the head
+    # isn't changing" footgun, refuse the combination at launch.
+    if args.direction_head_manifest:
+        _bad_genes = {
+            "direction_prob_loss_weight",
+            "bc_direction_target_weight",
+        } & enabled_set
+        if _bad_genes:
+            raise ValueError(
+                "--direction-head-manifest loads a FROZEN shared "
+                "direction head. Cannot combine with "
+                f"--enable-gene for: {sorted(_bad_genes)}. The "
+                "head's weights are frozen, so a per-agent loss "
+                "weight is meaningless. Either drop the "
+                "--enable-gene flag(s) (the head trains itself "
+                "off your training data) or drop "
+                "--direction-head-manifest (and let each agent "
+                "train its own head)."
+            )
+        _bad_overrides = (
+            {"direction_prob_loss_weight",
+             "bc_direction_target_weight"}
+            & set(reward_overrides)
+        )
+        if _bad_overrides and any(
+            float(reward_overrides[k]) > 0
+            for k in _bad_overrides
+        ):
+            logger.warning(
+                "--direction-head-manifest is set and the operator "
+                "passed --reward-overrides %s — those weights will "
+                "be forced to 0 inside the worker (head is frozen).",
+                sorted(_bad_overrides),
+            )
+        logger.info(
+            "Loading FROZEN direction head from %s — "
+            "direction_prob_loss_weight + bc_direction_target_weight "
+            "will be forced to 0 in trainer_hp.",
+            args.direction_head_manifest,
+        )
     if float(args.maturation_bonus_weight) != 0.0:
         logger.info(
             "GA selection composite_score = total_reward + %.3f × "
@@ -2391,6 +2454,10 @@ def main(argv: list[str] | None = None) -> int:
             rotating_eval_sample=int(args.rotating_eval_sample),
             monitor_eval_top_k=int(args.monitor_eval_top_k),
             monitor_early_stop_patience=int(args.monitor_early_stop_patience),
+            frozen_direction_head_path=(
+                Path(args.direction_head_manifest)
+                if args.direction_head_manifest else None
+            ),
         )
     finally:
         if server is not None:

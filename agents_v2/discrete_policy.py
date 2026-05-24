@@ -354,6 +354,7 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         direction_gate_threshold: float = 0.5,
         enable_fc_prob_head: bool = False,
         runner_dim: int | None = None,
+        frozen_direction_head_path: "Path | None" = None,
     ) -> None:
         super().__init__(obs_dim, action_space, hidden_size)
         self.num_layers = 1
@@ -479,6 +480,36 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             nn.ReLU(),
             nn.Linear(self.actor_mlp_hidden, 2),
         )
+
+        # 2026-05-24: optional load of a pre-trained shared direction
+        # head, frozen. See ``plans/shared-direction-head/``. The
+        # caller (cohort worker) passes a directory containing
+        # ``weights.pt`` (a flat state_dict matching the
+        # direction_prob_head's Sequential layers) + manifest.json.
+        # Cohort worker validates the manifest before reaching here.
+        # When supplied, the head's parameters are frozen via
+        # ``requires_grad_(False)`` — gradient still flows THROUGH
+        # the head (because actor_head reads its output) but the
+        # head's own weights stay fixed.
+        self._frozen_direction_head = False
+        if frozen_direction_head_path is not None:
+            from pathlib import Path as _Path
+            import torch as _torch
+            mp = _Path(frozen_direction_head_path)
+            if mp.is_dir():
+                weights_path = mp / "weights.pt"
+            else:
+                weights_path = mp
+            if not weights_path.exists():
+                raise FileNotFoundError(
+                    f"frozen_direction_head_path: weights.pt not "
+                    f"found at {weights_path}",
+                )
+            state = _torch.load(weights_path, map_location="cpu", weights_only=True)
+            self.direction_prob_head.load_state_dict(state, strict=True)
+            for param in self.direction_prob_head.parameters():
+                param.requires_grad_(False)
+            self._frozen_direction_head = True
 
         # Phase-15 S01: precompute the obs-slice offsets for the
         # per-runner feature block. The env's static obs is laid

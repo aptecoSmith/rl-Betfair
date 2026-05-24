@@ -987,6 +987,7 @@ def train_one_agent(
     lay_price_max: float = 0.0,
     composite_score_mode: str = "total_reward",
     feature_cache: dict[str, list] | None = None,
+    frozen_direction_head_path: "Path | None" = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -1183,7 +1184,34 @@ def train_one_agent(
         direction_gate_threshold=direction_gate_threshold,
         enable_fc_prob_head=enable_fc_prob_head,
         runner_dim=int(shim.env.active_runner_dim),
+        frozen_direction_head_path=frozen_direction_head_path,
     )
+
+    # 2026-05-24: when a shared frozen direction head is loaded, the
+    # supervised loss weights MUST be zero (hard_constraints §4 of
+    # plans/shared-direction-head/). Force them here even if the
+    # operator's gene overrides set them — the head's parameters are
+    # frozen so any non-zero supervised gradient would attempt to
+    # update parameters whose `requires_grad=False`, which torch
+    # would silently ignore but logging the BCE metric anyway gives
+    # a misleading impression of "head is being trained."
+    if frozen_direction_head_path is not None:
+        if trainer_hp.get("direction_prob_loss_weight", 0.0) > 0.0:
+            logger.info(
+                "Agent %s: FROZEN direction head loaded — forcing "
+                "direction_prob_loss_weight 0.0 (was %.4f)",
+                agent_id,
+                float(trainer_hp.get("direction_prob_loss_weight", 0.0)),
+            )
+            trainer_hp["direction_prob_loss_weight"] = 0.0
+        if trainer_hp.get("bc_direction_target_weight", 0.0) > 0.0:
+            logger.info(
+                "Agent %s: FROZEN direction head loaded — forcing "
+                "bc_direction_target_weight 0.0 (was %.4f)",
+                agent_id,
+                float(trainer_hp.get("bc_direction_target_weight", 0.0)),
+            )
+            trainer_hp["bc_direction_target_weight"] = 0.0
 
     # phase-3 Option A: when training on CUDA, the rollout's policy
     # forward at batch=1 is dominated by per-op kernel-launch overhead;
