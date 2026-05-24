@@ -1834,7 +1834,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "mark_to_market_weight, naked_loss_scale, "
             "stop_loss_pnl_threshold, arb_spread_target_lock_pct, "
             "fill_prob_loss_weight, mature_prob_loss_weight, "
-            "risk_loss_weight, alpha_lr, reward_clip."
+            "risk_loss_weight, alpha_lr, reward_clip, "
+            "direction_gate_threshold, direction_prob_loss_weight."
         ),
     )
     p.add_argument(

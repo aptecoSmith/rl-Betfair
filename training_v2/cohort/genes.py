@@ -99,6 +99,32 @@ NAKED_VARIANCE_PENALTY_BETA_RANGE: tuple[float, float] = (0.0, 0.10)
 # strictest gene draw — at 0.99+ an agent never opens, starving
 # PPO of training signal (per phase-14 hard_constraints §10).
 DIRECTION_GATE_THRESHOLD_RANGE: tuple[float, float] = (0.5, 0.95)
+# Phase-15 (2026-05-24). Promoted from operator-pinned to GA-evolvable
+# after the 2026-05-24 direction signal probe found:
+#   * positive class rate ~15-20 % across training days
+#   * pos-weighted random-uniform-0.5 floor for that imbalance ~1.13
+#   * standardised logistic regression on raw obs descends to ~1.00
+#     (10-12 % relative descent) — signal IS in obs
+#   * probe2's reported `train_mean_direction_back/lay_bce` ~1.14 sat
+#     AT the floor → head undertrained at the pinned 0.05 weight
+# Range floor 0.1 = 2x the broken pin (lowest agent still in
+# "actually trains" territory). Ceiling 2.0 = comparable to
+# mature_prob_loss_weight's mid-range — the GA tuning precedent
+# (CLAUDE.md 2026-05-04 raised mature_prob from [0.0, 0.30] to
+# [1.0, 5.0] for the same "head not training under small weight"
+# diagnosis). 20x ratio gives the GA room to find the curve.
+DIRECTION_PROB_LOSS_WEIGHT_RANGE: tuple[float, float] = (0.1, 2.0)
+# Phase-15 (2026-05-24). Promoted from operator-pinned at the same
+# time as `direction_prob_loss_weight`. The 2026-05-24 probe log line
+# showed `post_bc_dir_bce_back=0.7483 lay=0.6975` — both at the
+# unweighted random floor of ln(2)~0.693, meaning BC at the pinned
+# weight 0.1 did not move the direction head either. BC's blended
+# loss is `(1 - w) * oracle_ce + w * direction_ce`; range floor 0.1
+# = current pin (preserves a "control" agent matching probe2);
+# ceiling 0.5 = aggressive but oracle still dominates the loss
+# tug-of-war (above 0.5 risks turning BC into "predict direction"
+# instead of "imitate oracle action").
+BC_DIRECTION_TARGET_WEIGHT_RANGE: tuple[float, float] = (0.1, 0.5)
 
 # Predictor-integration Session 03 (plans/predictor-integration/
 # integration_contract.md §4). Five new genes:
@@ -155,6 +181,20 @@ PHASE5_GENE_DEFAULTS: dict[str, float] = {
     # default) this value is unread; when enabled, 0.5 is the
     # value at which the gate filters the fewest rows.
     "direction_gate_threshold": 0.5,
+    # Phase-15 (2026-05-24). Promoted from operator-pinned. Default
+    # 0.0 = direction head receives no supervised gradient; the head
+    # initialises near sigmoid(0)=0.5 and contributes a near-constant
+    # column to actor_head's input (benign no-signal). When > 0 the
+    # head learns to predict label_back / label_lay from the obs
+    # vector (and the predictor's direction-predictor signal in
+    # particular). See "Phase-15 direction signal probe" comment.
+    "direction_prob_loss_weight": 0.0,
+    # Phase-15 (2026-05-24). Promoted alongside
+    # `direction_prob_loss_weight` (same diagnosis). Default 0.0 =
+    # BC pretrain uses oracle-only target = byte-identical to pre-
+    # Phase-15 launches that didn't set --reward-overrides for this
+    # knob.
+    "bc_direction_target_weight": 0.0,
     # Predictor-integration Session 03 (2026-05-10). Defaults per
     # integration_contract.md §4. Cross-mode breeding-friendly: every
     # mode's CohortGenes.to_dict() carries all 5 keys at the documented
@@ -189,6 +229,8 @@ _PHASE5_RANGES: dict[str, tuple[float, float]] = {
     "reward_clip": REWARD_CLIP_RANGE,
     "naked_variance_penalty_beta": NAKED_VARIANCE_PENALTY_BETA_RANGE,
     "direction_gate_threshold": DIRECTION_GATE_THRESHOLD_RANGE,
+    "direction_prob_loss_weight": DIRECTION_PROB_LOSS_WEIGHT_RANGE,
+    "bc_direction_target_weight": BC_DIRECTION_TARGET_WEIGHT_RANGE,
     "predictor_feature_gain": PREDICTOR_FEATURE_GAIN_RANGE,
     "value_edge_threshold": VALUE_EDGE_THRESHOLD_RANGE,
     "value_kelly_fraction": VALUE_KELLY_FRACTION_RANGE,
@@ -418,20 +460,19 @@ def _sample_field(rng: random.Random, field_name: str):
         return 3e-4
     if field_name == "bc_target_entropy_warmup_eps":
         return 5
-    # Phase-13 (2026-05-06). Direction-prob knobs are operator-
-    # controlled (cohort runner ``--reward-overrides``); GA does not
-    # evolve them. Pin to the inert defaults so a fresh draw is
-    # byte-identical to a pre-S03 draw at the same seed.
-    if field_name == "direction_prob_loss_weight":
-        return 0.0
+    # Phase-13 (2026-05-06) / Phase-15 (2026-05-24).
+    # `direction_prob_loss_weight` and `bc_direction_target_weight`
+    # are now Phase 5 genes and dispatched via the `_PHASE5_RANGES`
+    # branch above. The remaining direction_* knobs below stay
+    # operator-controlled (constants surfaced via reward-overrides /
+    # cohort-runner flags) and pin to inert defaults so an unsampled
+    # cohort is byte-identical to pre-S03 at the same seed.
     if field_name == "direction_horizon_ticks":
         return 60
     if field_name == "direction_threshold_ticks":
         return 5
     if field_name == "direction_force_close_seconds":
         return 60.0
-    if field_name == "bc_direction_target_weight":
-        return 0.0
     # Phase-14 S03 (2026-05-07). ``direction_gate_enabled`` is a
     # cohort-wide bool, never sampled per-agent — operator turns it
     # on via ``--reward-overrides direction_gate_enabled=true``.

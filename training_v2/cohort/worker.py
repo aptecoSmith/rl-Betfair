@@ -1534,16 +1534,30 @@ def train_one_agent(
                 stats.direction_prob_loss_weight_active,
             ),
         })
+        # Phase-15 (2026-05-24). Surface direction_gate_refusals +
+        # arb_realised_lock_pct on the per-day log line so the
+        # operator's in-flight monitor can detect (a) the gate
+        # over-refusing and starving training, (b) the
+        # arb_spread_target_lock_pct formula not delivering the
+        # promised fraction. Both default to safe sentinels (0 / NaN)
+        # on pre-Phase-15 runs.
+        _arb_lock = stats.arb_realised_lock_pct
+        _arb_lock_str = (
+            f"{_arb_lock:+.3f}" if _arb_lock == _arb_lock else "nan"
+        )
         logger.info(
             "Agent %s day %d/%d [%s] reward=%+.3f pnl=%+.2f "
             "value_loss=%.4f approx_kl=%.4f dir_bce_back=%.4f "
-            "dir_bce_lay=%.4f n_dir_targets=%d wall=%.1fs",
+            "dir_bce_lay=%.4f n_dir_targets=%d "
+            "gate_refusals=%d arb_realised_lock=%s wall=%.1fs",
             agent_id, day_idx + 1, len(days_to_train), day_str,
             stats.total_reward, stats.day_pnl,
             stats.value_loss_mean, stats.approx_kl_mean,
             stats.direction_back_bce_mean,
             stats.direction_lay_bce_mean,
             stats.n_direction_targets,
+            stats.direction_gate_refusals,
+            _arb_lock_str,
             stats.wall_time_sec,
         )
         if event_emitter is not None:
