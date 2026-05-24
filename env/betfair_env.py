@@ -1168,6 +1168,38 @@ class BetfairEnv(gymnasium.Env):
         # ``reset()``; written in ``_attempt_close`` when
         # ``stop_close=True``. Default 0 = byte-identical to pre-plan.
         self._scalping_arbs_stop_closed: int = 0
+        # Attribution counters (2026-05-24). Per-episode integers that
+        # answer "is each gate / formula actually doing what it claims?"
+        # — pure additive telemetry on info dict + scoreboard; zero
+        # impact on reward, action selection, or any existing field.
+        # All four default to a falsy/no-op value when the corresponding
+        # gate is disabled, so old behaviour is byte-identical.
+        #
+        # ``_direction_gate_refusals`` is incremented by the rollout
+        # collector (training_v2/discrete_ppo/rollout.py) on each tick
+        # by the count of OPEN_BACK/OPEN_LAY slots the direction gate
+        # masked off post-legality. The env itself never reads or sets
+        # the count — it's exposed here only so per-episode reset
+        # logic owns the field and the info dict can surface it.
+        # ``_pwin_back_gate_refusals`` / ``_pwin_lay_gate_refusals``
+        # are placeholders for the future
+        # ``--predictor-p-win-back-threshold`` /
+        # ``--predictor-p-win-lay-threshold`` gates (plans/predictor-
+        # integration/strategy_modes.md). The fields exist so the
+        # scoreboard schema is forward-compatible; the gates are not
+        # yet wired into the action path, so the counters stay 0 in
+        # current cohorts. Default 0 = byte-identical to pre-2026-05-24.
+        # ``_arb_realised_lock_pct_last`` is computed at settle time
+        # from filled (matured OR agent-closed) pairs: locked_pnl / agg
+        # stake. NaN if no pairs filled in the episode.
+        self._direction_gate_refusals: int = 0
+        self._pwin_back_gate_refusals: int = 0
+        self._pwin_lay_gate_refusals: int = 0
+        self._arb_realised_lock_pct_last: float = float("nan")
+        # Settle-time accumulators for the lock-pct numerator /
+        # denominator. Episode rolls these into the float above.
+        self._arb_realised_locked_pnl_sum: float = 0.0
+        self._arb_realised_agg_stake_sum: float = 0.0
         # Per-pair MTM bucket {pair_id: £}. Rebuilt by
         # ``_compute_portfolio_mtm`` every call; initialised here so
         # first-access (e.g. in stub tests bypassing ``reset()``)
@@ -2806,6 +2838,18 @@ class BetfairEnv(gymnasium.Env):
             # agent suppressed via keep_open_inversion. 0 when the
             # flag is off OR stop_loss_pnl_threshold = 0.
             "stop_close_overridden": self._stop_close_overridden,
+            # Attribution counters (2026-05-24). Pure additive
+            # telemetry; readers must default-tolerate absence on
+            # pre-change JSONL rows. See env.__init__ docstring for
+            # field semantics. ``direction_gate_refusals`` is set by
+            # the rollout collector each tick (when the policy's
+            # direction gate is enabled); the pwin-gate counters are
+            # placeholders for the future predictor-integration gates
+            # and stay 0 until that plan lands.
+            "direction_gate_refusals": int(self._direction_gate_refusals),
+            "pwin_back_gate_refusals": int(self._pwin_back_gate_refusals),
+            "pwin_lay_gate_refusals": int(self._pwin_lay_gate_refusals),
+            "arb_realised_lock_pct": float(self._arb_realised_lock_pct_last),
             # Force-close-architecture Session 01 (2026-05-01).
             # Per-episode count of pair opens refused because the
             # solved target-£ passive price was non-physical
@@ -2920,6 +2964,15 @@ class BetfairEnv(gymnasium.Env):
         # (T−N blanket flatten); the matured-arb / close_signal shaped
         # bonuses do NOT credit stop-closes.
         self._scalping_arbs_stop_closed: int = 0
+        # Attribution counters (2026-05-24) — reset per episode.
+        # See __init__ for full semantics; the field documentation
+        # there is the authoritative source.
+        self._direction_gate_refusals = 0
+        self._pwin_back_gate_refusals = 0
+        self._pwin_lay_gate_refusals = 0
+        self._arb_realised_lock_pct_last = float("nan")
+        self._arb_realised_locked_pnl_sum = 0.0
+        self._arb_realised_agg_stake_sum = 0.0
         # Per-pair MTM bucket — mirrors the portfolio MTM sum per pair.
         # Rebuilt every tick by ``_compute_portfolio_mtm``; stored so
         # the stop-close trigger can read ``{pair_id: £}`` without
@@ -5003,6 +5056,23 @@ class BetfairEnv(gymnasium.Env):
                     # Locked-pnl floor contribution applies to both
                     # completed and closed pairs (zero for close-at-loss).
                     scalping_locked_pnl += p["locked_pnl"]
+                    # Attribution: arb_realised_lock_pct (2026-05-24).
+                    # Accumulate locked_pnl / agg.matched_stake across
+                    # pairs whose passive actually FILLED (matured
+                    # naturally OR agent-closed). Force-closed and
+                    # stop-closed pairs are env-initiated bail-outs and
+                    # do NOT count as "the arb_spread formula
+                    # delivered the promised lock fraction". Naked
+                    # pairs (passive failed) are likewise excluded
+                    # (handled in the ``else`` branch below).
+                    if (
+                        not is_force_closed
+                        and not is_stop_closed
+                        and agg is not None
+                        and agg.matched_stake > 0.0
+                    ):
+                        self._arb_realised_locked_pnl_sum += p["locked_pnl"]
+                        self._arb_realised_agg_stake_sum += agg.matched_stake
                 else:
                     scalping_arbs_naked += 1
             scalping_naked_exposure = bm.get_naked_exposure(
@@ -5491,6 +5561,21 @@ class BetfairEnv(gymnasium.Env):
             open_cost_shaped_pnl=open_cost_shaped_pnl,
             fill_mode=self.day.fill_mode,
         ))
+
+        # Attribution: refresh ``arb_realised_lock_pct`` (2026-05-24).
+        # Computed from running episode-cumulative sums so every settle
+        # leaves a defined value on the env (NaN until the first
+        # filled pair lands). Tests whether the
+        # ``arb_spread_target_lock_pct`` gene formula is delivering
+        # the promised lock fraction. NaN if no pairs filled this
+        # episode (both numerator and denominator stay 0).
+        if self._arb_realised_agg_stake_sum > 0.0:
+            self._arb_realised_lock_pct_last = (
+                self._arb_realised_locked_pnl_sum
+                / self._arb_realised_agg_stake_sum
+            )
+        else:
+            self._arb_realised_lock_pct_last = float("nan")
 
         return reward
 

@@ -283,6 +283,15 @@ class EpisodeStats:
     post_bc_entropy: float | None = None
     effective_target_entropy: float = 0.0
     eps_since_bc: int = 0
+    # Attribution counters (2026-05-24). Pure additive diagnostics on
+    # the per-episode JSONL row; defaults preserve construction-by-
+    # name in older tests and pre-patch consumers see the same field
+    # shape via ``.get(name, 0)`` / ``.get(name, float('nan'))``.
+    # See env/betfair_env.py __init__ for field semantics.
+    direction_gate_refusals: int = 0
+    pwin_back_gate_refusals: int = 0
+    pwin_lay_gate_refusals: int = 0
+    arb_realised_lock_pct: float = float("nan")
 
 
 # ── Helpers (exported for tests) ───────────────────────────────────────────
@@ -765,6 +774,24 @@ class DiscretePPOTrainer:
             post_bc_entropy=self._post_bc_entropy,
             effective_target_entropy=effective_te,
             eps_since_bc=eps_since_bc_now,
+            # Attribution counters (2026-05-24). Read from env's
+            # last-step info dict; defaults preserve the contract for
+            # synthetic info dicts (tests / pre-patch fixtures) that
+            # don't emit the new keys.
+            direction_gate_refusals=int(
+                (last_info or {}).get("direction_gate_refusals", 0)
+            ),
+            pwin_back_gate_refusals=int(
+                (last_info or {}).get("pwin_back_gate_refusals", 0)
+            ),
+            pwin_lay_gate_refusals=int(
+                (last_info or {}).get("pwin_lay_gate_refusals", 0)
+            ),
+            arb_realised_lock_pct=float(
+                (last_info or {}).get(
+                    "arb_realised_lock_pct", float("nan"),
+                )
+            ),
         )
         # Tick the post-BC counter for the NEXT episode. The increment
         # is gated on ``_post_bc_entropy is not None`` so non-BC runs
