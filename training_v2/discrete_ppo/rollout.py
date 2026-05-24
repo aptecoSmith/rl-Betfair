@@ -521,6 +521,76 @@ class RolloutCollector:
                 out = policy(obs_t, hidden_state=hidden_state, mask=mask_t)
                 hidden_state = out.new_hidden_state
 
+                # v2-aux-head-bet-plumbing (2026-05-24): snapshot the
+                # per-runner aux-head outputs at decision time. We
+                # detach and move to CPU here ONLY for the per-bet
+                # stamp side-channel — the surrogate-loss path still
+                # consumes the live torch tensors via ``out`` so
+                # gradients flow through fill_prob_head /
+                # mature_prob_head / direction_*_head as normal
+                # (CLAUDE.md §"fill_prob feeds actor_head" + §
+                # "mature_prob_head feeds actor_head" + the
+                # constraint "DO NOT detach gradients on
+                # fill_prob_per_runner / mature_prob_per_runner
+                # during capture").
+                #
+                # Shapes coming out of the policy are
+                # ``(batch=1, max_runners)`` for each per-runner head.
+                # ``.detach().cpu().numpy().reshape(-1)`` yields a
+                # 1-D length-``max_runners`` array; the stamp loop
+                # below indexes by ``runner_slot``.
+                fp_per_runner_np: np.ndarray | None = None
+                mp_per_runner_np: np.ndarray | None = None
+                dir_back_per_runner_np: np.ndarray | None = None
+                dir_lay_per_runner_np: np.ndarray | None = None
+                risk_mean_per_runner_np: np.ndarray | None = None
+                fp_tensor = getattr(out, "fill_prob_per_runner", None)
+                if (
+                    fp_tensor is not None
+                    and fp_tensor.numel() >= self.max_runners
+                ):
+                    fp_per_runner_np = (
+                        fp_tensor.detach().cpu().numpy().reshape(-1)
+                    )
+                mp_tensor = getattr(out, "mature_prob_per_runner", None)
+                if (
+                    mp_tensor is not None
+                    and mp_tensor.numel() >= self.max_runners
+                ):
+                    mp_per_runner_np = (
+                        mp_tensor.detach().cpu().numpy().reshape(-1)
+                    )
+                dir_back_tensor = getattr(
+                    out, "direction_back_prob_per_runner", None,
+                )
+                if (
+                    dir_back_tensor is not None
+                    and dir_back_tensor.numel() >= self.max_runners
+                ):
+                    dir_back_per_runner_np = (
+                        dir_back_tensor.detach().cpu().numpy().reshape(-1)
+                    )
+                dir_lay_tensor = getattr(
+                    out, "direction_lay_prob_per_runner", None,
+                )
+                if (
+                    dir_lay_tensor is not None
+                    and dir_lay_tensor.numel() >= self.max_runners
+                ):
+                    dir_lay_per_runner_np = (
+                        dir_lay_tensor.detach().cpu().numpy().reshape(-1)
+                    )
+                risk_mean_tensor = getattr(
+                    out, "predicted_locked_pnl_per_runner", None,
+                )
+                if (
+                    risk_mean_tensor is not None
+                    and risk_mean_tensor.numel() >= self.max_runners
+                ):
+                    risk_mean_per_runner_np = (
+                        risk_mean_tensor.detach().cpu().numpy().reshape(-1)
+                    )
+
                 # Phase-14 S05: capture the rollout-time effective
                 # action mask (legality AND gate) when the gate is
                 # active. ``masked_logits`` carries finite values at
@@ -650,6 +720,72 @@ class RolloutCollector:
                             seen_pair_ids=seen_pair_ids,
                         )
                     )
+
+                    # v2-aux-head-bet-plumbing (2026-05-24): stamp
+                    # decision-time aux-head outputs onto every newly
+                    # placed Bet whose corresponding ``Bet.*_at_placement``
+                    # field is still ``None``. Idempotent — re-running
+                    # the loop on a tick that placed no new bets is a
+                    # no-op (the diff is empty); and a bet that's
+                    # already stamped (e.g. passive leg inheriting from
+                    # an earlier aggressive via the env's
+                    # ``PassiveOrderBook.on_tick`` pair-id-lookup path)
+                    # is skipped via the ``is None`` guard.
+                    #
+                    # Slot resolution uses the same ``market_to_runner_map``
+                    # the pair_open_records collector uses — by
+                    # ``bet.market_id`` because race transitions move
+                    # bets between bm and ``_settled_bets`` and the
+                    # currently-active race may have advanced past
+                    # the bet's race.
+                    for bet in list(new_settled) + list(new_live):
+                        if bet.fill_prob_at_placement is not None:
+                            # Already stamped — either by an earlier
+                            # tick (defensive — shouldn't happen with
+                            # the diff watermarks) or by passive-leg
+                            # inheritance.
+                            continue
+                        runner_map = market_to_runner_map.get(bet.market_id)
+                        if runner_map is None:
+                            continue
+                        slot = runner_map.get(bet.selection_id)
+                        if slot is None or slot >= self.max_runners:
+                            continue
+                        if (
+                            fp_per_runner_np is not None
+                            and slot < fp_per_runner_np.shape[0]
+                        ):
+                            bet.fill_prob_at_placement = float(
+                                fp_per_runner_np[slot]
+                            )
+                        if (
+                            mp_per_runner_np is not None
+                            and slot < mp_per_runner_np.shape[0]
+                        ):
+                            bet.mature_prob_at_placement = float(
+                                mp_per_runner_np[slot]
+                            )
+                        if (
+                            dir_back_per_runner_np is not None
+                            and slot < dir_back_per_runner_np.shape[0]
+                        ):
+                            bet.direction_back_prob_at_placement = float(
+                                dir_back_per_runner_np[slot]
+                            )
+                        if (
+                            dir_lay_per_runner_np is not None
+                            and slot < dir_lay_per_runner_np.shape[0]
+                        ):
+                            bet.direction_lay_prob_at_placement = float(
+                                dir_lay_per_runner_np[slot]
+                            )
+                        if (
+                            risk_mean_per_runner_np is not None
+                            and slot < risk_mean_per_runner_np.shape[0]
+                        ):
+                            bet.predicted_locked_pnl_at_placement = float(
+                                risk_mean_per_runner_np[slot]
+                            )
                 prev_settled_count = len(settled_after)
                 prev_bm_id = new_bm_id
                 prev_live_count = new_live_count

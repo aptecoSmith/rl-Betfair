@@ -112,6 +112,21 @@ class Bet:
     # directional bets, pre-Session-03 data, stub tests.
     predicted_locked_pnl_at_placement: float | None = None
     predicted_locked_stddev_at_placement: float | None = None
+    # v2-aux-head-bet-plumbing (2026-05-24) — additional per-runner aux-head
+    # output snapshots stamped at placement time by the v2 rollout
+    # collector. ``mature_prob_at_placement`` is the policy's per-runner
+    # sigmoid output from ``mature_prob_head`` (strict-mature label per
+    # CLAUDE.md §"mature_prob_head feeds actor_head"). The two
+    # ``direction_*_prob_at_placement`` fields are the per-runner sigmoid
+    # outputs of the direction-back / direction-lay heads (Phase-14 gate
+    # heads — see ``DiscretePolicyOutput``). All three are ``None`` for
+    # bets the v2 trainer didn't capture (v1 runs, directional bets, stub
+    # tests constructing ``Bet`` directly). Same capture→attach flow as
+    # ``fill_prob_at_placement`` (aggressive stamped by the PPO rollout;
+    # passive inherits via ``pair_id`` lookup in the rollout collector).
+    mature_prob_at_placement: float | None = None
+    direction_back_prob_at_placement: float | None = None
+    direction_lay_prob_at_placement: float | None = None
     # Scalping-close-signal session 01 — marks a Bet placed by
     # :meth:`BetfairEnv._attempt_close` as the aggressive close leg of
     # a pair the agent deliberately crossed out of. A pair with any
@@ -803,6 +818,13 @@ class PassiveOrderBook:
             inherited_fill_prob: float | None = None
             inherited_risk_pnl: float | None = None
             inherited_risk_stddev: float | None = None
+            # v2-aux-head-bet-plumbing (2026-05-24) — same inheritance
+            # pattern as fill_prob / risk_pnl: a passive leg inherits
+            # ALL aux-head snapshots from its aggressive partner via
+            # pair_id lookup.
+            inherited_mature_prob: float | None = None
+            inherited_direction_back_prob: float | None = None
+            inherited_direction_lay_prob: float | None = None
             if order.pair_id is not None and self._bet_manager is not None:
                 for existing in self._bet_manager.bets:
                     if existing.pair_id == order.pair_id:
@@ -812,6 +834,15 @@ class PassiveOrderBook:
                         )
                         inherited_risk_stddev = (
                             existing.predicted_locked_stddev_at_placement
+                        )
+                        inherited_mature_prob = (
+                            existing.mature_prob_at_placement
+                        )
+                        inherited_direction_back_prob = (
+                            existing.direction_back_prob_at_placement
+                        )
+                        inherited_direction_lay_prob = (
+                            existing.direction_lay_prob_at_placement
                         )
                         break
 
@@ -833,6 +864,9 @@ class PassiveOrderBook:
                 fill_prob_at_placement=inherited_fill_prob,
                 predicted_locked_pnl_at_placement=inherited_risk_pnl,
                 predicted_locked_stddev_at_placement=inherited_risk_stddev,
+                mature_prob_at_placement=inherited_mature_prob,
+                direction_back_prob_at_placement=inherited_direction_back_prob,
+                direction_lay_prob_at_placement=inherited_direction_lay_prob,
             )
             self._bet_manager.bets.append(bet)
 

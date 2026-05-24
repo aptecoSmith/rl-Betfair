@@ -165,6 +165,15 @@ class EvaluationBetRecord:
     # for pre-Session-03 runs.
     predicted_locked_pnl_at_placement: float | None = None
     predicted_locked_stddev_at_placement: float | None = None
+    # v2-aux-head-bet-plumbing (2026-05-24) — additional aux-head outputs
+    # captured by the v2 rollout collector at placement time. Mirror the
+    # corresponding ``Bet.*_at_placement`` fields one-to-one. ``None``
+    # for v1 runs (the v1 trainer doesn't capture these), legacy parquet
+    # rows from before this column existed, directional bets, and stub
+    # tests.
+    mature_prob_at_placement: float | None = None
+    direction_back_prob_at_placement: float | None = None
+    direction_lay_prob_at_placement: float | None = None
     # Arb-signal-cleanup Session 03b (2026-04-22). Distinguishes closing
     # legs placed via agent-initiated ``close_signal`` from env-initiated
     # force-close at T−N. Without these, the bet-explorer UI treats both
@@ -827,6 +836,16 @@ class ModelStore:
                 "predicted_locked_stddev_at_placement": (
                     r.predicted_locked_stddev_at_placement
                 ),
+                # v2-aux-head-bet-plumbing (2026-05-24). Nullable floats —
+                # ``None`` for v1 runs / legacy parquet rows / directional
+                # bets / pre-plan rows.
+                "mature_prob_at_placement": r.mature_prob_at_placement,
+                "direction_back_prob_at_placement": (
+                    r.direction_back_prob_at_placement
+                ),
+                "direction_lay_prob_at_placement": (
+                    r.direction_lay_prob_at_placement
+                ),
                 # Arb-signal-cleanup Session 03b (2026-04-22). Surfaces
                 # force-close metadata to the bet-explorer UI. Booleans
                 # stored as-is; ``None`` isn't possible here because the
@@ -988,6 +1007,15 @@ class ModelStore:
         has_predicted_locked_stddev = (
             "predicted_locked_stddev_at_placement" in df.columns
         )
+        # v2-aux-head-bet-plumbing (2026-05-24). Same back-compat
+        # pattern: pre-plan parquet files load these as ``None``.
+        has_mature_prob = "mature_prob_at_placement" in df.columns
+        has_direction_back_prob = (
+            "direction_back_prob_at_placement" in df.columns
+        )
+        has_direction_lay_prob = (
+            "direction_lay_prob_at_placement" in df.columns
+        )
         # Arb-signal-cleanup Session 03b (2026-04-22). Pre-fix parquet
         # files lack these columns — default to False on the read side.
         has_close_leg = "close_leg" in df.columns
@@ -1053,6 +1081,24 @@ class ModelStore:
                     float(row["predicted_locked_stddev_at_placement"])
                     if has_predicted_locked_stddev
                     and pd.notna(row.get("predicted_locked_stddev_at_placement"))
+                    else None
+                ),
+                mature_prob_at_placement=(
+                    float(row["mature_prob_at_placement"])
+                    if has_mature_prob
+                    and pd.notna(row.get("mature_prob_at_placement"))
+                    else None
+                ),
+                direction_back_prob_at_placement=(
+                    float(row["direction_back_prob_at_placement"])
+                    if has_direction_back_prob
+                    and pd.notna(row.get("direction_back_prob_at_placement"))
+                    else None
+                ),
+                direction_lay_prob_at_placement=(
+                    float(row["direction_lay_prob_at_placement"])
+                    if has_direction_lay_prob
+                    and pd.notna(row.get("direction_lay_prob_at_placement"))
                     else None
                 ),
                 close_leg=(
