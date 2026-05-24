@@ -516,41 +516,48 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
                     f"found at {weights_path}",
                 )
 
-            # Read the manifest (when present) to recover the head's
-            # architecture. Pre-sweep manifests with a single
-            # hidden layer continue to work because hidden_dims
-            # defaults match the policy's default head shape.
-            hidden_dims: list[int] = [self.actor_mlp_hidden]
-            input_dim_manifest: int | None = None
-            if manifest_path.exists():
-                _manifest = _json.loads(
-                    manifest_path.read_text(encoding="utf-8"),
+            # Read the manifest to recover the head's architecture.
+            # `hidden_dims` is REQUIRED — the v1 single-layer head
+            # is retired (commit-message: "dont worry about back
+            # compat v1"), so a missing field signals a malformed
+            # manifest, not a v1 fallback.
+            if not manifest_path.exists():
+                raise FileNotFoundError(
+                    f"direction-head manifest.json not found at "
+                    f"{manifest_path}. Cannot construct the head "
+                    f"without architecture spec."
                 )
-                _arch = _manifest.get("architecture", {}) or {}
-                _hd = _arch.get("hidden_dims")
-                if _hd:
-                    hidden_dims = [int(h) for h in _hd]
-                input_dim_manifest = (
-                    int(_arch["input_dim"])
-                    if "input_dim" in _arch else None
+            _manifest = _json.loads(
+                manifest_path.read_text(encoding="utf-8"),
+            )
+            _arch = _manifest.get("architecture") or {}
+            _hd = _arch.get("hidden_dims")
+            if not _hd:
+                raise ValueError(
+                    f"direction-head manifest at {manifest_path} is "
+                    f"missing `architecture.hidden_dims`. Required "
+                    f"to construct the head."
                 )
-                # Refuse to load a head trained for a different
-                # per-runner input dim — the lean-obs/full-obs
-                # bug class (see plans/direction-predictor-label-
-                # alignment/) bit us with exactly this kind of
-                # silent dim mismatch.
-                if (
-                    input_dim_manifest is not None
-                    and input_dim_manifest != self._runner_dim
-                ):
-                    raise ValueError(
-                        f"direction-head manifest input_dim="
-                        f"{input_dim_manifest} does not match the "
-                        f"policy's per-runner dim {self._runner_dim}. "
-                        f"Re-train the head against the runner-dim "
-                        f"the policy uses (lean obs = 23, full obs "
-                        f"= 143)."
-                    )
+            hidden_dims = [int(h) for h in _hd]
+            if "input_dim" not in _arch:
+                raise ValueError(
+                    f"direction-head manifest at {manifest_path} is "
+                    f"missing `architecture.input_dim`."
+                )
+            input_dim_manifest = int(_arch["input_dim"])
+            # Refuse to load a head trained for a different
+            # per-runner input dim — the lean-obs/full-obs bug class
+            # (see plans/direction-predictor-label-alignment/) bit
+            # us with exactly this kind of silent dim mismatch.
+            if input_dim_manifest != self._runner_dim:
+                raise ValueError(
+                    f"direction-head manifest input_dim="
+                    f"{input_dim_manifest} does not match the "
+                    f"policy's per-runner dim {self._runner_dim}. "
+                    f"Re-train the head against the runner-dim "
+                    f"the policy uses (lean obs = 23, full obs "
+                    f"= 143)."
+                )
 
             # Rebuild the head to match the manifest's hidden_dims.
             # Layer pattern: LayerNorm(input) -> [Linear -> ReLU]+ ->

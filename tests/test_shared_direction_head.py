@@ -43,17 +43,33 @@ def action_space() -> DiscreteActionSpace:
 
 @pytest.fixture
 def saved_head_weights(action_space, tmp_path: Path) -> Path:
-    """Build a fresh policy, save its direction_prob_head state to a
-    tmp dir, return the dir path (mimicking the manifest layout)."""
+    """Build a fresh policy, save its direction_prob_head state +
+    a matching manifest.json to a tmp dir, return the dir path.
+    Used as fixture for the basic frozen-load tests."""
+    import json as _json
     p = DiscreteLSTMPolicy(
         obs_dim=LEAN_OBS_DIM,
         action_space=action_space,
         hidden_size=128,
         runner_dim=LEAN_RUNNER_DIM,
     )
-    out_dir = tmp_path / "head_v1"
+    out_dir = tmp_path / "head_fixture"
     out_dir.mkdir()
     torch.save(p.direction_prob_head.state_dict(), out_dir / "weights.pt")
+    # actor_mlp_hidden defaults to 64 in DiscreteLSTMPolicy, so the
+    # default head's first Linear is Linear(runner_dim, 64). Reflect
+    # that in the manifest.
+    _mlp_hidden = int(p.actor_mlp_hidden)
+    (out_dir / "manifest.json").write_text(_json.dumps({
+        "experiment_id": "test_fixture",
+        "weights_path": "weights.pt",
+        "architecture": {
+            "family": "linear_mlp",
+            "input_dim": LEAN_RUNNER_DIM,
+            "output_dim": 2,
+            "hidden_dims": [_mlp_hidden],
+        },
+    }))
     return out_dir
 
 
@@ -142,12 +158,16 @@ class TestSharedDirectionHead:
     def test_mismatched_runner_dim_raises(
         self, action_space, tmp_path: Path,
     ):
-        """§d: trying to load weights trained against
-        runner_dim=143 (full obs) into a runner_dim=23 (lean obs)
-        policy must raise — the LayerNorm shape mismatch is caught
-        by torch's strict load_state_dict."""
-        # Build a head with runner_dim=143 to mimic a "wrong"
-        # manifest.
+        """§d: trying to load a head trained against runner_dim=143
+        (full obs) into a runner_dim=23 (lean obs) policy must
+        raise — caught by the manifest input_dim check (clearer
+        error than torch's strict-load shape mismatch). Test
+        covered by test_manifest_input_dim_mismatch_raises further
+        down; here we just verify the legacy code path that uses a
+        weights.pt + matching manifest both at runner_dim=143
+        still raises with a useful ValueError when loaded into a
+        runner_dim=23 policy."""
+        import json as _json
         p_full = DiscreteLSTMPolicy(
             obs_dim=2254,
             action_space=action_space,
@@ -160,10 +180,17 @@ class TestSharedDirectionHead:
             p_full.direction_prob_head.state_dict(),
             out_dir / "weights.pt",
         )
-
-        with pytest.raises(RuntimeError):
-            # Constructing a lean-obs policy and loading the full-
-            # obs head should fail (LayerNorm dims disagree).
+        (out_dir / "manifest.json").write_text(_json.dumps({
+            "experiment_id": "test_full_obs",
+            "weights_path": "weights.pt",
+            "architecture": {
+                "family": "linear_mlp",
+                "input_dim": 143,
+                "output_dim": 2,
+                "hidden_dims": [int(p_full.actor_mlp_hidden)],
+            },
+        }))
+        with pytest.raises(ValueError, match="input_dim"):
             DiscreteLSTMPolicy(
                 obs_dim=LEAN_OBS_DIM,
                 action_space=action_space,
