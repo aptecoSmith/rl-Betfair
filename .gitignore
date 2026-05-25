@@ -2,6 +2,10 @@
 .venv/
 venv/
 
+# Scratch outputs for side-thread probes (e.g. trajectory-retrieval-probe).
+# Throwaway by design — see plans/trajectory-retrieval-probe/hard_constraints.md §7.
+scratch/
+
 # Processed data (large, regenerated from DB) — keep the directory marker
 data/processed/*.parquet
 # Curated subwindows of the processed data (e.g. AMBER v2 day window

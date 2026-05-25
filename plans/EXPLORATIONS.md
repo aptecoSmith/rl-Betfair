@@ -192,3 +192,61 @@ metric and terrible on the deployment-relevant cash.
 - If tnv3 also fails to clear bands, the next iteration should probably
   go all-in on full Sharpe (`day_pnl / σ(day_pnl)`) with even more
   eval days (e.g. 15+).
+
+
+---
+
+## 2026-05-25 — Retrieval / analogue-forecasting architecture viability
+
+**Question**: Can a vector-encoded pre-off price trajectory + kNN
+lookup on historical analogues predict the next 5 min of LTP
+better than naive baselines? If yes, retrieval might be worth
+investing in as a complement (or replacement) to the parametric
+PPO+LSTM stack. Side-thread probe under
+[plans/trajectory-retrieval-probe/](trajectory-retrieval-probe/).
+
+**What the data showed** (18,033 index rows / 6,934 query rows on
+query days 2026-05-05 → 2026-05-14, k=5 nearest-neighbour on 10
+hand-engineered z-scored features):
+
+| Method | MAE | vs B1 | dir_acc |
+|---|---|---|---|
+| B1 constant (`Δlog LTP = 0`) | **0.14168** | — | (degenerate) |
+| B2 linear extrap | 0.17118 | −20.8 % | 0.483 |
+| B3 per-fav-rank prior | 0.14292 | −0.9 % | 0.549 |
+| kNN k=5 | 0.15915 | **−12.3 %** | 0.517 |
+
+The constant-prediction baseline beats every alternative including
+the kNN retrieval. Target |mean| log-return is ~14 % over 5 min
+(prices DO move a lot) — but the moves are unpredictable from the
+10-feature embedding tried.
+
+**Interpretation**: short-horizon pre-off LTP direction looks like
+a near-random-walk relative to cheap hand-engineered features. The
+kNN does beat B2 on both MAE and directional accuracy (so it IS
+extracting some signal), just not enough to clear the variance of
+log-returns. Decision rule (locked in purpose.md before any data
+was looked at) fires PARK.
+
+**Implications / queued thoughts**:
+
+- The negative DOES NOT condemn the current PPO+LSTM stack. The
+  current stack's value-add is spread capture via scalping pair
+  lifecycle (locked PnL) and selective open behaviour, NOT
+  directional prediction. Different problem.
+- Three retrieval questions remain open and might have better
+  signal-to-noise: (1) fill-probability retrieval (binary target,
+  not continuous log-return), (2) race-outcome retrieval at
+  race-start (the existing `betfair-predictors` problem in
+  non-parametric form), (3) mature-probability retrieval (same
+  shape as #1). None blocked by this probe; each is its own
+  viability question.
+- Practical artifact preserved: `scratch/trajectory_retrieval/`
+  contains a clean long-form tick history (3.55M rows) and a
+  query-ready feature dataset (29.7k rows). Re-runnable from
+  the script in <3 min. Reusable for future probes on different
+  prediction targets.
+- Two feature-engineering lessons promoted to memory
+  (`feedback_feature_engineering_diagnostics.md`): value-domain
+  checks beat shape-domain checks; ~90σ z-scores are bug signals
+  not tail signals.
