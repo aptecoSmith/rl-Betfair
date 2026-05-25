@@ -6,31 +6,46 @@ progress would require violating any of them, stop and surface.
 
 ## 1. Value-edge formula correctness is load-bearing
 
+(Corrected 2026-05-25 during Phase 2 implementation — the
+initial scaffold drafted the back form with commission applied
+to the stake, not just the net winnings, and the lay form with
+the win-side multiplied by `(P-1)`. Both were off by small
+amounts; the form below is the canonical one used by
+`env.scalping_math.value_bet_edge`.)
+
 The two formulas:
 
 ```python
-# Back-side: stake S at price P; win pays S × (P − 1) × (1 − c)
-# Expected value per £1 stake:
-edge_back = pwin_back * price * (1 - c) - 1
+# Back: stake S at price P, hold to settle.
+#   Win pays S × (P − 1) × (1 − c)  (commission on net winnings only)
+#   Lose pays −S
+# EV per £1 stake:
+edge_back = pwin * (price - 1) * (1 - c) - (1 - pwin)
 
-# Lay-side: liability L at price P; stake = L / (P − 1)
-# Win pays the stake S × (1 − c); lose pays −L
-# Expected value per £1 liability:
-edge_lay = (1 - pwin_lay) * (1 - c) / (price - 1) - 1 * pwin_lay / 1
-# simplified: edge per £1 stake (NOT liability):
-edge_lay = (1 - pwin_lay) * (1 - c) * (price - 1) - pwin_lay
-# ^ this is the form to use; assert > 0.05 in the gate.
+# Lay: stake S at price P, liability S × (P − 1), hold to settle.
+#   Win (runner LOSES) pays S × (1 − c)
+#   Lose (runner WINS) pays −S × (P − 1)
+# EV per £1 stake (NOT per £1 liability):
+edge_lay = (1 - pwin) * (1 - c) - pwin * (price - 1)
 ```
 
-The lay formulation in particular is easy to get wrong (stake
-vs liability, commission on win-side only). Phase 2 MUST land
-a unit test that exercises a known-EV case in BOTH directions
-and asserts the gate fires correctly. Reference case for the
-test: pwin_back = 0.50, price = 2.10, c = 0.05 → edge_back =
-0.50 × 2.10 × 0.95 − 1 = −0.0025 (refuse). pwin_back = 0.50,
-price = 2.20, c = 0.05 → edge_back = +0.045 (still below 0.05
-threshold → refuse). pwin_back = 0.50, price = 2.30, c = 0.05
-→ edge_back = +0.0925 (ACCEPT).
+Note `edge_lay` is per £1 STAKE, not per £1 liability. Callers
+using fixed-liability sizing should still gate on this edge —
+the conversion (multiply by `1 / (P − 1)`) is just a positive
+scalar, so the SIGN of the edge is preserved and the
++0.05-threshold gate fires identically.
+
+Phase 2 MUST land a unit test exercising both formulas. Tests
+in `tests/test_value_bet_edge.py`:
+
+| Case | pwin | price | side | c | edge | Threshold 0.05 |
+|---|---|---|---|---|---|---|
+| Reference back, near zero | 0.50 | 2.10 | back | 0.05 | +0.0225 | REFUSE |
+| Reference back, above | 0.50 | 2.30 | back | 0.05 | +0.1175 | ACCEPT |
+| Lay short favourite | 0.80 | 1.50 | lay | 0.05 | −0.21 | REFUSE |
+| Lay outsider | 0.05 | 15.0 | lay | 0.05 | +0.2025 | ACCEPT |
+| c=0 collapses (back) | 0.50 | 2.00 | back | 0.0 | 0.0 | REFUSE |
+| c=0 collapses (lay) | 0.50 | 2.00 | lay | 0.0 | 0.0 | REFUSE |
 
 If the gate refuses or accepts the wrong cases, the entire
 probe is invalid.

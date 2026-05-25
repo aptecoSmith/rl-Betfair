@@ -398,3 +398,80 @@ def min_arb_ticks_for_profit(
         if locked >= profit_floor:
             return ticks
     return None
+
+
+def value_bet_edge(
+    pwin: float,
+    price: float,
+    side: AggressiveSide,
+    commission: float,
+) -> float:
+    """Expected P&L per £1 stake of a single-shot directional bet
+    held to settle, given the predictor's win probability and the
+    decimal Betfair odds at placement.
+
+    Used by the env-side value-bet gate (plan
+    ``non-scalping-directional-probe``) to refuse opens whose
+    predicted edge is below ``value_edge_threshold``. The gate is
+    only active when ``strategy_mode == "value_win"``.
+
+    Formulas:
+
+    - **Back** (stake S at price P, hold to settle):
+        - Win pays ``S × (P − 1) × (1 − c)``
+        - Lose pays ``−S``
+        - EV per £1 stake: ``pwin × (P − 1) × (1 − c) − (1 − pwin)``
+        - Simplifies to ``pwin × P × (1 − c) − 1 + pwin × c``
+        - For commission ``c = 0``: ``pwin × P − 1``.
+
+    - **Lay** (stake S at price P, liability ``S × (P − 1)``):
+        - Win (runner LOSES) pays ``S × (1 − c)``
+        - Lose (runner WINS) pays ``−S × (P − 1)``
+        - EV per £1 stake: ``(1 − pwin) × (1 − c) − pwin × (P − 1)``
+
+    Note the lay formulation is EV per £1 of STAKE, NOT per £1 of
+    liability. Callers using fixed-liability sizing should still
+    gate on this edge — the conversion is just a positive scalar so
+    the sign of the edge is preserved.
+
+    Parameters
+    ----------
+    pwin:
+        Champion p_win for this runner from the race-outcome
+        predictor. In ``[0, 1]``.
+    price:
+        Decimal Betfair odds at placement. Must be > 1.0 (caller
+        responsibility — at <= 1.0 the bet is degenerate; we return
+        ``-inf``).
+    side:
+        ``"back"`` or ``"lay"``.
+    commission:
+        Fractional commission charged on net winnings (Betfair:
+        ``0.05`` = 5%).
+
+    Returns
+    -------
+    float
+        Expected P&L per £1 stake. Caller typically compares against
+        ``+0.05`` (5% edge floor) to decide bet / skip.
+
+    Raises
+    ------
+    ValueError
+        If ``side`` is not ``"back"`` or ``"lay"``.
+    """
+    if not (0.0 <= pwin <= 1.0):
+        # Caller bug or predictor pathology; treat as unbettable.
+        return float("-inf")
+    if price <= 1.0:
+        return float("-inf")
+    c = commission
+    if side == "back":
+        # pwin × (P − 1) × (1 − c) − (1 − pwin)
+        return pwin * (price - 1.0) * (1.0 - c) - (1.0 - pwin)
+    if side == "lay":
+        # (1 − pwin) × (1 − c) − pwin × (P − 1)
+        return (1.0 - pwin) * (1.0 - c) - pwin * (price - 1.0)
+    raise ValueError(
+        f"side must be 'back' or 'lay', got {side!r}",
+    )

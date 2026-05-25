@@ -56,6 +56,7 @@ from env.scalping_math import (
     quantise_to_betfair_tick,
     solve_back_price_for_target_pnl,
     solve_lay_price_for_target_pnl,
+    value_bet_edge,
 )
 from env.tick_ladder import tick_offset, ticks_between
 from training.perf_log import perf_log
@@ -1091,6 +1092,28 @@ class BetfairEnv(gymnasium.Env):
         # predictor-driven gates (loud-fail if predictor off). Default
         # 0.0 = disabled = byte-identical to pre-plan.
         lay_price_max: float = 0.0,
+        # Value-bet edge gate (plans/non-scalping-directional-probe/).
+        # When > 0 AND strategy_mode == "value_win", refuse a directional
+        # open whose ``value_bet_edge(pwin, ltp, side, commission)`` is
+        # below the threshold. EV is expressed per £1 stake (sign-
+        # preserving wrt liability for lays). Composes additively with
+        # the per-runner pwin and race-confidence gates. Requires
+        # ``use_race_outcome_predictor=True`` so champion p_win is
+        # available. Default 0.0 = disabled = byte-identical to pre-plan
+        # (and byte-identical on arb-mode cohorts regardless of value).
+        value_edge_threshold: float = 0.0,
+        # Per-bet sizing overrides for directional mode
+        # (plans/non-scalping-directional-probe/). When
+        # ``strategy_mode == "value_win"`` AND the override is set
+        # (not None), the env IGNORES the policy's stake action dim
+        # and substitutes the override value at placement time. Default
+        # None preserves the policy-driven stake action (byte-
+        # identical). ``directional_back_stake`` is a £ stake;
+        # ``directional_lay_liability`` is a £ max-loss, with the lay
+        # stake computed as ``liability / (price - 1)`` so the lose-
+        # side loss is fixed regardless of price.
+        directional_back_stake: float | None = None,
+        directional_lay_liability: float | None = None,
     ) -> None:
         super().__init__()
         self.day = day
@@ -1456,6 +1479,9 @@ class BetfairEnv(gymnasium.Env):
         # pair_id placement, reset at race-start). Counter for refusals.
         self._pairs_opened_this_race: int = 0
         self._opens_refused_pair_budget: int = 0
+        # Value-bet gate per-episode refusal counter (plans/non-
+        # scalping-directional-probe/). 0 when gate inactive.
+        self._value_gate_refusals: int = 0
         # E4 (2026-05-18). Keep-open inversion. When True, the
         # close_signal action column reinterprets as "keep open
         # this tick" — raised → suppress stop-loss auto-close for
@@ -1812,6 +1838,63 @@ class BetfairEnv(gymnasium.Env):
                 "lay_price_max > 0 requires a predictor_bundle.",
             )
         self._lay_price_cap_active: bool = self._lay_price_max > 0.0
+
+        # Value-bet edge gate (plans/non-scalping-directional-probe/).
+        # Active iff threshold > 0 AND strategy_mode == "value_win"
+        # AND the predictor signal path is on. Validation is loud-fail
+        # for the predictor requirements; strategy_mode is checked at
+        # action-time (so the kwarg can be passed harmlessly on
+        # arb-mode cohorts and the runner can decide via cohort-wide
+        # strategy_mode flag).
+        self._value_edge_threshold: float = float(value_edge_threshold)
+        if self._value_edge_threshold < 0.0:
+            raise ValueError(
+                f"value_edge_threshold must be >= 0, got "
+                f"{self._value_edge_threshold!r}",
+            )
+        if (
+            self._value_edge_threshold > 0.0
+            and not self._use_race_outcome_predictor
+        ):
+            raise ValueError(
+                "value_edge_threshold > 0 requires "
+                "use_race_outcome_predictor=True (the gate reads "
+                "champion_p_win from the race-outcome predictor).",
+            )
+        if (
+            self._value_edge_threshold > 0.0
+            and self._predictor_bundle is None
+        ):
+            raise ValueError(
+                "value_edge_threshold > 0 requires a predictor_bundle.",
+            )
+
+        # Directional sizing overrides (plans/non-scalping-directional-
+        # probe/). None preserves the policy-driven stake action.
+        self._directional_back_stake: float | None = (
+            None if directional_back_stake is None
+            else float(directional_back_stake)
+        )
+        self._directional_lay_liability: float | None = (
+            None if directional_lay_liability is None
+            else float(directional_lay_liability)
+        )
+        if (
+            self._directional_back_stake is not None
+            and self._directional_back_stake <= 0.0
+        ):
+            raise ValueError(
+                f"directional_back_stake must be > 0 when set, got "
+                f"{self._directional_back_stake!r}",
+            )
+        if (
+            self._directional_lay_liability is not None
+            and self._directional_lay_liability <= 0.0
+        ):
+            raise ValueError(
+                f"directional_lay_liability must be > 0 when set, got "
+                f"{self._directional_lay_liability!r}",
+            )
 
         # Pre-compute features and runner mappings
         self._precompute(feature_cache)
@@ -2841,6 +2924,9 @@ class BetfairEnv(gymnasium.Env):
             "opens_refused_pair_budget": (
                 self._opens_refused_pair_budget
             ),
+            # Value-bet gate refusal counter (plans/non-scalping-
+            # directional-probe/). Threshold = 0 → always 0.
+            "value_gate_refusals": int(self._value_gate_refusals),
             # E4 (2026-05-18). Per-episode count of stop-closes the
             # agent suppressed via keep_open_inversion. 0 when the
             # flag is off OR stop_loss_pnl_threshold = 0.
@@ -2935,6 +3021,8 @@ class BetfairEnv(gymnasium.Env):
         # reset at episode start.
         self._pairs_opened_this_race = 0
         self._opens_refused_pair_budget = 0
+        # Value-bet gate per-episode counter reset.
+        self._value_gate_refusals = 0
         # E4 (2026-05-18). Per-episode keep-open state reset.
         self._keep_open_sids = set()
         self._stop_close_overridden = 0
@@ -3679,6 +3767,67 @@ class BetfairEnv(gymnasium.Env):
                                     ),
                                 }
                                 continue
+
+                # ── Value-bet gate (plans/non-scalping-directional-
+                # probe/). Active only when strategy_mode == "value_win"
+                # AND threshold > 0. Refuse opens whose pwin-based EV
+                # per £1 stake is below the threshold. The price input
+                # is the current LTP (same convention as the lay-quality-
+                # gate); aggressive crossing might match a tick or two
+                # different but the gate's purpose is to filter
+                # decisions, not to predict matched price exactly.
+                if (
+                    self._strategy_mode == "value_win"
+                    and self._value_edge_threshold > 0.0
+                ):
+                    ltp = runner.last_traded_price
+                    pwin = self._race_p_win_by_race[self._race_idx].get(
+                        sid, 0.0,
+                    )
+                    if ltp is None or ltp <= 1.0:
+                        self._value_gate_refusals += 1
+                        action_debug[sid] = {
+                            "aggressive_placed": False,
+                            "passive_placed": False,
+                            "cancelled": did_cancel,
+                            "skipped_reason": "value_gate_unpriceable",
+                        }
+                        continue
+                    side_str = "back" if side == BetSide.BACK else "lay"
+                    edge = value_bet_edge(
+                        pwin, float(ltp), side_str, self._commission,
+                    )
+                    if edge < self._value_edge_threshold:
+                        self._value_gate_refusals += 1
+                        action_debug[sid] = {
+                            "aggressive_placed": False,
+                            "passive_placed": False,
+                            "cancelled": did_cancel,
+                            "skipped_reason": "value_gate_edge_below_threshold",
+                        }
+                        continue
+
+                # ── Directional sizing override. When the strategy
+                # mode is value_win and an override is set, replace
+                # the policy's stake action with the configured value.
+                # BACK: flat stake; LAY: stake = liability / (P-1) so
+                # the lose-side max-loss is fixed across prices.
+                if self._strategy_mode == "value_win":
+                    if (
+                        side == BetSide.BACK
+                        and self._directional_back_stake is not None
+                    ):
+                        stake = self._directional_back_stake
+                    elif (
+                        side == BetSide.LAY
+                        and self._directional_lay_liability is not None
+                    ):
+                        ltp = runner.last_traded_price
+                        if ltp is not None and ltp > 1.0:
+                            stake = self._directional_lay_liability / (
+                                float(ltp) - 1.0
+                            )
+
                 if side == BetSide.BACK and runner.available_to_lay:
                     bet = bm.place_back(
                         runner, stake, market_id=race.market_id,
