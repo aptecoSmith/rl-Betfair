@@ -1,0 +1,148 @@
+{
+  "label": "Probe A (back-only, 5 seeds x 3 days)",
+  "side_filter": "back",
+  "stats": {
+    "n": 4156,
+    "mean": -2.0873140815988935,
+    "std": 20.15049104034943,
+    "sharpe": -0.10358626384931498,
+    "sum": -8674.877323125002,
+    "n_wins": 946,
+    "winrate": 0.22762271414821944
+  },
+  "day_pnl": {
+    "by_day_pnl": {
+      "2026-04-28": -541.7285973750006,
+      "2026-04-29": -1926.5131337500025,
+      "2026-04-30": -6206.6355920000005
+    },
+    "by_day_count": {
+      "2026-04-28": 1379,
+      "2026-04-29": 1656,
+      "2026-04-30": 1121
+    }
+  },
+  "calibration": [
+    {
+      "decile_lo": 0.018892060666054575,
+      "decile_hi": 0.08557397786147158,
+      "predicted_mean": 0.05960460103642997,
+      "realised_mean": 0.0746987951807229,
+      "n": 415,
+      "delta": 0.015094194144292923
+    },
+    {
+      "decile_lo": 0.08557397786147158,
+      "decile_hi": 0.1286992112428887,
+      "predicted_mean": 0.11370539105127835,
+      "realised_mean": 0.012048192771084338,
+      "n": 415,
+      "delta": -0.10165719828019401
+    },
+    {
+      "decile_lo": 0.1286992112428887,
+      "decile_hi": 0.17695850786696302,
+      "predicted_mean": 0.15027868407919062,
+      "realised_mean": 0.04096385542168675,
+      "n": 415,
+      "delta": -0.10931482865750387
+    },
+    {
+      "decile_lo": 0.17695850786696302,
+      "decile_hi": 0.19970198723915297,
+      "predicted_mean": 0.19083592387158524,
+      "realised_mean": 0.06506024096385542,
+      "n": 415,
+      "delta": -0.12577568290772984
+    },
+    {
+      "decile_lo": 0.19970198723915297,
+      "decile_hi": 0.22332779673878703,
+      "predicted_mean": 0.2098342193489087,
+      "realised_mean": 0.1566265060240964,
+      "n": 415,
+      "delta": -0.053207713324812306
+    },
+    {
+      "decile_lo": 0.22332779673878703,
+      "decile_hi": 0.4166969022526546,
+      "predicted_mean": 0.29703509894202423,
+      "realised_mean": 0.327710843373494,
+      "n": 415,
+      "delta": 0.030675744431469754
+    },
+    {
+      "decile_lo": 0.4166969022526546,
+      "decile_hi": 0.4302200487176571,
+      "predicted_mean": 0.4243631809850408,
+      "realised_mean": 0.43614457831325304,
+      "n": 415,
+      "delta": 0.011781397328212262
+    },
+    {
+      "decile_lo": 0.4302200487176571,
+      "decile_hi": 0.5338877549439807,
+      "predicted_mean": 0.47665813702767057,
+      "realised_mean": 0.40963855421686746,
+      "n": 415,
+      "delta": -0.06701958281080311
+    },
+    {
+      "decile_lo": 0.5338877549439807,
+      "decile_hi": 0.681223029716729,
+      "predicted_mean": 0.5929518197154844,
+      "realised_mean": 0.25542168674698795,
+      "n": 415,
+      "delta": -0.33753013296849643
+    },
+    {
+      "decile_lo": 0.681223029716729,
+      "decile_hi": 0.8245336569884161,
+      "predicted_mean": 0.7196835410927965,
+      "realised_mean": 0.4867469879518072,
+      "n": 415,
+      "delta": -0.23293655314098932
+    },
+    {
+      "decile_lo": 0.8245336569884161,
+      "decile_hi": 0.8245336569884161,
+      "predicted_mean": 0.824533656988416,
+      "realised_mean": 1.0,
+      "n": 6,
+      "delta": 0.17546634301158404
+    }
+  ],
+  "verdict": {
+    "verdict": "FAIL",
+    "checks": {
+      "per_bet_ev": {
+        "pass": false,
+        "fail": true,
+        "actual": -2.0873140815988935,
+        "criterion": "PASS: >+0.50, FAIL: <+0.10"
+      },
+      "sharpe": {
+        "pass": false,
+        "fail": true,
+        "actual": -0.10358626384931498,
+        "criterion": "PASS: >0.10, FAIL: <0.05"
+      },
+      "days_profitable": {
+        "pass": false,
+        "fail": true,
+        "actual": "0/3",
+        "criterion": "PASS: >=2/3, FAIL: 0/3"
+      },
+      "bet_count_per_day": {
+        "pass": false,
+        "fail": true,
+        "actual": 1385.3333333333333,
+        "criterion": "PASS: 20-300/day, FAIL: <10 or >600"
+      },
+      "calibration_circuit_breaker": {
+        "tripped": false,
+        "criterion": "Top admitted decile delta > 10pp invalidates EV"
+      }
+    }
+  }
+}

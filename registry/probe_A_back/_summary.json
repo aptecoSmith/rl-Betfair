@@ -1,0 +1,174 @@
+{
+  "args": {
+    "days": [
+      "2026-04-28",
+      "2026-04-29",
+      "2026-04-30"
+    ],
+    "data_dir": "data\\processed",
+    "device": "cuda",
+    "predictor_bundle_manifests": null,
+    "n_seeds": 5,
+    "side": "back",
+    "edge_threshold": 0.05,
+    "back_stake": 10.0,
+    "lay_liability": null,
+    "lay_price_max": 0.0,
+    "commission": 0.05,
+    "output_dir": "registry\\probe_A_back",
+    "log_level": "INFO"
+  },
+  "elapsed_s": 613.0238218307495,
+  "per_day_seed": [
+    {
+      "seed": 0,
+      "day": "2026-04-28",
+      "n_bets": 284,
+      "n_wins": 67,
+      "sum_pnl": -297.3827633750001,
+      "mean_pnl_per_bet": -1.0471224062500002,
+      "value_gate_refusals": 1683,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 1,
+      "day": "2026-04-28",
+      "n_bets": 272,
+      "n_wins": 68,
+      "sum_pnl": -170.47187650000004,
+      "mean_pnl_per_bet": -0.6267348400735295,
+      "value_gate_refusals": 1734,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 2,
+      "day": "2026-04-28",
+      "n_bets": 267,
+      "n_wins": 61,
+      "sum_pnl": -182.65346087500006,
+      "mean_pnl_per_bet": -0.6840953590823973,
+      "value_gate_refusals": 1695,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 3,
+      "day": "2026-04-28",
+      "n_bets": 279,
+      "n_wins": 72,
+      "sum_pnl": 278.89445499999994,
+      "mean_pnl_per_bet": 0.9996217025089603,
+      "value_gate_refusals": 1735,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 4,
+      "day": "2026-04-28",
+      "n_bets": 277,
+      "n_wins": 68,
+      "sum_pnl": -170.11495162500006,
+      "mean_pnl_per_bet": -0.6141333993682313,
+      "value_gate_refusals": 1671,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 0,
+      "day": "2026-04-29",
+      "n_bets": 331,
+      "n_wins": 92,
+      "sum_pnl": -314.1085850000001,
+      "mean_pnl_per_bet": -0.9489685347432028,
+      "value_gate_refusals": 1691,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 1,
+      "day": "2026-04-29",
+      "n_bets": 324,
+      "n_wins": 92,
+      "sum_pnl": -359.6509700000001,
+      "mean_pnl_per_bet": -1.1100338580246916,
+      "value_gate_refusals": 1627,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 2,
+      "day": "2026-04-29",
+      "n_bets": 348,
+      "n_wins": 91,
+      "sum_pnl": -551.74528625,
+      "mean_pnl_per_bet": -1.585474960488506,
+      "value_gate_refusals": 1648,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 3,
+      "day": "2026-04-29",
+      "n_bets": 323,
+      "n_wins": 93,
+      "sum_pnl": -327.0685268750001,
+      "mean_pnl_per_bet": -1.0125960584365328,
+      "value_gate_refusals": 1690,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 4,
+      "day": "2026-04-29",
+      "n_bets": 330,
+      "n_wins": 86,
+      "sum_pnl": -373.93976562500006,
+      "mean_pnl_per_bet": -1.1331508049242427,
+      "value_gate_refusals": 1679,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 0,
+      "day": "2026-04-30",
+      "n_bets": 221,
+      "n_wins": 29,
+      "sum_pnl": -1274.100715,
+      "mean_pnl_per_bet": -5.765161606334842,
+      "value_gate_refusals": 2033,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 1,
+      "day": "2026-04-30",
+      "n_bets": 211,
+      "n_wins": 32,
+      "sum_pnl": -1131.735175,
+      "mean_pnl_per_bet": -5.3636738151658765,
+      "value_gate_refusals": 1974,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 2,
+      "day": "2026-04-30",
+      "n_bets": 226,
+      "n_wins": 34,
+      "sum_pnl": -1223.87442,
+      "mean_pnl_per_bet": -5.415373539823009,
+      "value_gate_refusals": 2003,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 3,
+      "day": "2026-04-30",
+      "n_bets": 222,
+      "n_wins": 28,
+      "sum_pnl": -1231.838502,
+      "mean_pnl_per_bet": -5.548822081081082,
+      "value_gate_refusals": 2034,
+      "force_close_bets": 0
+    },
+    {
+      "seed": 4,
+      "day": "2026-04-30",
+      "n_bets": 241,
+      "n_wins": 33,
+      "sum_pnl": -1345.08678,
+      "mean_pnl_per_bet": -5.581272946058092,
+      "value_gate_refusals": 2018,
+      "force_close_bets": 0
+    }
+  ]
+}

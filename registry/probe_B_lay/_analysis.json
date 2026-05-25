@@ -1,0 +1,148 @@
+{
+  "label": "Probe B (lay-only, 5 seeds x 3 days)",
+  "side_filter": "lay",
+  "stats": {
+    "n": 1555,
+    "mean": -0.6946458254059636,
+    "std": 8.050448391536634,
+    "sharpe": -0.08628660064900717,
+    "sum": -1080.1742585062734,
+    "n_wins": 1107,
+    "winrate": 0.7118971061093248
+  },
+  "day_pnl": {
+    "by_day_pnl": {
+      "2026-04-28": -262.4118332875047,
+      "2026-04-29": -284.9454540422099,
+      "2026-04-30": -532.8169711765588
+    },
+    "by_day_count": {
+      "2026-04-28": 635,
+      "2026-04-29": 535,
+      "2026-04-30": 385
+    }
+  },
+  "calibration": [
+    {
+      "decile_lo": 0.2253171126210043,
+      "decile_hi": 0.7852579426755735,
+      "predicted_mean": 0.5002141220895426,
+      "realised_mean": 0.36129032258064514,
+      "n": 155,
+      "delta": -0.1389237995088975
+    },
+    {
+      "decile_lo": 0.7852579426755735,
+      "decile_hi": 0.8445780356068534,
+      "predicted_mean": 0.8277937560757493,
+      "realised_mean": 0.7483870967741936,
+      "n": 155,
+      "delta": -0.07940665930155577
+    },
+    {
+      "decile_lo": 0.8445780356068534,
+      "decile_hi": 0.8879693651492845,
+      "predicted_mean": 0.8682917084635078,
+      "realised_mean": 0.5870967741935483,
+      "n": 155,
+      "delta": -0.28119493426995945
+    },
+    {
+      "decile_lo": 0.8879693651492845,
+      "decile_hi": 0.909022967280136,
+      "predicted_mean": 0.8958756166357155,
+      "realised_mean": 1.0,
+      "n": 155,
+      "delta": 0.10412438336428453
+    },
+    {
+      "decile_lo": 0.909022967280136,
+      "decile_hi": 0.9225522646410842,
+      "predicted_mean": 0.9163399886601898,
+      "realised_mean": 0.7483870967741936,
+      "n": 155,
+      "delta": -0.16795289188599627
+    },
+    {
+      "decile_lo": 0.9225522646410842,
+      "decile_hi": 0.925805778982637,
+      "predicted_mean": 0.9244176236374965,
+      "realised_mean": 0.8580645161290322,
+      "n": 155,
+      "delta": -0.06635310750846424
+    },
+    {
+      "decile_lo": 0.925805778982637,
+      "decile_hi": 0.9348588453767359,
+      "predicted_mean": 0.9310134036515594,
+      "realised_mean": 0.632258064516129,
+      "n": 155,
+      "delta": -0.2987553391354304
+    },
+    {
+      "decile_lo": 0.9348588453767359,
+      "decile_hi": 0.9595614396242172,
+      "predicted_mean": 0.9484278985163217,
+      "realised_mean": 0.6645161290322581,
+      "n": 155,
+      "delta": -0.2839117694840636
+    },
+    {
+      "decile_lo": 0.9595614396242172,
+      "decile_hi": 0.9719380602464692,
+      "predicted_mean": 0.96662899570194,
+      "realised_mean": 0.8709677419354839,
+      "n": 155,
+      "delta": -0.09566125376645618
+    },
+    {
+      "decile_lo": 0.9719380602464692,
+      "decile_hi": 0.98792980229305,
+      "predicted_mean": 0.9809640858692029,
+      "realised_mean": 0.6387096774193548,
+      "n": 155,
+      "delta": -0.3422544084498481
+    },
+    {
+      "decile_lo": 0.9889564385643353,
+      "decile_hi": 0.9889564385643353,
+      "predicted_mean": 0.9889564385643353,
+      "realised_mean": 1.0,
+      "n": 5,
+      "delta": 0.01104356143566465
+    }
+  ],
+  "verdict": {
+    "verdict": "FAIL",
+    "checks": {
+      "per_bet_ev": {
+        "pass": false,
+        "fail": true,
+        "actual": -0.6946458254059636,
+        "criterion": "PASS: >+0.50, FAIL: <+0.10"
+      },
+      "sharpe": {
+        "pass": false,
+        "fail": true,
+        "actual": -0.08628660064900717,
+        "criterion": "PASS: >0.10, FAIL: <0.05"
+      },
+      "days_profitable": {
+        "pass": false,
+        "fail": true,
+        "actual": "0/3",
+        "criterion": "PASS: >=2/3, FAIL: 0/3"
+      },
+      "bet_count_per_day": {
+        "pass": false,
+        "fail": false,
+        "actual": 518.3333333333334,
+        "criterion": "PASS: 20-300/day, FAIL: <10 or >600"
+      },
+      "calibration_circuit_breaker": {
+        "tripped": false,
+        "criterion": "Top admitted decile delta > 10pp invalidates EV"
+      }
+    }
+  }
+}

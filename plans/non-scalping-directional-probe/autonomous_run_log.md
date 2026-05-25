@@ -72,3 +72,68 @@ Also corrected the value-edge formula in
 the stake (not just net winnings) for back, and the win-side
 multiplied by `(P-1)` for lay. Production code uses the correct
 forms.
+
+---
+
+## 2026-05-25 — Phase 3 pre-flight smoke PASS
+
+`tools/probe_directional.py --days 2026-05-20 --n-seeds 1 --side both
+--edge-threshold 0.05 --back-stake 10 --lay-liability 20` produced:
+
+- 280 matched bets
+- 1530 value-gate refusals (gate wired and active)
+- 0 force_close bets (value_win is hold-to-settle, confirmed)
+- BACK stake ≈ £10 (mean 9.72, max 10.00); LAY liability ≈ £20
+  (mean 21.49 — small over-shoot from match-price drift vs LTP)
+
+All four §10.1–§10.4 hard constraints satisfied. Both real probes
+launched in background after this.
+
+---
+
+## 2026-05-25 — Phase 4 (Probe A back-only) FAIL
+
+5 seeds × 3 days held-out (2026-04-28 / 04-29 / 04-30):
+
+- 4156 bets total, 22.8% win rate
+- Mean per-bet P&L: **−£2.09**
+- Sharpe: **−0.10**
+- 0/3 days profitable
+- 1385 bets/day (above the 300 PASS ceiling — gate too loose)
+- Cumulative: **−£8,675**
+
+FAIL on every pre-registered metric. Calibration table in
+`findings.md` shows predictor over-confidence concentrated in
+the 0.50-0.75 admitted band (predicted 59-72%, realised 26-49%).
+
+---
+
+## 2026-05-25 — Phase 5 (Probe B lay-only) FAIL
+
+5 seeds × 3 days held-out, same window, price ∈ [2, 20]:
+
+- 1555 bets total, 71.2% lay-win rate
+- Mean per-bet P&L: **−£0.69**
+- Sharpe: **−0.09**
+- 0/3 days profitable
+- 518 bets/day (borderline — above 300 PASS ceiling, below
+  600 FAIL ceiling)
+- Cumulative: **−£1,080**
+
+FAIL on EV, Sharpe, days. Smaller magnitude than Probe A but
+unambiguous direction. Calibration: predicted lay-win 87-98% →
+realised 59-87% across almost the entire admitted band.
+
+---
+
+## 2026-05-25 — Phase 6 verdict
+
+`findings.md` committed. `memory/feedback_reliability_over_upside.md`
+updated with the held-out FAIL outcome and the two follow-on
+options (predictor recalibration, threshold sweep).
+
+Loop CLOSED — pre-registered "both fail" branch of the decision
+table taken: scalping remains the only mode where the predictor's
+edge is tradeable at current calibration.
+
+Wall-clock: ~2.5h from scaffold to verdict (plan budget was ~5h).
