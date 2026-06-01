@@ -37,6 +37,14 @@ documented manual-LSTM float-reorder tol), `test_v2_batched_rollout` 9/9
 (R1 contract + R2 cache parity), `test_agents_v2_discrete_policy` 20/20,
 end-to-end CUDA cohort smoke OK.
 
+**End-to-end real-cohort validation.** A 3-agent cluster through the actual
+`train_cluster_batched` path on real data (2 train + 1 eval day, CUDA,
+predictors-off) trains correctly with R1+R2: value_loss 2.6-2.9, **approx_kl
+0.01-0.016 (healthy, well under the early-stop threshold)**, finite rewards,
+eval bets/pnl in the expected fresh-init range — i.e. the speedup does NOT
+break training. (The smaller N=3 cluster amortises the batched forward less
+than the N=11 measurement; the 2.55× is the N=11 cluster number.)
+
 ## The bit-identical ceiling is ~2.5-3× — and why
 
 Measured floor of the per-agent work that CANNOT be batched without
@@ -78,6 +86,18 @@ per-agent bet state does not have them.
 3. **Multiprocess the cluster across cores** (bit-identical: each agent
    solo): ~N× on the per-agent env work, but does NOT use the GPU and pays
    N× env-build (no cross-process cache) + memory; net unclear, untested.
+
+### Smaller deferred wins (bit-identical, not done)
+- **Shared `load_day` cache** (~0.15×): the cluster parses the same day file
+  N× (~5 s × 11 ≈ 55 s of the 97 s build; `feature_cache` covers engineering,
+  not loading). Sharing one `Day` across cluster agents would cut it — BUT
+  needs (a) verifying the matcher's self-depletion does NOT mutate the shared
+  tick ladders (an N≥2 parity gate, like R2's), and (b) threading a
+  `day_cache` through `worker._build_env_for_day` (currently entangled with
+  unrelated working-tree WIP). Clean follow-on.
+- **Collector buffer pre-alloc** (~0.1×): the per-tick obs/mask/hidden gather
+  `torch.stack`s fresh lists; the solo collector's pre-allocated-buffer
+  pattern would avoid the per-tick alloc.
 
 ## Still open (separate from the speedup)
 - **Predictor parity in the batched path** (operator's earlier "fold parity
