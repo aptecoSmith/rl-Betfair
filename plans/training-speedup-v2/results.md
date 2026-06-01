@@ -98,6 +98,16 @@ per-agent bet state does not have them.
 - **Collector buffer pre-alloc** (~0.1×): the per-tick obs/mask/hidden gather
   `torch.stack`s fresh lists; the solo collector's pre-allocated-buffer
   pattern would avoid the per-tick alloc.
+- **Incremental reward attribution** (bit-identical; scales with bet count):
+  the `BatchedRolloutCollector._attribute_step_reward` walks ALL bets
+  (`all_settled_bets + live`) every tick — **O(n²)/episode**, a regression of
+  the solo collector's incremental `_AttributionState` (O(open-bets)) + its
+  per-tick→sampled invariant assert. Modest at low bet counts (~5%); larger in
+  high-bet cohorts (~600 opens/race). Fix: copy the solo's incremental
+  attribution (the "no rollout import" constraint blocks importing it; the
+  clean route is to extract both to a shared `attribution.py` that
+  `rollout.py` + `batched_rollout.py` import). Correctness-critical (feeds the
+  PPO gradient) → do it gated, not at session-tail.
 
 ## Still open (separate from the speedup)
 - **Predictor parity in the batched path** (operator's earlier "fold parity
