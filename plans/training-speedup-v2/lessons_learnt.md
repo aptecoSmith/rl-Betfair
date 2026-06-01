@@ -51,6 +51,26 @@ actual code. Two things only this approach showed:
   invisible to a function-level cProfile sort because it is spread
   across inline collector code, not one hot function.
 
+## R2 — cross-agent scorer cache (bit-identical, ~105s/cluster-day)
+
+The scorer features appended by `compute_extended_obs` are PURELY
+market-derived (`extract_array` reads tick/runner market data + the
+rolling-window history; NO bet/position input), so they are identical
+across the lockstep cluster agents at a given (race, tick). The
+`BatchedRolloutCollector` installs one shared `_scorer_cache` dict on
+every shim (cleared each tick); the first agent at a tick computes the
+scorer, the rest reuse it. **Bit-identical by construction** (verified:
+N=2 with-cache vs without-cache → max|Δobs| = 0, 0 action flips, both
+agents incl. the reusing one). Measured: cluster N=11 rollout
+**392s → 287s** (−105s; cluster-day ~450s, ~2.5× vs baseline). Gate:
+`tests/test_v2_batched_rollout.py::test_r2_scorer_cache_is_bit_identical`
++ a `scorer_cache_enabled` toggle for the no-cache baseline.
+
+**Lesson:** in a lockstep cluster sharing a market replay, any
+*market-derived* per-tick computation (scorer, and the market slice of
+the base obs) is identical across agents and computable once. The
+"is it position-dependent?" question is the test for shareability.
+
 ## R1 — GPU batch=N forward via vmap + manual-LSTM (operator: max speed, autonomous)
 
 Built the real GPU batch=N forward the operator pushed for. Key build facts:

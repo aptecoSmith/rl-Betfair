@@ -588,3 +588,58 @@ def test_batched_collector_falls_back_to_n1_session01_path():
     assert n_flips <= max(1, int(0.02 * len(t_solo))), (
         f"too many action flips ({n_flips}/{len(t_solo)})"
     )
+
+
+# ── R2: cross-agent scorer cache parity ─────────────────────────────────────
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _runtime_ok, reason=_runtime_reason)
+@pytest.mark.timeout(180)
+def test_r2_scorer_cache_is_bit_identical():
+    """R2: the shared cross-agent scorer cache is byte-identical to
+    per-agent scorer computation.
+
+    The scorer ``extra`` is purely market-derived, so a reusing agent's
+    cached value must equal the value it would have computed itself. Run
+    an N=2 cluster WITH the cache and WITHOUT it (same weights, same
+    seeds, fresh identical synthetic envs); every transition of BOTH
+    agents — including the reusing agent — must match bit-for-bit
+    (obs carries the scorer features, so obs equality is the load-bearing
+    check).
+    """
+    from agents_v2.env_shim import DiscreteActionShim
+
+    def _run(use_cache: bool):
+        shims, pols = [], []
+        for k in range(2):
+            torch.manual_seed(10 + k)
+            env = BetfairEnv(
+                _make_day(n_races=2, n_pre_ticks=10, n_inplay_ticks=2),
+                _scalping_config(),
+            )
+            shim = DiscreteActionShim(env)
+            shims.append(shim)
+            pols.append(DiscreteLSTMPolicy(
+                obs_dim=shim.obs_dim, action_space=shim.action_space,
+                hidden_size=32,
+            ))
+        coll = BatchedRolloutCollector(
+            shims=shims, policies=pols, device="cpu", seeds=[101, 202],
+            scorer_cache_enabled=use_cache,
+        )
+        return coll.collect_episode_batch()
+
+    tr_cache = _run(True)
+    tr_nocache = _run(False)
+    for a in range(2):
+        tc, tn = tr_cache[a], tr_nocache[a]
+        assert len(tc) == len(tn) > 0, f"agent {a}: step-count mismatch"
+        for i, (c, n) in enumerate(zip(tc, tn)):
+            assert c.action_idx == n.action_idx, f"agent {a} tick {i}: action"
+            assert np.array_equal(c.obs, n.obs), (
+                f"agent {a} tick {i}: obs (scorer features) drift with cache"
+            )
+            assert np.array_equal(c.value_per_runner, n.value_per_runner), (
+                f"agent {a} tick {i}: value drift with cache"
+            )

@@ -357,6 +357,26 @@ class DiscreteActionShim:
                 np.float32, copy=False,
             )
 
+        # R2 (training-speedup-v2): cross-agent scorer cache. The scorer
+        # ``extra`` is PURELY market-derived — ``extract_array`` reads the
+        # tick/runner market data + the rolling-window history; there is NO
+        # bet/position input — so it is IDENTICAL across all cluster agents
+        # at the same (race, tick). When the batched collector installs a
+        # shared ``_scorer_cache`` dict (agents step in lockstep), the first
+        # agent at (r, t) computes ``extra`` and the rest reuse it:
+        # bit-identical, ~13% of rollout saved. ``None`` (default) = per-agent
+        # compute = byte-identical to pre-R2. The collector clears the dict
+        # each tick so it stays bounded.
+        scorer_cache = getattr(self, "_scorer_cache", None)
+        cache_key = None
+        if scorer_cache is not None:
+            cache_key = (self.env._race_idx, self.env._tick_idx)
+            cached_extra = scorer_cache.get(cache_key)
+            if cached_extra is not None:
+                return np.concatenate([base_obs, cached_extra]).astype(
+                    np.float32, copy=False,
+                )
+
         slot_map = self.env._slot_maps[self.env._race_idx]
         runner_by_sid = {r.selection_id: r for r in tick.runners}
         feature_names = self._feature_spec["feature_names"]
@@ -431,6 +451,8 @@ class DiscreteActionShim:
                 n_rows += 1
 
         if n_rows == 0:
+            if scorer_cache is not None:
+                scorer_cache[cache_key] = extra
             return np.concatenate([base_obs, extra]).astype(
                 np.float32, copy=False,
             )
@@ -450,6 +472,9 @@ class DiscreteActionShim:
             if not finite[k]:
                 continue
             extra[dest] = clipped[k]
+
+        if scorer_cache is not None:
+            scorer_cache[cache_key] = extra
 
         return np.concatenate([base_obs, extra]).astype(
             np.float32, copy=False,

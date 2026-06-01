@@ -283,7 +283,12 @@ class BatchedRolloutCollector:
         policies: list[BaseDiscretePolicy],
         device: str = "cpu",
         seeds: list[int] | None = None,
+        scorer_cache_enabled: bool = True,
     ) -> None:
+        # R2: share the market-derived scorer across the lockstep cluster
+        # (default on). False disables it (the no-cache baseline used by
+        # the cache-parity regression test).
+        self.scorer_cache_enabled = bool(scorer_cache_enabled)
         if len(shims) != len(policies):
             raise ValueError(
                 f"shims and policies length mismatch: "
@@ -344,6 +349,21 @@ class BatchedRolloutCollector:
     def _collect(self) -> list[list[Transition]]:
         N = self.n
         device = self.device
+
+        # R2 (training-speedup-v2): shared cross-agent scorer cache. The
+        # scorer ``extra`` is purely market-derived, so it is identical
+        # across the lockstep cluster agents at a given (race, tick). One
+        # dict, shared by every shim; the first agent at a tick computes
+        # the scorer and the rest reuse it (bit-identical). Cleared each
+        # tick (below) so it stays bounded. Set BEFORE reset so the
+        # initial-obs scorer is shared too.
+        shared_scorer_cache: dict = {}
+        if self.scorer_cache_enabled:
+            for sh in self.shims:
+                sh._scorer_cache = shared_scorer_cache
+        else:
+            for sh in self.shims:
+                sh._scorer_cache = None
 
         # ── Per-agent state ──────────────────────────────────────────────
         latest_obs: list[Any] = [None] * N
@@ -462,6 +482,11 @@ class BatchedRolloutCollector:
                 # below may shrink the next tick's active list.
                 tick_active = list(active)
                 n_act = len(tick_active)
+
+                # R2: the scorer cache holds only the current tick's entry
+                # (all lockstep agents share it within Pass B); clear so it
+                # stays bounded. Populated during Pass B's shim.step.
+                shared_scorer_cache.clear()
 
                 # Re-stack params only on active-set change.
                 if tick_active != stacked_active:

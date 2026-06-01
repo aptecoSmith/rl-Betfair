@@ -2379,3 +2379,13 @@ value / P&L match EXACTLY (0 flips on the gate cases). Gated:
 documented manual-LSTM tols), `tests/test_v2_batched_rollout.py` 8/8 (R1
 contract). Next rungs: R2 obs/scorer cache (~13%), R3 batched update, R4
 env-core hybrid.
+
+**R2 — cross-agent scorer cache (bit-identical).** The scorer features in
+`compute_extended_obs` are purely market-derived → identical across the
+lockstep cluster agents at a given (race, tick). `BatchedRolloutCollector`
+shares one `_scorer_cache` dict across shims (cleared per tick); first agent
+computes, rest reuse. Bit-identical by construction (N=2 with-vs-without cache:
+max|Δobs|=0, 0 flips). Measured: cluster N=11 rollout **392s → 287s** (−105s);
+**cluster-day ~450s, ~2.5× vs the 1130s baseline.** Gate:
+`test_r2_scorer_cache_is_bit_identical`. R1+R2 banked; R3 (batched update) +
+R4 (env-core hybrid) next.
