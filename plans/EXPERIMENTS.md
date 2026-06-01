@@ -2351,3 +2351,31 @@ master_todo).** 3B (cross-agent scorer cache, ~13%, bit-identical-feasible) —
 deferred with approach (invasive; needs an N≥2 gate). 3C (env-core) — **NO-GO**
 (~3% slice, >80% branching, highest-risk matcher). Step 4 (BC) — not
 load-bearing per evidence; kept dropped + logged (HC#2).
+
+---
+
+## 2026-06-01 — training-speedup-v2 R1: GPU batch=N forward (full-pipeline push)
+
+**Intention.** Operator: "get as fast as possible, do everything autonomously."
+Build the real GPU batch=N forward (the transformational lever) the earlier
+CPU-rollout shortcut skipped.
+
+**Implementation.** `DiscreteLSTMPolicy.forward` split into a vmap-able
+`_forward_core` (tensors-in/out) + a `_manual_lstm_step` flag + `_lstm_compute`
+(manual matmul LSTM; the fused `nn.LSTM` has no vmap rule). `batched_forward_core`
+= `vmap(functional_call(forward, _return_core=True))` over `stack_module_state`.
+`BatchedRolloutCollector._collect` restructured: per tick, ONE batched GPU
+forward over all active agents (params stacked once per active-set change),
+then the existing per-agent CPU sample+step. `batched_worker` runs the forward
+on CUDA (`rollout_device=device`).
+
+**Result.** Measured forward 20.9× (hand-bmm) / 4.8× (vmap, used — DRY); at the
+cluster the serial env/obs then dominate so the rung lands **~2.0× cluster-day**:
+N=11 rollout **626s (CPU baseline) → 392s**; cluster-day ~555s vs the 1130s
+original baseline. **NOT bit-identical by sanction** — manual vs fused LSTM
+float-reorder (stake ~6e-6, hidden ~1.2e-3 accumulated) — but actions / bets /
+value / P&L match EXACTLY (0 flips on the gate cases). Gated:
+`tests/test_env_golden_parity.py` 11/11 (solo byte-identical + batched within
+documented manual-LSTM tols), `tests/test_v2_batched_rollout.py` 8/8 (R1
+contract). Next rungs: R2 obs/scorer cache (~13%), R3 batched update, R4
+env-core hybrid.

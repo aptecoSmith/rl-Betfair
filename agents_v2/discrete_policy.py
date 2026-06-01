@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -148,6 +149,39 @@ class DiscretePolicyOutput:
     # are shape ``(batch, max_runners)``.
     fc_prob_per_runner: torch.Tensor | None = None
     fc_prob_logits_per_runner: torch.Tensor | None = None
+
+
+class _ForwardTensors(NamedTuple):
+    """Pure-tensor result of ``DiscreteLSTMPolicy._forward_core``.
+
+    Everything ``DiscretePolicyOutput`` carries EXCEPT the
+    ``Categorical`` (built by ``forward`` from ``masked_logits``) — so
+    the core is a tensors-in/tensors-out function that ``vmap`` can map
+    over a cluster of stacked-weight agents (the R1 GPU batch=N forward).
+    ``new_hidden`` is split into ``new_h`` / ``new_c`` (flat tensors)
+    rather than a nested tuple to keep the vmap output pytree simple.
+    ``fc_*`` are ``None`` when the fc head is disabled (vmap treats them
+    as non-mapped constants; the batched collector reads only the
+    always-tensor fields).
+    """
+
+    logits: torch.Tensor
+    masked_logits: torch.Tensor
+    stake_alpha: torch.Tensor
+    stake_beta: torch.Tensor
+    value_per_runner: torch.Tensor
+    new_h: torch.Tensor
+    new_c: torch.Tensor
+    fill_prob: torch.Tensor
+    mature_prob: torch.Tensor
+    risk_mean: torch.Tensor
+    risk_log_var: torch.Tensor
+    direction_back_prob: torch.Tensor
+    direction_lay_prob: torch.Tensor
+    direction_back_logits: torch.Tensor
+    direction_lay_logits: torch.Tensor
+    fc_prob: torch.Tensor | None
+    fc_prob_logit: torch.Tensor | None
 
 
 class BaseDiscretePolicy(nn.Module, abc.ABC):
@@ -340,8 +374,38 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
     # opens/day — preventing an agent from drawing 0.99+ and
     # starving PPO of training signal. See phase-14
     # hard_constraints §10.
-    DIRECTION_GATE_THRESHOLD_MIN: float = 0.5
-    DIRECTION_GATE_THRESHOLD_MAX: float = 0.95
+    # 2026-05-25 RECALIBRATION (recipe-sensitivity-sweep). Original
+    # bounds (0.5, 0.95) were set when the per-agent direction head
+    # was pos_weighted (outputs cluster near 0.5). The frozen shared
+    # C11 head is unweighted-calibrated to the ~18 % positive rate —
+    # its ``max(back_prob, lay_prob)`` on placed bets has mean ~0.32,
+    # max ~0.84. The old MIN=0.5 silently clamped every agent's
+    # threshold UP to 0.5, squashing the gene range (0.20, 0.50) to
+    # a single point. New bounds match the C11 output distribution:
+    # MIN=0.10 (near-no-op — refuses only the tail), MAX=0.60 (still
+    # caps before policy starves on NOOP under C11's distribution).
+    # See genes.py:DIRECTION_GATE_THRESHOLD_RANGE for the matching
+    # gene-range recalibration.
+    DIRECTION_GATE_THRESHOLD_MIN: float = 0.10
+    DIRECTION_GATE_THRESHOLD_MAX: float = 0.60
+
+    # Path C (recipe-expansion campaign, 2026-05-30). The mature_prob
+    # open-gate's threshold range. ``mature_prob`` is the sigmoid of
+    # ``mature_prob_head`` — a per-runner probability in [0, 1] — so
+    # the gate threshold is clamped to [0, 1]. The gate is ENABLED iff
+    # the threshold is > 0.0 (no separate enable bool; default 0.0 =
+    # disabled = byte-identical to pre-Path-C). When enabled, the
+    # forward pass masks OPEN_BACK_i / OPEN_LAY_i logits (-inf) where
+    # ``mature_prob_i < threshold`` — i.e. the policy only opens pairs
+    # its own mature_prob_head predicts are likely to mature. NOOP and
+    # CLOSE_i are NEVER gated (same contract as the direction gate).
+    # The warmup-anneal floor is 0.0 (gate off at cold-start), ramped
+    # up to the configured threshold by the trainer — fresh-init
+    # sigmoid sits ~0.5, so a threshold > 0.5 would otherwise mask
+    # every open at episode 0 and collapse the policy to zero bets
+    # (the Phase-14 S06 cold-start lesson, mirrored here).
+    MATURE_GATE_THRESHOLD_MIN: float = 0.0
+    MATURE_GATE_THRESHOLD_MAX: float = 1.0
 
     def __init__(
         self,
@@ -352,12 +416,40 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         actor_mlp_hidden: int | None = None,
         direction_gate_enabled: bool = False,
         direction_gate_threshold: float = 0.5,
+        mature_prob_open_threshold: float = 0.0,
         enable_fc_prob_head: bool = False,
         runner_dim: int | None = None,
         frozen_direction_head_path: "Path | None" = None,
+        input_norm: bool = False,
     ) -> None:
         super().__init__(obs_dim, action_space, hidden_size)
         self.num_layers = 1
+        # Opt-in per-dim input standardization (imitation-first Step 2,
+        # 2026-05-30). FULL obs (143-d/runner) carries raw unnormalized
+        # dims up to ~190k; the raw `input_proj` Linear is dominated by
+        # them and drowns the well-scaled features (see memory
+        # feedback_full_obs_needs_input_norm). When enabled we register
+        # per-dim (mean, std) buffers and standardize obs in forward
+        # BEFORE input_proj. PER-DIM (not LayerNorm-across-dims) is
+        # deliberate: a LayerNorm over the heterogeneous obs would let
+        # the huge-magnitude dims dominate the per-sample mean/var and
+        # collapse the small dims to a constant. Default OFF registers
+        # NO buffers → state_dict + behaviour byte-identical to pre-plan,
+        # so existing lean-obs cohorts are unaffected (same opt-in
+        # convention as direction_gate_enabled / enable_fc_prob_head).
+        self._input_norm_enabled = bool(input_norm)
+        if self._input_norm_enabled:
+            self.register_buffer("obs_mean", torch.zeros(self.obs_dim))
+            self.register_buffer("obs_std", torch.ones(self.obs_dim))
+        # training-speedup-v2 R1: when True, ``_forward_core`` uses a
+        # manual (matmul/sigmoid/tanh) LSTM step instead of the fused
+        # ``nn.LSTM``. The fused op has no vmap batching rule; the manual
+        # decomposition is vmap-able, enabling the GPU batch=N forward
+        # (``batched_forward_core``). Default False → solo path uses
+        # ``nn.LSTM`` and is byte-identical to pre-R1 (golden-gated). The
+        # manual step matches nn.LSTM within ~1e-6 (float reordering);
+        # see tests/test_discrete_policy_manual_lstm.py.
+        self._manual_lstm_step: bool = False
         # Phase-15 fix (2026-05-24): which RUNNER_KEYS variant the env
         # uses (full=143 or lean=23) drives the per-slot input dim
         # for direction_prob_head + the runner_block slicing in
@@ -694,6 +786,31 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # N updates lets PPO see opens at cold-start.
         self._effective_gate_threshold: float | None = None
 
+        # Path C (2026-05-30). mature_prob open-gate config. Enabled
+        # iff threshold > 0.0 (no separate bool — keeps the plumbing
+        # to a single plumbed float and sidesteps the Path-A
+        # precedence foot gun documented in CLAUDE.md). Threshold
+        # clamped to [MATURE_GATE_THRESHOLD_MIN, _MAX] = [0, 1] at
+        # construction. When enabled, OPEN_BACK_i / OPEN_LAY_i logits
+        # are masked (-inf) where ``mature_prob_i < threshold``; NOOP
+        # and CLOSE_i are never gated.
+        self.mature_prob_open_threshold = float(
+            max(
+                self.MATURE_GATE_THRESHOLD_MIN,
+                min(
+                    self.MATURE_GATE_THRESHOLD_MAX,
+                    float(mature_prob_open_threshold),
+                ),
+            ),
+        )
+        self.mature_prob_open_gate_enabled = (
+            self.mature_prob_open_threshold > 0.0
+        )
+        # Trainer-poked warmup-annealed threshold (mirrors the
+        # direction gate's _effective_gate_threshold). Absent the
+        # poke the configured threshold is used directly.
+        self._effective_mature_gate_threshold: float | None = None
+
     # ── Hidden state ──────────────────────────────────────────────────────
 
     def init_hidden(
@@ -754,13 +871,85 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
 
     # ── Forward ───────────────────────────────────────────────────────────
 
+    def set_input_norm_stats(self, mean, std) -> None:
+        """Set the per-dim input-standardization buffers (imitation-first
+        Step 2). Requires the policy was built with ``input_norm=True``.
+
+        ``mean`` / ``std`` are length-``obs_dim`` arrays computed over a
+        representative train-obs sample. ``std`` is floored at 1e-6 to
+        avoid divide-by-zero on constant / all-zero dims (e.g. inactive
+        runner-slot padding).
+        """
+        if not self._input_norm_enabled:
+            raise RuntimeError(
+                "set_input_norm_stats requires input_norm=True at "
+                "construction.",
+            )
+        with torch.no_grad():
+            self.obs_mean.copy_(
+                torch.as_tensor(mean, dtype=self.obs_mean.dtype),
+            )
+            self.obs_std.copy_(
+                torch.as_tensor(std, dtype=self.obs_std.dtype).clamp_min(1e-6),
+            )
+
     def forward(
         self,
         obs: torch.Tensor,
         hidden_state: tuple[torch.Tensor, ...] | None = None,
         mask: torch.Tensor | None = None,
         apply_direction_gate: bool | None = None,
+        apply_mature_prob_gate: bool | None = None,
+        _return_core: bool = False,
     ) -> DiscretePolicyOutput:
+        """Run the tensor core, then build the Categorical + dataclass.
+
+        R1 (training-speedup-v2): the body lives in ``_forward_core``
+        (tensors-in/tensors-out) so ``vmap`` can map it over a cluster of
+        stacked-weight agents for the GPU batch=N forward. This wrapper is
+        byte-identical to the pre-R1 ``forward`` (same computation, same
+        Categorical construction).
+
+        ``_return_core=True`` returns the raw ``_ForwardTensors`` (skips
+        the ``Categorical`` + dataclass) — the form ``functional_call`` +
+        ``vmap`` consume in ``batched_rollout.batched_forward_core``
+        (``vmap`` cannot map a function that builds a ``Categorical``).
+        """
+        t = self._forward_core(
+            obs, hidden_state, mask,
+            apply_direction_gate, apply_mature_prob_gate,
+        )
+        if _return_core:
+            return t  # type: ignore[return-value]
+        dist = Categorical(logits=t.masked_logits)
+        return DiscretePolicyOutput(
+            logits=t.logits,
+            masked_logits=t.masked_logits,
+            action_dist=dist,
+            stake_alpha=t.stake_alpha,
+            stake_beta=t.stake_beta,
+            value_per_runner=t.value_per_runner,
+            new_hidden_state=(t.new_h, t.new_c),
+            fill_prob_per_runner=t.fill_prob,
+            mature_prob_per_runner=t.mature_prob,
+            predicted_locked_pnl_per_runner=t.risk_mean,
+            predicted_locked_log_var_per_runner=t.risk_log_var,
+            direction_back_prob_per_runner=t.direction_back_prob,
+            direction_lay_prob_per_runner=t.direction_lay_prob,
+            direction_back_logits_per_runner=t.direction_back_logits,
+            direction_lay_logits_per_runner=t.direction_lay_logits,
+            fc_prob_per_runner=t.fc_prob,
+            fc_prob_logits_per_runner=t.fc_prob_logit,
+        )
+
+    def _forward_core(
+        self,
+        obs: torch.Tensor,
+        hidden_state: tuple[torch.Tensor, ...] | None = None,
+        mask: torch.Tensor | None = None,
+        apply_direction_gate: bool | None = None,
+        apply_mature_prob_gate: bool | None = None,
+    ) -> "_ForwardTensors":
         if obs.dim() == 2:
             obs = obs.unsqueeze(1)  # (batch, 1, obs_dim)
         if obs.dim() != 3:
@@ -778,10 +967,21 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
             h0, c0 = self.init_hidden(batch)
             hidden_state = (h0.to(obs.device), c0.to(obs.device))
 
+        # Opt-in per-dim input standardization (imitation-first Step 2).
+        # No-op + byte-identical when input_norm=False (no buffers, flag
+        # off). When on, buffers broadcast over (batch, ctx, obs_dim).
+        if self._input_norm_enabled:
+            obs = (obs - self.obs_mean) / self.obs_std
+
         # Backbone
         flat = obs.reshape(batch * obs.shape[1], obs_dim)
         proj = self.input_proj(flat).reshape(batch, obs.shape[1], -1)
-        lstm_out, new_hidden = self.lstm(proj, hidden_state)
+        if self._manual_lstm_step:
+            # vmap-able manual LSTM (R1 GPU batch=N path). Matches nn.LSTM
+            # within ~1e-6; the fused nn.LSTM has no vmap batching rule.
+            lstm_out, new_hidden = self._lstm_compute(proj, hidden_state)
+        else:
+            lstm_out, new_hidden = self.lstm(proj, hidden_state)
         lstm_last = lstm_out[:, -1, :]  # (batch, hidden)
 
         # ── Auxiliary heads (Phase 7 S01) ─────────────────────────────
@@ -959,7 +1159,21 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
                 direction_back_prob=direction_back_prob,
                 direction_lay_prob=direction_lay_prob,
             )
-        dist = Categorical(logits=masked_logits)
+        # Path C (2026-05-30): mature_prob open-gate. Same
+        # rollout/update consistency contract as the direction gate
+        # — the trainer passes ``apply_mature_prob_gate=False`` at
+        # update time so the captured rollout-time mask (which already
+        # bakes in this gate via ``isfinite(masked_logits)``) is
+        # replayed rather than recomputed from drifted head outputs.
+        if apply_mature_prob_gate is None:
+            apply_mature_prob_gate = self.mature_prob_open_gate_enabled
+        if apply_mature_prob_gate:
+            masked_logits = self._apply_mature_prob_gate(
+                masked_logits,
+                mature_prob=mature_prob,
+            )
+        # (Categorical is built by ``forward`` from masked_logits — the
+        # core stays tensors-only so it is vmap-able.)
 
         # Stake Beta heads — softplus + 1 keeps alpha, beta > 1 (unimodal).
         # ``squeeze(-1)`` so shape is (batch,), matching the contract.
@@ -972,25 +1186,63 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
 
         value_per_runner = self.value_head(lstm_last)  # (batch, max_runners)
 
-        return DiscretePolicyOutput(
+        return _ForwardTensors(
             logits=logits,
             masked_logits=masked_logits,
-            action_dist=dist,
             stake_alpha=stake_alpha,
             stake_beta=stake_beta,
             value_per_runner=value_per_runner,
-            new_hidden_state=new_hidden,
-            fill_prob_per_runner=fill_prob,
-            mature_prob_per_runner=mature_prob,
-            predicted_locked_pnl_per_runner=risk_mean,
-            predicted_locked_log_var_per_runner=risk_log_var,
-            direction_back_prob_per_runner=direction_back_prob,
-            direction_lay_prob_per_runner=direction_lay_prob,
-            direction_back_logits_per_runner=direction_back_logits,
-            direction_lay_logits_per_runner=direction_lay_logits,
-            fc_prob_per_runner=fc_prob,
-            fc_prob_logits_per_runner=fc_prob_logit,
+            new_h=new_hidden[0],
+            new_c=new_hidden[1],
+            fill_prob=fill_prob,
+            mature_prob=mature_prob,
+            risk_mean=risk_mean,
+            risk_log_var=risk_log_var,
+            direction_back_prob=direction_back_prob,
+            direction_lay_prob=direction_lay_prob,
+            direction_back_logits=direction_back_logits,
+            direction_lay_logits=direction_lay_logits,
+            fc_prob=fc_prob,
+            fc_prob_logit=fc_prob_logit,
         )
+
+    def _lstm_compute(
+        self,
+        proj: torch.Tensor,
+        hidden_state: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Manual single-layer LSTM matching ``nn.LSTM`` (R1 vmap-able).
+
+        ``proj``: ``(batch, seq, H)``; ``hidden_state``: ``(h, c)`` each
+        ``(num_layers=1, batch, H)``. Returns ``(out (batch, seq, H),
+        (h, c))``. Decomposed into matmul/sigmoid/tanh so ``vmap`` can
+        batch it across stacked-weight agents — the fused ``aten::lstm``
+        has no batching rule. Gate order is PyTorch's ``[i, f, g, o]``
+        (weight_ih_l0 layout); matches ``nn.LSTM`` within ~1e-6 (float
+        reordering only — verified bit-close in
+        ``tests/test_discrete_policy_manual_lstm.py``).
+        """
+        h = hidden_state[0][0]  # (batch, H)  — num_layers == 1
+        c = hidden_state[1][0]
+        w_ih = self.lstm.weight_ih_l0   # (4H, H)
+        w_hh = self.lstm.weight_hh_l0   # (4H, H)
+        b_ih = self.lstm.bias_ih_l0     # (4H,)
+        b_hh = self.lstm.bias_hh_l0     # (4H,)
+        H = self.hidden_size
+        outs = []
+        for t in range(proj.shape[1]):
+            x = proj[:, t, :]  # (batch, H)
+            gates = x @ w_ih.t() + b_ih + h @ w_hh.t() + b_hh  # (batch, 4H)
+            i = torch.sigmoid(gates[:, 0:H])
+            f = torch.sigmoid(gates[:, H:2 * H])
+            g = torch.tanh(gates[:, 2 * H:3 * H])
+            o = torch.sigmoid(gates[:, 3 * H:4 * H])
+            c = f * c + i * g
+            h = o * torch.tanh(c)
+            outs.append(h)
+        out = torch.stack(outs, dim=1)  # (batch, seq, H)
+        new_hidden = (h.unsqueeze(0), c.unsqueeze(0))  # (1, batch, H) each
+        return out, new_hidden
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -1096,6 +1348,65 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         # baked into ``logits`` via -inf at illegal positions). The
         # gate writes -inf at gate-blocked positions; positions that
         # were already -inf stay -inf.
+        return logits.masked_fill(~gate_mask, float("-inf"))
+
+    def set_effective_mature_gate_threshold(self, value: float) -> None:
+        """Path C: trainer poke for warmup annealing (mirrors
+        :meth:`set_effective_gate_threshold`).
+
+        The trainer computes
+        ``effective = floor + frac × (threshold − floor)`` per episode
+        (floor = ``MATURE_GATE_THRESHOLD_MIN`` = 0.0, ``frac`` ramps
+        0 → 1 across the warmup window) and writes the result here.
+        The policy reads it in :meth:`_apply_mature_prob_gate`; absent
+        the poke the configured threshold is used directly.
+        """
+        self._effective_mature_gate_threshold = float(value)
+
+    def _apply_mature_prob_gate(
+        self,
+        logits: torch.Tensor,
+        *,
+        mature_prob: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mask OPEN_BACK_i / OPEN_LAY_i logits where the per-runner
+        ``mature_prob_i`` falls below ``mature_prob_open_threshold``.
+
+        Path C (2026-05-30). The action layout is
+        ``[NOOP, OPEN_BACK_0..R-1, OPEN_LAY_0..R-1, CLOSE_0..R-1]`` so
+        we slice the OPEN slots out of the flat logits tensor and
+        write `-inf` where ``mature_prob_i < threshold``. NOOP
+        (index 0) and CLOSE_i (last R indices) are NEVER masked — an
+        agent at a strict threshold with no high-maturation runners
+        emits NOOP and can always still close existing positions.
+
+        Unlike the direction gate (which takes ``max(P_back, P_lay)``
+        of two per-side heads), ``mature_prob`` is a single per-runner
+        probability, so the same gate-pass bool applies to both the
+        OPEN_BACK and OPEN_LAY slot of each runner.
+
+        ``mature_prob`` is the ``(batch, R)`` sigmoid output of
+        :attr:`mature_prob_head`. When the trainer has poked a
+        warmup-annealed value via
+        :meth:`set_effective_mature_gate_threshold`, that value is
+        used in place of the configured threshold.
+        """
+        threshold = (
+            self._effective_mature_gate_threshold
+            if self._effective_mature_gate_threshold is not None
+            else self.mature_prob_open_threshold
+        )
+        gate_pass = mature_prob >= threshold  # (batch, R) bool
+        R = self.max_runners
+        open_back_start = 1
+        open_lay_start = 1 + R
+        batch = logits.shape[0]
+        gate_mask = torch.ones(
+            batch, logits.shape[-1], dtype=torch.bool,
+            device=logits.device,
+        )
+        gate_mask[:, open_back_start: open_back_start + R] = gate_pass
+        gate_mask[:, open_lay_start: open_lay_start + R] = gate_pass
         return logits.masked_fill(~gate_mask, float("-inf"))
 
 

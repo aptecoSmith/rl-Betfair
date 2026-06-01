@@ -174,9 +174,23 @@ def test_batched_path_matches_golden_fixture(case_name):
         "fill_prob_at_placement", "mature_prob_at_placement",
         "direction_back_prob_at_placement", "direction_lay_prob_at_placement",
     })
+    # R1: batched_forward_core uses the vmap-able MANUAL LSTM, which differs
+    # from the golden's fused nn.LSTM by float-reordering that ACCUMULATES
+    # through the recurrence. Looser-but-tight tols on the LSTM-affected
+    # continuous quantities; DISCRETE actions stay exact (a flipped action
+    # cascades into a different trajectory and must still trip the gate —
+    # verified 0 flips on these cases).
+    manual_lstm_tol = {
+        "stake_unit": (0.0, 1e-4),
+        "hidden_in": (1e-3, 5e-3),
+        "log_prob_action": (1e-3, 1e-3),
+        "log_prob_stake": (1e-3, 1e-3),
+        "value_per_runner": (0.0, 1e-3),
+    }
     diffs = compare_streams(
         golden, batched, label=f"batched:{case.name}",
         ignore_bet_fields=aux_stamp_fields,
+        tol_override=manual_lstm_tol,
     )
     assert not diffs, (
         f"GATE FAIL: batched path diverged from golden '{case.name}' on a "

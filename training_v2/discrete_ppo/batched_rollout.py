@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -67,9 +67,125 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "BatchedForwardOut",
     "BatchedRolloutCollector",
+    "batched_forward_core",
     "cluster_agents_by_arch",
+    "stack_policies",
 ]
+
+
+# ── R1: GPU batch=N forward ──────────────────────────────────────────────
+
+
+class BatchedForwardOut(NamedTuple):
+    """Tensors-only result of :func:`batched_forward_core` (leading dim N).
+
+    Excludes the fc-head fields (``fc_prob``/``fc_prob_logit``) — they are
+    ``None`` when the fc head is disabled (the default) and ``vmap`` cannot
+    return ``None``. The batched collector does not stamp fc onto bets, so
+    dropping them is benign (documented batched-path limitation; if the fc
+    head is ever enabled in a batched cohort, wire it here).
+    """
+
+    logits: torch.Tensor
+    masked_logits: torch.Tensor
+    stake_alpha: torch.Tensor
+    stake_beta: torch.Tensor
+    value_per_runner: torch.Tensor
+    new_h: torch.Tensor
+    new_c: torch.Tensor
+    fill_prob: torch.Tensor
+    mature_prob: torch.Tensor
+    risk_mean: torch.Tensor
+    risk_log_var: torch.Tensor
+    direction_back_prob: torch.Tensor
+    direction_lay_prob: torch.Tensor
+    direction_back_logits: torch.Tensor
+    direction_lay_logits: torch.Tensor
+
+
+def stack_policies(policies: list):
+    """Stack a cluster's per-agent params/buffers for the batched forward.
+
+    Call ONCE per active-set change (weights are frozen during rollout —
+    no gradient steps — so re-stacking every tick is pure waste; that was
+    the dominant overhead in the first R1 measurement). Returns
+    ``(base, params, buffers)`` ready for :func:`batched_forward_core`.
+    """
+    from torch.func import stack_module_state
+    params, buffers = stack_module_state(policies)
+    return policies[0], params, buffers
+
+
+def batched_forward_core(
+    base,
+    params: dict,
+    buffers: dict,
+    obs: torch.Tensor,
+    hidden_h: torch.Tensor,
+    hidden_c: torch.Tensor,
+    mask: torch.Tensor,
+):
+    """One stacked GPU forward over a cluster of N same-arch agents.
+
+    training-speedup-v2 R1. Replaces the per-agent batch=1 forward loop
+    (launch-bound on CUDA) with a single ``vmap(functional_call(...))``
+    over the agents' stacked weights — the idle GPU finally does real
+    work. Uses each agent's manual-LSTM path (``_manual_lstm_step``)
+    because the fused ``nn.LSTM`` has no vmap batching rule.
+
+    Parameters
+    ----------
+    base : a reference DiscreteLSTMPolicy (``policies[0]``) — functional_call
+        runs its ``forward`` with the stacked params swapped in.
+    params, buffers : from :func:`stack_policies` (stacked once per
+        active-set change; weights are frozen during rollout).
+    obs : ``(N, 1, obs_dim)`` — one obs row per agent (the inner batch dim
+        of 1 is kept so each agent's ``forward`` sees a 2-D obs).
+    hidden_h, hidden_c : ``(N, num_layers, 1, hidden)`` — per-agent LSTM
+        state going INTO this tick.
+    mask : ``(N, action_n)`` bool — per-agent legality mask.
+
+    Returns
+    -------
+    :class:`BatchedForwardOut` (leading dim N). Each per-agent field carries
+    the inner batch=1 dim, e.g. ``masked_logits`` is ``(N, 1, action_n)``,
+    ``value_per_runner`` ``(N, 1, max_runners)``, ``new_h``/``new_c``
+    ``(N, 1, 1, hidden)``. The caller squeezes dim 1.
+    """
+    from torch.func import functional_call, vmap
+
+    prev_flag = base._manual_lstm_step
+    base._manual_lstm_step = True
+    try:
+        def core_fn(p, b, o, h, c, m):
+            t = functional_call(
+                base, (p, b), (o,),
+                {"hidden_state": (h, c), "mask": m, "_return_core": True},
+            )
+            # Tensors-only subset (drop the None-able fc fields so vmap
+            # can map the output pytree).
+            return BatchedForwardOut(
+                logits=t.logits, masked_logits=t.masked_logits,
+                stake_alpha=t.stake_alpha, stake_beta=t.stake_beta,
+                value_per_runner=t.value_per_runner,
+                new_h=t.new_h, new_c=t.new_c,
+                fill_prob=t.fill_prob, mature_prob=t.mature_prob,
+                risk_mean=t.risk_mean, risk_log_var=t.risk_log_var,
+                direction_back_prob=t.direction_back_prob,
+                direction_lay_prob=t.direction_lay_prob,
+                direction_back_logits=t.direction_back_logits,
+                direction_lay_logits=t.direction_lay_logits,
+            )
+
+        with torch.no_grad():
+            out = vmap(core_fn, in_dims=(0, 0, 0, 0, 0, 0))(
+                params, buffers, obs, hidden_h, hidden_c, mask,
+            )
+    finally:
+        base._manual_lstm_step = prev_flag
+    return out
 
 
 _ATTRIBUTION_TOLERANCE = 1e-4
@@ -329,104 +445,123 @@ class BatchedRolloutCollector:
         n_steps_per_agent: list[int] = [0] * N
         terminated_info: list[dict] = [{} for _ in range(N)]
 
+        # ── R1: batched-forward state ────────────────────────────────────
+        # The policy forward runs ONCE per tick over ALL active agents on
+        # ``self.device`` (GPU) via ``batched_forward_core`` (vmap over
+        # stacked weights). Sampling + env.step stay PER-AGENT on CPU —
+        # the env is CPU and per-agent CPU sampling keeps the RNG
+        # byte-identical to the solo collector / golden. Params are
+        # re-stacked only when the active set changes (weights are frozen
+        # during rollout, so per-tick re-stacking was pure waste).
+        stacked_active: list[int] | None = None
+        stacked: tuple | None = None  # (base, params, buffers)
+
         with torch.no_grad():
             while active:
                 # Snapshot active set for this tick — the env step
                 # below may shrink the next tick's active list.
                 tick_active = list(active)
+                n_act = len(tick_active)
+
+                # Re-stack params only on active-set change.
+                if tick_active != stacked_active:
+                    stacked = stack_policies(
+                        [self.policies[i] for i in tick_active],
+                    )
+                    stacked_active = list(tick_active)
+                base_p, params_p, buffers_p = stacked  # type: ignore[misc]
+
+                # ── Pass A: gather + ONE batched GPU forward ─────────────
+                masknp_by_i: dict[int, np.ndarray] = {}
+                hidden_in_by_i: dict[int, tuple] = {}
+                obs_rows = []
+                mask_rows = []
+                h_rows = []
+                c_rows = []
                 for i in tick_active:
+                    obs_np = np.asarray(latest_obs[i], dtype=np.float32)
+                    obs_rows.append(torch.from_numpy(obs_np))
+                    mnp = np.asarray(self.shims[i].get_action_mask(), dtype=bool)
+                    masknp_by_i[i] = mnp
+                    mask_rows.append(torch.from_numpy(mnp))
+                    # Hidden state going INTO the forward — snapshot on CPU
+                    # for the Transition record (matches solo capture).
+                    hidden_in_by_i[i] = tuple(
+                        t.detach().cpu().clone() for t in hidden_states[i]
+                    )
+                    h_rows.append(hidden_states[i][0])
+                    c_rows.append(hidden_states[i][1])
+                obs_batch = torch.stack(obs_rows, 0).unsqueeze(1).to(device)
+                mask_batch = torch.stack(mask_rows, 0).to(device)
+                h_batch = torch.stack(h_rows, 0).to(device)
+                c_batch = torch.stack(c_rows, 0).to(device)
+
+                fout = batched_forward_core(
+                    base_p, params_p, buffers_p,
+                    obs_batch, h_batch, c_batch, mask_batch,
+                )
+                # One batched device→CPU transfer of everything sampling /
+                # recording needs (replaces ~N per-agent syncs).
+                ml_cpu = fout.masked_logits.squeeze(1).cpu()          # (n, A)
+                sa_cpu = fout.stake_alpha.reshape(n_act, -1).cpu()    # (n, 1)
+                sb_cpu = fout.stake_beta.reshape(n_act, -1).cpu()     # (n, 1)
+                val_cpu = fout.value_per_runner.squeeze(1).cpu()      # (n, R)
+                nh_cpu = fout.new_h.cpu()  # (n, num_layers, 1, H)
+                nc_cpu = fout.new_c.cpu()
+
+                # ── Pass B: per-agent sample + env.step (CPU) ────────────
+                for k, i in enumerate(tick_active):
                     shim = self.shims[i]
-                    policy = self.policies[i]
                     obs = latest_obs[i]
-
-                    obs_buffers[i].copy_(
-                        torch.from_numpy(np.asarray(obs, dtype=np.float32))
-                        .unsqueeze(0)
-                    )
-                    mask_np = shim.get_action_mask()
-                    mask_buffers[i].copy_(
-                        torch.from_numpy(np.asarray(mask_np, dtype=bool))
-                        .unsqueeze(0)
+                    mask_np = masknp_by_i[i]
+                    hidden_in_t = hidden_in_by_i[i]
+                    # Advance hidden state for next tick (back onto the
+                    # policy/forward device).
+                    hidden_states[i] = (
+                        nh_cpu[k].to(device), nc_cpu[k].to(device),
                     )
 
-                    hidden_in_t = tuple(
-                        t.detach().clone() for t in hidden_states[i]
-                    )
+                    logits_i = ml_cpu[k:k + 1]      # (1, A)
+                    alpha_i = sa_cpu[k].reshape(1)  # (1,)
+                    beta_i = sb_cpu[k].reshape(1)   # (1,)
 
-                    # ── Per-agent RNG window ─────────────────────────────
+                    # ── Per-agent RNG window (CPU sampling) ──────────────
+                    # The forward (Pass A) consumes no RNG (deterministic),
+                    # so wrapping only the sample preserves the solo RNG
+                    # consumption order exactly. CPU-only — sampling moved
+                    # to CPU, so no CUDA RNG juggling is needed.
                     saved_cpu_state = (
                         torch.get_rng_state() if use_per_agent_rng else None
                     )
-                    saved_cuda_state = (
-                        torch.cuda.get_rng_state(cuda_device)
-                        if (use_per_agent_rng and cuda_device is not None)
-                        else None
-                    )
                     if use_per_agent_rng and per_agent_cpu_states is not None:
                         torch.set_rng_state(per_agent_cpu_states[i])
-                        if (
-                            per_agent_cuda_states is not None
-                            and cuda_device is not None
-                        ):
-                            torch.cuda.set_rng_state(
-                                per_agent_cuda_states[i], cuda_device,
-                            )
 
-                    out = policy(
-                        obs_buffers[i],
-                        hidden_state=hidden_states[i],
-                        mask=mask_buffers[i],
+                    action_dist = torch.distributions.Categorical(
+                        logits=logits_i,
                     )
-                    hidden_states[i] = out.new_hidden_state
-
-                    action = out.action_dist.sample()  # (1,) long
+                    action = action_dist.sample()  # (1,)
                     action_idx = int(action.item())  # STRUCTURAL sync
-
-                    log_prob_action_t = (
-                        out.action_dist.log_prob(action).detach().squeeze()
+                    pending_log_prob_action[i].append(
+                        action_dist.log_prob(action).detach().squeeze()
                     )
-                    pending_log_prob_action[i].append(log_prob_action_t)
 
-                    stake_dist = torch.distributions.Beta(
-                        out.stake_alpha, out.stake_beta,
-                    )
+                    stake_dist = torch.distributions.Beta(alpha_i, beta_i)
                     stake_unit_t = stake_dist.sample()  # (1,)
                     stake_unit = float(stake_unit_t.item())  # STRUCTURAL sync
-
                     if action_uses_stake(self.action_space, action_idx):
                         log_prob_stake_t = (
-                            stake_dist.log_prob(stake_unit_t)
-                            .detach().squeeze()
+                            stake_dist.log_prob(stake_unit_t).detach().squeeze()
                         )
                     else:
                         log_prob_stake_t = torch.zeros(
-                            (), dtype=stake_unit_t.dtype, device=device,
+                            (), dtype=stake_unit_t.dtype,
                         )
                     pending_log_prob_stake[i].append(log_prob_stake_t)
+                    pending_value_per_runner[i].append(val_cpu[k].clone())
 
-                    value_per_runner_t = (
-                        out.value_per_runner.detach().squeeze(0)
-                    )
-                    pending_value_per_runner[i].append(value_per_runner_t)
-
-                    # Capture and restore per-agent RNG state.
                     if use_per_agent_rng and per_agent_cpu_states is not None:
                         per_agent_cpu_states[i] = torch.get_rng_state()
-                        if (
-                            per_agent_cuda_states is not None
-                            and cuda_device is not None
-                        ):
-                            per_agent_cuda_states[i] = torch.cuda.get_rng_state(
-                                cuda_device,
-                            )
                         torch.set_rng_state(saved_cpu_state)
-                        if (
-                            saved_cuda_state is not None
-                            and cuda_device is not None
-                        ):
-                            torch.cuda.set_rng_state(
-                                saved_cuda_state, cuda_device,
-                            )
 
                     # ── Env step (sequential, per agent) ─────────────────
                     env_i = envs[i]
@@ -450,7 +585,7 @@ class BatchedRolloutCollector:
 
                     per_tick_obs[i].append(np.asarray(obs, dtype=np.float32))
                     per_tick_hidden_in[i].append(hidden_in_t)
-                    per_tick_mask[i].append(np.asarray(mask_np, dtype=bool))
+                    per_tick_mask[i].append(mask_np)
                     per_tick_action_idx[i].append(action_idx)
                     per_tick_stake_unit[i].append(stake_unit)
                     per_tick_per_runner_reward[i].append(per_runner_reward)

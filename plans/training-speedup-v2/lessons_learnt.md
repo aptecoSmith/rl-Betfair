@@ -51,6 +51,41 @@ actual code. Two things only this approach showed:
   invisible to a function-level cProfile sort because it is spread
   across inline collector code, not one hot function.
 
+## R1 — GPU batch=N forward via vmap + manual-LSTM (operator: max speed, autonomous)
+
+Built the real GPU batch=N forward the operator pushed for. Key build facts:
+
+- **vmap+functional_call works over a MANUAL-LSTM forward.** Refactored
+  `DiscreteLSTMPolicy.forward` → `_forward_core` (tensors-in/out) + a
+  `_manual_lstm_step` flag + `_lstm_compute` (matmul/sigmoid/tanh LSTM
+  matching nn.LSTM's `[i,f,g,o]` gate order). `batched_forward_core` =
+  `vmap(functional_call(forward, _return_core=True))` over
+  `stack_module_state` params. Default flag off → solo path byte-identical
+  (golden-gated; 20/20 policy tests pass).
+- **Stack params ONCE per active-set change, not per tick.** The first
+  measurement was 3.6× because `stack_module_state` ran every tick;
+  hoisting it (weights are frozen during rollout) lifted it to 4.8×.
+- **vmap (4.8×) < hand-bmm (20.9×) on the forward, but cluster-equal.**
+  vmap's per-op overhead caps the forward multiplier, but once the forward
+  is batched the serial per-agent env/obs dominate, so the cluster-day
+  difference is small — vmap's DRY win (one `_forward_core`, no duplicated
+  stacked forward) is the right call.
+- **Collector restructure: two passes per tick.** Pass A gathers obs/
+  hidden/mask for active agents → ONE batched GPU forward → one batched
+  device→CPU transfer. Pass B is the existing per-agent sample+step
+  (RNG/env/record unchanged). The forward is deterministic (no RNG), so
+  per-agent CPU sampling keeps RNG byte-identical to solo.
+- **R1 is NOT bit-identical — by sanction.** Manual vs fused LSTM differ
+  by float-reordering that ACCUMULATES through the recurrence: stake
+  ~6e-6, hidden ~1.2e-3 over ~1500 ticks. Actions/bets/value/P&L matched
+  EXACTLY (0 flips on the gate cases) — only LSTM-internal continuous
+  values drift. The gate (`compare_streams(tol_override=...)`) uses looser
+  manual-LSTM tols on those quantities; discrete stays EXACT (a flipped
+  action cascades into a different trajectory and must still trip the
+  gate). The 2 strict-`==` self-parity tests were updated to the R1
+  contract (discrete exact + bounded near-tie flips; continuous within tol).
+  Operator-sanctioned ("same-device gate + log flips").
+
 ## Step 3A — a true GPU batch=N forward breaks EXACT discrete parity
 
 The plan's headline lever was "stack N agents → one GPU forward." Building

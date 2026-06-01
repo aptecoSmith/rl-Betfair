@@ -173,16 +173,15 @@ def train_cluster_batched(
     cfg["training"]["starting_budget"] = float(starting_budget)
     max_runners = int(cfg["training"]["max_runners"])
 
-    # training-speedup-v2 Step 3A — split-device (phase-3 Option A applied
-    # to the batched path). Run the batched rollout on CPU: the v2 full-obs
-    # forward at batch=1 is CUDA-kernel-launch-bound, and CPU is ~20-28%
-    # faster on it (measured, tools/profile_v2_batched_breakdown.py). The
-    # per-agent PPO update stays on ``device`` (CUDA wins at mini-batch=64);
-    # the trainer's existing rollout_device split handles the CPU<->CUDA
-    # round trip. Also makes the batched rollout bit-identical to the CPU
-    # golden harness. rollout_device == device for CPU runs (byte-identical
-    # to pre-change). Mirrors worker.py::train_one_agent.
-    rollout_device = "cpu" if str(device) == "cuda" else device
+    # training-speedup-v2 R1 — the batched rollout runs ONE GPU forward
+    # over all active agents per tick (BatchedRolloutCollector +
+    # batched_forward_core), so the forward goes on ``device`` (CUDA) to
+    # use the idle GPU and amortise the batch=1 kernel-launch overhead.
+    # Sampling + env.step stay per-agent on CPU inside the collector.
+    # (Supersedes the Step-3A CPU-rollout stopgap: GPU batch=N beats CPU
+    # batch=1 per-agent. The PPO update is also on ``device``.) For CPU
+    # runs this is a no-op. feature_cache (below) is independent.
+    rollout_device = device
     # training-speedup-v2 Step 3A — cluster-scoped feature cache (phase-3
     # Option F.1 applied to the batched path, where it was silently dropped).
     # ``engineer_day`` runs ONCE per date instead of once per cluster agent

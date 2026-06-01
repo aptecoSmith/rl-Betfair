@@ -314,7 +314,8 @@ class Mismatch:
 
 
 def _cmp_array(name: str, a: np.ndarray, b: np.ndarray,
-               *, exact: bool, out: list[Mismatch]) -> None:
+               *, exact: bool, out: list[Mismatch],
+               tol_override: dict[str, tuple[float, float]] | None = None) -> None:
     a = np.asarray(a)
     b = np.asarray(b)
     if a.shape != b.shape:
@@ -332,7 +333,10 @@ def _cmp_array(name: str, a: np.ndarray, b: np.ndarray,
                 f"{a.reshape(-1)[idx]!r} vs {b.reshape(-1)[idx]!r}",
             ))
         return
-    rtol, atol = TOLERANCES.get(name, (1e-4, 1e-4))
+    if tol_override and name in tol_override:
+        rtol, atol = tol_override[name]
+    else:
+        rtol, atol = TOLERANCES.get(name, (1e-4, 1e-4))
     if not np.allclose(a, b, rtol=rtol, atol=atol, equal_nan=True):
         diff = np.abs(a.astype(np.float64) - b.astype(np.float64))
         # ignore nan-vs-nan
@@ -351,6 +355,7 @@ def _cmp_array(name: str, a: np.ndarray, b: np.ndarray,
 def compare_streams(
     golden: GoldenStream, candidate: GoldenStream, *, label: str = "",
     ignore_bet_fields: frozenset[str] = frozenset(),
+    tol_override: dict[str, tuple[float, float]] | None = None,
 ) -> list[Mismatch]:
     """Diff two streams per hard-constraint #1. Empty list ⇒ PASS.
 
@@ -360,6 +365,15 @@ def compare_streams(
     which — unlike the solo ``RolloutCollector`` — does NOT stamp them
     (a pre-existing batched-path gap, documented in step0_profile.md;
     orthogonal to a load-bearing forward/env/reward divergence).
+
+    ``tol_override`` replaces the default per-quantity ``(rtol, atol)`` for
+    named continuous quantities. Used by the R1 batched-forward gate: the
+    vmap-able MANUAL LSTM differs from the fused ``nn.LSTM`` by
+    float-reordering that ACCUMULATES through the recurrence (hidden state
+    ~1e-3 over ~1500 ticks, stake ~6e-6), so the LSTM-affected quantities
+    get looser-but-still-tight tols. Discrete quantities stay EXACT — a
+    flipped action is a real trajectory divergence (it cascades), not
+    float-reordering, and must still trip the gate.
     """
     out: list[Mismatch] = []
 
@@ -378,7 +392,7 @@ def compare_streams(
     for name in ("obs", "stake_unit", "log_prob_action", "log_prob_stake",
                  "value_per_runner", "per_runner_reward"):
         _cmp_array(name, getattr(golden, name), getattr(candidate, name),
-                   exact=False, out=out)
+                   exact=False, out=out, tol_override=tol_override)
     # hidden state tuple
     if len(golden.hidden_in) != len(candidate.hidden_in):
         out.append(Mismatch(
@@ -387,7 +401,8 @@ def compare_streams(
         ))
     else:
         for k, (ga, ca) in enumerate(zip(golden.hidden_in, candidate.hidden_in)):
-            _cmp_array("hidden_in", ga, ca, exact=False, out=out)
+            _cmp_array("hidden_in", ga, ca, exact=False, out=out,
+                       tol_override=tol_override)
 
     # bet ledger
     _compare_bets(golden.bets, candidate.bets, out, ignore_bet_fields)

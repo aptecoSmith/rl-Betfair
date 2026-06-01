@@ -157,8 +157,8 @@ def _build_batched_cluster(
 @pytest.mark.skipif(not _runtime_ok, reason=_runtime_reason)
 @pytest.mark.timeout(120)
 def test_per_agent_self_parity_batched_vs_solo():
-    """Running agent A inside a batch of N produces transitions
-    bit-identical to running A alone at the same seed.
+    """Running agent A inside a batch of N reproduces running A alone
+    at the same seed — within the R1 manual-LSTM tolerance.
 
     Build a 4-agent cluster with seeds [42, 43, 44, 45]. Run via
     BatchedRolloutCollector and keep agent 0's transition list.
@@ -167,13 +167,17 @@ def test_per_agent_self_parity_batched_vs_solo():
     rollout so solo's state-at-rollout matches the per-agent
     state captured by ``BatchedRolloutCollector(seeds=[42, ...])``.
 
-    Bit-identity is preserved by construction in design (c): each
-    agent's forward in the batched path is the same call as solo,
-    and the per-agent RNG save/restore inside
-    ``BatchedRolloutCollector`` makes the random samples
-    indistinguishable from solo's torch.manual_seed(42)-driven
-    sequence.
+    R1 (training-speedup-v2): the batched path runs ONE GPU forward
+    over all agents via ``batched_forward_core``, which uses the
+    vmap-able MANUAL LSTM (the fused ``nn.LSTM`` has no vmap rule).
+    Manual vs fused LSTM differ by float-reordering (~1e-7/step), so
+    parity is now: **discrete ``action_idx`` matches except rare
+    near-tie flips** (a 1e-7 logit shift can cross a sampling
+    boundary — the operator-sanctioned relaxation), and **continuous
+    quantities match within a declared tol**. Per-agent RNG
+    independence + the save/restore mechanism are unchanged.
     """
+    _ATOL = 1e-3
     seeds = [42, 43, 44, 45]
     _shims, _policies, batched = _build_batched_cluster(seeds=seeds)
     transitions_per_agent = batched.collect_episode_batch()
@@ -196,27 +200,37 @@ def test_per_agent_self_parity_batched_vs_solo():
         f"step count mismatch: batched={len(transitions_batched_0)} "
         f"solo={len(transitions_solo)}"
     )
+    n_flips = 0
     for t, (tb, ts) in enumerate(zip(transitions_batched_0, transitions_solo)):
-        assert tb.action_idx == ts.action_idx, (
-            f"tick {t}: action_idx batched={tb.action_idx!r} "
-            f"solo={ts.action_idx!r}"
-        )
-        assert tb.stake_unit == ts.stake_unit, (
+        if tb.action_idx != ts.action_idx:
+            # Rare near-tie float-reorder flip — a different action means
+            # a different stake/log-prob, so skip the continuous checks
+            # for this tick (they'd compare unrelated draws).
+            n_flips += 1
+            continue
+        assert abs(tb.stake_unit - ts.stake_unit) < _ATOL, (
             f"tick {t}: stake_unit batched={tb.stake_unit!r} "
             f"solo={ts.stake_unit!r}"
         )
-        assert tb.log_prob_action == ts.log_prob_action, (
+        assert abs(tb.log_prob_action - ts.log_prob_action) < _ATOL, (
             f"tick {t}: log_prob_action batched={tb.log_prob_action!r} "
             f"solo={ts.log_prob_action!r}"
         )
-        assert tb.log_prob_stake == ts.log_prob_stake, (
+        assert abs(tb.log_prob_stake - ts.log_prob_stake) < _ATOL, (
             f"tick {t}: log_prob_stake batched={tb.log_prob_stake!r} "
             f"solo={ts.log_prob_stake!r}"
         )
-        assert np.array_equal(tb.value_per_runner, ts.value_per_runner), (
+        assert np.allclose(
+            tb.value_per_runner, ts.value_per_runner, atol=_ATOL,
+        ), (
             f"tick {t}: value_per_runner batched={tb.value_per_runner!r} "
             f"solo={ts.value_per_runner!r}"
         )
+    # R1: discrete actions match except RARE near-tie flips (bounded).
+    assert n_flips <= max(1, int(0.02 * len(transitions_solo))), (
+        f"too many action flips ({n_flips}/{len(transitions_solo)}) — "
+        f"manual-LSTM drift should only flip rare near-ties"
+    )
 
 
 # ── Test 2: per-agent RNG independence in a batch ───────────────────────────
@@ -551,16 +565,26 @@ def test_batched_collector_falls_back_to_n1_session01_path():
 
     assert len(t_solo) == len(t_batched)
     assert len(t_solo) > 0
+    # R1: the batched forward uses the vmap-able manual LSTM, which differs
+    # from the solo nn.LSTM by float-reordering (~1e-7/step). So discrete
+    # actions match except rare near-tie flips; continuous within tol.
+    _ATOL = 1e-3
+    n_flips = 0
     for i, (tb, ts) in enumerate(zip(t_batched, t_solo)):
-        assert tb.action_idx == ts.action_idx, f"tick {i}: action drift"
-        assert tb.stake_unit == ts.stake_unit, f"tick {i}: stake drift"
-        assert tb.log_prob_action == ts.log_prob_action, (
+        if tb.action_idx != ts.action_idx:
+            n_flips += 1
+            continue
+        assert abs(tb.stake_unit - ts.stake_unit) < _ATOL, f"tick {i}: stake drift"
+        assert abs(tb.log_prob_action - ts.log_prob_action) < _ATOL, (
             f"tick {i}: log_prob_action batched={tb.log_prob_action!r} "
             f"solo={ts.log_prob_action!r}"
         )
-        assert tb.log_prob_stake == ts.log_prob_stake, (
+        assert abs(tb.log_prob_stake - ts.log_prob_stake) < _ATOL, (
             f"tick {i}: log_prob_stake drift"
         )
-        assert np.array_equal(tb.value_per_runner, ts.value_per_runner), (
-            f"tick {i}: value_per_runner drift"
-        )
+        assert np.allclose(
+            tb.value_per_runner, ts.value_per_runner, atol=_ATOL,
+        ), f"tick {i}: value_per_runner drift"
+    assert n_flips <= max(1, int(0.02 * len(t_solo))), (
+        f"too many action flips ({n_flips}/{len(t_solo)})"
+    )
