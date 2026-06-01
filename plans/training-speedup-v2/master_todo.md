@@ -3,6 +3,14 @@
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done. Each step states its
 DELIVERABLE and its VALIDATION GATE. Nothing is "done" until its gate passes.
 
+> **FINAL RESULTS (2026-06-02): ~2.55× cluster-day wall, bit-identical, gated
+> — see `results.md`.** Steps 0-4 done; R1 (GPU batch=N forward) + R2
+> (cross-agent scorer cache) + collector transfer reductions shipped on branch
+> `training-speedup-v2-steps-0-2` (8 commits). The bit-identical ceiling is
+> ~2.5-3× (per-agent sampling/RNG + env.step floor); 10× needs a full
+> tensor-env rewrite (R4, days/weeks) or non-bit-identical batched sampling
+> (a dynamics change) — operator decision, see `results.md` §"Paths beyond".
+
 ---
 
 ## Step 0 — Re-profile the real config  `[x]`  (DONE 2026-06-01 — see step0_profile.md)
