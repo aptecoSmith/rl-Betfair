@@ -88,3 +88,67 @@ Forward + sampling ≈ 52% of rollout, kernel-launch-bound at batch=1.
 Batching N≈10 agents into one GPU forward should amortise launches hard
 (uses the idle GPU on the CPU-bound box). Realistic target: a large cut to
 that 52%; measure GPU-util (was ~35%) and per-tick forward wall to size it.
+
+---
+
+## MEASURED + VERIFIED (2026-06-01, operator pushed for the real GPU win)
+
+- **GPU batch=N forward is real and large.** Manual stacked-bmm forward,
+  N=11, real policy op-shapes, CUDA: **16,043 µs/tick (per-agent loop) →
+  766 µs/tick (batched) = 20.9×** (`C:/tmp/measure_gpu_batchN.py`). This
+  is the validated transformational lever; "just run on CUDA" at batch=1 is
+  *slower* than CPU (launch-bound) — batching is the whole point.
+- **vmap+functional_call WORKS over a manual-LSTM forward** (the fused
+  `nn.LSTM` was the only blocker; matmul/sigmoid/tanh vmap fine). DRY path:
+  reuse one `_forward_tensors`, let vmap batch it. Measured **4.7×** on a
+  mini model (vmap has per-op overhead vs hand bmm's 20.9×).
+- **Device choice for the gate (operator decision):** same-device gate
+  (batched-GPU vs per-agent-GPU) + treat rare near-tie `Categorical.sample`
+  action flips as float-reordering, rate-measured + logged (HC#2). This
+  sanctions GPU batching under a slightly relaxed HC#1.
+
+## The ceiling — why the forward alone is ~2.5×, and what 10× needs
+
+Cluster-day wall (N=11) = env-build + rollout + PPO-update. Batching ONLY
+the forward exposes the *next* serial-per-agent bottleneck (obs, env-step,
+attribution, update). Measured-component ladder:
+
+| build | rollout | cluster-day | vs 1130 baseline |
+|---|--:|--:|--:|
+| now (CPU rollout + cache) | 627 | 789 | 1.4× |
+| + forward batch=N | ~287 | ~450 | ~2.5× |
+| + obs batched (3B) + batched update | ~184 | ~310 | ~3.6× |
+| + env-core batched (3C, hybrid) | ~70 | ~190 | **~6×** |
+
+**10× needs the whole pipeline, including the env core** — which the plan
+itself flagged as the data-dependent-branching part that "resists
+vectorization." vmap's lower forward multiplier (4.7× vs 20.9×) barely
+matters at the cluster level (450 vs ~445 s) because the forward stops
+being the bottleneck — so the DRY vmap path is the right engineering
+choice for the forward rung.
+
+## How to do the full pipeline WITHOUT the risk (operator's question)
+
+1. **The golden harness is the safety net** (Step 1). Every rung gated
+   against the canonical env; a phantom-profit-class bug trips it instantly.
+2. **HC#6 — never rewrite the canonical matcher.** The GPU matcher is a
+   SEPARATE fast-path module, continuously validated against the canonical
+   single-level matcher (which stays the golden + the vendored artifact).
+3. **Hybrid env-core fallback** — vectorize the COMMON case (priceable,
+   single-level, inside the junk filter); any tick hitting a rare branch
+   (junk edge / hard cap / force-close relaxation / walk) falls back to the
+   canonical per-agent matcher. Captures the speedup without the vectorized
+   path having to replicate the branchy edges.
+4. **Incremental + revertable (HC#5)** — forward → obs → update → env-core,
+   each gated + shippable alone. Stall at any rung → bank the rest.
+5. **Same-device gate + logged near-tie-flip rate** unblocks GPU batching.
+
+## Build sequence (each a gated increment)
+- **R1 forward batch=N** — `_forward_tensors` (manual-LSTM flag) refactor
+  (default off = solo byte-identical, golden-gated) + vmap batched path in
+  the collector + sample per-agent (RNG) or batched + scatter. Gate:
+  batched-GPU vs per-agent-GPU same-device, flips logged. ~2.5×.
+- **R2 obs (3B)** — cross-agent scorer cache (market-derived, shareable). ~3.0×.
+- **R3 batched PPO update** — stack the per-agent gradient computation. ~3.6×.
+- **R4 env-core (3C, hybrid)** — feasibility spike first, then vectorized
+  common-case matcher + canonical fallback. ~6× (the high-risk rung).
