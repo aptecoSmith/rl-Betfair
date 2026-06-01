@@ -509,10 +509,12 @@ class BatchedRolloutCollector:
                     mnp = np.asarray(self.shims[i].get_action_mask(), dtype=bool)
                     masknp_by_i[i] = mnp
                     mask_rows.append(torch.from_numpy(mnp))
-                    # Hidden state going INTO the forward — snapshot on CPU
-                    # for the Transition record (matches solo capture).
+                    # Hidden state going INTO the forward — snapshot on the
+                    # forward device (no per-tick GPU→CPU transfer; the
+                    # trainer / golden-capture move it as needed). Clone:
+                    # the rolling hidden state mutates each tick.
                     hidden_in_by_i[i] = tuple(
-                        t.detach().cpu().clone() for t in hidden_states[i]
+                        t.detach().clone() for t in hidden_states[i]
                     )
                     h_rows.append(hidden_states[i][0])
                     c_rows.append(hidden_states[i][1])
@@ -525,14 +527,23 @@ class BatchedRolloutCollector:
                     base_p, params_p, buffers_p,
                     obs_batch, h_batch, c_batch, mask_batch,
                 )
-                # One batched device→CPU transfer of everything sampling /
-                # recording needs (replaces ~N per-agent syncs).
-                ml_cpu = fout.masked_logits.squeeze(1).cpu()          # (n, A)
-                sa_cpu = fout.stake_alpha.reshape(n_act, -1).cpu()    # (n, 1)
-                sb_cpu = fout.stake_beta.reshape(n_act, -1).cpu()     # (n, 1)
-                val_cpu = fout.value_per_runner.squeeze(1).cpu()      # (n, R)
-                nh_cpu = fout.new_h.cpu()  # (n, num_layers, 1, H)
-                nc_cpu = fout.new_c.cpu()
+                # ONE batched device→CPU transfer of everything sampling /
+                # recording needs on CPU (logits + stake α/β + value),
+                # concatenated so it is a single sync (replaces 4). new_h /
+                # new_c STAY on the forward device (fed straight back into
+                # the next tick's forward — no CPU round-trip).
+                ml = fout.masked_logits.squeeze(1)              # (n, A)
+                val = fout.value_per_runner.squeeze(1)          # (n, R)
+                sa = fout.stake_alpha.reshape(n_act, 1)         # (n, 1)
+                sb = fout.stake_beta.reshape(n_act, 1)          # (n, 1)
+                _A = ml.shape[1]
+                _R = val.shape[1]
+                packed_cpu = torch.cat([ml, sa, sb, val], dim=1).cpu()
+                ml_cpu = packed_cpu[:, :_A]
+                sa_cpu = packed_cpu[:, _A:_A + 1]
+                sb_cpu = packed_cpu[:, _A + 1:_A + 2]
+                val_cpu = packed_cpu[:, _A + 2:]
+                new_h, new_c = fout.new_h, fout.new_c  # (n, num_layers, 1, H)
 
                 # ── Pass B: per-agent sample + env.step (CPU) ────────────
                 for k, i in enumerate(tick_active):
@@ -540,10 +551,11 @@ class BatchedRolloutCollector:
                     obs = latest_obs[i]
                     mask_np = masknp_by_i[i]
                     hidden_in_t = hidden_in_by_i[i]
-                    # Advance hidden state for next tick (back onto the
-                    # policy/forward device).
+                    # Advance hidden state for next tick — kept on the
+                    # forward device (clone detaches it from the batched
+                    # output so the parent tensor can free next tick).
                     hidden_states[i] = (
-                        nh_cpu[k].to(device), nc_cpu[k].to(device),
+                        new_h[k].clone(), new_c[k].clone(),
                     )
 
                     logits_i = ml_cpu[k:k + 1]      # (1, A)
