@@ -1910,3 +1910,401 @@ in-training monitor that drives early-stop).
   the first honest single-agent baseline.
 
 ---
+
+## 2026-05-25 → 2026-05-28: Recipe Expansion campaign (`plans/recipe-expansion-and-robustness/`)
+
+Multi-day autonomous campaign exploring the BC + pwin_back recipe at
+probe scale (4 agents × 1 gen × 3 train days × 5 eval days). Same
+eval set throughout: 2026-04-10, -17, -21, 2026-05-03, -06.
+
+**Headline result: discovered force_close=0 unlocks positive day_pnl.
+20/20 agents POSITIVE across 5 cells. Mean +£214, range +£71 to +£370.**
+See `plans/recipe-expansion-and-robustness/BREAKTHROUGH.md`.
+
+### Round 1 — Env-side recipe sweep (8 cells)
+**Intention:** find which env-side priors meaningfully shift behaviour
+on top of vanilla BC+pwin_back.
+**Result:** C2 pwin_back=0.20 only winner (+£64/d vs baseline). All
+other env-side gates regressed. C7 all_on stack collapsed.
+
+### Round 2 — Close-penalty + BC pretrain (5 cells)
+**Result:** close_signal_bonus is a dead lever at probe scale. BC=1000
+lifts mat% 5× but un-trains close_signal → -£315/d catastrophe.
+
+### Round 2.5 — Direction-gate threshold response (4 cells)
+**Result:** Threshold-response flat-and-harmful across 0.20-0.45. Drop
+the policy-side direction gate.
+
+### Round 3 — BC exit recovery (8 cells)
+**Result:** E7 (pwin_back + BC=500) hit 3/5 at -£66/d — best of round.
+Shaped partners confirmed DEAD at probe scale. Three-way classification:
+(a) shaped rewards — no authority at probe, (b) BC supervised — strong,
+(c) env-side action masks — strong.
+
+### Phase A — NOOP augmentation (3 cells, `bc-label-augmentation/`)
+**Result:** F1b mat% 10.0% (record) but cls% dropped to 5.8%, fc% 81.5%.
+NOOP alone makes close-decay WORSE. Day_pnl -£151.
+
+### Phase B — close+hold paired augmentation (3 cells)
+**Result:** F2 restored cls% to 41.2%, fc% to 52.3%, but opens dropped
+to 93 (below band) and mat% to 3.2%. Augmentation hit a plateau.
+
+### Round 5 — Recipe expansion (21 cells, the original Round 5)
+**Result:** No cell passed 4+ criteria. Augmentation plateau confirmed.
+Critical observation: **naked P&L consistently positive (+£44 to +£95)
+across all no-augmentation cells** — back-leg selection is EV-positive.
+
+### Round 6 — E7-anchored exploration (12 cells)
+**Result:** G1_e7_seed43 hit 4/5 at -£82.5 (first 4/5 cell ever).
+G2_e7_lay_price_max20 best day_pnl at -£54.6 (3/5). G4_e7_bc1000 also
+4/5 at -£99.6.
+
+### Round 6.5 — 🎯 FORCE-CLOSE HYPOTHESIS (6 cells)
+**Intention:** test whether disabling env force-close lets EV-positive
+nakeds dominate.
+**Result:** **5 of 6 cells POSITIVE day_pnl. 20 of 20 agents positive.
+Mean +£214, range +£71 to +£370.** K5 (lay_max+bc1000+fc=0) best at
++£233. K4 fc=30 partial disable at -£82 (full disable needed).
+
+### Round 7 — pwin/env-stack on fc=120 base (12 cells)
+**Result:** Best H2_e7_tight_lock_race_conf at -£34.3 (4/5) — cleanest
+non-fc=0 improvement. Tight_lock + race_conf is a real lever-stack
+worth combining with fc=0.
+
+### Round 9 — fc=0 parameter sweep (12 cells, in progress 2026-05-27)
+**Result so far:** L1_lay_max30 best at **+£259 mean, +£170 floor**
+(all 4 agents positive). L1_lay_max20 replicated K2's +£202 exactly.
+
+### Rounds 9.5, 10, 11, 8 — queued via chain wrapper
+9.5: extreme lay_max (40/50/100) + 3-seed replicate.
+10: 8-agent + multi-gen + BC dose + more seeds.
+11: naked_loss_scale + close_bonus + mat_bonus on fc=0 base.
+8: fc=120 cells (deprioritized, known-suboptimal).
+
+### WINNING RECIPE (mid-campaign)
+
+```
+--bc-pretrain-steps 500
+--predictor-p-win-back-threshold 0.20
+--reward-overrides force_close_before_off_seconds=0
+--lay-price-max 30   # may revise to higher after Round 9.5
+```
+
+### Caveats
+- L/σ_naked ≈ 0.04-0.10 — day_pnl is almost entirely naked-side.
+  Locked +£4-7. Depends on naked EV being structural, not eval-window.
+- Same 5 eval days throughout. Held-out probe owed.
+- Live deployment with fc=0 carries naked positions into in-play —
+  real money at risk. Sim may overstate EV.
+
+---
+
+## 2026-05-27 → 2026-05-30: Held-out methodology reset (recipe-expansion-and-robustness/, cont.)
+
+Pivoted to mandatory held-out evaluation after the fc=0 in-sample
+"+£287" breakthrough was reckoned with reality. Training stays on
+2026-04-06/08/09; iteration eval = 7 odd-dated held-out May days
+(2026-05-07,09,11,13,15,17,19); even days reserved as final test.
+fc=120 safety rail kept ON.
+
+### Held-out validation of fc=0 winner (HV cells)
+**Intention:** confirm whether the in-sample +£287 from
+fc=0+lay_max=100 generalises to unseen days.
+**Result:** **catastrophic collapse — every agent NEGATIVE on
+held-out (-£155 to -£195/day)**. The naked P&L that was +£270
+in-sample turned deeply negative out-of-sample. Confirms naked is
+zero-EV directional variance, not structural edge. fc=120 stays
+ON as safety rail.
+
+### Round H1 — honest re-baseline (6 cells, held-out)
+**Intention:** measure the deployable (fc=120) recipes on held-out
+to find which has the best LOCKED P&L (the structural edge).
+**Result:** all 6 NEGATIVE day_pnl (-£145 to -£232) on held-out.
+But identified two mat% levers:
+- **tight_lock** (`arb_spread_target_lock_pct=0.005`): mat 4.3% (vs
+  H1 baseline 1.6%).
+- **full-aug** (L2+L3a+L4 close-hold augmentation): mat 4.2%, best
+  day_pnl -£145, opens 100 (vs E7's 162) — selectivity helps.
+- Locked-per-matured holds positive (+£2-6) — true scalping works
+  per matured pair; bottleneck is mat% (only 4%).
+
+### Round M / M2 — mat%-push (14 cells, held-out)
+**Intention:** stack tight_lock + full-aug and push tight_lock harder.
+**Result:** mat% lifted to 7.0% at tight_lock=0.001 (P2). Best
+day_pnl **M6 (full-aug + pwin_back=0.25) at -£98**. Trade-off
+revealed: tighter spread → higher mat% but lower locked/pair.
+
+### Round N — selectivity push (6 cells, held-out)
+**Intention:** push selectivity further (pwin floors 0.30/0.35,
+the pwin BAND 0.20-0.50, seed replicates).
+**Result:** 🎯 **N4 (pwin BAND 0.20-0.50) hit -£78 day_pnl — new
+held-out leader.** Opens 52 (drastic selectivity), lkd/mat +£4.80
+(highest seen). Demonstrates the BAND lever: capping favourites
+filters out marginal/low-EV opens.
+
+### Round O — force-close window sweep (4 cells, held-out)
+**Result:** **fc=60 best (-£114)**; longer windows worse. Tighter
+fc window cuts naked exposure near the off.
+
+### Round P — seed robustness (6 cells, held-out)
+**Intention:** measure seed variance of full-aug+pwin025 across
+seeds 42-47.
+**Result:** mean -£130, range -£98 to -£164 (spread £65). The M6
+in-sample leader is seed-dependent; best seed (42) only matches
+its own training number on held-out. N4 (band) remains the
+distinct better recipe.
+
+### Round Q / R / S / T — currently running/queued
+
+| round | direction | finishes |
+|---|---|---|
+| Q (running) | tight spread + band cap variants | ~09:30 BST 2026-05-30 |
+| R (queued) | band-lever push (R1 band 0.15-0.45, R2 0.20-0.45, R3 0.15-0.50, R4 band+fc60, R5-R7 N4 seed replicates) | ~13:30 |
+| S (queued) | **mat%-LIFT path** (extreme tight_lock 0.0005-0.0001, fc=30/15, stacked) — explicitly trades £/pair for mat% per the economics framework | ~17:30 |
+| T (chained S→T) | **Path C — mature_prob open-gate** (policy-side per-runner mask; threshold sweep 0.20/0.30/0.40/0.50 + head-trained-no-gate control + seed replicate) | ~21:30 |
+
+### Round T — Path C: mature_prob open-gate (built + queued 2026-05-30)
+
+**Intention.** The highest-leverage untried mechanism per findings.md.
+Per-open economics are negative because most opens force-close
+(fc-side ≈ -£1.20/open). A policy-side gate that refuses OPEN_BACK/
+OPEN_LAY on runners whose own `mature_prob_head` says the pair is
+unlikely to mature should cut the unrefunded-open population at the
+decision point — flipping the sign, not just shrinking volume.
+
+**Implementation (this session).** New `--mature-prob-open-threshold`
+flag threaded runner → worker → `DiscreteLSTMPolicy`. The gate masks
+each runner's OPEN slots to -inf where `sigmoid(mature_prob_head) <
+threshold`; NOOP and CLOSE never gated. Mirrors the direction-gate's
+rollout/update KL-consistency contract (mask captured via
+`isfinite(masked_logits)` at rollout, replayed with
+`apply_mature_prob_gate=False` at update) and its warmup annealing
+(effective threshold 0→gene over `mature_gate_warmup_eps`, cold-start
+guard). Threaded as a direct function arg (NOT `trainer_hp.get(key,
+flag)`) to dodge the Path-A precedence foot-gun. Regression tests:
+`tests/test_v2_mature_gate.py` (12 pass).
+
+**Critical setup note.** Every prior round ran
+`mature_prob_loss_weight=0`, so the head was UNTRAINED (~constant 0.5)
+and any gate on it would be degenerate. Round T pins
+`mature_prob_loss_weight=2.0` cohort-wide so the head learns the
+strict-maturation label and the gate has real discrimination. T5 is a
+control (head trained, gate off) to separate the actor_input effect
+from the gate effect.
+
+**Result.** PENDING — chains after Round S (~21:30 BST 2026-05-30).
+
+### Current overall held-out leaderboard
+
+| rank | recipe | day_pnl |
+|---|---|---:|
+| **1** | **N4 — full-aug + pwin band 0.20-0.50** | **-£78** |
+| 2 | M6/N2/P_seed42 — full-aug + pwin 0.25/0.35 | -£98 |
+| 3 | O1 — full-aug + fc=60 | -£114 |
+| 4 | P seed mean (full-aug+pwin025 × 6 seeds) | -£130 |
+
+**No recipe is held-out-positive yet.** Per-open economics still
+negative: locked-side ≈ +£0.13/open vs fc-side ≈ -£1.20/open. To
+flip net positive, either mat% must rise 6× (~30%+) or fc-cost/pair
+must drop dramatically. Round S tests the mat-lift path explicitly.
+
+### Methodology lessons locked in (memory + this doc + autonomous_loop_v2.md)
+
+1. **Always eval on held-out, never train on held-out.** Maintain
+   train / iteration-eval / final-test split.
+2. **Naked P&L is zero-EV directional variance.** Select on LOCKED
+   P&L + mat%, not total day_pnl (which is naked-noise on short
+   eval windows).
+3. **fc=120 safety rail ON** for any deployable recipe.
+4. **Bash polling chains are the durable mechanism** for queued
+   work on this Windows + git-bash + Claude Code env. Multiple
+   "smart" daemon approaches (ScheduleWakeup, supervisor) failed.
+
+---
+
+## 2026-05-31 — bc-to-ppo scalping GA cohorts (autonomous overnight)
+
+**Plan.** `plans/bc-to-ppo/` (successor to bc-getting-it-right).
+
+**Intention.** bc-getting-it-right proved maturation is learnable (holdout
+AUC 0.745) and that a threshold-gated BC policy opens selectively + locks
+positive (but day_pnl-negative — the force-close toll). Single-agent PPO to
+make it profitable kept COLLAPSING to NOOP or FLOODING (200-400 opens/race →
+budget-exhausted nakeds). Two operator reward insights were implemented +
+verified but couldn't fix a single agent: (1) `per_pair_reward_at_resolution`
+(credit each pair's P&L — incl. force-close losses — at resolution, not
+lumped at settle: the credit-assignment fix), (2) `locked_pnl_reward_weight`
+(new env override: amplify POSITIVE locked 10x in the shaped channel, losses
+stay 1x — so the net value of opening flips positive). The binding problem is
+the selectivity knob-tangle (entropy x gate x open_cost x stop_loss x budget),
+which is a SEARCH problem → GA cohort.
+
+**Implementation brief.** Wide batched GA cohorts, full obs 2254 + input_norm
+(newly wired through worker.py — foot-gun grep-verified) + predictors
+(race-outcome + direction). New machinery this run: `locked_pnl_reward_weight`
+env override, `input_norm` cohort wiring, the force-close deviation barrier
+(`force_close_max_deviation_pct=0.50`). Cohort 1 (`registry/scalping_ga_c1_1780260727`): 30 agents x 5 gens,
+25 train + 2 eval days (holdout May 20-29 EXCLUDED; eval May 18-19), genes
+{open_cost, stop_loss_pnl_threshold, mature_prob_loss_weight,
+arb_spread_target_lock_pct} + legacy, pins {per_pair_reward_at_resolution=true,
+locked_pnl_reward_weight=9.0, mature_prob_open_threshold=0.30}, BC 500 steps,
+select on locked_per_std, argmax-eval. **[ANNOTATED 2026-06-01 by
+training-speedup-v2 Step 0: under `--batched` the BC 500 steps was a NO-OP,
+AND predictors / feature_cache / input_norm were ALSO silently dropped — c1
+is a predictor-less, BC-less run. See the correction block after the Cohort 2
+entry below.]** Cohorts 2/3 queued via bash chain with
+complementary configs (locked_weight 0/20, gate 0.20, day_pnl_per_std,
+reward_clip gene). Select-on-locked + a CLEAN final holdout test (May 20-29)
+of the best agents is the real validation (eval window is narrow → overfit
+risk; holdout catches it).
+
+**Result.** Cohort 1 ran **Gen 1 in 17.2h** — only ~1.3 of 5 gens fit the
+window. Two findings, both load-bearing for future cohort design:
+
+1. **Cost model was backwards.** Measured from the c1 scoreboard wall times:
+   **training is the expensive lever (~867s/agent-train-day**, batched ~10× via
+   hidden-size clusters), **eval is cheap (~70s/agent-eval-day**, serial). My
+   pre-launch uniform estimate of ~76s/agent-day *averaged* these and hid the
+   structure, so I cut the cheap thing (eval days → 2) to fit 30×5 and kept the
+   expensive thing (25 train days) maxed — exactly backwards. `gen_wall ≈
+   n_train×0.64h + n_eval×n_agents×70s` at ~30 agents.
+2. **2 eval days starved the selection metric.** `locked_per_std`'s σ over
+   n=2 is statistically meaningless → noisy fitness → the GA got no clean
+   gradient. Gen-2 bred genes barely moved from Gen-1 and not cleanly toward
+   the top-10 (only `stop_loss` converged; `mature_prob_loss_weight` and
+   entropy drifted the *wrong* way). The metric was right; the denominator was
+   starved. **2 eval days is fine for single-shot ranking** (Gen-1 still gave a
+   coherent winner signature) but **not for iterative breeding** (compounds
+   noise).
+
+**Gen-1 science (still useful).** 4/30 day_pnl-positive but mostly naked-lucky
+(locked ≈ £0). The GA correctly surfaced **high-locked structural scalpers**
+via locked_per_std: best +£20-26 locked (≈ +£13/day, **8× the threshold-gated
+BC baseline** of +£1.5/day). day_pnl negative because **force-close was OFF**
+(non-matured settle naked at ±£100s). mat% 5-9%. Gene signature of the
+winners: high `mature_prob_loss_weight` (2.8-4.4), meaningful `open_cost`
+(0.5-1.7), low entropy, wide-ish `arb_lock_pct` (~0.038). c1 + bash chain +
+monitor **killed**; superseded by Cohort 2.
+
+---
+
+## 2026-06-01 — bc-to-ppo Cohort 2 (stable-fitness redesign)
+
+**Plan.** `plans/bc-to-ppo/` (supersedes Cohort 1 above).
+
+**Intention.** Fix c1's two flaws while keeping its working parts. The headline
+change is **7 eval days (was 2)** for a usable selection σ so the GA actually
+breeds. Pay for it by **cutting train days 25→12** (the expensive lever; BC
+warm-start means PPO doesn't need 25 days to express the reward genes). Result
+is a properly-sized GA the operator chose at ~1.5 days wall.
+
+**Implementation brief.** `registry/scalping_ga_c2_1780341500`. **20 agents ×
+4 generations**, **12 train + 7 eval days** (eval = May 13-19, fixed
+validation; **holdout May 20-29 EXCLUDED**), batched, full obs 2254 +
+input_norm + predictors. **[ANNOTATED 2026-06-01 by training-speedup-v2
+Step 0: "input_norm + predictors" is WRONG for the batched training path —
+both were silently dropped, as was BC 500 steps and feature_cache. c2 trained
+on full-obs-2254 with zero-filled predictor slots, no input_norm, no BC. See
+the correction block at the end of this entry.]** Genes {open_cost, stop_loss_pnl_threshold,
+mature_prob_loss_weight, arb_spread_target_lock_pct} + legacy. Pins
+{per_pair_reward_at_resolution=true, locked_pnl_reward_weight=9.0,
+mature_prob_open_threshold=0.30}, BC 500 steps, select **locked_per_std**
+(now with a stable σ), argmax-eval, seed 45. Train **fc=0** (keep naked
+signal); **winners get an fc=120 holdout re-eval** on May 20-29 (the clean
+verdict — does the +£20-26 locked edge survive on never-trained days once the
+naked tail is capped?). `locked_pnl_reward_weight` left pinned (not a
+CohortGenes field — evolving it needs a dataclass change + wiring test;
+deferred to avoid a silent-swallow bug on a 1.5-day run).
+
+**Lesson banked.** Match eval-day count to the selection metric's variance
+needs *before* launch; cost-model a run from measured per-phase wall times,
+not a uniform per-agent-day average.
+
+**Result.** [RUNNING — launched 2026-06-01 ~20:18. 4-gen monitor armed; gen-on-
+gen breeding-bite + best-agent fc=120 holdout test to follow.] **[c2 process
+later EXITED 1 per `registry/launch_c2.log`.]**
+
+**CORRECTION (2026-06-01, training-speedup-v2 Step 0) — applies to BOTH
+Cohort 1 and Cohort 2.** Profiling the real `--batched` path to re-measure the
+cost model surfaced that `--batched` silently drops far more than BC. Verified
+three ways (code read of `train_cluster_batched`/`_build_env_for_day`, a build
+probe printing `env._use_race_outcome_predictor`, and the c1 log's ~20 s
+env-build timing matching the predictors-OFF path not the ~43 s predictors-ON
+path):
+
+- **predictors (race-outcome + direction) silently OFF** — `--use-race-outcome-predictor
+  --use-direction-predictor` were accepted but `train_cluster_batched` never
+  threads `predictor_bundle` into the env, so it resolves to `False`. obs is
+  still 2254-d but the 2226 predictor slots are **zero-filled** and every
+  pwin / direction / race-confidence gate is a no-op. **c1 and c2 are
+  predictor-less runs.**
+- **feature_cache OFF** — re-engineers each agent's day from scratch (11×
+  redundant per cluster-day).
+- **input_norm OFF** — batched policy built without it.
+- **BC 500 steps OFF** + **per_transition_credit OFF** — the originally-known
+  drops (runner warns on these two only).
+
+Consequence: the c1 "high-locked structural scalper" gene signatures and c2's
+fitness are from a *predictor-less, input-norm-less, BC-less* configuration.
+Re-interpret accordingly; an operator decision on whether to fix the batched
+feature parity is pending. Full detail: `plans/training-speedup-v2/step0_profile.md`.
+
+---
+
+## 2026-06-01 — training-speedup-v2 Step 0 profile (real --batched config)
+
+**Intention.** Re-profile the production batched path (full obs 2254 +
+`--batched`) with faithful per-phase wall timers to replace the stale Phase-3
+lean-obs cProfile breakdown and steer the speedup stages.
+
+**Implementation.** `tools/profile_v2_batched_breakdown.py` monkeypatches
+`time.perf_counter` accumulators onto the **real** `BatchedRolloutCollector` /
+`BetfairEnv` / shim methods (not cProfile) and runs N=2 arch-identical agents
+through one real training day (2026-05-09, 13 520 ticks, hidden=128, cuda,
+predictors OFF = what actually ran).
+
+**Result.**
+- **867 s/agent-train-day decoded** = the per-day wall of an ~11-agent batched
+  *cluster* (the cluster-wide `train_wall` is written into every agent's
+  `wall_time_sec`), cohort-averaged over 25 days. True per-agent marginal ≈ 80 s.
+- **Cluster-day wall ≈ 75 % rollout, 22 % env build, 6 % PPO update.**
+- **Rollout breakdown:** policy_forward 35 % + sampling 15 % + rng 2 % ≈ **52 %
+  batch=1 GPU work (Step 3A lever)**; scorer_obs 13 % + base_obs 5 % ≈ 18.5 %
+  (Steps 2/3B); collector residual ~22 %; **env-core matching+settle ≈ 3 %
+  (Step 3C is the smallest, riskiest lever — defer)**.
+- Forward is **kernel-launch-bound, not FLOP-bound** (hidden=128 reconciled
+  within 6 % of c1's hidden=256) → batch=N forward should amortise hard.
+- GATE: N=11 extrapolation (~1040 s) vs c1 log measured day-1 (1101 s) agree
+  within 6 %; 867 s is the smaller-day average. **Reconciles within ±15 %.**
+
+**Lesson banked.** When a code path forks (sequential vs batched), every kwarg
+the canonical path threads is a silent-drop candidate in the fork — diff the
+two call sites. And always check what a "per-agent" wall number divides by
+before optimising against it.
+
+---
+
+## 2026-06-01 — training-speedup-v2 Step 1 (harness) + Step 2 (extract_array)
+
+**Step 1 — bit-identical golden harness (the gate).** `training_v2/golden_parity.py`
+(capture + per-quantity comparator: discrete exact, continuous within declared
+tol) + `golden_cases.py` (7-case battery, predictors-ON) + `tools/gen_golden_fixtures.py`
++ `tests/test_env_golden_parity.py`. Both gates pass 9/9: (a) current env
+reproduces committed fixtures bit-for-bit; (b) an injected 1-tick matcher price
+shift is caught end-to-end. Battery covers normal/naked/multipair, force-close
+(13 fired), stop-loss (1 fired), predictor-gated, empty/all-refused, seeds
+{1,2,3}, hidden {64,128,256}. Caught a real nondeterminism on run #1 — `pair_id`
+is a random uuid → comparator now compares pairing STRUCTURE not the string.
+
+**Step 2 — `extract_array` (deferred Option B-big), gated bit-identical.**
+Eliminated the scorer hot path's per-call 30-key dict build + re-key by sharing
+one `_extract_into` writer between `extract` (dict) and a new `extract_array`
+(writes a preallocated matrix row). **~32-44% faster on the extract+rekey path
+(15-19→10.6 us/call), ~2-3.3 s/agent-day, byte-identical** (byte-equality test +
+all 9 golden cases still reproduce + 14 scorer tests pass). The whole-stack
+profiler was too noisy (untouched forward ±18% run-to-run) — a CPU micro-bench
+was needed to measure it.
+
+**Lesson banked.** For sub-5%-of-rollout optimisations, the whole-stack profiler's
+run-to-run variance (GPU forward, thermal) swamps the signal — isolate with a
+CPU micro-bench of the exact changed function.

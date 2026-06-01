@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable
 
+import numpy as np
+
 from data.episode_builder import Race, RunnerSnap, Tick
 from env.tick_ladder import _LADDER_BANDS, MAX_PRICE, MIN_PRICE
 
@@ -85,6 +87,47 @@ _VELOCITY_VOLUME_WINDOW_SEC = 30.0
 _RANK_WINDOW_SEC = 60.0
 
 
+# Stable name→index map for the array-writing fast path (``extract_array``,
+# training-speedup-v2 Step 2). Derived from FEATURE_NAMES so a
+# declaration-order edit auto-reindexes — the position a feature occupies
+# in the array is ALWAYS its position in FEATURE_NAMES, which is the same
+# order the dict path's consumer re-keys by. This is the load-bearing
+# ordering contract; the byte-equality test
+# (tests/test_extract_array_parity.py) guards it.
+_N_FEATURES: int = len(FEATURE_NAMES)
+_FN_INDEX: dict[str, int] = {name: i for i, name in enumerate(FEATURE_NAMES)}
+_I_BEST_BACK = _FN_INDEX["best_back"]
+_I_BEST_LAY = _FN_INDEX["best_lay"]
+_I_LTP = _FN_INDEX["ltp"]
+_I_SPREAD = _FN_INDEX["spread"]
+_I_SPREAD_IN_TICKS = _FN_INDEX["spread_in_ticks"]
+_I_MID_PRICE = _FN_INDEX["mid_price"]
+_I_BACK_SIZE = (
+    _FN_INDEX["back_size_l1"], _FN_INDEX["back_size_l2"], _FN_INDEX["back_size_l3"],
+)
+_I_LAY_SIZE = (
+    _FN_INDEX["lay_size_l1"], _FN_INDEX["lay_size_l2"], _FN_INDEX["lay_size_l3"],
+)
+_I_TOTAL_BACK_SIZE = _FN_INDEX["total_back_size"]
+_I_TOTAL_LAY_SIZE = _FN_INDEX["total_lay_size"]
+_I_TIME_TO_OFF = _FN_INDEX["time_to_off_seconds"]
+_I_TIME_SINCE_LAST_TRADE = _FN_INDEX["time_since_last_trade_seconds"]
+_I_TRADED_VOL_30 = _FN_INDEX["traded_volume_last_30s"]
+_I_LTP_CHANGE_30 = _FN_INDEX["ltp_change_last_30s"]
+_I_SPREAD_CHANGE_30 = _FN_INDEX["spread_change_last_30s"]
+_I_SIDE_BACK = _FN_INDEX["side_back"]
+_I_SIDE_LAY = _FN_INDEX["side_lay"]
+_I_FAV_RANK = _FN_INDEX["favourite_rank"]
+_I_SORT_PRIORITY = _FN_INDEX["sort_priority"]
+_I_LTP_RANK_CHANGE_60 = _FN_INDEX["ltp_rank_change_last_60s"]
+_I_N_ACTIVE = _FN_INDEX["n_active_runners"]
+_I_TOTAL_MKT_VOL = _FN_INDEX["total_market_volume"]
+_I_TOTAL_MKT_VOL_VEL = _FN_INDEX["total_market_volume_velocity"]
+_I_MKT_WIN = _FN_INDEX["market_type_win"]
+_I_MKT_EW = _FN_INDEX["market_type_each_way"]
+_I_MKT_OTHER = _FN_INDEX["market_type_other"]
+
+
 @dataclass(slots=True)
 class _RunnerHistory:
     """Per-runner rolling state for one market.
@@ -142,6 +185,10 @@ class FeatureExtractor:
     def __init__(self) -> None:
         self._markets: dict[str, _MarketHistory] = {}
         self._extract_contract_verified: bool = False
+        # Reused float64 scratch for the dict-returning ``extract`` path
+        # (Step 2). float64 so ``float(scratch[i])`` is exact → the
+        # returned dict is byte-identical to the pre-refactor dict.
+        self._scratch64: np.ndarray = np.empty(_N_FEATURES, dtype=np.float64)
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -211,6 +258,56 @@ class FeatureExtractor:
         Caller is expected to have called :meth:`update_history` for
         every tick from the start of the race up to and including
         ``race.ticks[tick_idx]``. Order in declaration order is preserved.
+
+        Step 2 (training-speedup-v2): delegates the computation to
+        :meth:`_extract_into` (the single source of truth shared with
+        :meth:`extract_array`) writing a float64 scratch buffer, then
+        builds the dict from it. ``float(scratch[i])`` at float64 is
+        exact, so the returned dict is byte-identical to the pre-refactor
+        method. The dict keyset is now FEATURE_NAMES by construction, so
+        the old once-per-instance keyset assert is redundant and dropped;
+        the load-bearing guard is the byte-equality test
+        (``tests/test_extract_array_parity.py``) plus the golden harness.
+        """
+        out = self._scratch64
+        self._extract_into(race, tick_idx, runner_idx, side, out)
+        return {name: float(out[i]) for i, name in enumerate(FEATURE_NAMES)}
+
+    def extract_array(
+        self,
+        race: Race,
+        tick_idx: int,
+        runner_idx: int,
+        side: str,
+        out: np.ndarray,
+    ) -> None:
+        """Write the feature vector directly into ``out`` (no dict).
+
+        Step 2 hot-path replacement for ``extract`` + the consumer's
+        ``np.asarray([d[name] for name in FEATURE_NAMES])`` re-key.
+        ``out`` must be a writable length-``_N_FEATURES`` array; its dtype
+        controls the stored precision. When ``out`` is float32 the write
+        casts each value float64→float32 with the SAME IEEE round-to-even
+        as the dict path's ``np.asarray(..., dtype=np.float32)`` — hence
+        byte-identical (test-guarded).
+        """
+        self._extract_into(race, tick_idx, runner_idx, side, out)
+
+    def _extract_into(
+        self,
+        race: Race,
+        tick_idx: int,
+        runner_idx: int,
+        side: str,
+        out: np.ndarray,
+    ) -> None:
+        """Compute every feature and write it into ``out[_I_*]``.
+
+        THE single source of feature computation (shared by ``extract``
+        and ``extract_array``). Every assignment mirrors the original
+        ``extract`` body's expression exactly; only the destination
+        (``out[index]`` vs ``feats[name]``) changed. Writes all
+        ``_N_FEATURES`` positions on every code path.
         """
         if side not in ("back", "lay"):
             raise ValueError(f"side must be 'back' or 'lay', got {side!r}")
@@ -218,7 +315,6 @@ class FeatureExtractor:
         runner = tick.runners[runner_idx]
         ts = _ts(tick.timestamp)
 
-        feats: dict[str, float] = {}
         market_state = self._markets.setdefault(race.market_id, _MarketHistory())
         rstate = market_state.runners.setdefault(
             runner.selection_id, _RunnerHistory(),
@@ -231,105 +327,86 @@ class FeatureExtractor:
             runner.last_traded_price is not None and runner.last_traded_price > 1.0
         ) else None
 
-        feats["best_back"] = float(best_back) if best_back is not None else math.nan
-        feats["best_lay"] = float(best_lay) if best_lay is not None else math.nan
-        feats["ltp"] = float(ltp) if ltp is not None else math.nan
+        out[_I_BEST_BACK] = float(best_back) if best_back is not None else math.nan
+        out[_I_BEST_LAY] = float(best_lay) if best_lay is not None else math.nan
+        out[_I_LTP] = float(ltp) if ltp is not None else math.nan
 
         if best_back is not None and best_lay is not None:
             spread = best_lay - best_back
-            feats["spread"] = float(spread)
-            feats["spread_in_ticks"] = _spread_in_ticks(best_back, best_lay)
-            feats["mid_price"] = 0.5 * (best_back + best_lay)
+            out[_I_SPREAD] = float(spread)
+            out[_I_SPREAD_IN_TICKS] = _spread_in_ticks(best_back, best_lay)
+            out[_I_MID_PRICE] = 0.5 * (best_back + best_lay)
         else:
-            feats["spread"] = math.nan
-            feats["spread_in_ticks"] = math.nan
-            feats["mid_price"] = math.nan
+            out[_I_SPREAD] = math.nan
+            out[_I_SPREAD_IN_TICKS] = math.nan
+            out[_I_MID_PRICE] = math.nan
 
         # ── Book depth ─────────────────────────────────────────────────
-        for i, key in enumerate(("back_size_l1", "back_size_l2", "back_size_l3")):
-            feats[key] = (
+        for i, idx in enumerate(_I_BACK_SIZE):
+            out[idx] = (
                 float(runner.available_to_back[i].size)
                 if i < len(runner.available_to_back) else 0.0
             )
-        for i, key in enumerate(("lay_size_l1", "lay_size_l2", "lay_size_l3")):
-            feats[key] = (
+        for i, idx in enumerate(_I_LAY_SIZE):
+            out[idx] = (
                 float(runner.available_to_lay[i].size)
                 if i < len(runner.available_to_lay) else 0.0
             )
-        feats["total_back_size"] = float(sum(lv.size for lv in runner.available_to_back))
-        feats["total_lay_size"] = float(sum(lv.size for lv in runner.available_to_lay))
+        out[_I_TOTAL_BACK_SIZE] = float(sum(lv.size for lv in runner.available_to_back))
+        out[_I_TOTAL_LAY_SIZE] = float(sum(lv.size for lv in runner.available_to_lay))
 
         # ── Time features ──────────────────────────────────────────────
         race_off_ts = _ts(race.market_start_time)
-        feats["time_to_off_seconds"] = float(race_off_ts - ts)
+        out[_I_TIME_TO_OFF] = float(race_off_ts - ts)
         if rstate.last_trade_ts is not None:
-            feats["time_since_last_trade_seconds"] = float(ts - rstate.last_trade_ts)
+            out[_I_TIME_SINCE_LAST_TRADE] = float(ts - rstate.last_trade_ts)
         else:
-            feats["time_since_last_trade_seconds"] = math.nan
+            out[_I_TIME_SINCE_LAST_TRADE] = math.nan
 
         # ── Velocity (rolling 30s windows) ─────────────────────────────
-        feats["traded_volume_last_30s"] = _delta_window(
+        out[_I_TRADED_VOL_30] = _delta_window(
             rstate.total_matched, ts, _VELOCITY_VOLUME_WINDOW_SEC,
         )
-        feats["ltp_change_last_30s"] = _value_delta(
+        out[_I_LTP_CHANGE_30] = _value_delta(
             rstate.ltp, ts, _VELOCITY_LTP_WINDOW_SEC,
         )
-        feats["spread_change_last_30s"] = _value_delta(
+        out[_I_SPREAD_CHANGE_30] = _value_delta(
             rstate.spread, ts, _VELOCITY_SPREAD_WINDOW_SEC,
         )
 
         # ── Side one-hot ───────────────────────────────────────────────
-        feats["side_back"] = 1.0 if side == "back" else 0.0
-        feats["side_lay"] = 1.0 if side == "lay" else 0.0
+        out[_I_SIDE_BACK] = 1.0 if side == "back" else 0.0
+        out[_I_SIDE_LAY] = 1.0 if side == "lay" else 0.0
 
         # ── Runner attributes ──────────────────────────────────────────
-        feats["favourite_rank"] = _current_rank(rstate)
+        out[_I_FAV_RANK] = _current_rank(rstate)
         meta = race.runner_metadata.get(runner.selection_id)
         if meta is not None and meta.sort_priority and meta.sort_priority.strip():
             try:
-                feats["sort_priority"] = float(meta.sort_priority)
+                out[_I_SORT_PRIORITY] = float(meta.sort_priority)
             except (ValueError, TypeError):
-                feats["sort_priority"] = math.nan
+                out[_I_SORT_PRIORITY] = math.nan
         else:
-            feats["sort_priority"] = math.nan
-        feats["ltp_rank_change_last_60s"] = _rank_delta(
+            out[_I_SORT_PRIORITY] = math.nan
+        out[_I_LTP_RANK_CHANGE_60] = _rank_delta(
             rstate, ts, _RANK_WINDOW_SEC,
         )
 
         # ── Market attributes ──────────────────────────────────────────
         n_active = sum(1 for r in tick.runners if r.status == "ACTIVE")
-        feats["n_active_runners"] = float(n_active)
-        feats["total_market_volume"] = float(tick.traded_volume)
-        feats["total_market_volume_velocity"] = _delta_window(
+        out[_I_N_ACTIVE] = float(n_active)
+        out[_I_TOTAL_MKT_VOL] = float(tick.traded_volume)
+        out[_I_TOTAL_MKT_VOL_VEL] = _delta_window(
             market_state.market_volume, ts, _VELOCITY_VOLUME_WINDOW_SEC,
         )
 
         # ── Market type one-hot ────────────────────────────────────────
         mtype = (race.market_type or "").upper()
-        feats["market_type_win"] = 1.0 if mtype == "WIN" else 0.0
-        feats["market_type_each_way"] = 1.0 if mtype == "EACH_WAY" else 0.0
-        feats["market_type_other"] = (
+        out[_I_MKT_WIN] = 1.0 if mtype == "WIN" else 0.0
+        out[_I_MKT_EW] = 1.0 if mtype == "EACH_WAY" else 0.0
+        out[_I_MKT_OTHER] = (
             1.0 if mtype not in ("WIN", "EACH_WAY") else 0.0
         )
-
-        # Verify FEATURE_NAMES coverage in dev — the keyset must match
-        # exactly. phase-3 Option B: lifted from a per-call set
-        # comparison to a once-per-instance check. The first extract
-        # call pays the full cost; subsequent calls skip it. A keyset
-        # drift on a later call would silently slip past — accepted
-        # because the producer (this method) is statically structured
-        # so all branches assign all FEATURE_NAMES entries; runtime
-        # divergence is impossible without a code edit which would
-        # exercise the first-call check via the test suite.
-        if not self._extract_contract_verified:
-            keys = feats.keys()
-            assert frozenset(keys) == self._FEATURE_NAME_SET, (
-                f"FEATURE_NAMES / extracted keys mismatch: "
-                f"missing={self._FEATURE_NAME_SET - frozenset(keys)}, "
-                f"extra={frozenset(keys) - self._FEATURE_NAME_SET}"
-            )
-            self._extract_contract_verified = True
-        return feats
 
 
 # ── Helpers ────────────────────────────────────────────────────────────

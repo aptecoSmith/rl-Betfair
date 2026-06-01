@@ -360,13 +360,28 @@ class DiscreteActionShim:
         slot_map = self.env._slot_maps[self.env._race_idx]
         runner_by_sid = {r.selection_id: r for r in tick.runners}
         feature_names = self._feature_spec["feature_names"]
+        n_feat = len(feature_names)
 
-        # Pass 1: collect priceable runner-side feature vectors + their
-        # destination indices in ``extra``. Skip semantics are identical
-        # to the per-row path — runners that are inactive, unpriceable,
-        # or whose feature_extractor.extract raises never enter the
-        # batch in the first place.
-        rows: list[np.ndarray] = []
+        # Step 2 (training-speedup-v2): reused (2*N, n_feat) float32 matrix
+        # buffer. ``extract_array`` writes each runner-side feature vector
+        # straight into a row — no per-call 30-key dict build and no
+        # ``[d[name] for name in feature_names]`` re-key (the deferred
+        # Option B-big). Byte-identical to the dict path: extract_array
+        # casts float64→float32 with the same IEEE rounding the old
+        # ``np.asarray(..., dtype=np.float32)`` used (guarded by
+        # tests/test_extract_array_parity.py + the golden harness).
+        if (
+            getattr(self, "_feat_matrix", None) is None
+            or self._feat_matrix.shape != (2 * self._N, n_feat)
+        ):
+            self._feat_matrix = np.empty((2 * self._N, n_feat), dtype=np.float32)
+        matrix_buf = self._feat_matrix
+
+        # Pass 1: write priceable runner-side feature rows into the buffer
+        # + record their destination indices in ``extra``. Skip semantics
+        # are identical to the per-row path — runners that are inactive,
+        # unpriceable, or whose extract_array raises never enter the batch.
+        n_rows = 0
         extra_idx: list[int] = []
         for slot in range(self._N):
             sid = slot_map.get(slot)
@@ -389,39 +404,39 @@ class DiscreteActionShim:
                 continue
             for side_idx, side in enumerate(("back", "lay")):
                 try:
-                    feat_dict = self._feature_extractor.extract(
+                    # NaN is expected for the F7-dead velocity features.
+                    # LightGBM handles NaN natively; the Pass-3 finiteness
+                    # gate catches any genuine downstream blow-up. A raise
+                    # mid-write leaves matrix_buf[n_rows] partial, but
+                    # n_rows is NOT incremented so the row is discarded
+                    # (and the next successful write overwrites it fully —
+                    # extract_array writes every position).
+                    self._feature_extractor.extract_array(
                         race=race,
                         tick_idx=self.env._tick_idx,
                         runner_idx=runner_idx_in_tick,
                         side=side,
+                        out=matrix_buf[n_rows],
                     )
                 except Exception:  # pragma: no cover
                     logger.debug(
-                        "FeatureExtractor.extract failed for race=%s "
+                        "FeatureExtractor.extract_array failed for race=%s "
                         "tick=%d runner_idx=%d side=%s",
                         race.market_id, self.env._tick_idx,
                         runner_idx_in_tick, side,
                         exc_info=True,
                     )
                     continue
-                # NaN is expected here for the F7-dead velocity
-                # features. LightGBM handles NaN natively (see Phase 0
-                # findings); the post-calibrator finiteness gate in
-                # Pass 3 catches any genuine downstream blow-up.
-                row = np.asarray(
-                    [feat_dict[name] for name in feature_names],
-                    dtype=np.float32,
-                )
-                rows.append(row)
                 extra_idx.append(2 * slot + side_idx)
+                n_rows += 1
 
-        if not rows:
+        if n_rows == 0:
             return np.concatenate([base_obs, extra]).astype(
                 np.float32, copy=False,
             )
 
         # Pass 2: one batched booster call, one batched calibrator call.
-        matrix = np.stack(rows, axis=0)
+        matrix = matrix_buf[:n_rows]
         raw = self._booster.predict(matrix)
         cal = self._calibrator.predict(np.asarray(raw))
 
