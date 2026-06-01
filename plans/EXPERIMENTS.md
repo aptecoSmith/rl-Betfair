@@ -2308,3 +2308,46 @@ was needed to measure it.
 **Lesson banked.** For sub-5%-of-rollout optimisations, the whole-stack profiler's
 run-to-run variance (GPU forward, thermal) swamps the signal — isolate with a
 CPU micro-bench of the exact changed function.
+
+---
+
+## 2026-06-01 — training-speedup-v2 Step 3A + measured A/B (1.43× cluster-day)
+
+**Step 3A — bit-identical batched-path wins (NOT the GPU batch=N the plan
+assumed).** Building the "batch=N forward" surfaced that it CANNOT be
+bit-identical: the golden is captured on CPU, and batching the forward (manual
+stacking/bmm OR CUDA) reorders float reductions ~1e-6 → flips rare near-tie
+`Categorical.sample()` ACTIONS vs the CPU golden → fails HC#1 discrete-exact.
+(vmap-over-LSTM also confirmed structurally blocked + a torch bump would break
+the golden anyway.) So the bit-identical lever is **CPU rollout**, which ALSO
+sidesteps the batch=1 CUDA-kernel-launch overhead. Landed in `batched_worker.py`:
+(1) **CPU rollout** via the trainer's `rollout_device` split (rollout on CPU,
+PPO update on CUDA); (2) **feature_cache re-wire** (was silently dropped — 11×
+redundant `engineer_day`/cluster-day). Gated by
+`tests/test_env_golden_parity.py::test_batched_path_matches_golden_fixture`
+(batched N=1 CPU reproduces the golden bit-for-bit on every load-bearing
+quantity). Also surfaced + logged a 5th batched silent-drop: the batched
+collector doesn't stamp per-bet aux-head decision values.
+
+**MEASURED A/B (`tools/bench_speedup_ab.py`, real day 2026-05-09, predictors-off
+= the as-ran 867s config, extrapolated to an 11-agent cluster):**
+
+| phase | BASELINE (CUDA, no cache) | OPTIMISED (CPU, feature_cache) |
+|---|---:|---:|
+| env build | 250s | 97s |
+| rollout | 814s | 626s |
+| PPO update | 66s | 66s |
+| **cluster-day wall** | **1130s** | **789s** |
+
+**→ 30.2% faster, 1.43× speedup, 341s/cluster-day saved, bit-identical.**
+Baseline 1130s reconciles with the c1 log's measured ~1101s for this day.
+CPU rollout 56.9 vs 74.0 s/agent (−23%); feature_cache builds 22.7→7.5s on hit.
+`extract_array` (Step 2) is an additional ~2-3 s/agent-day on top of the dict
+baseline (it's in both rollout numbers here). At a 30-agent/5-gen/25-day cohort
+this is ~hours off the wall, bit-identical.
+
+**Steps 3B/3C/4 (recorded decisions, step3c_step4_decisions.md +
+master_todo).** 3B (cross-agent scorer cache, ~13%, bit-identical-feasible) —
+deferred with approach (invasive; needs an N≥2 gate). 3C (env-core) — **NO-GO**
+(~3% slice, >80% branching, highest-risk matcher). Step 4 (BC) — not
+load-bearing per evidence; kept dropped + logged (HC#2).

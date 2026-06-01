@@ -209,6 +209,86 @@ def capture_golden(
     )
 
 
+def capture_golden_from_batched(
+    shim: DiscreteActionShim,
+    policy: BaseDiscretePolicy,
+    *,
+    seed: int,
+    case: str = "",
+    device: str = "cpu",
+) -> GoldenStream:
+    """Capture a stream from the BATCHED collector at N=1 for the gate.
+
+    Runs :class:`BatchedRolloutCollector` over a single (shim, policy)
+    with ``seeds=None`` so it takes the single-global-RNG path that is
+    bit-identical to :class:`RolloutCollector` at the same seed (its
+    docstring's load-bearing contract). The result is converted to a
+    :class:`GoldenStream` so the SAME comparator gates the batched fast
+    path against the canonical solo golden (Step 3A — CPU-rollout +
+    feature_cache must reproduce the golden).
+    """
+    from training_v2.discrete_ppo.batched_rollout import BatchedRolloutCollector
+
+    torch.manual_seed(int(seed) & 0x7FFFFFFF)
+    if device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed) & 0x7FFFFFFF)
+
+    collector = BatchedRolloutCollector(
+        shims=[shim], policies=[policy], device=device, seeds=None,
+    )
+    transitions = collector.collect_episode_batch()[0]
+    env = shim.env
+    n = len(transitions)
+
+    def _stack(attr, dtype):
+        if n == 0:
+            return np.zeros((0,), dtype=dtype)
+        return np.asarray([getattr(t, attr) for t in transitions], dtype=dtype)
+
+    obs = (np.stack([np.asarray(t.obs, np.float32) for t in transitions])
+           if n else np.zeros((0, int(shim.obs_dim)), np.float32))
+    value_pr = (np.stack([np.asarray(t.value_per_runner, np.float32)
+                          for t in transitions])
+                if n else np.zeros((0, int(policy.max_runners)), np.float32))
+    per_runner_reward = (np.stack([np.asarray(t.per_runner_reward, np.float32)
+                                   for t in transitions])
+                         if n else np.zeros((0, int(policy.max_runners)), np.float32))
+    # hidden_in: each transition's hidden_state_in is a tuple of tensors;
+    # stack across ticks to mirror RolloutBatch.hidden_state_in.
+    if n:
+        n_h = len(transitions[0].hidden_state_in)
+        hidden_in = tuple(
+            np.stack([
+                np.asarray(transitions[k].hidden_state_in[j].detach().cpu()
+                           if hasattr(transitions[k].hidden_state_in[j], "detach")
+                           else transitions[k].hidden_state_in[j], np.float32)
+                for k in range(n)
+            ])
+            for j in range(n_h)
+        )
+    else:
+        hidden_in = ()
+
+    info = collector.last_infos[0] or {}
+    return GoldenStream(
+        case=case, seed=int(seed),
+        hidden_size=int(getattr(policy, "hidden_size", 0)),
+        obs_dim=int(shim.obs_dim), n_steps=n,
+        obs=obs,
+        action_idx=_stack("action_idx", np.int64),
+        stake_unit=_stack("stake_unit", np.float32),
+        log_prob_action=_stack("log_prob_action", np.float32),
+        log_prob_stake=_stack("log_prob_stake", np.float32),
+        value_per_runner=value_pr,
+        per_runner_reward=per_runner_reward,
+        done=_stack("done", bool),
+        hidden_in=hidden_in,
+        bets=[_bet_to_dict(b) for b in env.all_settled_bets],
+        info_discrete={k: int(info.get(k, 0)) for k in _INFO_DISCRETE if k in info},
+        info_continuous={k: float(info.get(k, 0.0)) for k in _INFO_CONTINUOUS if k in info},
+    )
+
+
 def _bet_to_dict(bet: Any) -> dict:
     d: dict[str, Any] = {}
     for f in _BET_DISCRETE:
@@ -270,8 +350,17 @@ def _cmp_array(name: str, a: np.ndarray, b: np.ndarray,
 
 def compare_streams(
     golden: GoldenStream, candidate: GoldenStream, *, label: str = "",
+    ignore_bet_fields: frozenset[str] = frozenset(),
 ) -> list[Mismatch]:
-    """Diff two streams per hard-constraint #1. Empty list ⇒ PASS."""
+    """Diff two streams per hard-constraint #1. Empty list ⇒ PASS.
+
+    ``ignore_bet_fields`` skips named per-bet fields in the ledger
+    comparison. Used to exclude the per-bet aux-head decision stamps
+    (``fill_prob_at_placement`` etc.) when gating the BATCHED collector,
+    which — unlike the solo ``RolloutCollector`` — does NOT stamp them
+    (a pre-existing batched-path gap, documented in step0_profile.md;
+    orthogonal to a load-bearing forward/env/reward divergence).
+    """
     out: list[Mismatch] = []
 
     if golden.n_steps != candidate.n_steps:
@@ -301,7 +390,7 @@ def compare_streams(
             _cmp_array("hidden_in", ga, ca, exact=False, out=out)
 
     # bet ledger
-    _compare_bets(golden.bets, candidate.bets, out)
+    _compare_bets(golden.bets, candidate.bets, out, ignore_bet_fields)
 
     # info
     for k, gv in golden.info_discrete.items():
@@ -337,7 +426,8 @@ def _pairing_groups(bets: list[dict]) -> list[int]:
 
 
 def _compare_bets(golden: list[dict], cand: list[dict],
-                  out: list[Mismatch]) -> None:
+                  out: list[Mismatch],
+                  ignore_bet_fields: frozenset[str] = frozenset()) -> None:
     if len(golden) != len(cand):
         out.append(Mismatch(
             "bet_count", f"{len(golden)} vs {len(cand)} bets",
@@ -354,11 +444,15 @@ def _compare_bets(golden: list[dict], cand: list[dict],
         ))
     for i, (gb, cb) in enumerate(zip(golden, cand)):
         for f in _BET_DISCRETE:
+            if f in ignore_bet_fields:
+                continue
             if gb.get(f) != cb.get(f):
                 out.append(Mismatch(
                     f"bet[{i}].{f}", f"{gb.get(f)!r} vs {cb.get(f)!r} (exact)",
                 ))
         for f in _BET_CONTINUOUS:
+            if f in ignore_bet_fields:
+                continue
             gv, cv = gb.get(f), cb.get(f)
             if gv is None and cv is None:
                 continue

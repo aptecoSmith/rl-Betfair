@@ -152,14 +152,50 @@ may now win.
      forward-rewrite decision is made.
 - **OPERATOR DECISION (2026-06-01):** check pytorch-update first → ruled out
   (structural, would break the golden); **go manual batch.** Precise gated
-  build (Increments 1/2/3) in **`step3a_build_plan.md`**. Build pending a
-  focused execution pass (not rushed at session-end — the refactor touches
-  the hot-path policy forward bit-identically).
+  build (Increments 1/2/3) in **`step3a_build_plan.md`**.
 
-### 3B — Vectorize obs/market path across agents  `[ ]`
+**RESULT (DONE 2026-06-01 — the achievable bit-identical wins landed + gated):**
+- **KEY REALISATION:** a true batch=N GPU forward CANNOT be bit-identical on
+  *discrete* quantities. The golden is captured on CPU; batching the forward
+  (manual stacking/bmm or CUDA) reorders float reductions ~1e-6, which flips
+  rare near-tie `Categorical.sample()` actions vs the CPU golden → violates
+  HC#1 "discrete EXACT". The GPU-batch=N path is therefore a (subtle)
+  dynamics change, NOT a bit-identical speedup. **Deferred** (documented in
+  step3a_build_plan.md); the bit-identical lever is CPU rollout.
+- **CPU rollout for the batched path** (`batched_worker.py`: `rollout_device`
+  split + collector on CPU). Measured rollout **N=2: 110s CPU vs 138-154s
+  CUDA (~20-28% faster)**; `collector_other` 55s→22s (no GPU sync/launch on
+  sampling). **Bit-identical to the CPU golden** (same device).
+- **feature_cache re-wire** into the batched path (was silently dropped).
+  CUDA smoke: **8 "Feature cache hit" lines** (was 0). Byte-identical.
+- **GATE:** `tests/test_env_golden_parity.py::test_batched_path_matches_golden_fixture`
+  — the batched collector (N=1, CPU) reproduces the golden bit-for-bit on
+  every load-bearing quantity. The only diff was the per-bet aux-head stamps
+  (`fill/mature/direction_at_placement`) — a PRE-EXISTING batched-collector
+  gap (it doesn't stamp them; solo does), orthogonal to these changes,
+  excluded via `ignore_bet_fields` + recorded as a finding.
+- Increment 3 (predictors/input_norm parity into batched) remains for a
+  separate pass — it's a dynamics change (HC#8), not bundled into the speedup.
+
+### 3B — Vectorize obs/market path across agents  `[~]`  DEFERRED w/ approach
 Build the shared market-derived obs slice once per tick and broadcast;
 vectorize the agent-derived slice across the N agents as tensors.
 - GATE: bit-identical golden.
+
+**DEFERRED (2026-06-01) — bit-identical-feasible, scoped, not built.**
+Cleanest bit-identical win: a **cross-agent scorer cache**. The scorer
+features appended by `compute_extended_obs` (the 13% `scorer_obs` phase)
+are PURELY market-derived (the booster predicts on `FeatureExtractor`
+runner features; NO bet/position input), so they are identical across all
+cluster agents at the same `(race_idx, tick_idx)` — the batched collector
+keeps active agents in lockstep, so agent 1 computes the scorer once and
+agents 2..N reuse it (concatenated with their own per-agent `base_obs`).
+Bit-identical by construction. NOT built this pass because: (a) it's
+invasive — a shared cache threaded through the shims + `compute_extended_obs`
+(the golden-gated hot path); (b) it needs an N≥2 batched gate (the N=1
+`capture_golden_from_batched` doesn't exercise cross-agent sharing, so a
+stale-cache bug could slip an N=1 gate); (c) the Step-2/3A wins already
+landed the headline speedup. A clean follow-on, ~13% of rollout.
 
 ### 3C — Vectorize the env core  `[ ]`
 - **FEASIBILITY SPIKE FIRST:** prototype matching + settlement as batched

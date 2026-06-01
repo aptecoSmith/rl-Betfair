@@ -51,6 +51,41 @@ actual code. Two things only this approach showed:
   invisible to a function-level cProfile sort because it is spread
   across inline collector code, not one hot function.
 
+## Step 3A — a true GPU batch=N forward breaks EXACT discrete parity
+
+The plan's headline lever was "stack N agents → one GPU forward." Building
+it revealed a deeper obstacle than vmap: **batching the forward is
+incompatible with HC#1's "discrete quantities match EXACTLY."** The golden
+is captured on CPU (deterministic). Any batched forward — manual
+weight-stacking/bmm OR running on CUDA — reorders float reductions by
+~1e-6. Continuous quantities stay within tolerance, but `Categorical(
+logits).sample()` at a near-tie can land in a different bin under a 1e-6
+logit shift, flipping a discrete ACTION. Rare (~1 per 10-100 agent-days)
+but non-zero → not bit-identical. So a GPU batch=N forward is a subtle
+*dynamics* change, not a bit-identical speedup, and fails the gate.
+
+**The bit-identical lever is therefore CPU rollout**, not GPU batching:
+same device as the CPU golden → exactly reproducible, AND it sidesteps the
+batch=1 CUDA kernel-launch overhead that made the forward slow in the
+first place (measured ~20-28% faster). The "use the idle GPU" instinct is
+right for throughput but wrong for the bit-identity spine — it would need
+a GPU-captured golden and an accepted (logged) discrete-flip rate. Parked.
+
+**Lesson:** before committing to a GPU-vectorisation rewrite under a
+bit-identity gate, check whether the device/reduction-order change can flip
+a *discrete* output. Continuous-within-tolerance does NOT imply
+discrete-exact when a sample/argmax sits on the reordered values.
+
+## Step 3A — the batched collector silently drops per-bet aux-head stamps
+
+The batched-path gate caught it: the solo `RolloutCollector` stamps
+`fill_prob/mature_prob/direction_*_at_placement` onto each bet (the
+"v2-aux-head-bet-plumbing"); the `BatchedRolloutCollector` does NOT. So
+batched cohorts' bet logs lack these forensic fields — another batched
+silent-drop (alongside predictors/feature_cache/input_norm/BC), affecting
+per-bet phenotype analysis, not training. Orthogonal to the speedup;
+excluded from the gate via `ignore_bet_fields` and logged here.
+
 ## Step 3A — a PyTorch update will NOT unlock vmap-over-LSTM (verified)
 
 Operator asked whether updating torch could unlock `vmap` over `nn.LSTM`

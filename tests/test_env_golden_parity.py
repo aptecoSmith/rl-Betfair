@@ -51,6 +51,7 @@ from env.tick_ladder import tick_offset  # noqa: E402
 from training_v2.golden_cases import CASES, build_env, build_policy  # noqa: E402
 from training_v2.golden_parity import (  # noqa: E402
     capture_golden,
+    capture_golden_from_batched,
     compare_streams,
     load_stream,
 )
@@ -141,3 +142,44 @@ def test_perturbation_recovers_when_matcher_restored():
     a = _capture_case(case)
     b = _capture_case(case)
     assert not compare_streams(a, b), "self-parity broke outside the patch"
+
+
+# ── Step 3A gate: the BATCHED fast path reproduces the golden ─────────────
+
+
+@pytest.mark.parametrize(
+    "case_name", ["normal_h128_s1", "forceclose_h128_s1"],
+)
+def test_batched_path_matches_golden_fixture(case_name):
+    """The CPU batched collector (N=1, seeds=None → single-global-RNG
+    path) must reproduce the canonical solo golden bit-for-bit. Gates
+    the Step-3A batched changes (CPU-rollout + feature_cache) against the
+    same harness the solo path is gated on (HC#1/#2/#7)."""
+    case = next(c for c in CASES if c.name == case_name)
+    fixture = FIXTURE_DIR / case.name
+    if not fixture.with_suffix(".npz").exists():
+        pytest.skip(f"fixture {case.name} not generated")
+    golden = load_stream(fixture)
+    env, shim = build_env(case.env_config, day=case.day, n_races=case.n_races)
+    policy = build_policy(shim, hidden=case.hidden, seed=case.seed)
+    batched = capture_golden_from_batched(
+        shim, policy, seed=case.seed, case=case.name, device="cpu",
+    )
+    # The BatchedRolloutCollector does not stamp per-bet aux-head decision
+    # values (fill/mature/direction _at_placement) — a PRE-EXISTING gap vs
+    # the solo collector's "v2-aux-head-bet-plumbing", orthogonal to the
+    # Step-3A CPU-rollout/feature_cache changes under test. Exclude those
+    # forensic fields; every load-bearing quantity must still match.
+    aux_stamp_fields = frozenset({
+        "fill_prob_at_placement", "mature_prob_at_placement",
+        "direction_back_prob_at_placement", "direction_lay_prob_at_placement",
+    })
+    diffs = compare_streams(
+        golden, batched, label=f"batched:{case.name}",
+        ignore_bet_fields=aux_stamp_fields,
+    )
+    assert not diffs, (
+        f"GATE FAIL: batched path diverged from golden '{case.name}' on a "
+        f"load-bearing quantity:\n"
+        + "\n".join(f"  {d}" for d in diffs[:20])
+    )

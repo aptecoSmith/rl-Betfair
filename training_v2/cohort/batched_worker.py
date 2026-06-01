@@ -173,6 +173,25 @@ def train_cluster_batched(
     cfg["training"]["starting_budget"] = float(starting_budget)
     max_runners = int(cfg["training"]["max_runners"])
 
+    # training-speedup-v2 Step 3A — split-device (phase-3 Option A applied
+    # to the batched path). Run the batched rollout on CPU: the v2 full-obs
+    # forward at batch=1 is CUDA-kernel-launch-bound, and CPU is ~20-28%
+    # faster on it (measured, tools/profile_v2_batched_breakdown.py). The
+    # per-agent PPO update stays on ``device`` (CUDA wins at mini-batch=64);
+    # the trainer's existing rollout_device split handles the CPU<->CUDA
+    # round trip. Also makes the batched rollout bit-identical to the CPU
+    # golden harness. rollout_device == device for CPU runs (byte-identical
+    # to pre-change). Mirrors worker.py::train_one_agent.
+    rollout_device = "cpu" if str(device) == "cuda" else device
+    # training-speedup-v2 Step 3A — cluster-scoped feature cache (phase-3
+    # Option F.1 applied to the batched path, where it was silently dropped).
+    # ``engineer_day`` runs ONCE per date instead of once per cluster agent
+    # (was N-times redundant per cluster-day — ~165s wasted on the c1
+    # hidden=256 cluster's day 1). Byte-identical: features are pure
+    # functions of (date, env feature knobs); knobs are constant across a
+    # cluster so the cache survives the whole cluster run.
+    feature_cache: dict[str, list] = {}
+
     # Phase 5 (2026-05-03): per-agent reward / scalping overrides built
     # from each agent's enabled-gene values combined with the cohort-
     # level overrides. Disabled genes contribute nothing — a launch
@@ -222,6 +241,7 @@ def train_cluster_batched(
             scorer_dir=scorer_dir,
             reward_overrides=per_agent_reward_overrides_list[i],
             scalping_overrides=per_agent_scalping_overrides_list[i],
+            feature_cache=feature_cache,
         )
         envs.append(env_i)
         shims.append(shim_i)
@@ -246,6 +266,7 @@ def train_cluster_batched(
             mini_batch_size=int(genes_list[i].mini_batch_size),
             max_grad_norm=0.5,
             device=device,
+            rollout_device=rollout_device,
         )
         trainers.append(trainer)
 
@@ -297,6 +318,7 @@ def train_cluster_batched(
                     scorer_dir=scorer_dir,
                     reward_overrides=per_agent_reward_overrides_list[i],
                     scalping_overrides=per_agent_scalping_overrides_list[i],
+                    feature_cache=feature_cache,
                 )
                 shims.append(new_shim)
                 envs.append(new_shim.env)
@@ -309,7 +331,8 @@ def train_cluster_batched(
                 trainers[i].action_space = new_shim.action_space
                 trainers[i].max_runners = new_shim.max_runners
                 trainers[i]._collector = RolloutCollector(
-                    shim=new_shim, policy=policies[i], device=device,
+                    shim=new_shim, policy=policies[i],
+                    device=str(rollout_device),
                 )
 
         # ── Build batched collector and collect ────────────────────
@@ -326,7 +349,7 @@ def train_cluster_batched(
         collector = BatchedRolloutCollector(
             shims=shims,
             policies=policies,
-            device=device,
+            device=str(rollout_device),
             seeds=day_seeds,
         )
         transitions_per_agent = collector.collect_episode_batch()
@@ -430,9 +453,15 @@ def train_cluster_batched(
                 scorer_dir=scorer_dir,
                 reward_overrides=per_agent_reward_overrides_list[i],
                 scalping_overrides=per_agent_scalping_overrides_list[i],
+                feature_cache=feature_cache,
             )
+            # Eval rollout on the trainer's rollout_device (CPU when on
+            # CUDA) — the policy was parked there by the last update, and
+            # CPU is faster for the batch=1 eval forward (same reason as
+            # the training rollout).
             eval_collector = RolloutCollector(
-                shim=eval_shim, policy=policies[i], device=device,
+                shim=eval_shim, policy=policies[i],
+                device=str(rollout_device),
             )
             eval_batch = eval_collector.collect_episode(deterministic=argmax_eval)
             partial = _eval_rollout_stats(
