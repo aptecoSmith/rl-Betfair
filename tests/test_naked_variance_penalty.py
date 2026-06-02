@@ -38,8 +38,10 @@ class TestNakedVariancePenalty:
         )
         assert raw_a == pytest.approx(raw_b)
         assert shaped_a == pytest.approx(shaped_b)
-        # Sanity: shaped = -0.95 * (50+30) + 1.0 * 3 = -76 + 3 = -73
-        assert shaped_a == pytest.approx(-73.0)
+        # Sanity: shaped = -0.95 * (50+30) + close_bonus. CLOSE_SIGNAL_BONUS
+        # was zeroed 0.5 -> 0.0 on 2026-05-23 (was £1/success when this test
+        # was written 2026-05-15), so close_bonus = 0: shaped = -76 + 0 = -76.
+        assert shaped_a == pytest.approx(-76.0)
 
     def test_penalty_scales_quadratically(self):
         """At beta=0.005, per_pair=[+50, -50] → variance contribution

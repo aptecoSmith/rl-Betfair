@@ -85,7 +85,7 @@ class TestPerAgentOverrideHelpers:
             _build_per_agent_reward_overrides,
             _build_per_agent_scalping_overrides,
         )
-        g = self._genes(open_cost=1.5, arb_spread_scale=1.7)
+        g = self._genes(open_cost=1.5, arb_spread_target_lock_pct=0.03)
         # No enabled_set, no cohort overrides → None for both (legacy
         # byte-identity invariant).
         assert _build_per_agent_reward_overrides(
@@ -135,24 +135,25 @@ class TestPerAgentOverrideHelpers:
             "open_cost": 1.5,
         }
 
-    def test_arb_spread_scale_routes_to_scalping_overrides(self):
-        """``arb_spread_scale`` lives in scalping_overrides, not
-        reward_overrides — the env reads it from a different dict."""
+    def test_arb_spread_target_lock_pct_routes_to_scalping_overrides(self):
+        """``arb_spread_target_lock_pct`` lives in scalping_overrides, not
+        reward_overrides — the env reads it from a different dict. (Renamed
+        from the retired arb_spread_scale; the routing is unchanged.)"""
         from training_v2.cohort.worker import (
             _build_per_agent_reward_overrides,
             _build_per_agent_scalping_overrides,
         )
-        g = self._genes(arb_spread_scale=1.7)
+        g = self._genes(arb_spread_target_lock_pct=0.03)
         ro = _build_per_agent_reward_overrides(
             cohort_overrides=None, genes=g,
-            enabled_set=frozenset({"arb_spread_scale"}),
+            enabled_set=frozenset({"arb_spread_target_lock_pct"}),
         )
         so = _build_per_agent_scalping_overrides(
-            genes=g, enabled_set=frozenset({"arb_spread_scale"}),
+            genes=g, enabled_set=frozenset({"arb_spread_target_lock_pct"}),
         )
         # Goes to scalping_overrides ONLY.
         assert ro is None
-        assert so == {"arb_spread_scale": 1.7}
+        assert so == {"arb_spread_target_lock_pct": 0.03}
 
     def test_enables_all_eight_env_consumed_genes(self):
         """All Phase 5 genes routed through reward_overrides land in
