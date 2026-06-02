@@ -209,40 +209,69 @@ def test_train_cluster_reuses_executor_without_shutting_it_down():
 
 def test_resolve_parallel_agents_default_is_16():
     from training_v2.cohort.runner import _resolve_parallel_agents
-    assert _resolve_parallel_agents(
-        None, batched=False, has_predictor=False) == 16
+    assert _resolve_parallel_agents(None, batched=False) == 16
 
 
 def test_resolve_parallel_agents_explicit_value_kept():
     from training_v2.cohort.runner import _resolve_parallel_agents
-    assert _resolve_parallel_agents(8, batched=False, has_predictor=False) == 8
-    assert _resolve_parallel_agents(0, batched=False, has_predictor=False) == 0
+    assert _resolve_parallel_agents(8, batched=False) == 8
+    assert _resolve_parallel_agents(0, batched=False) == 0
 
 
 def test_resolve_parallel_agents_batched_default_yields_to_zero():
     from training_v2.cohort.runner import _resolve_parallel_agents
     # default 16 + --batched -> 0 (batched wins, NO error)
-    assert _resolve_parallel_agents(
-        None, batched=True, has_predictor=False) == 0
+    assert _resolve_parallel_agents(None, batched=True) == 0
 
 
 def test_resolve_parallel_agents_batched_explicit_raises():
     from training_v2.cohort.runner import _resolve_parallel_agents
     with pytest.raises(SystemExit):
-        _resolve_parallel_agents(8, batched=True, has_predictor=False)
+        _resolve_parallel_agents(8, batched=True)
 
 
-def test_resolve_parallel_agents_predictor_default_yields_to_zero():
-    from training_v2.cohort.runner import _resolve_parallel_agents
-    # default 16 + predictors -> 0 (auto-disable to sequential, NO error)
-    assert _resolve_parallel_agents(
-        None, batched=False, has_predictor=True) == 0
+def test_worker_injects_predictor_bundle_from_manifests(monkeypatch):
+    """`_train_agent_worker` rebuilds the predictor bundle from manifest
+    paths (cached, by reference — never pickled across spawn) and injects it
+    as ``predictor_bundle=``, popping the private key."""
+    sentinel = object()
+    monkeypatch.setattr(mp, "_worker_load_bundle", lambda m: sentinel)
+    captured: dict = {}
+
+    def fake_train_one_agent(**kw):
+        captured.update(kw)
+        return types.SimpleNamespace(
+            train=types.SimpleNamespace(wall_time_sec=0.0))
+
+    import training_v2.cohort.worker as worker
+    monkeypatch.setattr(worker, "train_one_agent", fake_train_one_agent)
+    mp._train_agent_worker(dict(
+        agent_id="r0",
+        _predictor_manifests=("champ.json", "rank.json", "dir.json"),
+    ))
+    assert captured["predictor_bundle"] is sentinel
+    assert "_predictor_manifests" not in captured
 
 
-def test_resolve_parallel_agents_predictor_explicit_raises():
-    from training_v2.cohort.runner import _resolve_parallel_agents
-    with pytest.raises(SystemExit):
-        _resolve_parallel_agents(8, batched=False, has_predictor=True)
+def test_worker_load_bundle_caches_by_manifests(monkeypatch):
+    """A warm worker loads each distinct bundle once (cached by manifests)."""
+    mp._WORKER_PREDICTOR_BUNDLE.clear()
+    calls = {"n": 0}
+
+    class _FakeBundle:
+        @classmethod
+        def from_manifests(cls, **kw):
+            calls["n"] += 1
+            return ("bundle", kw["champion_manifest"])
+
+    import predictors
+    monkeypatch.setattr(predictors, "PredictorBundle", _FakeBundle,
+                        raising=False)
+    m = ("c.json", "r.json", "d.json")
+    b1 = mp._worker_load_bundle(m)
+    b2 = mp._worker_load_bundle(m)
+    assert b1 is b2 and calls["n"] == 1   # loaded once, reused
+    mp._WORKER_PREDICTOR_BUNDLE.clear()
 
 
 def test_worker_without_private_keys_is_passthrough(tmp_path, monkeypatch):

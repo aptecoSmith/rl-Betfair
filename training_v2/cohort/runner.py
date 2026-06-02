@@ -784,6 +784,7 @@ def run_cohort(
     bc_include_close_hold_samples: bool = False,
     arb_spread_target_lock_pct_override: float | None = None,
     predictor_bundle: object | None = None,
+    predictor_manifests: "tuple | list | None" = None,
     strategy_mode: str | None = None,
     use_race_outcome_predictor: bool = False,
     predictor_lean_obs: bool = False,
@@ -1172,13 +1173,23 @@ def run_cohort(
                 # worker plumbing (cache + store injection, key popping).
                 # Behaviour-knob drift is a review item when either path
                 # gains a kwarg.
-                if predictor_bundle is not None:
+                # Predictor support: the worker rebuilds the bundle from its
+                # MANIFEST PATHS (bit-identical, no spawn-pickle of the model
+                # object). We therefore need the manifests, not just the
+                # loaded bundle object — the parent has the loaded bundle for
+                # solo/batched, but multiprocess workers reload from paths.
+                if predictor_bundle is not None and not predictor_manifests:
                     raise ValueError(
-                        "parallel_agents (multiprocess) does not yet support "
-                        "predictor_bundle (spawn-pickling of the bundle is "
-                        "unverified). Use --batched or the sequential path "
-                        "for predictor runs."
+                        "parallel_agents (multiprocess) with a predictor "
+                        "bundle requires predictor_manifests (the worker "
+                        "rebuilds the bundle from manifest paths). The CLI "
+                        "threads --predictor-bundle-manifests through; a "
+                        "programmatic caller must pass predictor_manifests."
                     )
+                mp_predictor_manifests = (
+                    tuple(predictor_manifests)
+                    if predictor_bundle is not None else None
+                )
                 # Warm persistent pool: create once, reuse across generations
                 # so workers stay alive (torch imported once, per-worker day
                 # cache survives → gen 2+ skips both startup costs).
@@ -1228,7 +1239,7 @@ def run_cohort(
                             bc_include_close_hold_samples),
                         arb_spread_target_lock_pct_override=(
                             arb_spread_target_lock_pct_override),
-                        predictor_bundle=None,
+                        predictor_bundle=None,   # worker reloads from manifests
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
                         predictor_lean_obs=predictor_lean_obs,
@@ -1248,6 +1259,7 @@ def run_cohort(
                         frozen_direction_head_path=frozen_direction_head_path,
                         _feature_cache_day_paths=day_cache_paths,
                         _model_store_paths=store_paths,
+                        _predictor_manifests=mp_predictor_manifests,
                     ))
                 logger.info(
                     "── Multiprocess: %d agents on warm pool (%d workers) ──",
@@ -2343,9 +2355,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "feature cache. DEFAULT 16 (the measured throughput peak — see "
             "tools/measure_optimal_n.py; re-calibrate per machine). 0 = OFF "
             "(sequential). N is the concurrency CAP, not the cohort size: a "
-            "cohort of M agents runs ceil(M/N) waves. Yields to --batched "
-            "(error only if both set explicitly) and auto-disables (warns, "
-            "runs sequential) on --predictor-* runs (not supported yet)."
+            "cohort of M agents runs ceil(M/N) waves. Predictor runs ARE "
+            "supported (workers rebuild the bundle from manifests). Yields to "
+            "--batched (error only if both set explicitly)."
         ),
     )
     p.add_argument(
@@ -2637,21 +2649,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _resolve_parallel_agents(
-    parallel_agents_arg: "int | None", *, batched: bool, has_predictor: bool,
+    parallel_agents_arg: "int | None", *, batched: bool,
 ) -> int:
     """Resolve the ``--parallel-agents`` worker count (training-speedup-v2 R5).
 
     Default (arg is ``None``) is **16** — the measured throughput peak
     (``tools/measure_optimal_n.py``) — so the fast multiprocess path is ON by
-    default. It must yield SAFELY to the paths it doesn't support, and the
-    default must NEVER turn a working ``--batched`` / predictor launch into a
-    crash:
-
-    * ``--batched`` takes precedence; raise ONLY if BOTH were set explicitly,
-      otherwise the default 16 silently yields to batched (returns 0).
-    * predictor runs aren't supported yet; an explicit ``--parallel-agents>0``
-      with predictors raises, while the default silently yields to sequential
-      (returns 0 — the caller logs a warning so the operator isn't surprised).
+    default. The only conflict is ``--batched``: it takes precedence, raising
+    ONLY if BOTH were set explicitly, otherwise the default 16 silently yields
+    to batched (returns 0). Predictor runs ARE supported (workers rebuild the
+    bundle from manifests — see the multiprocess branch in ``run_cohort``), so
+    they no longer disable multiprocess.
 
     Returns the resolved worker count (0 = sequential / off). This mirrors the
     `_resolve_<knob>` pattern from the Path-A precedence foot-gun lesson
@@ -2667,14 +2675,6 @@ def _resolve_parallel_agents(
                 "--parallel-agents and --batched are mutually exclusive: "
                 "--parallel-agents runs N solo agents as parallel CPU "
                 "processes; --batched runs one GPU-batched cluster. Pick one."
-            )
-        return 0
-    if has_predictor:
-        if explicit:
-            raise SystemExit(
-                "--parallel-agents (multiprocess) does not support predictor "
-                "runs yet (bundle spawn-pickling unverified). Pass "
-                "--parallel-agents 0, or drop --predictor-bundle-manifests."
             )
         return 0
     return pa
@@ -2832,15 +2832,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parallel_agents = _resolve_parallel_agents(
         args.parallel_agents, batched=bool(args.batched),
-        has_predictor=predictor_bundle is not None,
     )
-    if (parallel_agents == 0 and args.parallel_agents is None
-            and not args.batched and predictor_bundle is not None):
-        logger.warning(
-            "Predictors enabled -> multiprocess (--parallel-agents) "
-            "auto-disabled; running SEQUENTIAL. Multiprocess predictor support "
-            "is the next step; pass --parallel-agents 0 to silence this warning."
-        )
 
     try:
         run_cohort(
@@ -2885,6 +2877,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.arb_spread_target_lock_pct is not None else None
             ),
             predictor_bundle=predictor_bundle,
+            predictor_manifests=args.predictor_bundle_manifests,
             strategy_mode=args.strategy_mode,
             use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
             predictor_lean_obs=bool(args.predictor_lean_obs),

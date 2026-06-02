@@ -84,6 +84,35 @@ def _worker_load_day(day: str, path: str):
     return feats
 
 
+# ── Per-worker predictor-bundle cache (predictor support, 2026-06-02) ───────
+# The predictor bundle (LightGBM + sklearn + torch heads) is loaded by
+# REFERENCE — the worker rebuilds it from its manifest paths rather than
+# receiving a pickled object across the spawn boundary. This (a) sidesteps
+# the "is the bundle picklable" risk entirely, (b) avoids serialising a large
+# object into every spawn-arg, and (c) is bit-identical to the parent's
+# bundle (same manifests → same files → same deterministic models). Cached
+# per-worker keyed by the manifests tuple, so a warm worker loads the bundle
+# ONCE across all waves + generations.
+_WORKER_PREDICTOR_BUNDLE: dict = {}
+
+
+def _worker_load_bundle(manifests: tuple):
+    """Return the PredictorBundle for ``manifests`` (champion, ranker,
+    direction paths), from the per-worker cache if present else loaded once.
+    """
+    key = tuple(str(m) for m in manifests)
+    bundle = _WORKER_PREDICTOR_BUNDLE.get(key)
+    if bundle is None:
+        from predictors import PredictorBundle
+        bundle = PredictorBundle.from_manifests(
+            champion_manifest=key[0],
+            ranker_manifest=key[1],
+            direction_manifest=key[2],
+        )
+        _WORKER_PREDICTOR_BUNDLE[key] = bundle
+    return bundle
+
+
 def make_pool(n_workers: int) -> "ProcessPoolExecutor":
     """Create a persistent ProcessPoolExecutor for the cohort runner to reuse
     across generations. MKL/OMP single-threading is already pinned at this
@@ -176,6 +205,14 @@ def _train_agent_worker(spec: dict):
             weights_dir=store_paths["weights_dir"],
             bet_logs_dir=store_paths.get("bet_logs_dir"),
         )
+
+    # Predictor bundle by reference: rebuild from manifests in the worker
+    # (cached), bit-identical to the parent's bundle. Injected as
+    # predictor_bundle= so the env consumes predictor obs exactly as the
+    # sequential path does.
+    manifests = spec.pop("_predictor_manifests", None)
+    if manifests is not None:
+        spec["predictor_bundle"] = _worker_load_bundle(manifests)
 
     t0 = time.perf_counter()
     result = train_one_agent(**spec)
