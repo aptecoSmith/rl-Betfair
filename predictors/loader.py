@@ -821,9 +821,16 @@ class PredictorBundle:
 
         No caching — the call is cheap (~ms per runner per tick) and
         each tick has a fresh window.
+
+        NOTE: the q*_1m/3m/7m fields are POSITIONAL LABELS for the
+        predictor's 1st/2nd/3rd declared horizons, which differ by manifest
+        (V2 was 1m/3m/7m; the retrained V4 is 3m/7m/15m). This mirrors the
+        env's obs mapping in ``env/betfair_env.py`` — consumers read by
+        position, not by the literal name. The model forward + fire logic
+        are delegated to :meth:`predict_tick_batch` so there is a single,
+        horizon-agnostic source of truth.
         """
         import numpy as np
-        import torch
 
         # Validate shape against the manifest-declared sizes.
         arr = np.asarray(ladder_window, dtype=np.float32)
@@ -840,28 +847,30 @@ class PredictorBundle:
                 f"({expected_t}, {expected_f})"
             )
 
-        # Conv1D expects (B, T, F); add the batch dim, run forward, drop it.
-        x = torch.from_numpy(arr).unsqueeze(0)
-        with torch.no_grad():
-            y = self.direction.model(x)
-        # y: (1, n_horizons, n_quantiles)
-        y_np = y.squeeze(0).numpy()
-        # Map manifest's horizons / quantiles tuples onto the output grid
-        h_idx = {h: i for i, h in enumerate(self.direction.horizons)}
+        # Delegate the model forward + fire derivation to predict_tick_batch
+        # (it reads horizons/quantiles off the loaded payload, so it adapts
+        # to any retrained bundle — no hardcoded horizon names). Add the
+        # batch dim, call, drop it.
+        quantiles, fires = self.predict_tick_batch(arr[np.newaxis, :, :])
+        y_np = quantiles[0]          # (n_horizons, n_quantiles)
+        fire_row = fires[0]          # (3,) [drift, shorten, no_signal]
         q_idx = {q: i for i, q in enumerate(self.direction.quantiles)}
+        q10i = q_idx.get(0.1, 0)
+        q50i = q_idx.get(0.5, 1)
+        q90i = q_idx.get(0.9, 2)
 
-        def get(h: str, q: float) -> float:
-            return float(y_np[h_idx[h], q_idx[q]])
+        def _pos(h_pos: int, q_pos: int) -> float:
+            # Positional read of the predictor's 1st/2nd/3rd horizon;
+            # missing horizons zero-fill (matches the env's obs mapping).
+            return float(y_np[h_pos, q_pos]) if h_pos < y_np.shape[0] else 0.0
 
-        q10_1m, q50_1m, q90_1m = get("1m", 0.1), get("1m", 0.5), get("1m", 0.9)
-        q10_3m, q50_3m, q90_3m = get("3m", 0.1), get("3m", 0.5), get("3m", 0.9)
-        q10_7m, q50_7m, q90_7m = get("7m", 0.1), get("7m", 0.5), get("7m", 0.9)
+        q10_1m, q50_1m, q90_1m = _pos(0, q10i), _pos(0, q50i), _pos(0, q90i)
+        q10_3m, q50_3m, q90_3m = _pos(1, q10i), _pos(1, q50i), _pos(1, q90i)
+        q10_7m, q50_7m, q90_7m = _pos(2, q10i), _pos(2, q50i), _pos(2, q90i)
 
-        # Fire logic from the manifest's `signal_description` block.
-        # Values are in TICKS per the manifest.
-        fire_drift = bool(q50_7m >= 5.0 and q10_7m >= 0.0)
-        fire_shorten = bool(q50_7m <= -5.0 and q90_7m <= 0.0)
-        fire_no_signal = bool(not (fire_drift or fire_shorten))
+        fire_drift = bool(fire_row[0])
+        fire_shorten = bool(fire_row[1])
+        fire_no_signal = bool(fire_row[2])
 
         return TickLevelOutputs(
             q10_1m=q10_1m,

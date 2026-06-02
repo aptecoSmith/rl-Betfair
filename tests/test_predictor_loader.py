@@ -352,14 +352,6 @@ def test_predict_race_rejects_non_dataframe(_bundle_and_val):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="predict_tick (non-batched) hardcodes the retired '1m' horizon; "
-    "the retrained direction predictor uses 3m/7m/15m -> KeyError. Training "
-    "is UNAFFECTED (the env uses predict_tick_batch, which adapts to the "
-    "bundle's feature_variant + horizons). Reconcile predict_tick + its "
-    "output dataclass in the direction-predictor task, then remove this xfail.",
-)
 def test_predict_tick_returns_dataclass(_bundle_and_val):
     """predict_tick on a (32, 26) random window returns the full TickLevelOutputs."""
     import numpy as np
@@ -382,12 +374,6 @@ def test_predict_tick_returns_dataclass(_bundle_and_val):
         assert isinstance(getattr(out, name), bool)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="predict_tick (non-batched) hardcodes the retired '1m' horizon; "
-    "training-unused (env uses predict_tick_batch). Reconcile in the "
-    "direction-predictor task, then remove this xfail.",
-)
 def test_predict_tick_fire_logic(_bundle_and_val):
     """Fire flags are mutually exclusive AND exhaustive (sum == 1).
 
@@ -413,13 +399,16 @@ def test_predict_tick_fire_logic(_bundle_and_val):
         flags = (out.fire_drift, out.fire_shorten, out.fire_no_signal)
         assert sum(flags) == 1, f"flags={flags}"
 
-        # Cross-check derivations against the manifest's thresholds.
-        expected_drift = out.q50_7m >= 5.0 and out.q10_7m >= 0.0
-        expected_shorten = out.q50_7m <= -5.0 and out.q90_7m <= 0.0
-        expected_no_signal = not (expected_drift or expected_shorten)
-        assert out.fire_drift is expected_drift
-        assert out.fire_shorten is expected_shorten
-        assert out.fire_no_signal is expected_no_signal
+        # Fires are derived from the ACTUAL 7m horizon inside
+        # predict_tick_batch, NOT the positional _7m field (which for a V4
+        # bundle is the 15m slot — the q*_Xm fields are positional labels,
+        # see predict_tick's docstring). So verify predict_tick mirrors the
+        # batched path's fires exactly for the same window, rather than
+        # re-deriving from the positional fields.
+        _, batch_fires = bundle.predict_tick_batch(window[np.newaxis, :, :])
+        assert out.fire_drift is bool(batch_fires[0, 0])
+        assert out.fire_shorten is bool(batch_fires[0, 1])
+        assert out.fire_no_signal is bool(batch_fires[0, 2])
 
 
 def test_predict_tick_rejects_wrong_shape(_bundle_and_val):
@@ -441,12 +430,6 @@ def test_predict_tick_rejects_wrong_shape(_bundle_and_val):
         bundle.predict_tick(np.zeros((33, 26), dtype=np.float32))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="predict_tick (non-batched) hardcodes the retired '1m' horizon; "
-    "training-unused (env uses predict_tick_batch). Reconcile in the "
-    "direction-predictor task, then remove this xfail.",
-)
 def test_predict_tick_is_deterministic(_bundle_and_val):
     """Same window -> same outputs (per `intended_consumer.md` §Determinism)."""
     import numpy as np
