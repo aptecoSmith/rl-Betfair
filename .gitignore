@@ -86,3 +86,30 @@ tests/_evaluate_tmp_data/
 .claude/settings.local.json
 .claude/worktrees/
 frontend/.claude/
+
+# --- Plan-local + per-run artefacts (regenerable; not source) — 2026-06-02 ---
+# Plan working dirs accumulate feature caches, model weights, and run logs.
+plans/**/_cache/
+plans/**/*.npz
+plans/**/*.pt
+plans/**/*.log
+plans/**/babysit_log.txt
+plans/**/babysit_state.json
+
+# Cohort / smoke / monitor run logs + transient markers under registry/
+registry/scalping_ga_*.log
+registry/smoke_*.log
+registry/cohort_chain.log
+registry/monitor_wake.log
+registry/launch_*.log
+registry/c2_latest_outdir.txt
+registry/_*_ready
+
+# Cohort / smoke / probe output dirs (scoreboards, weights, bet-dumps —
+# regenerable; any tracked _summary/_analysis json inside stays tracked)
+registry/scalping_ga_*/
+registry/smoke_*/
+registry/probe_*/
+
+# Stray top-level archive dirs (registry/archive_* is already covered above)
+registry_archive_*/
