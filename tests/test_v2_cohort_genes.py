@@ -17,8 +17,11 @@ import pytest
 
 from training_v2.cohort.genes import (
     ALPHA_LR_RANGE,
-    ARB_SPREAD_SCALE_RANGE,
+    ARB_SPREAD_TARGET_LOCK_PCT_RANGE,
+    BC_DIRECTION_TARGET_WEIGHT_RANGE,
     CLIP_RANGE_RANGE,
+    DIRECTION_GATE_THRESHOLD_RANGE,
+    DIRECTION_PROB_LOSS_WEIGHT_RANGE,
     ENTROPY_COEFF_RANGE,
     FILL_PROB_LOSS_WEIGHT_RANGE,
     GAE_LAMBDA_RANGE,
@@ -50,7 +53,7 @@ _PHASE5_RANGE_TABLE: dict[str, tuple[float, float]] = {
     "mark_to_market_weight": MARK_TO_MARKET_WEIGHT_RANGE,
     "naked_loss_scale": NAKED_LOSS_SCALE_RANGE,
     "stop_loss_pnl_threshold": STOP_LOSS_PNL_THRESHOLD_RANGE,
-    "arb_spread_scale": ARB_SPREAD_SCALE_RANGE,
+    "arb_spread_target_lock_pct": ARB_SPREAD_TARGET_LOCK_PCT_RANGE,
     "fill_prob_loss_weight": FILL_PROB_LOSS_WEIGHT_RANGE,
     "mature_prob_loss_weight": MATURE_PROB_LOSS_WEIGHT_RANGE,
     "risk_loss_weight": RISK_LOSS_WEIGHT_RANGE,
@@ -202,7 +205,12 @@ class TestPhase5Genes:
             "mark_to_market_weight": 0.05,
             "naked_loss_scale": 1.0,
             "stop_loss_pnl_threshold": 0.0,
-            "arb_spread_scale": 1.0,
+            # arb_spread_scale retired 2026-05-23 -> arb_spread_target_lock_pct.
+            "arb_spread_target_lock_pct": 0.02,
+            # direction_prob_loss_weight + bc_direction_target_weight promoted
+            # to GA genes in the afed983 refactor (default 0.0 = disabled).
+            "direction_prob_loss_weight": 0.0,
+            "bc_direction_target_weight": 0.0,
             "fill_prob_loss_weight": 0.0,
             "mature_prob_loss_weight": 0.0,
             "risk_loss_weight": 0.0,
@@ -370,28 +378,36 @@ class TestPhase5Genes:
         assert isinstance(d["bc_pretrain_steps"], int)
         assert d["bc_learning_rate"] == pytest.approx(3e-4)
         assert d["bc_target_entropy_warmup_eps"] == 5
-        # Phase-13 direction-prob genes — operator-controlled via
-        # ``--reward-overrides``; pinned defaults at sample time.
-        assert d["direction_prob_loss_weight"] == 0.0
+        # direction_prob_loss_weight was promoted to a GA gene in the
+        # afed983 refactor, so with enabled_set=PHASE5_GENE_NAMES it is
+        # SAMPLED in-range (not pinned at the 0.0 default).
+        assert (DIRECTION_PROB_LOSS_WEIGHT_RANGE[0]
+                <= d["direction_prob_loss_weight"]
+                <= DIRECTION_PROB_LOSS_WEIGHT_RANGE[1])
         assert d["direction_horizon_ticks"] == 60
         assert d["direction_threshold_ticks"] == 5
         assert d["direction_force_close_seconds"] == 60.0
-        # Phase-13 S05 — direction-targeted BC.
-        assert d["bc_direction_target_weight"] == 0.0
+        # Phase-13 S05 — direction-targeted BC, also promoted to GA -> sampled.
+        assert (BC_DIRECTION_TARGET_WEIGHT_RANGE[0]
+                <= d["bc_direction_target_weight"]
+                <= BC_DIRECTION_TARGET_WEIGHT_RANGE[1])
         # Phase-14 S03 — direction-confidence gate. The threshold
         # is sampled here because we passed enabled_set=
         # PHASE5_GENE_NAMES, so the random draw lands in the
         # [0.5, 0.95] range rather than at the default 0.5.
         assert d["direction_gate_enabled"] is False
-        assert 0.5 <= d["direction_gate_threshold"] <= 0.95
+        assert (DIRECTION_GATE_THRESHOLD_RANGE[0]
+                <= d["direction_gate_threshold"]
+                <= DIRECTION_GATE_THRESHOLD_RANGE[1])
         # Phase-14 S06 — threshold warmup window. Operator-controlled,
         # not GA-evolved; pinned at default 5 even when enabled_set
         # covers all PHASE5_GENE_NAMES.
         assert d["direction_gate_warmup_eps"] == 5
 
     def test_phase5_gene_names_set_size(self):
-        # 12 Phase 5 genes + 5 predictor-integration Session 03 genes
-        # + 1 scalping-tight-naked-variance Phase 2A
-        # (naked_variance_penalty_beta) = 18.
-        assert len(PHASE5_GENE_NAMES) == 18
+        # 18 prior genes + 2 promoted to GA in the afed983 refactor
+        # (direction_prob_loss_weight, bc_direction_target_weight) = 20.
+        # (arb_spread_scale was retired and replaced by
+        # arb_spread_target_lock_pct — a swap, not a count change.)
+        assert len(PHASE5_GENE_NAMES) == 20
         assert PHASE5_GENE_NAMES == frozenset(PHASE5_GENE_DEFAULTS)
