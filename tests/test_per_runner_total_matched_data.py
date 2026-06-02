@@ -178,6 +178,15 @@ class TestRealParquetPerRunnerTotalMatched:
             )
         return path
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="F7 unresolved: the upstream polled source does not carry "
+        "per-runner cumulative totalMatched (identically 0.0 in all "
+        "data/processed parquets). Tracked in audit_findings.md F7; needs "
+        "an upstream data-pipeline fix. xfail(strict) keeps the suite green "
+        "while preserving the gate — when F7 is fixed this XPASSES and the "
+        "strict marker fails it, prompting removal of the xfail.",
+    )
     def test_at_least_one_active_runner_has_nonzero_total_matched(
         self, parquet_path: Path,
     ) -> None:
@@ -224,6 +233,13 @@ class TestRealParquetPerRunnerTotalMatched:
             f"finding F7 for the triage and fix options."
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="F7 unresolved: upstream polled source lacks per-runner "
+        "cumulative totalMatched (see audit_findings.md F7). xfail(strict) "
+        "keeps the suite green and flips to a failure (XPASS) once F7 is "
+        "fixed, prompting removal of the marker.",
+    )
     def test_market_with_high_traded_volume_has_per_runner_signal(
         self, parquet_path: Path,
     ) -> None:

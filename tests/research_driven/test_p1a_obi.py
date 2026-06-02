@@ -302,7 +302,8 @@ class TestEnvObi:
         )
 
     def test_obi_in_obs_vector(self):
-        """The obs vector dimension matches the new RUNNER_DIM=111."""
+        """The obs vector dimension matches the current RUNNER_DIM=143
+        (full-runner obs; was 115 after P1e, grown by later feature work)."""
         from env.betfair_env import (
             AGENT_STATE_DIM,
             BetfairEnv,
@@ -312,7 +313,7 @@ class TestEnvObi:
             VELOCITY_DIM,
         )
 
-        assert RUNNER_DIM == 115, f"Expected RUNNER_DIM=115 (after P1e), got {RUNNER_DIM}"
+        assert RUNNER_DIM == 143, f"Expected RUNNER_DIM=143, got {RUNNER_DIM}"
 
         cfg = _minimal_config()
         max_runners = cfg["training"]["max_runners"]
