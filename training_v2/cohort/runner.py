@@ -60,8 +60,9 @@ from training_v2.cohort.batched_worker import train_cluster_batched
 from training_v2.cohort.multiproc_worker import (
     train_cluster_multiproc,
     prebuild_feature_cache,
-    save_shared_cache,
+    save_shared_cache_per_day,
     model_store_paths,
+    make_pool,
 )
 from training_v2.cohort.worker import (
     AgentResult,
@@ -1069,11 +1070,15 @@ def run_cohort(
     feature_cache: dict[str, list] = {}
 
     # R5 multiprocess path: master engineered-feature cache, persisted across
-    # generations so each unique day is engineered ONCE in the parent. Per
-    # generation we write a SUBSET file (only that gen's train+eval days) for
-    # the workers to load — keeps the shared file small even as eval days
-    # rotate. Empty / unused unless ``parallel_agents > 0``.
+    # generations so each unique day is engineered ONCE in the parent, then
+    # written to per-day cache files the workers load. ``mp_pool`` is the
+    # WARM persistent ProcessPoolExecutor — created lazily on the first
+    # parallel generation and reused for the rest of the run, so workers stay
+    # alive across generations (torch imported once, per-worker day cache
+    # survives → gen 2+ skips both startup costs). Shut down in the finally
+    # below. All empty / unused unless ``parallel_agents > 0``.
     mp_feature_cache: dict[str, list] = {}
+    mp_pool = None
 
     # Initial eval_days = full pool (used for the cohort_started event;
     # per-gen rotation re-samples inside the loop).
@@ -1174,18 +1179,22 @@ def run_cohort(
                         "unverified). Use --batched or the sequential path "
                         "for predictor runs."
                     )
+                # Warm persistent pool: create once, reuse across generations
+                # so workers stay alive (torch imported once, per-worker day
+                # cache survives → gen 2+ skips both startup costs).
+                if mp_pool is None:
+                    mp_pool = make_pool(int(parallel_agents))
                 # Engineer each unique day ONCE (master cache persisted across
-                # generations); write a per-gen SUBSET file for the workers to
-                # load. engineer_day is a pure fn of day + cohort-fixed params,
-                # so the shared cache is bit-identical to per-worker
-                # engineering.
+                # generations); write per-DAY cache files so a warm worker
+                # deserialises each day at most once over the whole run.
+                # engineer_day is a pure fn of day + cohort-fixed params, so
+                # the shared cache is bit-identical to per-worker engineering.
                 gen_days = list(dict.fromkeys(
                     list(training_days) + list(eval_days)))
                 prebuild_feature_cache(
                     gen_days, data_dir=data_dir, into=mp_feature_cache)
-                gen_cache = {d: mp_feature_cache[d] for d in gen_days}
-                mp_cache_file = save_shared_cache(
-                    gen_cache, output_dir / "mp_feature_cache.pkl")
+                day_cache_paths = save_shared_cache_per_day(
+                    mp_feature_cache, output_dir / "mp_cache", gen_days)
                 store_paths = model_store_paths(model_store)
                 specs: list[dict] = []
                 for idx, genes in enumerate(cohort):
@@ -1237,15 +1246,15 @@ def run_cohort(
                         composite_score_mode=composite_score_mode,
                         feature_cache=None,
                         frozen_direction_head_path=frozen_direction_head_path,
-                        _feature_cache_path=str(mp_cache_file),
+                        _feature_cache_day_paths=day_cache_paths,
                         _model_store_paths=store_paths,
                     ))
                 logger.info(
-                    "── Multiprocess: %d agents across %d processes ──",
+                    "── Multiprocess: %d agents on warm pool (%d workers) ──",
                     len(specs), int(parallel_agents),
                 )
                 cluster_results = train_cluster_multiproc(
-                    specs, n_workers=int(parallel_agents))
+                    specs, n_workers=int(parallel_agents), executor=mp_pool)
                 for idx, result in enumerate(cluster_results):
                     results[idx] = result
                     total_agents_trained += 1
@@ -1670,6 +1679,13 @@ def run_cohort(
             ))
         except Exception:
             logger.exception("event_emitter raised on cohort_complete; continuing")
+
+    # Tear down the warm multiprocess pool (R5). On an exception escaping the
+    # generation loop this line is skipped, but ProcessPoolExecutor registers
+    # an atexit handler that terminates the workers at interpreter exit, so
+    # they never leak past the process.
+    if mp_pool is not None:
+        mp_pool.shutdown(wait=True)
 
     return last_results
 
@@ -2317,17 +2333,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--parallel-agents", type=int, default=0, metavar="N",
+        "--parallel-agents", type=int, default=None, metavar="N",
         help=(
             "training-speedup-v2 R5: train the cohort as N parallel solo-"
             "agent PROCESSES (CPU, 1 thread each) — the fastest path on a "
-            "many-core box (~7-9x cluster-day, bit-identical to the "
-            "sequential path; each worker is the golden solo train_one_agent "
-            "at its own seed). Engineers each day ONCE in the parent and "
-            "shares the feature_cache to workers by file. 0 = OFF (default). "
-            "Mutually exclusive with --batched (raises if both set); does "
-            "NOT support --predictor-* runs yet (bundle spawn-pickling "
-            "unverified). Pick N ~= cores-2."
+            "many-core box (~9x cluster-day, bit-identical to the sequential "
+            "path; each worker is the golden solo train_one_agent at its own "
+            "seed). Warm persistent pool across generations + per-day shared "
+            "feature cache. DEFAULT 16 (the measured throughput peak — see "
+            "tools/measure_optimal_n.py; re-calibrate per machine). 0 = OFF "
+            "(sequential). N is the concurrency CAP, not the cohort size: a "
+            "cohort of M agents runs ceil(M/N) waves. Yields to --batched "
+            "(error only if both set explicitly) and auto-disables (warns, "
+            "runs sequential) on --predictor-* runs (not supported yet)."
         ),
     )
     p.add_argument(
@@ -2618,6 +2636,50 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _resolve_parallel_agents(
+    parallel_agents_arg: "int | None", *, batched: bool, has_predictor: bool,
+) -> int:
+    """Resolve the ``--parallel-agents`` worker count (training-speedup-v2 R5).
+
+    Default (arg is ``None``) is **16** — the measured throughput peak
+    (``tools/measure_optimal_n.py``) — so the fast multiprocess path is ON by
+    default. It must yield SAFELY to the paths it doesn't support, and the
+    default must NEVER turn a working ``--batched`` / predictor launch into a
+    crash:
+
+    * ``--batched`` takes precedence; raise ONLY if BOTH were set explicitly,
+      otherwise the default 16 silently yields to batched (returns 0).
+    * predictor runs aren't supported yet; an explicit ``--parallel-agents>0``
+      with predictors raises, while the default silently yields to sequential
+      (returns 0 — the caller logs a warning so the operator isn't surprised).
+
+    Returns the resolved worker count (0 = sequential / off). This mirrors the
+    `_resolve_<knob>` pattern from the Path-A precedence foot-gun lesson
+    (CLAUDE.md) so the CLI default and the explicit value are both tested.
+    """
+    explicit = parallel_agents_arg is not None
+    pa = int(parallel_agents_arg) if explicit else 16
+    if pa <= 0:
+        return 0
+    if batched:
+        if explicit:
+            raise SystemExit(
+                "--parallel-agents and --batched are mutually exclusive: "
+                "--parallel-agents runs N solo agents as parallel CPU "
+                "processes; --batched runs one GPU-batched cluster. Pick one."
+            )
+        return 0
+    if has_predictor:
+        if explicit:
+            raise SystemExit(
+                "--parallel-agents (multiprocess) does not support predictor "
+                "runs yet (bundle spawn-pickling unverified). Pass "
+                "--parallel-agents 0, or drop --predictor-bundle-manifests."
+            )
+        return 0
+    return pa
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     args = _parse_args(argv if argv is not None else sys.argv[1:])
@@ -2768,11 +2830,16 @@ def main(argv: list[str] | None = None) -> int:
             "--predictor-bundle-manifests CHAMPION RANKER DIRECTION",
         )
 
-    if int(getattr(args, "parallel_agents", 0) or 0) > 0 and args.batched:
-        raise SystemExit(
-            "--parallel-agents and --batched are mutually exclusive: "
-            "--parallel-agents runs N solo agents as parallel CPU processes; "
-            "--batched runs one GPU-batched cluster. Pick one."
+    parallel_agents = _resolve_parallel_agents(
+        args.parallel_agents, batched=bool(args.batched),
+        has_predictor=predictor_bundle is not None,
+    )
+    if (parallel_agents == 0 and args.parallel_agents is None
+            and not args.batched and predictor_bundle is not None):
+        logger.warning(
+            "Predictors enabled -> multiprocess (--parallel-agents) "
+            "auto-disabled; running SEQUENTIAL. Multiprocess predictor support "
+            "is the next step; pass --parallel-agents 0 to silence this warning."
         )
 
     try:
@@ -2789,7 +2856,7 @@ def main(argv: list[str] | None = None) -> int:
             reward_overrides=reward_overrides or None,
             enabled_set=enabled_set,
             batched=bool(args.batched),
-            parallel_agents=int(getattr(args, "parallel_agents", 0) or 0),
+            parallel_agents=parallel_agents,
             maturation_bonus_weight=float(args.maturation_bonus_weight),
             n_eval_days=(
                 int(args.n_eval_days) if args.n_eval_days is not None else None

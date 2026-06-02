@@ -13,11 +13,17 @@ WHOLE per-agent rollout (env + forward + PPO update) across the cores —
 not just the policy forward like the GPU-batched R1/R2 path did — and it is
 **bit-identical by construction** (each worker is the golden solo path).
 
-| path (N=11 cluster, day 2026-05-09, predictors-off) | cluster-day wall | vs baseline (1130s) | vs sequential (1177s) |
-|---|--:|--:|--:|
-| BASELINE (c1/c2: CUDA batch=1, no cache) | 1130s | 1.0× | — |
-| R1+R2 GPU-batched (below) | 443s | 2.55× | — |
-| **R5 multiprocess (11 procs, shared cache)** | **165s** | **6.8×** | **7.1×** |
+| path (N=11 cluster, day 2026-05-09, predictors-off) | cluster-day wall | vs baseline (1130s) |
+|---|--:|--:|
+| BASELINE (c1/c2: CUDA batch=1, no cache) | 1130s | 1.0× |
+| R1+R2 GPU-batched (below) | 443s | 2.55× |
+| R5 multiprocess, generation 0 (cold disk + cold pool) | ~134-165s | 6.8-8.4× |
+| **R5 multiprocess, generation 2+ (warm disk + warm pool)** | **~122s** | **~9.3×** |
+
+Steady-state is generation 2+ (most of a multi-gen cohort): **~9×**. A 5-gen
+cohort ≈ `165 + 4×122 = 653s` vs `5×1130 = 5650s` → **~8.6× overall**. The
+warm pool contributes the last ~9 % (gen-0 cold 134s → gen-1 warm 122s,
+same-run isolated); the rest is parallelism + warm OS page cache.
 
 Gates (all PASS, bit-identical — discrete metrics + pnl + bet counts
 match the sequential golden exactly):
@@ -41,17 +47,70 @@ match the sequential golden exactly):
 - Wired into `run_cohort` as `--parallel-agents N` (a third branch
   alongside `--batched` / solo; mutually exclusive with `--batched`;
   predictor runs not yet supported — bundle spawn-pickling unverified).
+- **WARM PERSISTENT POOL (done, gated — smaller win than projected).**
+  `run_cohort` now creates ONE `ProcessPoolExecutor` and reuses it across
+  generations, so workers stay alive — torch is imported once per worker
+  and a per-worker LRU day cache (`_WORKER_DAY_CACHE`, fed by per-day cache
+  files) survives, so generation 2+ skips the torch re-import + cache
+  deserialise. Gated bit-identical **across generations**: a 2-generation
+  `run_cohort` parallel run matches sequential on every deterministic field
+  for both gen 0 and gen 1 (a reused worker with a cached day == a fresh
+  one). **Measured N=11: gen-0 cold 134s → gen-1 warm 122s — only ~12 s
+  (~9 %) saved, NOT the ~80 s projected.**
 
-**When build-share helps:** at small N it's a clear win (N=4: 3.9× vs
-3.1×). At large N the 548 MB cache deserialise (×N, CPU-bound, contended)
-roughly cancels the engineering it saves — so the headline N=11 number is
-≈ the same with or without it. Headroom: a persistent pool (amortise the
-~93 s spawn+import across generations, ~+15 %) and shared-memory cache
-(skip per-worker deserialise) would push past ~8×.
+**Correction — the per-generation wall is contention-bound, not
+startup-bound.** I had decomposed the cold 165 s as "72 s training + 93 s
+startup", but that 72 s was the per-worker `wall_time_sec` stamp WITHOUT
+contention. The true per-gen wall is dominated by **memory-bandwidth
+contention** — 11 memory-heavy processes competing — which the warm pool
+cannot remove. It only removes the genuine startup (~12 s: spawn + torch
+re-import + per-worker deserialise). So:
+
+| N=11 per-generation | wall | vs baseline 1130s |
+|---|--:|--:|
+| cold (fresh pool each gen) | 134s | 8.4× |
+| **warm (persistent pool, gen 2+)** | **122s** | **9.3×** |
+
+The headline is therefore **~9× steady-state**, with the warm pool
+contributing the last ~9 %. The remaining cost is real per-agent training
+under contention — only **fewer workers (optimal-N), less memory pressure
+per worker, or the tensor-env rewrite** move it further; a shared-memory
+cache would shave the cold gen-0 deserialise but not the contended
+training that dominates. Build-share itself is a clear win only at small N
+(N=4: 3.9× vs 3.1×); at large N it's contention-bound either way.
 
 Tests: `tests/test_v2_multiproc_cluster.py` (worker plumbing — cache+store
-injection, key popping, worker-count) 6/6; runner integration gate
-(`run_cohort` parallel == sequential scoreboard) PASS.
+injection, key popping, day cache, executor reuse) 12/12; runner
+integration gates: single-gen + 2-gen `run_cohort` parallel == sequential
+scoreboard, bit-identical across generations, PASS.
+
+### Optimal worker count N (throughput sweep, `tools/measure_optimal_n.py`)
+
+Throughput = agents/sec per wave, cached days, per-agent ~72 s solo:
+
+| K workers | wall | throughput | per-agent (contention) |
+|---:|---:|---:|---:|
+| 4  |  92s | 0.043 | 1.3× |
+| 8  | 115s | 0.070 | 1.6× |
+| 12 | 144s | 0.084 | 2.0× |
+| **16** | **170s** | **0.094 (peak)** | 2.4× |
+| 20 | 216s | 0.093 | 3.0× |
+
+**Optimal N ≈ 16 on the 20-core box — a flat plateau K≈12-20** (within
+~10 %). The decisive lesson is the low end: K=4 throughput is < ½ the peak,
+so *under*-parallelising wastes the box; *over*-parallelising (K=20) barely
+hurts. `default_worker_count` = `cpu-2` (18) sits on the plateau, so it is a
+safe default; pin `--parallel-agents 16` for the exact peak. The curve is
+machine-specific (re-run the sweep on other hardware).
+
+**N is the concurrency cap, not the cohort size.** For a cohort of M
+agents the pool runs N at a time and queues the rest — `ceil(M/N)` waves per
+generation, and the warm pool/day-cache span waves AND generations, so only
+the very FIRST wave of the whole run is cold. Realistic walls at N=16
+(partial last wave accounted): M=11 → 1 wave ~130s; M=20 → 2 waves ~260s;
+M=30 → 2 waves ~330s. Set `--parallel-agents 16` regardless of M; never set
+it to M (30 procs on 20 cores oversubscribes and is *slower* than 16
+waving through 30).
 
 ---
 

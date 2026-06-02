@@ -47,8 +47,49 @@ __all__ = [
     "default_worker_count",
     "prebuild_feature_cache",
     "save_shared_cache",
+    "save_shared_cache_per_day",
     "model_store_paths",
+    "make_pool",
 ]
+
+# ── Per-worker engineered-feature day cache (warm persistent pool) ──────────
+# When the cohort runner reuses ONE ProcessPoolExecutor across generations
+# (instead of re-spawning per generation), each worker process stays alive
+# between tasks. This module-global dict therefore persists across tasks in
+# that worker, so a day engineered + deserialised on generation 1 is reused
+# on every later generation — the worker skips both the ~30s torch re-import
+# (process stays warm) AND the ~50s 548 MB cache deserialise (day cached).
+# Keyed by day string; values are the engineer_day output (identical across
+# agents — pure fn of day + cohort-fixed params — so reuse is bit-identical).
+# LRU-bounded so a long cohort with many rotating eval days can't grow RAM
+# without limit; fixed training days are touched every task so they're MRU
+# and never evicted.
+_WORKER_DAY_CACHE: dict = {}
+_WORKER_DAY_CACHE_MAX = 16
+
+
+def _worker_load_day(day: str, path: str):
+    """Return the engineered features for ``day``, from the per-worker cache
+    if present (move-to-MRU), else deserialise the per-day file and cache it.
+    """
+    cache = _WORKER_DAY_CACHE
+    if day in cache:
+        cache[day] = cache.pop(day)  # mark most-recently-used
+        return cache[day]
+    with open(path, "rb") as fh:
+        feats = pickle.load(fh)
+    cache[day] = feats
+    while len(cache) > _WORKER_DAY_CACHE_MAX:
+        del cache[next(iter(cache))]  # evict least-recently-used
+    return feats
+
+
+def make_pool(n_workers: int) -> "ProcessPoolExecutor":
+    """Create a persistent ProcessPoolExecutor for the cohort runner to reuse
+    across generations. MKL/OMP single-threading is already pinned at this
+    module's import (top of file), which the spawned workers inherit.
+    """
+    return ProcessPoolExecutor(max_workers=int(n_workers))
 
 
 def model_store_paths(store) -> dict:
@@ -68,10 +109,19 @@ def model_store_paths(store) -> dict:
 def default_worker_count(n_agents: int) -> int:
     """Pick a worker count: one per agent, capped so we don't oversubscribe.
 
-    Memory- and bandwidth-bound, not just core-bound — the per-agent
-    rollout slows under contention (measured build 61→95s, rollout 28→47s
-    at 8-way), so capping at ~cpu_count-2 leaves headroom for the OS + the
-    parent. The caller can override.
+    Memory-bandwidth-bound, not just core-bound — the per-agent rollout
+    slows under contention, so the THROUGHPUT (agents/sec) curve rises then
+    plateaus well below the core count. Measured on the 20-core dev box
+    (``tools``/``measure_optimal_n.py``, cached days, per-agent ~72 s solo):
+
+        K=4 0.043  K=8 0.070  K=12 0.084  K=16 0.094(peak)  K=20 0.093 ag/s
+
+    i.e. a flat plateau K≈12-20; the only bad choice is going too LOW (K=4
+    is <½ the peak). ``cpu_count-2`` (18 here) sits on the plateau, so it is
+    a safe generic default. For best results an operator should run the
+    sweep on their own hardware and pin ``--parallel-agents`` to the
+    measured peak (the curve shape is machine-specific — beefier memory
+    subsystems plateau higher). The caller can override.
     """
     try:
         cpu = os.cpu_count() or 4
@@ -86,20 +136,29 @@ def _train_agent_worker(spec: dict):
     ``spec`` is a kwargs dict for ``train_one_agent`` (must include
     ``model_store=None``). Runs single-threaded; returns the AgentResult.
 
-    If ``spec`` carries the private key ``_feature_cache_path`` (a pickled
-    pre-built ``feature_cache``), the worker loads it ONCE and injects it as
-    ``feature_cache=`` so the env build skips ``engineer_day``. Passing the
-    cache by PATH (not by value) avoids pickling the large dict into every
-    spawn-arg N times — the parent serialises once to disk, workers
-    deserialise in parallel.
+    Feature-cache injection (skips ``engineer_day`` in the worker's env
+    build) is by PATH, not by value — passing the big dict as a spawn-arg
+    would pickle it N times. Two forms:
+
+    * ``_feature_cache_day_paths`` (dict ``{day: path}``) — the warm-pool
+      form: each day is loaded via the per-worker LRU ``_WORKER_DAY_CACHE``,
+      so across generations a reused worker deserialises each day at most
+      once. Use this with a persistent executor.
+    * ``_feature_cache_path`` (single pickled dict) — the simple form: load
+      the whole file each call (no cross-task reuse). Used by the probes.
     """
     import torch
     torch.set_num_threads(1)
     from training_v2.cohort.worker import train_one_agent
 
     spec = dict(spec)
+    day_paths = spec.pop("_feature_cache_day_paths", None)
     cache_path = spec.pop("_feature_cache_path", None)
-    if cache_path is not None:
+    if day_paths is not None:
+        spec["feature_cache"] = {
+            day: _worker_load_day(day, path) for day, path in day_paths.items()
+        }
+    elif cache_path is not None:
         with open(cache_path, "rb") as fh:
             spec["feature_cache"] = pickle.load(fh)
 
@@ -132,6 +191,7 @@ def train_cluster_multiproc(
     specs: list[dict],
     *,
     n_workers: int | None = None,
+    executor: "ProcessPoolExecutor | None" = None,
 ) -> list:
     """Train a cluster of agents in parallel processes.
 
@@ -143,6 +203,12 @@ def train_cluster_multiproc(
         ``device="cpu"`` (multiprocess is CPU-parallel; the GPU is not
         shared across N processes). Predictor-bundle args, if used, must
         be picklable or loaded inside the worker.
+    executor:
+        Optional PERSISTENT pool (from ``make_pool``). When given, the pool
+        is reused (NOT shut down here) so its workers stay warm across
+        generations — torch is imported once per worker and the per-worker
+        day cache survives, so generation 2+ skips both startup costs. When
+        ``None``, a fresh pool is created and torn down for this call.
 
     Returns
     -------
@@ -152,12 +218,22 @@ def train_cluster_multiproc(
     n = len(specs)
     if n == 0:
         return []
+    t0 = time.perf_counter()
+    if executor is not None:
+        logger.info(
+            "train_cluster_multiproc: %d agents on persistent pool (warm)", n,
+        )
+        results = list(executor.map(_train_agent_worker, specs))
+        logger.info(
+            "train_cluster_multiproc: %d agents done in %.0fs wall",
+            n, time.perf_counter() - t0,
+        )
+        return results
     nw = int(n_workers) if n_workers else default_worker_count(n)
     logger.info(
         "train_cluster_multiproc: %d agents across %d worker processes "
-        "(1 thread each)", n, nw,
+        "(1 thread each, fresh pool)", n, nw,
     )
-    t0 = time.perf_counter()
     with ProcessPoolExecutor(max_workers=nw) as ex:
         results = list(ex.map(_train_agent_worker, specs))
     logger.info(
@@ -222,3 +298,27 @@ def save_shared_cache(cache: dict, path: "Path") -> "Path":
     with open(path, "wb") as fh:
         pickle.dump(cache, fh, protocol=pickle.HIGHEST_PROTOCOL)
     return path
+
+
+def save_shared_cache_per_day(
+    cache: dict, cache_dir: "Path", days: list[str],
+) -> dict:
+    """Write ONE pickle per day under ``cache_dir`` and return ``{day: path}``.
+
+    Per-day files (vs one big file) let a warm-pool worker load each day at
+    most once across all generations via ``_WORKER_DAY_CACHE`` — a rotated
+    eval day costs one deserialise the first time any worker sees it, never
+    again. A day whose file already exists is left untouched (engineer_day
+    is deterministic, so the bytes would be identical), so re-calling this
+    each generation only writes genuinely-new days.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out: dict = {}
+    for day in dict.fromkeys(days):
+        p = cache_dir / f"mp_day_{day}.pkl"
+        if not p.exists():
+            with open(p, "wb") as fh:
+                pickle.dump(cache[day], fh, protocol=pickle.HIGHEST_PROTOCOL)
+        out[day] = str(p)
+    return out
