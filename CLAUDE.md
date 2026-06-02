@@ -5,6 +5,31 @@ this before touching anything in `env/`, `agents/`, or the reward path.
 
 ---
 
+## Fast cohort training: `--parallel-agents` (multiprocess, default 16)
+
+`training_v2/cohort/runner.py` trains the cohort's agents as N parallel
+solo `train_one_agent` PROCESSES (1 thread each) — the fastest path on a
+many-core box: **~8-9x cluster-day, bit-identical** (each worker is the
+golden solo path at its own seed). This is the default now —
+`--parallel-agents` defaults to **16** (the measured throughput peak;
+`tools/measure_optimal_n.py` calibrates per machine). Key facts:
+
+- **N is the concurrency CAP, not cohort size.** M>N agents run `ceil(M/N)`
+  waves automatically; a WARM persistent pool + per-worker day/bundle cache
+  span waves+generations (only the first wave is cold).
+- **Predictor runs are supported** (the intended config): workers rebuild
+  the bundle from manifest paths (`_worker_load_bundle`), not pickled across
+  spawn. predictors-ON ≈ 7.9x (17h/gen → ~2.2h). Just pass
+  `--use-race-outcome-predictor --predictor-bundle-manifests ...` as usual.
+- Mutually exclusive with `--batched` (the older GPU-batched path, 2.55x).
+  `0` = sequential. The per-generation wall is memory-bandwidth-contention-
+  bound, so going past ~9x needs the tensor-env rewrite (R4), not tuning.
+- Engine: `training_v2/cohort/multiproc_worker.py`. Gates:
+  `tests/test_v2_multiproc_cluster.py` + the parallel-vs-sequential
+  bit-identity probes. Full record: `plans/training-speedup-v2/results.md`.
+
+---
+
 ## Bet accounting: matched orders, not netted positions
 
 For the operator's model of how Betfair markets work and how the
