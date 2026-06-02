@@ -98,7 +98,22 @@ NAKED_VARIANCE_PENALTY_BETA_RANGE: tuple[float, float] = (0.0, 0.10)
 # is the gate's "no-op floor" semantic. Upper bound clamps the
 # strictest gene draw — at 0.99+ an agent never opens, starving
 # PPO of training signal (per phase-14 hard_constraints §10).
-DIRECTION_GATE_THRESHOLD_RANGE: tuple[float, float] = (0.5, 0.95)
+#
+# 2026-05-25 RECALIBRATION (recipe-sensitivity-sweep / shared
+# direction head C11). The original (0.5, 0.95) range was set when
+# the per-agent direction head was pos_weighted (outputs cluster
+# near 0.5 by construction). The frozen shared C11 head is trained
+# UNWEIGHTED so its outputs are calibrated to the actual ~18 %
+# positive rate — observed `direction_back_prob` / `direction_lay_prob`
+# on placed bets show mean ~0.26, max ~0.84, with `max(back, lay)`
+# per-runner mean ~0.32. At threshold 0.5+ the gate refuses 95-99 %
+# of opens (effectively NOOP-only), starving PPO. New range
+# (0.20, 0.50) puts the strictest draw at "refuse ~95 % of opens"
+# and the loosest at "refuse ~30 % of opens" — meaningful response
+# curve across the gene's range. See
+# `plans/recipe-sensitivity-sweep/purpose.md` for the discovery
+# trail.
+DIRECTION_GATE_THRESHOLD_RANGE: tuple[float, float] = (0.20, 0.50)
 # Phase-15 (2026-05-24). Promoted from operator-pinned to GA-evolvable
 # after the 2026-05-24 direction signal probe found:
 #   * positive class rate ~15-20 % across training days

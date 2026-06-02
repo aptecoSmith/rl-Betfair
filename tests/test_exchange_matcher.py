@@ -319,3 +319,193 @@ class TestMatchResult:
             average_price=0.0, skipped_reason="empty",
         )
         assert r.fully_matched is False
+
+
+# ── Close-walk (2026-05-30, findings.md KEY FINDING #2) ──────────────────────
+
+
+class TestCloseWalk:
+    """``walk_to_price`` lets a close leg fill across successive levels.
+
+    The OPEN path never passes ``walk_to_price`` (stays single-level);
+    only ``_attempt_close`` does. These guard the bounded-walk contract:
+    fill from best toward the limit, weighted-average price, respect the
+    hard cap, and remain byte-identical when ``walk_to_price is None``.
+    """
+
+    def test_none_is_byte_identical_single_level(self, matcher):
+        # The Runman case: lay to close a back. Without walk we take
+        # only the £17.55 at 2.94 (the documented under-hedge).
+        book = _levels((2.94, 17.55), (2.96, 146.21), (2.98, 66.15))
+        r = matcher.match_lay(book, stake=42.6, reference_price=2.94)
+        assert r.matched_stake == pytest.approx(17.55)
+        assert r.average_price == pytest.approx(2.94)
+        assert r.unmatched_stake == pytest.approx(42.6 - 17.55)
+
+    def test_walk_completes_hedge_across_levels(self, matcher):
+        # Same book, walk up to 2.98: the £42.6 now fills fully —
+        # £17.55 @ 2.94 + £25.05 @ 2.96 (depth at 2.96 is ample).
+        book = _levels((2.94, 17.55), (2.96, 146.21), (2.98, 66.15))
+        r = matcher.match_lay(
+            book, stake=42.6, reference_price=2.94, walk_to_price=2.98,
+        )
+        assert r.matched_stake == pytest.approx(42.6)
+        assert r.unmatched_stake == pytest.approx(0.0)
+        # Weighted average: (17.55*2.94 + 25.05*2.96) / 42.6
+        exp = (17.55 * 2.94 + 25.05 * 2.96) / 42.6
+        assert r.average_price == pytest.approx(exp)
+
+    def test_walk_stops_at_limit_price(self, matcher):
+        # Walk limit 2.94 (= best) means single level only even though
+        # deeper liquidity exists — the limit binds.
+        book = _levels((2.94, 17.55), (2.96, 146.21))
+        r = matcher.match_lay(
+            book, stake=42.6, reference_price=2.94, walk_to_price=2.94,
+        )
+        assert r.matched_stake == pytest.approx(17.55)
+        assert r.average_price == pytest.approx(2.94)
+
+    def test_walk_back_side_descends(self, matcher):
+        # Closing a lay → back DOWN the ladder. Best back is highest
+        # (3.00); walk down to 2.96 takes 3.00 then 2.98.
+        book = _levels((3.00, 5.0), (2.98, 30.0), (2.96, 50.0))
+        r = matcher.match_back(
+            book, stake=20.0, reference_price=2.98, walk_to_price=2.96,
+        )
+        assert r.matched_stake == pytest.approx(20.0)
+        exp = (5.0 * 3.00 + 15.0 * 2.98) / 20.0
+        assert r.average_price == pytest.approx(exp)
+
+    def test_walk_never_crosses_hard_cap(self, matcher):
+        # max_price caps the lay walk: 2.98 is above the £2.96 cap, so
+        # the £66 there is unreachable; only 2.94 (+2.96 if <= cap).
+        book = _levels((2.94, 10.0), (2.96, 10.0), (2.98, 100.0))
+        r = matcher.match_lay(
+            book, stake=80.0, reference_price=2.94,
+            max_price=2.96, walk_to_price=2.98,
+        )
+        assert r.matched_stake == pytest.approx(20.0)  # 10 + 10, not 2.98
+        assert r.average_price == pytest.approx((10 * 2.94 + 10 * 2.96) / 20.0)
+
+    def test_walk_partial_when_band_too_thin(self, matcher):
+        # If even the whole band can't fill the stake, accept partial.
+        book = _levels((2.94, 5.0), (2.96, 5.0))
+        r = matcher.match_lay(
+            book, stake=42.6, reference_price=2.94, walk_to_price=3.10,
+        )
+        assert r.matched_stake == pytest.approx(10.0)
+        assert r.unmatched_stake == pytest.approx(32.6)
+
+
+class TestForceCloseDeviationBarrier:
+    """``force_close_max_deviation_pct`` caps how far past LTP a relaxed
+    force-close may cross (plans/bc-getting-it-right, 2026-05-31).
+
+    Before this, force-close skipped the junk filter ENTIRELY and, with
+    ``max_lay_price: null``, had no upper-price guardrail — a thin near-off
+    book could fill a close at a junk price. These guard: the barrier
+    refuses junk-only force-closes (→ pair settles naked), allows near-LTP
+    closes, leaves the OPEN path untouched, composes with the close-walk,
+    and is byte-identical when unset (the legacy default).
+    """
+
+    def test_constructor_default_is_none(self):
+        assert ExchangeMatcher().force_close_max_deviation_pct is None
+        assert DEFAULT_MATCHER.force_close_max_deviation_pct is None
+
+    def test_constructor_stores_value(self):
+        m = ExchangeMatcher(force_close_max_deviation_pct=0.5)
+        assert m.force_close_max_deviation_pct == pytest.approx(0.5)
+
+    def test_constructor_rejects_non_positive(self):
+        with pytest.raises(ValueError):
+            ExchangeMatcher(force_close_max_deviation_pct=0.0)
+        with pytest.raises(ValueError):
+            ExchangeMatcher(force_close_max_deviation_pct=-0.1)
+
+    def test_legacy_none_fills_junk_only_book(self):
+        # Without the barrier, a force-close LAY fills the only (junk)
+        # level — the documented pre-fix behaviour (lay at 50 vs LTP 10).
+        m = ExchangeMatcher()  # force_close_max_deviation_pct=None
+        junk = _levels((50.0, 100.0))
+        r = m.match_lay(junk, stake=10.0, reference_price=10.0, force_close=True)
+        assert r.matched_stake == pytest.approx(10.0)
+        assert r.average_price == pytest.approx(50.0)
+
+    def test_barrier_refuses_junk_only_book(self):
+        # With the barrier, the same junk-only book is REFUSED → naked.
+        m = ExchangeMatcher(force_close_max_deviation_pct=0.5)
+        junk = _levels((50.0, 100.0))
+        r = m.match_lay(junk, stake=10.0, reference_price=10.0, force_close=True)
+        assert r.matched_stake == 0.0
+        assert r.unmatched_stake == pytest.approx(10.0)
+        assert r.skipped_reason is not None
+
+    def test_barrier_allows_near_ltp_close(self):
+        # A level inside the barrier (1.05x LTP) fills normally.
+        m = ExchangeMatcher(force_close_max_deviation_pct=0.5)
+        book = _levels((10.5, 100.0), (50.0, 100.0))  # 10.5 ok, 50 junk
+        r = m.match_lay(book, stake=10.0, reference_price=10.0, force_close=True)
+        assert r.matched_stake == pytest.approx(10.0)
+        assert r.average_price == pytest.approx(10.5)  # picked the in-band level
+
+    def test_barrier_boundary_inclusive(self):
+        # Exactly at 1.5x LTP (the bound) is allowed.
+        m = ExchangeMatcher(force_close_max_deviation_pct=0.5)
+        book = _levels((15.0, 100.0))  # 1.5x of 10.0
+        r = m.match_lay(book, stake=10.0, reference_price=10.0, force_close=True)
+        assert r.matched_stake == pytest.approx(10.0)
+        assert r.average_price == pytest.approx(15.0)
+
+    def test_barrier_does_not_touch_open_path(self):
+        # The OPEN path uses max_price_deviation_pct (not the force-close
+        # bound). A junk level on an open is already dropped by the ±50%
+        # junk filter; the force-close bound must not change open semantics.
+        m = ExchangeMatcher(
+            max_price_deviation_pct=0.5, force_close_max_deviation_pct=0.5,
+        )
+        book = _levels((10.5, 100.0))
+        r = m.match_lay(book, stake=10.0, reference_price=10.0)  # open
+        assert r.matched_stake == pytest.approx(10.0)
+        assert r.average_price == pytest.approx(10.5)
+
+    def test_barrier_composes_with_close_walk(self):
+        # The close-walk fills across levels, but the barrier excludes the
+        # junk level BEFORE the walk, so the walk can never reach it.
+        m = ExchangeMatcher(force_close_max_deviation_pct=0.5)
+        # 10.5 + 11.0 in-band (<=15.0); 50.0 junk excluded by the barrier.
+        book = _levels((10.5, 5.0), (11.0, 5.0), (50.0, 100.0))
+        r = m.match_lay(
+            book, stake=20.0, reference_price=10.0,
+            force_close=True, walk_to_price=50.0,
+        )
+        # Only the two in-band levels fill (10 total); junk unreachable.
+        assert r.matched_stake == pytest.approx(10.0)
+        assert r.average_price == pytest.approx((5 * 10.5 + 5 * 11.0) / 10.0)
+
+    def test_barrier_no_reference_refuses(self):
+        # Barrier ON but no LTP to judge against → REFUSE rather than cross
+        # blind (operator decision 2026-05-31). The pair settles naked,
+        # downside bounded by the original aggressive stake.
+        m = ExchangeMatcher(force_close_max_deviation_pct=0.5)
+        junk = _levels((50.0, 100.0))
+        r = m.match_lay(junk, stake=10.0, reference_price=None, force_close=True)
+        assert r.matched_stake == 0.0
+        assert r.skipped_reason is not None
+
+    def test_legacy_no_reference_still_fills(self):
+        # Barrier OFF (None) + no LTP → legacy behaviour: cross anyway
+        # (the pre-fix force-close path). Byte-identical to before.
+        m = ExchangeMatcher()  # force_close_max_deviation_pct=None
+        junk = _levels((50.0, 100.0))
+        r = m.match_lay(junk, stake=10.0, reference_price=None, force_close=True)
+        assert r.matched_stake == pytest.approx(10.0)
+        assert r.average_price == pytest.approx(50.0)
+
+    def test_pick_top_price_respects_barrier(self):
+        m = ExchangeMatcher(force_close_max_deviation_pct=0.5)
+        junk = _levels((50.0, 100.0))
+        p = m.pick_top_price(
+            junk, reference_price=10.0, lower_is_better=True, force_close=True,
+        )
+        assert p is None  # junk-only → no force-close price within barrier

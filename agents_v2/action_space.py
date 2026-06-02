@@ -302,6 +302,9 @@ def compute_mask(
     p_win_gate_active = getattr(env, "_predictor_p_win_gate_active", False)
     if p_win_gate_active:
         p_win_back_thr = env._predictor_p_win_back_threshold
+        p_win_back_max_thr = getattr(
+            env, "_predictor_p_win_back_max_threshold", 1.0,
+        )
         p_win_lay_thr = env._predictor_p_win_lay_threshold
         race_p_wins: dict[int, float] = (
             env._race_p_win_by_race[env._race_idx]
@@ -310,6 +313,7 @@ def compute_mask(
         )
     else:
         p_win_back_thr = 0.0
+        p_win_back_max_thr = 1.0
         p_win_lay_thr = 1.0
         race_p_wins = {}
 
@@ -363,7 +367,7 @@ def compute_mask(
         if open_ok:
             if p_win_gate_active:
                 p_win = race_p_wins.get(sid, 0.0)
-                if p_win >= p_win_back_thr:
+                if p_win_back_thr <= p_win <= p_win_back_max_thr:
                     mask[space.encode(ActionType.OPEN_BACK, slot)] = True
                 if p_win <= p_win_lay_thr:
                     mask[space.encode(ActionType.OPEN_LAY, slot)] = True

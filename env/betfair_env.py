@@ -40,6 +40,7 @@ import logging
 from data.episode_builder import Day, Race, Tick
 from data.feature_engineer import engineer_day
 from env.bet_manager import BetManager, BetOutcome, BetSide
+from env.exchange_matcher import ExchangeMatcher
 from env.features import (
     betfair_tick_size,
     compute_book_churn,
@@ -356,6 +357,49 @@ def _compute_scalping_reward_terms(
         + quadratic_loss_penalty
     )
     return race_reward_pnl, race_shaping
+
+
+def maturation_only_reward(pair_outcomes: "list[dict]") -> float:
+    """Raw reward that pays ONLY for matured trades (ga-recipe-search §R).
+
+    Operator-specified reward shape (2026-05-30): the positive raw
+    channel is naturally-matured locked P&L PLUS agent-closes that
+    locked a profit — "matured naturally and agent-closed-at-a-profit
+    are on the same side." Everything else contributes ZERO to raw:
+    agent-closes at a loss, env force-closes, stop-closes, and naked
+    pairs. Spam is prevented NOT here but by the ``open_cost`` toll in
+    the shaped channel (a non-maturing open costs the toll and earns no
+    raw refund); without that toll this reward degenerates to "open
+    maximally" since non-matured opens would be reward-neutral.
+
+    Each entry in *pair_outcomes* is a dict::
+
+        {"kind": "matured" | "agent_closed" | "force" | "stop" | "naked",
+         "locked": float,          # min(win,lose) spread lock for the pair
+         "covered_cash": float}    # realised hedged cash (agent-closed only)
+
+    Contribution per kind:
+      - ``matured``      → ``locked`` (the true scalp's spread lock)
+      - ``agent_closed`` → ``max(0.0, covered_cash)`` (profit only; a
+                           loss-close contributes 0, same as not opening)
+      - ``force`` / ``stop`` / ``naked`` → 0.0
+
+    Pure function — no env state — so it is exhaustively unit-testable
+    independently of the settle loop that will classify the pairs and
+    feed it (see ``tests/test_maturation_reward.py``). The settle-loop
+    wiring (gather ``pair_outcomes`` + use this as ``race_reward_pnl``
+    when ``maturation_reward_mode`` is on) is the remaining build step;
+    default OFF keeps ``race_reward_pnl = race_pnl`` byte-identical.
+    """
+    total = 0.0
+    for o in pair_outcomes:
+        kind = o.get("kind")
+        if kind == "matured":
+            total += float(o.get("locked", 0.0))
+        elif kind == "agent_closed":
+            total += max(0.0, float(o.get("covered_cash", 0.0)))
+        # force / stop / naked contribute nothing to the matured channel.
+    return total
 
 
 # ── Feature key constants (deterministic ordering) ──────────────────────────
@@ -848,6 +892,16 @@ class BetfairEnv(gymnasium.Env):
         # on pair maturation. Whitelisted so a per-agent gene override
         # flows through.
         "matured_arb_bonus_weight",
+        # Locked-PnL reward amplifier (operator idea 2026-05-31). Multiplies
+        # the POSITIVE locked (matured / profit-closed) per-pair P&L by this
+        # weight in the SHAPED channel, so the small "good trade" signal
+        # isn't drowned by the large naked / force-close loss variance — and
+        # so the net training-reward of opening flips positive (preventing
+        # the NOOP collapse). Losses stay at 1x (real cash) so the agent
+        # still feels the real toll on bad opens. Credited at the per-pair
+        # resolution site (needs per_pair_reward_at_resolution on for the
+        # loop to run). Default 0 = off = byte-identical.
+        "locked_pnl_reward_weight",
         # Companions to matured_arb_bonus_weight — also overridable so
         # the operator can tune the bonus shape end-to-end. Added
         # 2026-05-23 after probe2 discovered the override silently
@@ -950,6 +1004,15 @@ class BetfairEnv(gymnasium.Env):
         # See plans/EXPERIMENTS.md "E5: per-pair reward at resolution
         # tick".
         "per_pair_reward_at_resolution",
+        # imitation-first Step 2 (2026-05-30): when truthy, the RAW
+        # reward channel becomes ``maturation_only_reward(pair_outcomes)``
+        # — pays ONLY naturally-matured locked P&L + agent-closes-at-a-
+        # profit; force/stop/naked → 0 raw. Pairs with ``open_cost`` to
+        # make non-maturing opens net-negative (else degenerates to "open
+        # maximally"). Shaped channel (open_cost, MTM, naked clips, etc.)
+        # is UNCHANGED. Default False = byte-identical (raw stays
+        # ``race_pnl``). See plans/imitation-first/findings.md.
+        "maturation_reward_mode",
         # Force-close-architecture Session 01 (2026-05-01): when
         # truthy, the agent's per-runner ``arb_spread`` action dim
         # reinterprets as a £-target ∈ [0.20, 5.00] and the env
@@ -1016,6 +1079,26 @@ class BetfairEnv(gymnasium.Env):
         # (2026-05-02)".
         "force_close_before_off_seconds",
         "min_seconds_before_off",
+        # Close-walk (2026-05-30, findings.md KEY FINDING #2). Number of
+        # ticks the close / force-close leg may walk from the best
+        # opposite-side price to complete its hedge across successive
+        # levels. Not a reward parameter; plumbed through the same
+        # passthrough so cohort runners can pin it via
+        # ``--reward-overrides close_walk_ticks=10``. Env reads it from
+        # reward_overrides FIRST, falling back to betting_constraints.
+        # 0 = OFF = byte-identical single-level closing.
+        "close_walk_ticks",
+        # Force-close deviation barrier (2026-05-31, plans/bc-getting-it-
+        # right). Caps how far past LTP the relaxed force-close matcher may
+        # cross (it historically skipped the junk filter entirely, leaving
+        # the force-close LAY with no upper-price guardrail under
+        # ``max_lay_price: null``). Same betting_constraints-knob-through-
+        # reward_overrides passthrough as close_walk_ticks so cohort/eval
+        # runners can pin it via ``--reward-overrides
+        # force_close_max_deviation_pct=0.5``. None/unset = legacy full
+        # skip (no barrier). Env reads reward_overrides FIRST, then
+        # betting_constraints.
+        "force_close_max_deviation_pct",
     })
 
     def __init__(
@@ -1065,6 +1148,7 @@ class BetfairEnv(gymnasium.Env):
         # ``use_race_outcome_predictor`` is True (otherwise champion
         # p_win isn't computed).
         predictor_p_win_back_threshold: float = 0.0,
+        predictor_p_win_back_max_threshold: float = 1.0,
         predictor_p_win_lay_threshold: float = 1.0,
         # Direction-predictor action gate (plans/scalping-direction-gate/).
         # When True, ALSO refuse OPEN_LAY on (tick, sid) pairs where the
@@ -1236,6 +1320,49 @@ class BetfairEnv(gymnasium.Env):
                 "force_close_before_off_seconds",
                 constraints.get("force_close_before_off_seconds", 0),
             )
+        )
+        # Close-walk (2026-05-30, findings.md KEY FINDING #2). Number of
+        # Betfair ticks the close / force-close leg may walk from the
+        # best opposite-side price to complete its hedge, instead of
+        # taking only the single best level (the no-walk artifact that
+        # left closes under-hedged against thin top levels). 0 = OFF =
+        # byte-identical single-level closing (pre-change behaviour). The
+        # OPEN path is never affected — only ``_attempt_close`` passes a
+        # walk limit. See CLAUDE.md "Order matching" + the close-walk
+        # note. Operator pins via ``--close-walk-ticks N``.
+        self._close_walk_ticks: int = int(
+            (reward_overrides or {}).get(
+                "close_walk_ticks",
+                constraints.get("close_walk_ticks", 0),
+            )
+        )
+        # Force-close deviation barrier (2026-05-31, plans/bc-getting-it-
+        # right). Same passthrough rule as close_walk_ticks. ``None`` =
+        # legacy behaviour (force-close skips the junk filter entirely —
+        # no upper-price guardrail). When set to a fraction, the env's
+        # matcher refuses any force-close fill more than that fraction
+        # from the runner's LTP (the close then settles naked, downside
+        # bounded by the original aggressive stake). The value flows into
+        # the ``ExchangeMatcher`` built just below and used by both this
+        # env's BetManager AND its passive book. A blunt finite
+        # ``max_lay_price`` is the complementary backstop for the rare
+        # no-LTP close (config.yaml). See CLAUDE.md "Force-close at T−N".
+        _fc_dev = (reward_overrides or {}).get(
+            "force_close_max_deviation_pct",
+            constraints.get("force_close_max_deviation_pct", None),
+        )
+        self._force_close_max_deviation_pct: float | None = (
+            float(_fc_dev) if _fc_dev is not None else None
+        )
+        # Per-env matcher carrying the force-close barrier. Open-side
+        # junk-filter tolerance stays at the historical DEFAULT_MATCHER
+        # 0.5 so OPEN matching is byte-identical; only the force-close
+        # path gains the barrier. Passed to every BetManager this env
+        # builds (reset + per-race) so the barrier is in force everywhere
+        # closes are placed.
+        self._matcher = ExchangeMatcher(
+            max_price_deviation_pct=0.5,
+            force_close_max_deviation_pct=self._force_close_max_deviation_pct,
         )
         # Shaped-penalty warmup (plans/arb-signal-cleanup, Session 02,
         # 2026-04-21). Linearly scales efficiency_cost and
@@ -1499,6 +1626,12 @@ class BetfairEnv(gymnasium.Env):
         self._per_pair_reward_at_resolution: bool = bool(
             reward_cfg.get("per_pair_reward_at_resolution", False)
         )
+        # imitation-first Step 2 (2026-05-30): raw reward = matured locked
+        # + agent-close-at-profit only (maturation_only_reward). Default
+        # False = raw stays race_pnl (byte-identical).
+        self._maturation_reward_mode: bool = bool(
+            reward_cfg.get("maturation_reward_mode", False)
+        )
         # Per-tick accumulator (mirrors _step_open_cost_pnl). Reset
         # each step. Folded into reward + cum_shaped at end of step().
         self._step_per_pair_pnl: float = 0.0
@@ -1648,6 +1781,14 @@ class BetfairEnv(gymnasium.Env):
         self._matured_arb_bonus_weight: float = float(
             reward_cfg.get("matured_arb_bonus_weight", 0.0)
         )
+        # Locked-PnL reward amplifier (operator 2026-05-31). See
+        # _REWARD_OVERRIDE_KEYS comment. ``_step_locked_bonus`` accumulates
+        # the per-step amplified positive-locked bonus, folded into reward
+        # at end of step (non-telescoping permanent shaped incentive).
+        self._locked_pnl_reward_weight: float = float(
+            reward_cfg.get("locked_pnl_reward_weight", 0.0)
+        )
+        self._step_locked_bonus: float = 0.0
         self._matured_arb_bonus_cap: float = float(
             reward_cfg.get("matured_arb_bonus_cap", 10.0)
         )
@@ -1742,6 +1883,13 @@ class BetfairEnv(gymnasium.Env):
         self._predictor_p_win_back_threshold: float = float(
             predictor_p_win_back_threshold
         )
+        # 2026-05-27: pwin_back UPPER bound. Refuse OPEN_BACK when
+        # champion p_win > max_threshold. Default 1.0 = disabled
+        # (byte-identical pre-plan). Added after Round 9 EV-by-pwin
+        # analysis showed the 0.40-0.50 band has negative naked EV.
+        self._predictor_p_win_back_max_threshold: float = float(
+            predictor_p_win_back_max_threshold
+        )
         self._predictor_p_win_lay_threshold: float = float(
             predictor_p_win_lay_threshold
         )
@@ -1750,17 +1898,33 @@ class BetfairEnv(gymnasium.Env):
                 "predictor_p_win_back_threshold must be in [0, 1], got "
                 f"{self._predictor_p_win_back_threshold!r}",
             )
+        if not 0.0 <= self._predictor_p_win_back_max_threshold <= 1.0:
+            raise ValueError(
+                "predictor_p_win_back_max_threshold must be in [0, 1], got "
+                f"{self._predictor_p_win_back_max_threshold!r}",
+            )
+        if (
+            self._predictor_p_win_back_max_threshold
+            < self._predictor_p_win_back_threshold
+        ):
+            raise ValueError(
+                "predictor_p_win_back_max_threshold must be >= "
+                "predictor_p_win_back_threshold, got "
+                f"max={self._predictor_p_win_back_max_threshold} "
+                f"min={self._predictor_p_win_back_threshold}",
+            )
         if not 0.0 <= self._predictor_p_win_lay_threshold <= 1.0:
             raise ValueError(
                 "predictor_p_win_lay_threshold must be in [0, 1], got "
                 f"{self._predictor_p_win_lay_threshold!r}",
             )
         # Active iff the gate would actually refuse any action. When
-        # both defaults hold, compute_mask short-circuits the lookup.
+        # all defaults hold, compute_mask short-circuits the lookup.
         self._predictor_p_win_gate_active: bool = (
             self._use_race_outcome_predictor
             and (
                 self._predictor_p_win_back_threshold > 0.0
+                or self._predictor_p_win_back_max_threshold < 1.0
                 or self._predictor_p_win_lay_threshold < 1.0
             )
         )
@@ -2834,6 +2998,9 @@ class BetfairEnv(gymnasium.Env):
             # episodes.jsonl. Stays a single scalar (not per-race)
             # because the env is constructed once per episode.
             "open_cost_active": float(self._open_cost),
+            "maturation_reward_mode_active": bool(
+                self._maturation_reward_mode
+            ),
             "force_close_before_off_seconds": (
                 self._force_close_before_off_seconds
             ),
@@ -2982,6 +3149,7 @@ class BetfairEnv(gymnasium.Env):
         self.bet_manager = BetManager(
             starting_budget=self.starting_budget,
             fill_mode=self.day.fill_mode,
+            matcher=self._matcher,
         )
         self._race_idx = 0
         self._tick_idx = 0
@@ -3150,6 +3318,7 @@ class BetfairEnv(gymnasium.Env):
         # newly-resolved pairs' locked-P&L estimates. Added to
         # ``reward`` at end of step.
         self._step_per_pair_pnl = 0.0
+        self._step_locked_bonus = 0.0  # locked-PnL amplifier (per-step)
 
         # 0. Update runtime windowed history with the current tick so that
         #    _get_info() can serve windowed debug_features for this tick.
@@ -3280,6 +3449,7 @@ class BetfairEnv(gymnasium.Env):
                 self.bet_manager = BetManager(
                     starting_budget=self.starting_budget,
                     fill_mode=self.day.fill_mode,
+                    matcher=self._matcher,
                 )
                 self._bet_times = {}
                 self._windowed_history = {}
@@ -3364,6 +3534,14 @@ class BetfairEnv(gymnasium.Env):
         if self._step_per_pair_pnl != 0.0:
             reward += self._step_per_pair_pnl
             self._cum_shaped_reward += self._step_per_pair_pnl
+
+        # Locked-PnL amplifier (operator 2026-05-31). PERMANENT shaped
+        # bonus (does NOT telescope at settle — it's a real incentive to
+        # open maturing trades, not a timing redistribution). Default
+        # weight 0 → ``_step_locked_bonus`` stays 0 → byte-identical.
+        if self._step_locked_bonus != 0.0:
+            reward += self._step_locked_bonus
+            self._cum_shaped_reward += self._step_locked_bonus
 
         # Deployment-economics telemetry (2026-05-20). Update peak
         # open_liability and peak naked exposure trackers EVERY tick
@@ -4526,17 +4704,33 @@ class BetfairEnv(gymnasium.Env):
 
         # Place the aggressive close leg with the same pair_id — no
         # commission gate, no tick-floor bump. place_back / place_lay
-        # routes through the single-price matcher, so no ladder walking
-        # (hard_constraints §2). A partial fill (matched_stake <
-        # close_stake, common when the top opposite-side level is thin)
-        # is accepted; the residual of the aggressive leg is left naked
-        # and will settle via raw P&L.
+        # routes through the single-price matcher. Close-walk (2026-05-30,
+        # findings.md KEY FINDING #2): when ``self._close_walk_ticks > 0``
+        # the close leg may walk up to that many ticks from the best
+        # opposite-side price to COMPLETE the equal-profit hedge across
+        # successive levels, instead of taking only the single best level
+        # and leaving the aggressive leg under-hedged. ``walk_to_price``
+        # is the bounded limit; ``None`` keeps the strict single-level
+        # behaviour (default OFF). A back is closed by laying UP the
+        # ladder (worse = higher lay price → +1); a lay is closed by
+        # backing DOWN the ladder (worse = lower back price → −1). The
+        # OPEN path never passes a walk limit, so its no-walk contract is
+        # untouched. A residual partial fill (book thinner than the
+        # 10-tick band) is still accepted and settles via raw P&L.
+        walk_to_price: "float | None" = None
+        if self._close_walk_ticks > 0:
+            walk_to_price = tick_offset(
+                close_price,
+                self._close_walk_ticks,
+                +1 if close_side is BetSide.LAY else -1,
+            )
         if close_side is BetSide.BACK:
             close_bet = bm.place_back(
                 runner, close_stake, market_id=race.market_id,
                 max_price=self._max_back_price,
                 pair_id=pair_id,
                 force_close=force_close,
+                walk_to_price=walk_to_price,
             )
         else:
             close_bet = bm.place_lay(
@@ -4544,6 +4738,7 @@ class BetfairEnv(gymnasium.Env):
                 max_price=self._max_lay_price,
                 pair_id=pair_id,
                 force_close=force_close,
+                walk_to_price=walk_to_price,
             )
         if close_bet is None:
             _mark(close_attempted=True, close_placed=False,
@@ -4872,7 +5067,10 @@ class BetfairEnv(gymnasium.Env):
         Called from ``step()`` once per tick when
         ``_per_pair_reward_at_resolution=True``. No-op otherwise.
         """
-        if not self._per_pair_reward_at_resolution:
+        if not (
+            self._per_pair_reward_at_resolution
+            or self._locked_pnl_reward_weight > 0.0
+        ):
             return 0.0
         bm = self.bet_manager
         if bm is None:
@@ -4916,9 +5114,19 @@ class BetfairEnv(gymnasium.Env):
                 + lay.matched_stake * (1.0 - c)
             )
             locked = min(win_pnl, lose_pnl)
-            self._step_per_pair_pnl += locked
-            self._race_per_pair_emitted_pnl += locked
-            emitted_total += locked
+            if self._per_pair_reward_at_resolution:
+                self._step_per_pair_pnl += locked
+                self._race_per_pair_emitted_pnl += locked
+                emitted_total += locked
+            # Locked-PnL amplifier (operator 2026-05-31): a PERMANENT
+            # (non-telescoping) shaped bonus on the POSITIVE locked only
+            # (matured / profit-closed). Makes the good-trade signal loud
+            # enough to survive the loss variance; losses (locked < 0) get
+            # NO bonus so the real toll is still felt.
+            if self._locked_pnl_reward_weight > 0.0 and locked > 0.0:
+                self._step_locked_bonus += (
+                    self._locked_pnl_reward_weight * locked
+                )
             self._paid_pair_ids.add(pid)
         return emitted_total
 
@@ -5103,6 +5311,12 @@ class BetfairEnv(gymnasium.Env):
         scalping_arbs_naked = 0
         scalping_naked_exposure = 0.0
         scalping_early_lock_bonus = 0.0
+        # imitation-first Step 2: per-pair outcome classification for
+        # ``maturation_only_reward`` (consumed only when
+        # ``_maturation_reward_mode`` is on; built unconditionally — it's
+        # a cheap list append per pair and keeps the classification in
+        # one place).
+        pair_outcomes: list[dict] = []
         if self.scalping_mode:
             pairs = bm.get_paired_positions(
                 market_id=race.market_id, commission=self._commission,
@@ -5174,12 +5388,28 @@ class BetfairEnv(gymnasium.Env):
                             -s_b_eff
                             + s_l_eff * (1.0 - self._commission)
                         )
+                        _covered_cash = min(win_pnl, lose_pnl)
                         if is_stop_closed:
                             scalping_arbs_stop_closed += 1
+                            pair_outcomes.append({
+                                "kind": "stop",
+                                "locked": p["locked_pnl"],
+                                "covered_cash": _covered_cash,
+                            })
                         elif is_force_closed:
                             scalping_arbs_force_closed += 1
+                            pair_outcomes.append({
+                                "kind": "force",
+                                "locked": p["locked_pnl"],
+                                "covered_cash": _covered_cash,
+                            })
                         else:
                             scalping_arbs_closed += 1
+                            pair_outcomes.append({
+                                "kind": "agent_closed",
+                                "locked": p["locked_pnl"],
+                                "covered_cash": _covered_cash,
+                            })
                         self._close_events.append({
                             "selection_id": agg.selection_id,
                             "back_price": back_bet.average_price,
@@ -5199,6 +5429,10 @@ class BetfairEnv(gymnasium.Env):
                         })
                     else:
                         scalping_arbs_completed += 1
+                        pair_outcomes.append({
+                            "kind": "matured",
+                            "locked": p["locked_pnl"],
+                        })
                         # Record a one-line summary for the activity log. The
                         # aggressive/passive legs can be either side, so pull
                         # the back and lay prices by side rather than role.
@@ -5231,6 +5465,7 @@ class BetfairEnv(gymnasium.Env):
                         self._arb_realised_agg_stake_sum += agg.matched_stake
                 else:
                     scalping_arbs_naked += 1
+                    pair_outcomes.append({"kind": "naked"})
             scalping_naked_exposure = bm.get_naked_exposure(
                 market_id=race.market_id,
             )
@@ -5657,6 +5892,14 @@ class BetfairEnv(gymnasium.Env):
                 ),
             )
             shaped += race_shaping
+            # imitation-first Step 2 (2026-05-30): override the RAW
+            # channel with the matured-only reward (matured locked +
+            # agent-close-at-profit; force/stop/naked → 0). Shaped
+            # (open_cost toll, MTM, naked clips, etc.) is UNCHANGED, and
+            # ``reward = race_reward_pnl + shaped`` (below) still holds the
+            # raw+shaped invariant. Default off → byte-identical.
+            if self._maturation_reward_mode:
+                race_reward_pnl = maturation_only_reward(pair_outcomes)
             # Realised per-race variance-penalty contribution. Recomputed
             # here so the helper can stay 2-tuple for backward-compat.
             # Always ≤ 0 (penalty). At beta=0.0 this is exactly 0.0.

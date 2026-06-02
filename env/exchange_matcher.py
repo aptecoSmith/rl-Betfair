@@ -144,15 +144,78 @@ class ExchangeMatcher:
     session.
     """
 
-    def __init__(self, max_price_deviation_pct: float = 0.5) -> None:
+    def __init__(
+        self,
+        max_price_deviation_pct: float = 0.5,
+        force_close_max_deviation_pct: float | None = None,
+    ) -> None:
         if max_price_deviation_pct <= 0.0:
             raise ValueError(
                 f"max_price_deviation_pct must be > 0 "
                 f"(got {max_price_deviation_pct})"
             )
         self.max_price_deviation_pct = float(max_price_deviation_pct)
+        # Force-close safety barrier (2026-05-31). The force-close path
+        # historically SKIPPED the junk filter entirely (``force_close=True``
+        # → "any priceable level is a valid close target") on the rationale
+        # that crossing a thin book beats leaving a pair naked. A
+        # fill-price forensic (plans/bc-getting-it-right) showed that holds
+        # in the median (~+3% past LTP) but the "any price" tail has NO
+        # guardrail — ``max_lay_price`` was ``null`` in config, so a thin
+        # near-off book could fill a close at a junk level (e.g. 2× LTP+).
+        # When this is set, the force-close path applies a WIDER-than-open
+        # deviation bound: it may cross up to ±this fraction of the LTP, but
+        # refuses beyond it (the close fails → the pair settles naked, whose
+        # downside is bounded by the original aggressive stake — strictly
+        # safer than crossing into junk). ``None`` (default) preserves the
+        # legacy full-skip behaviour, so existing callers / tests that don't
+        # set it stay byte-identical. Must be > 0 when set.
+        if (
+            force_close_max_deviation_pct is not None
+            and force_close_max_deviation_pct <= 0.0
+        ):
+            raise ValueError(
+                f"force_close_max_deviation_pct must be > 0 when set "
+                f"(got {force_close_max_deviation_pct})"
+            )
+        self.force_close_max_deviation_pct: float | None = (
+            float(force_close_max_deviation_pct)
+            if force_close_max_deviation_pct is not None
+            else None
+        )
 
     # ── Public API ──────────────────────────────────────────────────
+
+    def _force_close_filter(
+        self,
+        valid_levels: list["PriceLevel"],
+        reference_price: float | None,
+    ) -> list["PriceLevel"]:
+        """Apply the force-close deviation barrier to already-validated levels.
+
+        ``valid_levels`` must already be filtered to ``price > 0, size > 0``.
+        When ``force_close_max_deviation_pct`` is set AND a reference price
+        is available, drop levels more than that fraction from the LTP (a
+        WIDER bound than the open-side ``max_price_deviation_pct``). When the
+        barrier is unset, or no reference price exists to bound against,
+        return ``valid_levels`` unchanged — the legacy full-skip behaviour.
+        Keeping this in ONE place mirrors the open-side junk-filter contract.
+        """
+        dev = self.force_close_max_deviation_pct
+        if dev is None:
+            # Barrier OFF: legacy full-skip — any priceable level is valid.
+            return valid_levels
+        if reference_price is None or reference_price <= 0.0:
+            # Barrier ON but NO reference to judge against (runner has no
+            # LTP). We can't tell a fair level from junk, so refuse rather
+            # than cross blind — the pair settles naked, downside bounded by
+            # the original aggressive stake (operator decision 2026-05-31,
+            # plans/bc-getting-it-right; 0 such cases in the holdout
+            # forensic, so no economic impact — pure safety completeness).
+            return []
+        lo = reference_price * (1.0 - dev)
+        hi = reference_price * (1.0 + dev)
+        return [lv for lv in valid_levels if lo <= lv.price <= hi]
 
     def pick_top_level(
         self,
@@ -179,7 +242,7 @@ class ExchangeMatcher:
         if not valid:
             return None
         if force_close:
-            filtered = valid
+            filtered = self._force_close_filter(valid, reference_price)
         else:
             if reference_price is None or reference_price <= 0.0:
                 return None
@@ -222,7 +285,7 @@ class ExchangeMatcher:
         if not valid:
             return None
         if force_close:
-            filtered = valid
+            filtered = self._force_close_filter(valid, reference_price)
         else:
             if reference_price is None or reference_price <= 0.0:
                 return None
@@ -244,6 +307,7 @@ class ExchangeMatcher:
         already_matched_at_top: float = 0.0,
         *,
         force_close: bool = False,
+        walk_to_price: float | None = None,
     ) -> MatchResult:
         """Attempt to fill a back bet against the back side of the book.
 
@@ -251,6 +315,11 @@ class ExchangeMatcher:
         backer can match against (the blue column on the Betfair UI).
         The *best* price is the **highest** back offer, because a
         higher price means greater profit if the selection wins.
+
+        ``walk_to_price`` (close-walk, 2026-05-30): when set, the match
+        walks DOWN the ladder (worse back prices) consuming successive
+        levels until the stake is filled or a level's price drops below
+        ``walk_to_price``. See :meth:`_match`.
         """
         return self._match(
             list(available_to_back),
@@ -260,6 +329,7 @@ class ExchangeMatcher:
             lower_is_better=False,
             already_matched_at_top=already_matched_at_top,
             force_close=force_close,
+            walk_to_price=walk_to_price,
         )
 
     def match_lay(
@@ -271,6 +341,7 @@ class ExchangeMatcher:
         already_matched_at_top: float = 0.0,
         *,
         force_close: bool = False,
+        walk_to_price: float | None = None,
     ) -> MatchResult:
         """Attempt to fill a lay bet against the lay side of the book.
 
@@ -278,6 +349,11 @@ class ExchangeMatcher:
         layer can match against (the pink column on the Betfair UI).
         The *best* price is the **lowest** lay offer, because a lower
         price means less liability for the layer.
+
+        ``walk_to_price`` (close-walk, 2026-05-30): when set, the match
+        walks UP the ladder (worse lay prices) consuming successive
+        levels until the stake is filled or a level's price exceeds
+        ``walk_to_price``. See :meth:`_match`.
         """
         return self._match(
             list(available_to_lay),
@@ -287,6 +363,7 @@ class ExchangeMatcher:
             lower_is_better=True,
             already_matched_at_top=already_matched_at_top,
             force_close=force_close,
+            walk_to_price=walk_to_price,
         )
 
     # ── Internals ───────────────────────────────────────────────────
@@ -301,6 +378,7 @@ class ExchangeMatcher:
         lower_is_better: bool,
         already_matched_at_top: float = 0.0,
         force_close: bool = False,
+        walk_to_price: float | None = None,
     ) -> MatchResult:
         if stake <= 0.0:
             return MatchResult(0.0, 0.0, 0.0, "non-positive stake")
@@ -308,20 +386,31 @@ class ExchangeMatcher:
             return MatchResult(0.0, stake, 0.0, "empty ladder")
 
         # Force-close path (arb-signal-cleanup, 2026-04-21): crossing to
-        # close an already-matched aggressive leg is strictly better than
+        # close an already-matched aggressive leg is usually better than
         # leaving the pair naked through the off (±£100s of directional
         # variance). So for close-out attempts at T−N we drop the LTP
-        # requirement and the ±``max_price_deviation_pct`` junk filter
-        # — a thin or unpriced book is still a valid close target. The
-        # hard ``max_price`` cap stays in force so £1–£1000 parked
-        # orders can never be hit. See CLAUDE.md "Force-close at T−N"
-        # and ``plans/arb-signal-cleanup/hard_constraints.md`` §11.
+        # REQUIREMENT (a thin / unpriced book is still a valid close
+        # target). Historically this ALSO skipped the deviation filter
+        # entirely — but with ``max_lay_price: null`` that left the
+        # force-close LAY with NO upper-price guardrail, so a thin
+        # near-off book could fill a close at a junk level (2× LTP+).
+        # Safety barrier (2026-05-31, plans/bc-getting-it-right): when
+        # ``force_close_max_deviation_pct`` is set, apply a WIDER-than-open
+        # deviation bound here. The close may cross up to ±that fraction of
+        # the LTP but is refused beyond it — the pair then settles naked
+        # (downside bounded by the original aggressive stake), strictly
+        # safer than crossing into junk. The hard ``max_price`` cap still
+        # applies on top. See CLAUDE.md "Force-close at T−N".
         if force_close:
-            filtered = [
+            valid = [
                 lv for lv in levels if lv.price > 0.0 and lv.size > 0.0
             ]
+            filtered = self._force_close_filter(valid, reference_price)
             if not filtered:
-                return MatchResult(0.0, stake, 0.0, "empty ladder after filter")
+                return MatchResult(
+                    0.0, stake, 0.0,
+                    "no force-close level within deviation barrier",
+                )
         else:
             if reference_price is None or reference_price <= 0.0:
                 return MatchResult(0.0, stake, 0.0, "no LTP for runner")
@@ -355,6 +444,68 @@ class ExchangeMatcher:
             return MatchResult(
                 0.0, stake, 0.0,
                 f"best price {top.price:.2f} exceeds max_price cap {max_price:.2f}",
+                top_level_size=top.size,
+            )
+
+        # ── Close-walk path (2026-05-30) ─────────────────────────────────
+        # When ``walk_to_price`` is supplied (close / force-close only),
+        # fill across SUCCESSIVE levels from the best toward — and
+        # including — ``walk_to_price``, until the stake is exhausted.
+        # This is a bounded LIMIT order, not the unbounded market sweep
+        # the no-walk rule bans: the OPEN path never passes
+        # ``walk_to_price`` so it keeps the strict single-level contract.
+        # See CLAUDE.md "Order matching" + docs/betfair_market_model.md
+        # §2 ("matches at the named price OR BETTER, leaving the
+        # remainder resting") + findings.md KEY FINDING #2. Walking lets
+        # a close complete the equal-profit hedge instead of leaving the
+        # aggressive leg directionally exposed against a thin top level.
+        #
+        # ``lower_is_better`` (lay closing a back): walk to HIGHER prices,
+        # taking every level whose price <= walk_to_price.
+        # ``not lower_is_better`` (back closing a lay): walk to LOWER
+        # prices, taking every level whose price >= walk_to_price.
+        # The hard ``max_price`` cap is enforced on every walked level.
+        if walk_to_price is not None:
+            ordered = sorted(
+                filtered,
+                key=lambda lv: lv.price,
+                reverse=not lower_is_better,
+            )
+            remaining = stake
+            filled_size = 0.0
+            filled_value = 0.0
+            for i, lv in enumerate(ordered):
+                if remaining <= 0.0:
+                    break
+                # Stop once we'd cross past the walk limit.
+                if lower_is_better and lv.price > walk_to_price:
+                    break
+                if (not lower_is_better) and lv.price < walk_to_price:
+                    break
+                # Never walk past the hard price cap.
+                if max_price is not None and lv.price > max_price:
+                    break
+                # Self-depletion only ever recorded against the best
+                # level (the OPEN path's single-level fill); subtract it
+                # from the first level here, deeper levels are untouched.
+                avail = lv.size - (already_matched_at_top if i == 0 else 0.0)
+                if avail <= 0.0:
+                    continue
+                take = min(remaining, avail)
+                filled_size += take
+                filled_value += take * lv.price
+                remaining -= take
+            if filled_size <= 0.0:
+                return MatchResult(
+                    0.0, stake, 0.0,
+                    "self-depletion exhausted level",
+                    top_level_size=top.size,
+                )
+            return MatchResult(
+                matched_stake=filled_size,
+                unmatched_stake=stake - filled_size,
+                average_price=filled_value / filled_size,
+                skipped_reason=None,
                 top_level_size=top.size,
             )
 

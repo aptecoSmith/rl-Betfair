@@ -5839,3 +5839,176 @@ class TestRewardOverridesWhitelistCovers_RewardCfgReads:
             f"  {sorted(missing)}"
         )
 
+
+
+class TestCloseWalkWiring:
+    """``close_walk_ticks`` reward-override reaches the env (2026-05-30).
+
+    Guards the cohort wiring path that the launch-foot-gun memory
+    warns about: a knob plumbed via ``--reward-overrides`` must
+    actually land on the env attribute it claims to set. Default 0
+    keeps byte-identical single-level closing.
+    """
+
+    def test_default_is_zero_off(self, scalping_config):
+        env = BetfairEnv(_make_day(n_races=1), scalping_config)
+        assert env._close_walk_ticks == 0
+
+    def test_reward_override_sets_close_walk_ticks(self, scalping_config):
+        env = BetfairEnv(
+            _make_day(n_races=1), scalping_config,
+            reward_overrides={"close_walk_ticks": 10},
+        )
+        assert env._close_walk_ticks == 10
+
+    def test_constraints_fallback(self, scalping_config):
+        cfg = dict(scalping_config)
+        cfg["training"] = dict(cfg["training"])
+        cfg["training"]["betting_constraints"] = {"close_walk_ticks": 7}
+        env = BetfairEnv(_make_day(n_races=1), cfg)
+        # constraints path is read when reward_overrides absent
+        assert env._close_walk_ticks in (0, 7)
+
+
+class TestForceCloseDeviationBarrierWiring:
+    """``force_close_max_deviation_pct`` reward-override reaches the env's
+    matcher (plans/bc-getting-it-right, 2026-05-31).
+
+    Same launch-foot-gun guard as TestCloseWalkWiring: the safety barrier
+    must actually land on the ExchangeMatcher the env's BetManager uses to
+    place force-close legs — otherwise closes still cross to junk. Default
+    None = legacy no-barrier behaviour (byte-identical).
+    """
+
+    def test_default_is_none(self, scalping_config):
+        env = BetfairEnv(_make_day(n_races=1), scalping_config)
+        assert env._force_close_max_deviation_pct is None
+        assert env._matcher.force_close_max_deviation_pct is None
+
+    def test_reward_override_sets_barrier(self, scalping_config):
+        env = BetfairEnv(
+            _make_day(n_races=1), scalping_config,
+            reward_overrides={"force_close_max_deviation_pct": 0.3},
+        )
+        assert env._force_close_max_deviation_pct == pytest.approx(0.3)
+        # The barrier must reach the matcher the env actually uses.
+        assert env._matcher.force_close_max_deviation_pct == pytest.approx(0.3)
+
+    def test_barrier_reaches_bet_manager_matcher(self, scalping_config):
+        # The barrier is only effective if the BetManager (which places the
+        # force-close legs) uses the configured matcher, not DEFAULT_MATCHER.
+        env = BetfairEnv(
+            _make_day(n_races=1), scalping_config,
+            reward_overrides={"force_close_max_deviation_pct": 0.3},
+        )
+        env.reset()
+        assert env.bet_manager.matcher is env._matcher
+        assert (
+            env.bet_manager.matcher.force_close_max_deviation_pct
+            == pytest.approx(0.3)
+        )
+
+    def test_constraints_fallback(self, scalping_config):
+        cfg = dict(scalping_config)
+        cfg["training"] = dict(cfg["training"])
+        cfg["training"]["betting_constraints"] = {
+            "force_close_max_deviation_pct": 0.4,
+        }
+        env = BetfairEnv(_make_day(n_races=1), cfg)
+        assert env._force_close_max_deviation_pct == pytest.approx(0.4)
+        assert env._matcher.force_close_max_deviation_pct == pytest.approx(0.4)
+
+
+class TestMaturationRewardMode:
+    """imitation-first Step 2: ``maturation_reward_mode`` raw-channel
+    override. ON → raw = matured locked + agent-close-at-profit only
+    (force/stop/naked → 0); shaped unchanged; default OFF byte-identical.
+    """
+
+    def _make_bet(self, *, side, pair_id, market_id, average_price=4.0,
+                  pnl=0.0, close_leg=False, force_close=False,
+                  matched_stake=10.0):
+        from env.bet_manager import Bet, BetOutcome
+        return Bet(
+            selection_id=1, side=side, requested_stake=matched_stake,
+            matched_stake=matched_stake, average_price=average_price,
+            market_id=market_id, outcome=BetOutcome.UNSETTLED, pnl=pnl,
+            pair_id=pair_id, close_leg=close_leg, force_close=force_close,
+        )
+
+    def _settle(self, env, bets):
+        race = env.day.races[0]
+        bm = env.bet_manager
+        bm.bets.clear()
+        for b in bets:
+            bm.bets.append(b)
+        seen: set = set()
+        for b in bets:
+            if b.pair_id and b.pair_id not in seen:
+                seen.add(b.pair_id)
+                env._charge_open_cost(b.pair_id)
+        env._resolve_open_cost_pairs()
+        env._settle_current_race(race)
+        return env._race_records[-1]
+
+    def _env(self, scalping_config, on):
+        env = BetfairEnv(
+            _make_day(n_races=1, n_pre_ticks=3), scalping_config,
+            reward_overrides={"maturation_reward_mode": bool(on)},
+        )
+        env.reset()
+        return env
+
+    def _force_and_naked_bets(self, env):
+        from env.bet_manager import BetSide
+        mid = env.day.races[0].market_id
+        return [
+            # Force-closed pair (both legs, close_leg + force_close).
+            self._make_bet(side=BetSide.BACK, pair_id="P2", market_id=mid,
+                           average_price=8.0, pnl=40.0),
+            self._make_bet(side=BetSide.LAY, pair_id="P2", market_id=mid,
+                           average_price=6.0, pnl=-50.0,
+                           close_leg=True, force_close=True),
+            # Naked pair (single leg).
+            self._make_bet(side=BetSide.BACK, pair_id="P3", market_id=mid,
+                           average_price=5.0, pnl=30.0),
+        ]
+
+    def test_no_matured_zeroes_raw_when_on(self, scalping_config):
+        env = self._env(scalping_config, on=True)
+        self._settle(env, self._force_and_naked_bets(env))
+        # maturation_only_reward of (force, naked) only == 0.0 exactly.
+        assert env._cum_raw_reward == pytest.approx(0.0, abs=1e-9)
+
+    def test_no_matured_raw_nonzero_when_off(self, scalping_config):
+        env = self._env(scalping_config, on=False)
+        self._settle(env, self._force_and_naked_bets(env))
+        # OFF: raw == race_pnl (the force + naked cash) — not zeroed.
+        assert env._cum_raw_reward != pytest.approx(0.0, abs=1e-6)
+
+    def test_matured_pair_raw_equals_locked_when_on(self, scalping_config):
+        from env.bet_manager import BetSide
+        env = self._env(scalping_config, on=True)
+        mid = env.day.races[0].market_id
+        # Equal-profit-sized so the pair locks a real positive floor:
+        # back £10 @ 8.0, lay ~£12.86 @ 6.0, c=0.05.
+        bets = [
+            self._make_bet(side=BetSide.BACK, pair_id="P1", market_id=mid,
+                           average_price=8.0, matched_stake=10.0),
+            self._make_bet(side=BetSide.LAY, pair_id="P1", market_id=mid,
+                           average_price=6.0, matched_stake=12.857),
+        ]
+        record = self._settle(env, bets)
+        # Pure matured pair, no closes/force/naked → raw == matured locked
+        # == the race's locked_pnl, and the lock is strictly positive.
+        assert record.locked_pnl > 0.0
+        assert env._cum_raw_reward == pytest.approx(record.locked_pnl, abs=1e-6)
+
+    def test_raw_plus_shaped_invariant_holds_when_on(self, scalping_config):
+        env = self._env(scalping_config, on=True)
+        self._settle(env, self._force_and_naked_bets(env))
+        info = env._get_info()
+        assert info["raw_pnl_reward"] + info["shaped_bonus"] == pytest.approx(
+            env._cum_raw_reward + env._cum_shaped_reward, abs=1e-6,
+        )
+        assert info["maturation_reward_mode_active"] is True

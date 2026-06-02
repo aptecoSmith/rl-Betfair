@@ -42,7 +42,16 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from agents_v2.action_space import ActionType, DiscreteActionSpace
-from training_v2.arb_oracle import OracleSample, load_samples
+from training_v2.arb_oracle import (
+    CloseHoldSample,
+    NegativeOracleSample,
+    OracleSample,
+    TARGET_CLASS_CLOSE,
+    TARGET_CLASS_HOLD,
+    load_close_hold_samples,
+    load_negative_samples,
+    load_samples,
+)
 from training_v2.direction_label_scan import (
     DirectionLabel,
     load_labels as _load_direction_labels,
@@ -57,7 +66,9 @@ __all__ = [
     "DiscreteBCPretrainer",
     "build_direction_bce_label_map",
     "build_direction_target_map",
+    "load_close_hold_samples_for_dates",
     "load_direction_labels_for_dates",
+    "load_negative_samples_for_dates",
     "load_oracle_samples_for_dates",
     "measure_post_bc_entropy",
 ]
@@ -200,6 +211,64 @@ def build_direction_target_map(
     return out
 
 
+def load_negative_samples_for_dates(
+    dates: list[str],
+    data_dir,
+    expected_obs_dim: int,
+) -> list[NegativeOracleSample]:
+    """Concatenate cached negative-open oracle samples across dates.
+
+    BC label augmentation Phase A. Mirrors
+    :func:`load_oracle_samples_for_dates` precisely. Missing-cache-
+    per-day emits a warning (via the underlying ``load_negative_
+    samples``) and contributes zero negatives — the BC pretrain code
+    handles an empty negative pool as "treat exactly like the
+    pre-plan positive-only path".
+
+    The strict ``expected_obs_dim`` check guards against silently
+    feeding a stale or mis-sized cache into BC.
+    """
+    from pathlib import Path
+    out: list[NegativeOracleSample] = []
+    for d in dates:
+        # load_negative_samples returns [] on missing cache (does NOT
+        # raise) so the same try/except pattern as the positive loader
+        # isn't strictly needed — but keep the symmetric shape so the
+        # callsite reads identically.
+        samples = load_negative_samples(
+            str(d), Path(data_dir),
+            strict=True, expected_obs_dim=int(expected_obs_dim),
+        )
+        out.extend(samples)
+    return out
+
+
+def load_close_hold_samples_for_dates(
+    dates: list[str],
+    data_dir,
+    expected_obs_dim: int,
+) -> list[CloseHoldSample]:
+    """Concatenate cached Phase B close/hold samples across dates.
+
+    BC label augmentation Phase B. Mirrors
+    :func:`load_negative_samples_for_dates` precisely. Missing-cache-
+    per-day emits a warning (via the underlying
+    ``load_close_hold_samples``) and contributes zero samples.
+
+    The strict ``expected_obs_dim`` check guards against silently
+    feeding a stale or mis-sized cache into BC.
+    """
+    from pathlib import Path
+    out: list[CloseHoldSample] = []
+    for d in dates:
+        samples = load_close_hold_samples(
+            str(d), Path(data_dir),
+            strict=True, expected_obs_dim=int(expected_obs_dim),
+        )
+        out.extend(samples)
+    return out
+
+
 def load_oracle_samples_for_dates(
     dates: list[str],
     data_dir,
@@ -320,6 +389,9 @@ class DiscreteBCPretrainer:
         ) = None,
         direction_bce_weight: float = 0.0,
         direction_bce_use_pos_weight: bool = True,
+        negative_samples: list[NegativeOracleSample] | None = None,
+        positive_weight: float = 1.0,
+        close_hold_samples: list[CloseHoldSample] | None = None,
     ) -> BCLossHistory:
         """Run ``n_steps`` BC mini-batches against ``samples``.
 
@@ -349,6 +421,43 @@ class DiscreteBCPretrainer:
                 max_runners,
             )
             return BCLossHistory()
+
+        # BC label augmentation Phase A: filter the negative pool by
+        # the same defensive runner_idx guard. When ``negative_samples``
+        # is None or empty, ``neg_active`` is False and every code
+        # path that touches negatives is gated off — the loss surface,
+        # the optimiser sequence, and the per-step CE history are
+        # byte-identical to pre-plan.
+        valid_negatives: list[NegativeOracleSample] = []
+        if negative_samples:
+            valid_negatives = [
+                s for s in negative_samples
+                if 0 <= int(s.runner_idx) < max_runners
+            ]
+        neg_active = bool(valid_negatives)
+        pos_weight = float(positive_weight) if positive_weight is not None else 1.0
+        # Per-step negative draw: match the positive batch size so the
+        # CE on negatives is the same order of magnitude as the CE on
+        # positives. The pool ratio (negatives:positives) only matters
+        # for which subset of the negative cache the policy sees; each
+        # mini-batch is balanced regardless.
+        n_neg_per_batch = self.batch_size if neg_active else 0
+        noop_idx = int(action_space.encode(ActionType.NOOP, None))
+
+        # BC label augmentation Phase B: filter the close/hold pool by
+        # the same defensive runner_idx guard as positives + negatives.
+        # When ``close_hold_samples`` is None/empty, ``ch_active`` is
+        # False and every code path that touches close/hold samples is
+        # gated off — byte-identical to pre-plan (and to Phase A when
+        # negatives are also off).
+        valid_close_hold: list[CloseHoldSample] = []
+        if close_hold_samples:
+            valid_close_hold = [
+                s for s in close_hold_samples
+                if 0 <= int(s.runner_idx) < max_runners
+            ]
+        ch_active = bool(valid_close_hold)
+        n_ch_per_batch = self.batch_size if ch_active else 0
 
         rng = random.Random(self._seed)
 
@@ -591,6 +700,81 @@ class DiscreteBCPretrainer:
                             / denom
                         )
                         loss = loss + dir_bce_w * dir_bce_term
+
+                # BC label augmentation Phase A. When negative samples
+                # are present, draw a balanced negative mini-batch this
+                # step, target NOOP for each row, and add a NOOP-CE
+                # term to the loss. When ``negative_samples`` was None
+                # or empty on entry, ``neg_active`` is False and this
+                # block is a no-op — the loss surface and the
+                # optimiser step are byte-identical to pre-plan. The
+                # ``positive_weight`` parameter scales the positive
+                # (oracle + direction + dir_bce) loss; default 1.0
+                # preserves byte-identity when neg_active is False.
+                if neg_active:
+                    if pos_weight != 1.0:
+                        loss = pos_weight * loss
+                    neg_batch = _sample_batch(
+                        valid_negatives, n_neg_per_batch, rng,
+                    )
+                    neg_obs_t = torch.tensor(
+                        np.stack([s.obs for s in neg_batch], axis=0),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    neg_targets = torch.full(
+                        (len(neg_batch),), noop_idx,
+                        dtype=torch.long, device=device,
+                    )
+                    neg_out = policy(neg_obs_t)
+                    neg_ce = F.cross_entropy(neg_out.logits, neg_targets)
+                    loss = loss + neg_ce
+
+                # BC label augmentation Phase B. When close/hold samples
+                # are present, draw a balanced close/hold mini-batch
+                # this step. Per-row target = CLOSE on the sample's
+                # runner_idx if target_action_class == TARGET_CLASS_
+                # CLOSE, else NOOP (slot-less). The CE runs over the
+                # mixed mini-batch with per-row targets. When
+                # ``close_hold_samples`` was None or empty on entry,
+                # ``ch_active`` is False and this block is a no-op —
+                # byte-identical to pre-plan (Phase A behavior).
+                #
+                # Note: ``pos_weight`` was already applied to ``loss``
+                # in the negative-sample block above when both phases
+                # are active; we do NOT apply it a second time here.
+                # When only Phase B is active (negatives off, close/
+                # hold on), we apply pos_weight here so the positive
+                # CE has the same weighting contract as Phase A.
+                if ch_active:
+                    if not neg_active and pos_weight != 1.0:
+                        loss = pos_weight * loss
+                    ch_batch = _sample_batch(
+                        valid_close_hold, n_ch_per_batch, rng,
+                    )
+                    ch_obs_t = torch.tensor(
+                        np.stack([s.obs for s in ch_batch], axis=0),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    ch_targets_list: list[int] = []
+                    for s in ch_batch:
+                        if int(s.target_action_class) == int(
+                            TARGET_CLASS_CLOSE,
+                        ):
+                            ch_targets_list.append(
+                                int(action_space.encode(
+                                    ActionType.CLOSE, int(s.runner_idx),
+                                ))
+                            )
+                        else:
+                            ch_targets_list.append(noop_idx)
+                    ch_targets = torch.tensor(
+                        ch_targets_list, dtype=torch.long, device=device,
+                    )
+                    ch_out = policy(ch_obs_t)
+                    ch_ce = F.cross_entropy(ch_out.logits, ch_targets)
+                    loss = loss + ch_ce
 
                 opt.zero_grad()
                 loss.backward()

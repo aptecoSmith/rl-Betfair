@@ -1,10 +1,61 @@
 # training-speedup-v2 — RESULTS (autonomous full-pipeline push, 2026-06-01/02)
 
 Operator directive: "get as fast as possible, do everything autonomously."
-Branch: `training-speedup-v2-steps-0-2` (8 commits). Everything below is
-gated against the Step-1 golden harness and measured.
+Branch: `training-speedup-v2-steps-0-2`. Everything below is gated against
+the Step-1 golden harness and measured.
 
-## Headline: ~2.55× cluster-day wall, bit-identical, using the idle GPU
+## HEADLINE (R5): ~7× cluster-day, bit-identical, multiprocess across cores
+
+The biggest lever on this 20-core CPU-bound box is **R5 — run the cohort's
+agents as N parallel solo-agent PROCESSES** (each the canonical solo
+`train_one_agent` at its own seed, 1 thread each). It parallelises the
+WHOLE per-agent rollout (env + forward + PPO update) across the cores —
+not just the policy forward like the GPU-batched R1/R2 path did — and it is
+**bit-identical by construction** (each worker is the golden solo path).
+
+| path (N=11 cluster, day 2026-05-09, predictors-off) | cluster-day wall | vs baseline (1130s) | vs sequential (1177s) |
+|---|--:|--:|--:|
+| BASELINE (c1/c2: CUDA batch=1, no cache) | 1130s | 1.0× | — |
+| R1+R2 GPU-batched (below) | 443s | 2.55× | — |
+| **R5 multiprocess (11 procs, shared cache)** | **165s** | **6.8×** | **7.1×** |
+
+Gates (all PASS, bit-identical — discrete metrics + pnl + bet counts
+match the sequential golden exactly):
+- Basic multiprocess, N=4: sequential 444s → parallel 142s = **3.1×**.
+- Build-share, N=4: 427s → 108s = **3.9×** (shared feature_cache).
+- Headline, N=11: **165s** (per-worker 69-72s; ~93s is pool startup —
+  11× torch re-import + 548 MB cache deserialise).
+
+**Mechanism (`training_v2/cohort/multiproc_worker.py`):**
+- `train_cluster_multiproc(specs, n_workers)` — `ProcessPoolExecutor` over
+  solo `train_one_agent`; `MKL/OMP=1` + `torch.set_num_threads(1)` per
+  worker so N processes don't oversubscribe (load-bearing — without it
+  each worker spawns BLAS pools and the parallel gain vanishes).
+- `prebuild_feature_cache(days, into=...)` + `save_shared_cache` — engineer
+  each unique day ONCE in the parent (cohort-fixed params → identical
+  cache across agents → bit-identical), share to workers by file. A
+  per-generation SUBSET file keeps it small as eval days rotate.
+- Each worker rebuilds its own `ModelStore` from passed paths and writes
+  the shared WAL db directly (added `busy_timeout=60s` to
+  `ModelStore._get_conn` so N concurrent writers serialise cleanly).
+- Wired into `run_cohort` as `--parallel-agents N` (a third branch
+  alongside `--batched` / solo; mutually exclusive with `--batched`;
+  predictor runs not yet supported — bundle spawn-pickling unverified).
+
+**When build-share helps:** at small N it's a clear win (N=4: 3.9× vs
+3.1×). At large N the 548 MB cache deserialise (×N, CPU-bound, contended)
+roughly cancels the engineering it saves — so the headline N=11 number is
+≈ the same with or without it. Headroom: a persistent pool (amortise the
+~93 s spawn+import across generations, ~+15 %) and shared-memory cache
+(skip per-worker deserialise) would push past ~8×.
+
+Tests: `tests/test_v2_multiproc_cluster.py` (worker plumbing — cache+store
+injection, key popping, worker-count) 6/6; runner integration gate
+(`run_cohort` parallel == sequential scoreboard) PASS.
+
+---
+
+## Prior headline: ~2.55× cluster-day wall, bit-identical, using the idle GPU
 
 | config (N=11 cluster, day 2026-05-09, predictors-off = the 867s baseline) | env build | rollout | PPO update | **cluster-day** | vs baseline |
 |---|--:|--:|--:|--:|--:|
@@ -69,23 +120,43 @@ harness. That is the honest answer to "isn't Step 3 supposed to be 10×":
 the 100× physics-sim ideal needs uniform tensor ops; a replay sim with
 per-agent bet state does not have them.
 
-## Paths to go beyond ~2.55× (operator decision)
+## Paths beyond ~2.55× — #3 is DONE (R5, the new headline)
 
+3. **Multiprocess the cluster across cores** — ✅ **DONE (R5 above).** The
+   "net unclear, untested" worry resolved decisively in favour: ~7× at
+   N=11, bit-identical, the new headline. The "pays N× env-build" cost was
+   recovered by the shared `feature_cache` (engineer once in the parent);
+   "doesn't use the GPU" turned out not to matter because the GPU-batched
+   path only sped the forward (a minority of the rollout) while
+   multiprocess parallelises the whole per-agent loop. This is the
+   recommended default for CPU-bound boxes.
 1. **R4 — full env-core vectorization** (the only path to the high
-   multiplier): rewrite matching/settlement as batched tensor ops behind a
-   construction-time fast-path switch (HC#6: canonical matcher stays the
-   golden + the vendored ai-betfair artifact; hybrid fallback to canonical
-   on rare branches). Days-to-weeks, highest risk; gated by the harness.
-   Realistic landing ~4-6× (still capped by the sampling floor unless #2).
+   multiplier on a SINGLE process): rewrite matching/settlement as batched
+   tensor ops behind a construction-time fast-path switch (HC#6: canonical
+   matcher stays the golden + the vendored ai-betfair artifact; hybrid
+   fallback to canonical on rare branches). Days-to-weeks, highest risk;
+   gated by the harness. Note: **R4 is largely SUPERSEDED by R5** for the
+   cohort-throughput goal — multiprocess already extracts the across-agent
+   parallelism R4 would, without the rewrite risk. R4 only adds value for
+   the *single-agent* latency (live inference) or to stack on top of R5.
 2. **Accept non-bit-identical batched sampling** (a *dynamics change*, not
-   a speedup under HC#8): one RNG stream → batched sampling, removing the
-   per-agent floor. Doesn't bias the policy gradient (exploration is
-   exploration) but is no longer bit-identical to the canonical env — must
-   be validated by held-out eval (does a fast-mode-trained agent match a
-   canonically-trained one?). Combine with #1 for the high multiplier.
-3. **Multiprocess the cluster across cores** (bit-identical: each agent
-   solo): ~N× on the per-agent env work, but does NOT use the GPU and pays
-   N× env-build (no cross-process cache) + memory; net unclear, untested.
+   a speedup under HC#8): one RNG stream → batched sampling. Now moot for
+   throughput (R5 gets ~7× while staying bit-identical); only relevant if
+   R4 is pursued for single-process speed.
+
+### R5 follow-on wins (bit-identical, not done)
+- **Persistent worker pool** (~+15 %): `train_cluster_multiproc` creates a
+  fresh `ProcessPoolExecutor` per generation, re-paying ~93 s of spawn +
+  torch-import + cache-deserialise each gen. A pool that lives across
+  generations (workers reused, cache loaded once) amortises it. The win
+  grows with generation count.
+- **Shared-memory feature cache**: the 548 MB/2-day pickle is deserialised
+  per worker (×N, CPU-bound) — at large N this ≈ cancels the engineering it
+  saves. Laying the engineered features out as shared-memory numpy arrays
+  (one copy, workers mmap) removes the per-worker deserialise and lets
+  build-share help at large N too.
+- **Optimal-N tuning**: contention is memory-bandwidth-bound; the best N
+  may be < cluster size (run in waves). Measure the N→wall curve.
 
 ### Smaller deferred wins (bit-identical, not done)
 - **Shared `load_day` cache** (~0.15×): the cluster parses the same day file

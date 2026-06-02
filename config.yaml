@@ -106,6 +106,18 @@ training:
   betting_constraints:
     max_back_price: 50.0
     max_lay_price: null
+    # Force-close deviation barrier (2026-05-31, plans/bc-getting-it-right).
+    # The relaxed force-close matcher historically skipped the junk filter
+    # entirely; with max_lay_price=null that left the force-close LAY with NO
+    # upper-price guardrail, so a thin near-off book could fill a close at a
+    # junk price (a forensic found one fill at 2x LTP). This caps how far past
+    # the runner's LTP a force-close may cross: beyond it the close is refused
+    # and the pair settles naked (downside bounded by the original aggressive
+    # stake — safer than crossing into junk). 0.50 = up to 1.5x LTP; a 7-day
+    # forensic showed 99% of legit closes fill within ~1.15x, so this refuses
+    # only the junk tail. null = legacy no-barrier behaviour. Overridable per
+    # run via --reward-overrides force_close_max_deviation_pct=N.
+    force_close_max_deviation_pct: 0.50
     min_seconds_before_off: 0
     # Force-close at T−N (plans/arb-signal-cleanup, Session 01,
     # 2026-04-21). Triggers env-initiated best-available close on any

@@ -1097,6 +1097,7 @@ class BetManager:
         *,
         pair_id: str | None = None,
         force_close: bool = False,
+        walk_to_price: float | None = None,
         each_way: bool = False,
         each_way_divisor: float | None = None,
         number_of_places: int | None = None,
@@ -1157,6 +1158,7 @@ class BetManager:
             max_price=max_price,
             already_matched_at_top=already_matched,
             force_close=force_close,
+            walk_to_price=walk_to_price,
         )
         if result.matched_stake < MIN_BET_STAKE:
             return None
@@ -1210,6 +1212,7 @@ class BetManager:
         *,
         pair_id: str | None = None,
         force_close: bool = False,
+        walk_to_price: float | None = None,
         each_way: bool = False,
         each_way_divisor: float | None = None,
         number_of_places: int | None = None,
@@ -1259,6 +1262,7 @@ class BetManager:
             max_price=max_price,
             already_matched_at_top=already_matched,
             force_close=force_close,
+            walk_to_price=walk_to_price,
         )
         if result.matched_stake < MIN_BET_STAKE:
             return None
@@ -1284,6 +1288,7 @@ class BetManager:
                 max_price=max_price,
                 already_matched_at_top=already_matched,
                 force_close=force_close,
+                walk_to_price=walk_to_price,
             )
             if result.matched_stake < MIN_BET_STAKE:
                 return None

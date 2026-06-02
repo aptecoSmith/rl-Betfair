@@ -96,16 +96,17 @@ class TestGateDisabledByteIdentical:
 
 class TestGateMasksOpenWhenLow:
     def test_strict_threshold_masks_all_opens(self):
-        p = _make_policy(enabled=True, threshold=0.95, seed=0)
+        # 2026-05-25: was threshold=0.95 under old (0.5, 0.95) clamp.
+        # New clamp (0.10, 0.60) so use 0.60 (the new MAX).
+        # Fresh-init direction probs sit near sigmoid(0)=0.5;
+        # threshold 0.60 > 0.5 masks every OPEN slot.
+        p = _make_policy(enabled=True, threshold=0.60, seed=0)
         obs = torch.zeros(1, _OBS_DIM)
         with torch.no_grad():
             out = p(obs)
         ml = out.masked_logits[0]
-        # NOOP at 0; OPEN at 1..2R; CLOSE at 2R+1..3R.
         R = _MAX_RUNNERS
         open_slice = ml[1: 1 + 2 * R]
-        # Fresh-init direction probs sit near 0.5; threshold 0.95
-        # masks every OPEN slot.
         assert torch.isinf(open_slice).all()
 
 
@@ -242,18 +243,36 @@ class TestGateUsesMaxNotPerSide:
 
 
 class TestGateThresholdClamped:
+    # 2026-05-25 RECALIBRATION: clamp bounds were (0.5, 0.95) under
+    # the pos-weighted head; now (0.10, 0.60) under unweighted C11.
     @pytest.mark.parametrize(
         "raw,expected",
-        [(0.99, 0.95), (1.5, 0.95), (0.4, 0.5), (-0.1, 0.5)],
+        [(0.99, 0.60), (1.5, 0.60), (0.05, 0.10), (-0.1, 0.10)],
     )
     def test_clamp(self, raw, expected):
         p = _make_policy(enabled=True, threshold=raw, seed=0)
         assert p.direction_gate_threshold == expected
 
     def test_in_range_passthrough(self):
-        for v in (0.5, 0.65, 0.8, 0.95):
+        # Values inside the new clamp (0.10, 0.60) should pass through.
+        for v in (0.15, 0.30, 0.45, 0.55):
             p = _make_policy(enabled=True, threshold=v, seed=0)
             assert p.direction_gate_threshold == v
+
+    def test_recalibrated_gene_range_not_squashed(self):
+        """2026-05-25 regression: the old clamp (0.5, 0.95) silently
+        squashed the recalibrated gene range (0.20, 0.50) to a
+        single point. Verify that constructing with the gene-range
+        min and max produces distinct stored values."""
+        from training_v2.cohort.genes import DIRECTION_GATE_THRESHOLD_RANGE
+        lo, hi = DIRECTION_GATE_THRESHOLD_RANGE
+        p_lo = _make_policy(enabled=True, threshold=lo, seed=0)
+        p_hi = _make_policy(enabled=True, threshold=hi, seed=0)
+        # The gene range must fit inside the policy clamp, so
+        # both values pass through unchanged.
+        assert p_lo.direction_gate_threshold == lo
+        assert p_hi.direction_gate_threshold == hi
+        assert p_lo.direction_gate_threshold != p_hi.direction_gate_threshold
 
 
 # ── 7. AND with legality mask ──────────────────────────────────────────────
@@ -320,7 +339,9 @@ class TestGateMaskCapturePath:
         (default) the gate masks OPEN slots; with
         ``apply_direction_gate=False`` it does NOT (caller is
         responsible for passing the gate via ``mask``)."""
-        p = _make_policy(enabled=True, threshold=0.95, seed=0)
+        # 2026-05-25: clamp recalibration — use 0.60 (new MAX)
+        # instead of 0.95.
+        p = _make_policy(enabled=True, threshold=0.60, seed=0)
         obs = torch.zeros(1, _OBS_DIM)
         with torch.no_grad():
             default_out = p(obs)
@@ -335,23 +356,22 @@ class TestGateMaskCapturePath:
 
     def test_set_effective_gate_threshold_overrides_gene(self):
         """Phase-14 S06: trainer poke overrides the gene value."""
-        p = _make_policy(enabled=True, threshold=0.95, seed=0)
-        # Default (no poke): uses gene value 0.95.
+        # 2026-05-25: strict=0.60 (new MAX), loose=0.10 (new floor).
+        # Fresh-init head produces sigmoid(0)≈0.5; 0.60 masks all,
+        # 0.10 masks none.
+        p = _make_policy(enabled=True, threshold=0.60, seed=0)
         obs = torch.zeros(1, _OBS_DIM)
         with torch.no_grad():
             out_strict = p(obs)
         n_inf_strict = torch.isinf(
             out_strict.masked_logits[0, 1: 1 + 2 * _MAX_RUNNERS]
         ).sum().item()
-        # Poke a loose threshold (the warmup-floor). Should mask
-        # fewer (or zero) OPEN slots.
-        p.set_effective_gate_threshold(0.5)
+        p.set_effective_gate_threshold(0.10)
         with torch.no_grad():
             out_loose = p(obs)
         n_inf_loose = torch.isinf(
             out_loose.masked_logits[0, 1: 1 + 2 * _MAX_RUNNERS]
         ).sum().item()
-        # Strict should mask MORE positions than loose.
         assert n_inf_strict > n_inf_loose
 
     def test_supplied_mask_combined_with_apply_direction_gate_false(self):
@@ -360,7 +380,7 @@ class TestGateMaskCapturePath:
         masked_logits whose finite-positions exactly match the
         supplied mask. No extra in-forward gate is added.
         """
-        p = _make_policy(enabled=True, threshold=0.95, seed=0)
+        p = _make_policy(enabled=True, threshold=0.60, seed=0)
         obs = torch.zeros(1, _OBS_DIM)
         # Synthetic "rollout-time" mask: NOOP + first OPEN_BACK
         # legal, everything else illegal.
@@ -393,26 +413,23 @@ class TestGateThresholdWarmup:
 
     def test_warmup_starts_at_floor(self):
         """At eps=0, the trainer's _effective_direction_gate_threshold
-        returns the floor (0.5)."""
+        returns the floor (= DIRECTION_GATE_THRESHOLD_MIN, 0.10 post-
+        2026-05-25 recalibration)."""
         from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
-        # Construct a trainer-shaped object indirectly: we need a
-        # policy + a trainer instance. Use a minimal policy and
-        # exercise just the threshold-anneal path via the helper.
-        import unittest.mock as mock
-        # Stub trainer; we just need the method.
+        from agents_v2.discrete_policy import DiscreteLSTMPolicy
         class _StubTrainer:
             _direction_gate_warmup_eps = 5
             _eps_since_gate_start = 0
             policy = _make_policy(
-                enabled=True, threshold=0.9, seed=0,
+                enabled=True, threshold=0.55, seed=0,
             )
             _effective_direction_gate_threshold = (
                 DiscretePPOTrainer._effective_direction_gate_threshold
             )
         t = _StubTrainer()
         v = t._effective_direction_gate_threshold()
-        # eps=0, frac=0/5=0 → floor (0.5).
-        assert v == 0.5
+        # eps=0, frac=0/5=0 → floor (DIRECTION_GATE_THRESHOLD_MIN).
+        assert v == DiscreteLSTMPolicy.DIRECTION_GATE_THRESHOLD_MIN
 
     def test_warmup_reaches_gene_value(self):
         from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
@@ -420,14 +437,14 @@ class TestGateThresholdWarmup:
             _direction_gate_warmup_eps = 5
             _eps_since_gate_start = 5  # at end of warmup
             policy = _make_policy(
-                enabled=True, threshold=0.9, seed=0,
+                enabled=True, threshold=0.55, seed=0,
             )
             _effective_direction_gate_threshold = (
                 DiscretePPOTrainer._effective_direction_gate_threshold
             )
         t = _StubTrainer()
         v = t._effective_direction_gate_threshold()
-        assert v == 0.9
+        assert v == 0.55
 
     def test_warmup_inactive_when_eps_zero(self):
         """``direction_gate_warmup_eps=0`` → no warmup, gene value
@@ -437,14 +454,14 @@ class TestGateThresholdWarmup:
             _direction_gate_warmup_eps = 0
             _eps_since_gate_start = 0
             policy = _make_policy(
-                enabled=True, threshold=0.9, seed=0,
+                enabled=True, threshold=0.55, seed=0,
             )
             _effective_direction_gate_threshold = (
                 DiscretePPOTrainer._effective_direction_gate_threshold
             )
         t = _StubTrainer()
         v = t._effective_direction_gate_threshold()
-        assert v == 0.9
+        assert v == 0.55
 
     def test_warmup_inactive_when_gate_disabled(self):
         from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
@@ -452,27 +469,127 @@ class TestGateThresholdWarmup:
             _direction_gate_warmup_eps = 5
             _eps_since_gate_start = 0
             policy = _make_policy(
-                enabled=False, threshold=0.9, seed=0,
+                enabled=False, threshold=0.55, seed=0,
             )
             _effective_direction_gate_threshold = (
                 DiscretePPOTrainer._effective_direction_gate_threshold
             )
         t = _StubTrainer()
         # Gate disabled → returns gene value regardless of eps.
-        assert t._effective_direction_gate_threshold() == 0.9
+        assert t._effective_direction_gate_threshold() == 0.55
 
     def test_warmup_linear_at_midpoint(self):
         from training_v2.discrete_ppo.trainer import DiscretePPOTrainer
+        from agents_v2.discrete_policy import DiscreteLSTMPolicy
         class _StubTrainer:
             _direction_gate_warmup_eps = 4
             _eps_since_gate_start = 2  # halfway
             policy = _make_policy(
-                enabled=True, threshold=0.9, seed=0,
+                enabled=True, threshold=0.55, seed=0,
             )
             _effective_direction_gate_threshold = (
                 DiscretePPOTrainer._effective_direction_gate_threshold
             )
         t = _StubTrainer()
         v = t._effective_direction_gate_threshold()
-        # frac=0.5 → 0.5 + 0.5 * (0.9 - 0.5) = 0.5 + 0.2 = 0.7.
-        assert abs(v - 0.7) < 1e-9
+        # frac=0.5 → floor + 0.5 * (gene - floor)
+        #          = 0.10 + 0.5 * (0.55 - 0.10) = 0.10 + 0.225 = 0.325
+        floor = DiscreteLSTMPolicy.DIRECTION_GATE_THRESHOLD_MIN
+        expected = floor + 0.5 * (0.55 - floor)
+        assert abs(v - expected) < 1e-9
+
+
+# ──────────────────────────────────────────────────────────────────
+# Regression: CLI flag vs reward-override resolution (2026-05-24)
+# ──────────────────────────────────────────────────────────────────
+
+
+class TestResolvePolicyGateEnabled:
+    """Regression for the 2026-05-24 wiring bug.
+
+    The bug: ``train_one_agent`` previously resolved the policy-side
+    gate-enable bool via
+    ``trainer_hp.get("direction_gate_enabled", cli_flag)``. Because
+    ``CohortGenes.to_dict()`` ALWAYS includes the key (with the gene
+    dataclass default of ``False``), the ``.get`` fallback never
+    fired — so the CLI flag was silently discarded and replaced with
+    ``False``. Result: ``--direction-gate-enabled`` enabled only the
+    ENV-side gate (dir_fire_drift refusal of OPEN_LAY); the
+    POLICY-side gate (action-mask via direction_prob_head outputs)
+    stayed OFF unless the operator also passed
+    ``--reward-overrides direction_gate_enabled=true``.
+
+    Symptom: cohort
+    ``_recipe_sensitivity_sweep_1779661887`` showed
+    ``gate_refusals=0`` for every agent despite non-default
+    threshold gene draws and the CLI flag being on.
+
+    Fix: ``_resolve_direction_gate_enabled`` returns
+    ``cli_flag OR trainer_hp["direction_gate_enabled"]`` — enable
+    if EITHER source says enable.
+    """
+
+    def test_cli_flag_alone_enables_when_gene_default_false(self):
+        """The CLI flag MUST enable even when the gene-derived
+        trainer_hp has the key set to its default False."""
+        from training_v2.cohort.worker import _resolve_direction_gate_enabled
+        # This is the canonical bug scenario: operator passes
+        # --direction-gate-enabled, gene default is False, no
+        # --reward-overrides direction_gate_enabled=...
+        trainer_hp = {"direction_gate_enabled": False}
+        assert _resolve_direction_gate_enabled(
+            cli_flag=True, trainer_hp=trainer_hp,
+        ) is True
+
+    def test_reward_override_alone_enables_when_cli_flag_false(self):
+        """The reward-override key MUST still enable (backward
+        compatibility with launches that used --reward-overrides
+        direction_gate_enabled=true instead of the CLI flag)."""
+        from training_v2.cohort.worker import _resolve_direction_gate_enabled
+        trainer_hp = {"direction_gate_enabled": True}
+        assert _resolve_direction_gate_enabled(
+            cli_flag=False, trainer_hp=trainer_hp,
+        ) is True
+
+    def test_both_off_keeps_gate_disabled(self):
+        from training_v2.cohort.worker import _resolve_direction_gate_enabled
+        trainer_hp = {"direction_gate_enabled": False}
+        assert _resolve_direction_gate_enabled(
+            cli_flag=False, trainer_hp=trainer_hp,
+        ) is False
+
+    def test_both_on_enables(self):
+        """OR semantics — both sources saying enable also enables."""
+        from training_v2.cohort.worker import _resolve_direction_gate_enabled
+        trainer_hp = {"direction_gate_enabled": True}
+        assert _resolve_direction_gate_enabled(
+            cli_flag=True, trainer_hp=trainer_hp,
+        ) is True
+
+    def test_missing_key_in_trainer_hp_defaults_to_disabled(self):
+        """If the key is absent from trainer_hp (defensive — the
+        production path always populates it via CohortGenes.to_dict()
+        but a future refactor could drop it), the CLI flag alone
+        still works."""
+        from training_v2.cohort.worker import _resolve_direction_gate_enabled
+        trainer_hp = {}
+        assert _resolve_direction_gate_enabled(
+            cli_flag=True, trainer_hp=trainer_hp,
+        ) is True
+        assert _resolve_direction_gate_enabled(
+            cli_flag=False, trainer_hp=trainer_hp,
+        ) is False
+
+    def test_production_to_dict_populates_key_at_false_by_default(self):
+        """Documents the precondition that made the original
+        .get(..., fallback) pattern broken: CohortGenes.to_dict()
+        ALWAYS populates direction_gate_enabled, defaulting False.
+        If this contract ever changes, the OR-semantics fix still
+        works — but this test asserts the input shape future fixes
+        must handle."""
+        from training_v2.cohort.genes import sample_genes
+        rng = random.Random(42)
+        genes = sample_genes(rng, enabled_set=frozenset())
+        d = genes.to_dict()
+        assert "direction_gate_enabled" in d
+        assert d["direction_gate_enabled"] is False

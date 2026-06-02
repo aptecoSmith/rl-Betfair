@@ -375,7 +375,10 @@ class RolloutCollector:
         # gate) rather than re-applying the gate from drifted head
         # outputs at update time. See findings.md.
         gate_mask_arr: np.ndarray | None
-        if getattr(policy, "direction_gate_enabled", False):
+        if (
+            getattr(policy, "direction_gate_enabled", False)
+            or getattr(policy, "mature_prob_open_gate_enabled", False)
+        ):
             gate_mask_arr = np.empty(
                 (n_steps_estimate, action_n), dtype=bool,
             )

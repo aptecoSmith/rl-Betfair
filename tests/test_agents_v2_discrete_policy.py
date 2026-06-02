@@ -248,3 +248,96 @@ class TestBackwardGradients:
         assert policy.fill_prob_head.weight.grad is None
         assert policy.mature_prob_head.weight.grad is None
         assert policy.risk_head.weight.grad is None
+
+
+# ── Opt-in input normalization (imitation-first Step 2) ────────────────────
+
+
+class TestInputNorm:
+    """Per-dim input standardization: opt-in, default-off byte-identical.
+
+    Full obs (143-d/runner) carries raw unnormalized dims up to ~190k;
+    the policy gained an opt-in per-dim standardizer before input_proj
+    (memory feedback_full_obs_needs_input_norm). Default off must be
+    byte-identical to pre-plan (no buffers, no behaviour change).
+    """
+
+    def _space(self):
+        return DiscreteActionSpace(max_runners=8)
+
+    def test_off_registers_no_buffers(self):
+        p = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=self._space(), hidden_size=32,
+            runner_dim=64,
+        )
+        sd = p.state_dict()
+        assert "obs_mean" not in sd and "obs_std" not in sd
+
+    def test_on_registers_buffers(self):
+        p = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=self._space(), hidden_size=32,
+            runner_dim=64, input_norm=True,
+        )
+        sd = p.state_dict()
+        assert "obs_mean" in sd and "obs_std" in sd
+        assert sd["obs_mean"].shape == (64,)
+
+    def test_identity_stats_is_byte_identical_to_off(self):
+        sp = self._space()
+        torch.manual_seed(0)
+        off = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=sp, hidden_size=32, runner_dim=64,
+        )
+        torch.manual_seed(0)
+        on = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=sp, hidden_size=32, runner_dim=64,
+            input_norm=True,
+        )  # default buffers are mean=0, std=1 -> identity transform
+        x = torch.randn(4, 64)
+        with torch.no_grad():
+            a = off(x).logits
+            b = on(x).logits
+        assert torch.allclose(a, b, atol=0.0)
+
+    def test_nonidentity_stats_changes_output(self):
+        sp = self._space()
+        torch.manual_seed(0)
+        off = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=sp, hidden_size=32, runner_dim=64,
+        )
+        torch.manual_seed(0)
+        on = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=sp, hidden_size=32, runner_dim=64,
+            input_norm=True,
+        )
+        on.set_input_norm_stats(
+            mean=torch.full((64,), 2.0), std=torch.full((64,), 3.0),
+        )
+        x = torch.randn(4, 64)
+        with torch.no_grad():
+            a = off(x).logits
+            c = on(x).logits
+        assert not torch.allclose(a, c, atol=1e-4)
+
+    def test_set_stats_requires_flag(self):
+        p = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=self._space(), hidden_size=32,
+            runner_dim=64,
+        )
+        with pytest.raises(RuntimeError):
+            p.set_input_norm_stats(
+                mean=torch.zeros(64), std=torch.ones(64),
+            )
+
+    def test_zero_std_floored_no_nan(self):
+        p = DiscreteLSTMPolicy(
+            obs_dim=64, action_space=self._space(), hidden_size=32,
+            runner_dim=64, input_norm=True,
+        )
+        std = torch.ones(64)
+        std[:5] = 0.0  # constant / all-zero dims (e.g. inactive slots)
+        p.set_input_norm_stats(mean=torch.zeros(64), std=std)
+        x = torch.randn(4, 64)
+        with torch.no_grad():
+            out = p(x)
+        assert torch.isfinite(out.logits).all()

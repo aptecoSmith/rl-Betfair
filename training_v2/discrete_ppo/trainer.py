@@ -481,6 +481,20 @@ class DiscretePPOTrainer:
         )
         self._eps_since_gate_start: int = 0
 
+        # Path C (2026-05-30). mature_prob open-gate threshold warmup.
+        # Same machinery as the direction gate but with an independent
+        # counter (so the two warmups don't share a cap when both
+        # gates are ever active). Anneal floor is
+        # ``MATURE_GATE_THRESHOLD_MIN`` = 0.0 (gate OFF at cold-start)
+        # ramped up to the policy's configured threshold over the
+        # first N episodes — without this, a threshold > 0.5 masks
+        # every open at episode 0 (fresh-init sigmoid ~0.5) and
+        # collapses the policy to zero bets (Phase-14 S06 lesson).
+        self._mature_gate_warmup_eps = int(
+            hp.get("mature_gate_warmup_eps", 5),
+        )
+        self._eps_since_mature_gate_start: int = 0
+
         # Phase-13 Session 03 (2026-05-06). Direction-prob aux head.
         # Read from ``hp`` ONLY (Path A; Phase 7 lessons-learnt
         # precedence trap). ``direction_prob_loss_weight = 0.0`` is
@@ -610,6 +624,29 @@ class DiscretePPOTrainer:
         )
         return floor + frac * (gene - floor)
 
+    def _effective_mature_gate_threshold(self) -> float:
+        """Path C: linear-anneal from the gate floor (0.0 = gate off)
+        to the policy's configured ``mature_prob_open_threshold`` over
+        the first ``_mature_gate_warmup_eps`` episodes.
+
+        Returns the configured threshold when the gate is disabled,
+        the warmup window is 0 (opt-out), or the window is exceeded.
+        """
+        target = float(
+            getattr(self.policy, "mature_prob_open_threshold", 0.0),
+        )
+        if not getattr(self.policy, "mature_prob_open_gate_enabled", False):
+            return target
+        if self._mature_gate_warmup_eps <= 0:
+            return target
+        if self._eps_since_mature_gate_start >= self._mature_gate_warmup_eps:
+            return target
+        floor = float(self.policy.MATURE_GATE_THRESHOLD_MIN)
+        frac = float(self._eps_since_mature_gate_start) / float(
+            self._mature_gate_warmup_eps,
+        )
+        return floor + frac * (target - floor)
+
     def train_episode(self) -> EpisodeStats:
         """Run one episode → GAE → PPO update; return per-episode stats."""
         t0 = time.perf_counter()
@@ -619,6 +656,12 @@ class DiscretePPOTrainer:
         if self.policy.direction_gate_enabled:
             self.policy.set_effective_gate_threshold(
                 self._effective_direction_gate_threshold(),
+            )
+        # Path C: poke the annealed mature-gate threshold BEFORE the
+        # rollout so action sampling sees the warmed value.
+        if getattr(self.policy, "mature_prob_open_gate_enabled", False):
+            self.policy.set_effective_mature_gate_threshold(
+                self._effective_mature_gate_threshold(),
             )
         batch = self._collector.collect_episode()
         last_info = self._collector.last_info
@@ -806,6 +849,9 @@ class DiscretePPOTrainer:
         # training runs.
         if self._eps_since_gate_start <= self._direction_gate_warmup_eps:
             self._eps_since_gate_start += 1
+        # Path C: independent mature-gate warmup counter.
+        if self._eps_since_mature_gate_start <= self._mature_gate_warmup_eps:
+            self._eps_since_mature_gate_start += 1
         logger.info(
             "DiscretePPOTrainer episode: n_steps=%d n_updates=%d "
             "policy_loss=%.4f value_loss=%.4f entropy=%.4f "
@@ -1165,6 +1211,7 @@ class DiscretePPOTrainer:
                             hidden_state=mb_hidden,
                             mask=mb_effective_mask,
                             apply_direction_gate=False,
+                            apply_mature_prob_gate=False,
                         )
                     else:
                         out = self.policy(

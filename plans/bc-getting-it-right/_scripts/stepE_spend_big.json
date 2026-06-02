@@ -1,0 +1,74 @@
+{
+  "policy": "plans/bc-getting-it-right/_scripts/stepB_alltrain_wd3e-3.pt",
+  "thresholds": [
+    0.2
+  ],
+  "holdout": [
+    "2026-05-20",
+    "2026-05-22",
+    "2026-05-29"
+  ],
+  "stake": 10.0,
+  "results": [
+    {
+      "agg": {
+        "pairs_opened": 296,
+        "arbs_completed": 78,
+        "arbs_force_closed": 218,
+        "day_pnl": -428.31,
+        "locked_pnl": 27.8,
+        "budget_lay_rejects": 0,
+        "back_staked": 2959.88,
+        "mat_pct": 26.35,
+        "fc_pct": 73.65,
+        "peak_open_liability_max": 2365.51,
+        "peak_open_liability_mean": 1739.09,
+        "threshold": 0.2
+      },
+      "per_day": [
+        {
+          "date": "2026-05-20",
+          "pairs_opened": 87,
+          "arbs_completed": 24,
+          "arbs_force_closed": 63,
+          "day_pnl": -116.28,
+          "locked_pnl": 8.25,
+          "mat_pct": 27.59,
+          "fc_pct": 72.41,
+          "peak_open_liability": 1587.3,
+          "peak_drawdown": 116.28,
+          "budget_lay_rejects": 0,
+          "back_staked": 869.96
+        },
+        {
+          "date": "2026-05-22",
+          "pairs_opened": 84,
+          "arbs_completed": 19,
+          "arbs_force_closed": 65,
+          "day_pnl": -113.84,
+          "locked_pnl": 7.17,
+          "mat_pct": 22.62,
+          "fc_pct": 77.38,
+          "peak_open_liability": 1264.47,
+          "peak_drawdown": 113.84,
+          "budget_lay_rejects": 0,
+          "back_staked": 839.97
+        },
+        {
+          "date": "2026-05-29",
+          "pairs_opened": 125,
+          "arbs_completed": 35,
+          "arbs_force_closed": 90,
+          "day_pnl": -198.19,
+          "locked_pnl": 12.38,
+          "mat_pct": 28.0,
+          "fc_pct": 72.0,
+          "peak_open_liability": 2365.51,
+          "peak_drawdown": 198.19,
+          "budget_lay_rejects": 0,
+          "back_staked": 1249.95
+        }
+      ]
+    }
+  ]
+}

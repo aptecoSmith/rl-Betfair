@@ -250,3 +250,255 @@ was looked at) fires PARK.
   (`feedback_feature_engineering_diagnostics.md`): value-domain
   checks beat shape-domain checks; ~90σ z-scores are bug signals
   not tail signals.
+
+---
+
+## 2026-05-27: Naked-EV is structural, not noise — and force_close eats it
+
+**Trigger:** Across 7 different recipes in the recipe-expansion
+campaign (Round 6 cells), the per-episode naked P&L term was
+consistently POSITIVE — ranging +£44 to +£95/day. This wasn't
+predicted by anyone's prior; in fact the team's earlier framing
+(memo `naked_variance_primary_metric`) treated naked variance as
+the deployment risk to suppress.
+
+**Question:** is the consistency across 7 independent
+hyperparameter recipes evidence that naked P&L is **structurally
+EV-positive** (i.e., a real edge from back-leg selection) rather
+than directional luck on a particular eval window?
+
+**Analysis:**
+
+- 4 agents × 5 eval days = 20 datapoints per recipe.
+- Across recipes, mean naked stayed in +£44 to +£95 range despite
+  varied selection levers (pwin thresholds, BC dose, augmentation
+  on/off, env gates).
+- A naked pair is one whose passive lay leg never filled before
+  T-force_close. The agent placed the back leg at some price X.
+  If at T-120s the lay hasn't filled, env CROSSES THE SPREAD —
+  paying ~£3-5 of spread to flatten. That force-closed loss was
+  -£125/day across cells.
+- If we remove the force-close, the naked legs settle at race
+  outcome. The +£77 naked-pnl observation suggested **back legs
+  on these specific runners pay out positively at settlement**.
+
+**Hypothesis:** the agent's back-leg selection (after BC's
+oracle alignment + pwin_back's selection prior) is structurally
+EV-positive. The env's force-close-at-T-120s is throwing away
+the EV by crossing thin spreads when nakeds could just settle.
+
+**Test:** Round 6.5 (6 cells) — disable env force-close
+(`force_close_before_off_seconds=0`).
+
+**Result:** Hypothesis confirmed. 5 of 6 cells positive
+day_pnl. 20 of 20 agents positive. Mean +£214, range +£71 to
++£370. Naked term jumped +£77 → +£270 as more pairs settled
+naked. Locked dropped to +£4-7 but naked dominates.
+
+**Interpretation:**
+
+- The "naked variance is risk" framing of the
+  `naked_variance_primary_metric` memo was WRONG for this
+  recipe. Naked is the SIGNAL, not the noise.
+- The recipe's back-leg selection (BC trained on oracle samples
+  at price 5-30, pwin_back gating to p_win ≥ 0.20) appears to
+  pick runners that drift longer-than-fair but ultimately settle
+  toward win — a real EV edge on the live ladder.
+- Force-close was an unprincipled cost ceiling that didn't know
+  about this edge. Disabling it captures the EV.
+
+**Caveats / open questions for follow-up:**
+
+1. The eval window (5 fixed days) might be a lucky drift slice.
+   Need held-out eval probe.
+2. Live trading carries the naked position INTO the in-play
+   period. Settlement variance under live conditions may differ
+   from sim. Slippage, adverse selection, partial fills,
+   in-play market dynamics — none modelled here.
+3. Locked P&L is only +£4-7, so the recipe is NOT a scalping
+   recipe in the original framing — it's a "selective
+   back-leg with no env exit" recipe. Should be re-labelled
+   for clarity.
+4. The L/σ_naked ratio across agents is ~0.04-0.10 — locked is
+   tiny relative to naked variance. The recipe's profitability
+   is entirely contingent on naked EV staying positive.
+5. Why is naked EV positive in the first place? The agent
+   selects back legs on horses that drift but win — could be
+   a real market inefficiency the predictors are capturing, or
+   could be eval-window artefact. Need to characterise the
+   per-runner profile of winning nakeds.
+
+**Methodological note:** this is an example of a metric being
+"obviously bad" by prior framing turning out to be the actual
+edge once interrogated. The `naked_variance_primary_metric` memo
+should be amended — naked variance per leg is the WRONG
+deployment metric for this recipe family.
+
+---
+
+## 2026-05-28: CORRECTION — the naked-EV "edge" was eval-window overfitting
+
+**This entry corrects the 2026-05-27 entry above, which concluded
+naked-EV was structural. It was NOT.**
+
+The fc=0 recipe produced +£260-287/day in-sample (eval days
+2026-04-10..05-06). Held-out validation on 14 never-seen days
+(2026-05-07..05-20) collapsed it to **-£155 to -£195/day** — every
+held-out agent-day negative.
+
+**What happened:** across 60+ probe cells we repeatedly evaluated and
+selected on the SAME 5 April eval days. That's classic eval-set
+overfitting. The naked back-legs that "won more than fair" did so
+only on those specific 5 days' race outcomes. The policy behaviour
+was identical out-of-sample (same opens, mat%, cls%) but the naked
+directional P&L flipped sign.
+
+**Corrected conclusions:**
+1. Naked P&L is ~zero-EV directional variance (negative after
+   commission). It is the deployment RISK, not an edge. The original
+   `naked_variance_primary_metric` memo was right.
+2. force_close is a SAFETY RAIL that bounds naked variance into
+   bounded spread cost — not a profit-eating bug. Keep it ON.
+3. The only structural edge is LOCKED P&L (genuine scalping spread
+   capture), and it's small (+£4-20/day in these probes).
+4. **METHODOLOGY FIX (locked in): every experiment must eval on
+   held-out days never used in training OR selection. Maintain a
+   train / iteration-eval / final-test split. Never iterate against
+   training-adjacent days.** This single discipline would have caught
+   the mirage 2 days earlier.
+
+**Cost of the lesson:** ~2 days of GPU chasing a recipe that loses
+money live. Cheap relative to deploying it. This is the highest-value
+negative result of the campaign.
+
+---
+
+## 2026-05-30: Per-open economics — why "selectivity alone" can't reach profitability
+
+**Trigger:** Round N showed N4 (pwin band 0.20-0.50) hit -£78 on
+held-out — the best ever. Tempting to read "selectivity is THE
+lever" and just push it further. Operator pushed back: "low but
+positive £ per scalp and high mat rate will lead to profitability"
+— don't conflate "less bad" with "actually positive."
+
+**The economics, written down to keep us honest:**
+
+For any recipe, the daily P&L decomposes as:
+
+```
+day_pnl = mat_count × locked/pair
+        − fc_count × fc_cost/pair
+        − close_count × close_cost/pair
+        + naked (≈ 0 in expectation, ignore)
+```
+
+Per-open contribution at our current operating point (e.g. H1 E7):
+
+| component | mat | locked/pair | fc% | fc_cost/pair | per-open |
+|---|---:|---:|---:|---:|---:|
+| locked side | 5% | £2.5 | — | — | +£0.125 |
+| fc side | — | — | ~80% | ~£1.50 | -£1.20 |
+| close side | — | — | (~15% × ~£3) | — | -£0.45 |
+| **net** | | | | | **-£1.07 / open** |
+
+Selectivity (Round N4: 52 opens) reduces TOTAL day_pnl by reducing
+the *number* of negative-EV opens. It does NOT change the per-open
+sign. You can drive day_pnl from -£200 → -£78 by opening less, but
+you cannot reach +£0 by this alone — the only zero-bet recipe is
+day_pnl = £0.
+
+**To flip the per-open sign positive, EITHER:**
+1. **mat% × locked/pair must rise** (need ~6× from 0.125 to 0.75).
+   Realistic path: mat% from 5% → 30%+ at the cost of locked/pair
+   dropping (but the product still rises).
+2. **fc% × fc_cost/pair must drop** dramatically. Shorter fc window
+   crosses less spread when env force-closes — directly cuts
+   fc_cost/pair.
+3. **Both moderately** — mat 15% × £1 = £0.15 + fc 50% × £0.6 = £0.30
+   negative → net -£0.15/open. Still negative; need more.
+
+**Two distinct directions to explore in parallel — NOT a one-lever
+hunt:**
+
+- **Path A: Selectivity** (Round R now testing). Fewer-but-better
+  opens. N4 is the leader. Reduces *count* of negative-EV opens but
+  ceiling is determined by per-open sign.
+- **Path B: mat%-lift** (Round S explicitly designed for this).
+  Trade locked/pair for mat%. Extreme tight_lock + short fc window.
+  Targets the per-open sign by making more passive legs fill AND
+  cutting the cost when they don't.
+- **Path C (architectural, queued):** **mature_prob open-gate** —
+  use the policy's own mature_prob_head to gate opens at the source.
+  Only open pairs the model predicts will mature. Targets per-open
+  sign by filtering on PREDICTED fill probability.
+- **Path D (future):** Liquidity-aware gating — only open on runners
+  with deep enough book that the passive lay actually fills. Needs
+  new env field exposed.
+
+**The mistake to avoid:** mono-pursuit of any single lever. The
+right campaign explores multiple paths and looks for the one (or
+combination) that actually flips per-open economics positive.
+"Less negative" is not the goal.
+
+**Implications going forward:**
+
+- Don't celebrate held-out -£78 as "almost there." It's
+  fundamentally negative-EV per open, just opened fewer times.
+- The mature_prob open-gate is the highest-leverage untried
+  mechanism — it directly targets selection-by-predicted-fill
+  rather than indirect levers (selectivity, spread).
+- Per-cell analysis should always report mat%, locked/pair AND
+  fc-cost/pair — not just day_pnl — so we can see which side of
+  the per-open arithmetic moved.
+
+---
+
+## 2026-05-30 — Imitation-first: does the scalping opportunity exist, and is it learnable?
+
+**Question**: The recipe-expansion campaign found no held-out-positive
+recipe (best −£78/day) with maturation stuck at a ~5% base rate. Before
+spending more GPU on online PPO, two cheap diagnostic questions: (1) does
+the hindsight arb oracle itself make money out-of-sample (the ceiling)?
+(2) is the maturing-open decision predictable from decision-time features
+(learnable)? See `plans/imitation-first/findings.md`.
+
+**What the data showed** (7 reserved holdout days, May 20-29, ~505k
+candidates; env fc=120 + close_walk=10):
+
+- **The oracle itself bleeds.** Running the spread-placeable oracle's own
+  labels through the real env: **−£474/day, 88.7% force-close, 5.1%
+  natural maturation.** The oracle labels "a profitable SPREAD is
+  placeable", not "the passive will FILL" — it never forward-walks. This
+  is the campaign's core flaw, at the labeler.
+- **Maturation-conditioning fixes it.** New `scan_day(maturation_
+  conditioned=True)` forward-walks each candidate under the ENV-FAITHFUL
+  fill model (crossing on available-to-LAY + cumulative traded volume ≥
+  queue_ahead — NOT the close/hold heuristic's ATB-touch, which
+  over-counted fills 12x). Re-run on holdout: **+£559 locked, fc 89%→31%,
+  maturation 5%→67%** (budget-unconstrained); ~breakeven under deployment
+  budget.
+- **Maturation is predictable.** LightGBM on `(full predictor-injected
+  obs → matured?)`, 8 train days → 7 holdout: **holdout AUC 0.76,
+  top-decile precision 0.30 = 2.45x base-rate lift.** (Scale-invariant
+  trees, so immune to the unnormalized-full-obs problem below.)
+- **Full obs is unnormalized.** Audit: 335/2254 dims abs-max > 50 (max
+  190k); the v2 policy has no input-norm on the actor path (lean obs
+  masked this). A BC-only learnability probe would be confounded — hence
+  the LightGBM proxy.
+
+**Interpretation**: the campaign was solving the wrong problem (online
+PPO exploration) when the issue was the LABELER. With maturation-
+conditioned labels the opportunity is real (~breakeven hindsight ceiling,
+locked edge ≈ force-close toll) AND the maturation decision is learnable
+(AUC 0.76). The lever to turn breakeven into profit is SELECTIVITY: a
+policy that opens only high-mature-probability runners pushes its
+opened-subset maturation above the breakeven point. The 2.45x top-decile
+lift says the signal to do that is present.
+
+**Implications / queued**: (1) train all future scalping work on
+maturation-conditioned labels, not spread-placeable. (2) Step 2 =
+reward-aware selective BC→PPO; first unblock the policy input-norm
+(opt-in, needs sign-off), then `maturation_reward_mode` + open_cost toll,
+fc=120 + close_walk=10 pinned, select on LOCKED, eval on the reserved 7
+holdout days once. (3) The recipe + caches are staged
+(`plans/imitation-first/`).

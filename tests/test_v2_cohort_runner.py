@@ -195,7 +195,7 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             # the cohort enables them via --enable-gene NAME.
             "open_cost", "matured_arb_bonus_weight",
             "mark_to_market_weight", "naked_loss_scale",
-            "stop_loss_pnl_threshold", "arb_spread_scale",
+            "stop_loss_pnl_threshold", "arb_spread_target_lock_pct",
             "fill_prob_loss_weight", "mature_prob_loss_weight",
             "risk_loss_weight", "alpha_lr", "reward_clip",
             # Phase 8 (added 2026-05-05). Operator-controlled via the

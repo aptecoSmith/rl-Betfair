@@ -1,0 +1,211 @@
+{
+  "trainable": "full",
+  "pos_weight": 1.0,
+  "lr": 0.0003,
+  "hidden_size": 256,
+  "train_days": [
+    "2026-04-06",
+    "2026-04-12",
+    "2026-04-19",
+    "2026-04-25",
+    "2026-05-01",
+    "2026-05-07"
+  ],
+  "val_days": [
+    "2026-05-13",
+    "2026-05-19"
+  ],
+  "holdout_days": [
+    "2026-05-20",
+    "2026-05-21",
+    "2026-05-22",
+    "2026-05-25",
+    "2026-05-27",
+    "2026-05-28",
+    "2026-05-29"
+  ],
+  "untrained_holdout": {
+    "n": 505183,
+    "base_rate": 0.1233,
+    "auc": 0.4953,
+    "ap": 0.118,
+    "top_decile_precision": 0.1075,
+    "top_decile_lift": 0.872
+  },
+  "best_val_auc": 0.6961,
+  "holdout": {
+    "n": 505183,
+    "base_rate": 0.1233,
+    "auc": 0.6962,
+    "ap": 0.2215,
+    "top_decile_precision": 0.2618,
+    "top_decile_lift": 2.123
+  },
+  "pr_curve": [
+    {
+      "threshold": 0.05,
+      "opens": 244992,
+      "mat_pct": 18.98,
+      "recall": 0.7465,
+      "lift": 1.539,
+      "frac_opened": 0.485
+    },
+    {
+      "threshold": 0.1,
+      "opens": 159286,
+      "mat_pct": 22.3,
+      "recall": 0.5704,
+      "lift": 1.809,
+      "frac_opened": 0.3153
+    },
+    {
+      "threshold": 0.15,
+      "opens": 119292,
+      "mat_pct": 24.02,
+      "recall": 0.46,
+      "lift": 1.948,
+      "frac_opened": 0.2361
+    },
+    {
+      "threshold": 0.2,
+      "opens": 92450,
+      "mat_pct": 25.04,
+      "recall": 0.3716,
+      "lift": 2.031,
+      "frac_opened": 0.183
+    },
+    {
+      "threshold": 0.25,
+      "opens": 73261,
+      "mat_pct": 25.57,
+      "recall": 0.3008,
+      "lift": 2.074,
+      "frac_opened": 0.145
+    },
+    {
+      "threshold": 0.3,
+      "opens": 57587,
+      "mat_pct": 26.07,
+      "recall": 0.241,
+      "lift": 2.114,
+      "frac_opened": 0.114
+    },
+    {
+      "threshold": 0.35,
+      "opens": 44811,
+      "mat_pct": 26.27,
+      "recall": 0.189,
+      "lift": 2.131,
+      "frac_opened": 0.0887
+    },
+    {
+      "threshold": 0.4,
+      "opens": 34308,
+      "mat_pct": 26.35,
+      "recall": 0.1451,
+      "lift": 2.137,
+      "frac_opened": 0.0679
+    },
+    {
+      "threshold": 0.45,
+      "opens": 25519,
+      "mat_pct": 26.78,
+      "recall": 0.1097,
+      "lift": 2.172,
+      "frac_opened": 0.0505
+    },
+    {
+      "threshold": 0.5,
+      "opens": 18311,
+      "mat_pct": 26.77,
+      "recall": 0.0787,
+      "lift": 2.171,
+      "frac_opened": 0.0362
+    },
+    {
+      "threshold": 0.55,
+      "opens": 12489,
+      "mat_pct": 27.53,
+      "recall": 0.0552,
+      "lift": 2.233,
+      "frac_opened": 0.0247
+    },
+    {
+      "threshold": 0.6,
+      "opens": 8185,
+      "mat_pct": 27.03,
+      "recall": 0.0355,
+      "lift": 2.192,
+      "frac_opened": 0.0162
+    },
+    {
+      "threshold": 0.65,
+      "opens": 4895,
+      "mat_pct": 26.84,
+      "recall": 0.0211,
+      "lift": 2.177,
+      "frac_opened": 0.0097
+    },
+    {
+      "threshold": 0.7,
+      "opens": 2534,
+      "mat_pct": 24.59,
+      "recall": 0.01,
+      "lift": 1.994,
+      "frac_opened": 0.005
+    },
+    {
+      "threshold": 0.8,
+      "opens": 499,
+      "mat_pct": 26.85,
+      "recall": 0.0022,
+      "lift": 2.178,
+      "frac_opened": 0.001
+    }
+  ],
+  "trace": [
+    {
+      "chunk": 0,
+      "steps": 200,
+      "train_loss": 0.2422,
+      "val_auc": 0.6961
+    },
+    {
+      "chunk": 1,
+      "steps": 400,
+      "train_loss": 0.1474,
+      "val_auc": 0.6751
+    },
+    {
+      "chunk": 2,
+      "steps": 600,
+      "train_loss": 0.12,
+      "val_auc": 0.662
+    },
+    {
+      "chunk": 3,
+      "steps": 800,
+      "train_loss": 0.1243,
+      "val_auc": 0.6568
+    },
+    {
+      "chunk": 4,
+      "steps": 1000,
+      "train_loss": 0.102,
+      "val_auc": 0.6438
+    },
+    {
+      "chunk": 5,
+      "steps": 1200,
+      "train_loss": 0.1057,
+      "val_auc": 0.6384
+    },
+    {
+      "chunk": 6,
+      "steps": 1400,
+      "train_loss": 0.1,
+      "val_auc": 0.6246
+    }
+  ],
+  "lightgbm_reference_auc": 0.7592
+}

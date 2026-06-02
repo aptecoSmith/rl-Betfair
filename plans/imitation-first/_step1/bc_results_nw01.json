@@ -1,0 +1,166 @@
+{
+  "bc_train_days": [
+    "2026-04-06",
+    "2026-04-10",
+    "2026-04-13",
+    "2026-04-17",
+    "2026-04-21",
+    "2026-04-25",
+    "2026-04-29",
+    "2026-05-03",
+    "2026-05-06",
+    "2026-05-10",
+    "2026-05-13",
+    "2026-05-17"
+  ],
+  "val_days": [
+    "2026-05-18",
+    "2026-05-19"
+  ],
+  "holdout": [
+    "2026-05-20",
+    "2026-05-21",
+    "2026-05-22",
+    "2026-05-25",
+    "2026-05-27",
+    "2026-05-28",
+    "2026-05-29"
+  ],
+  "obs_dim": 2254,
+  "pos": 108992,
+  "neg": 217984,
+  "bc_trace": [
+    {
+      "chunk": 0,
+      "steps": 500,
+      "train_loss": 2.6255,
+      "val_ce": 2.6923,
+      "val_acc": 0.0623
+    },
+    {
+      "chunk": 1,
+      "steps": 1000,
+      "train_loss": 2.1029,
+      "val_ce": 2.6577,
+      "val_acc": 0.1074
+    },
+    {
+      "chunk": 2,
+      "steps": 1500,
+      "train_loss": 2.1904,
+      "val_ce": 2.7076,
+      "val_acc": 0.0841
+    },
+    {
+      "chunk": 3,
+      "steps": 2000,
+      "train_loss": 1.9863,
+      "val_ce": 2.6456,
+      "val_acc": 0.0973
+    },
+    {
+      "chunk": 4,
+      "steps": 2500,
+      "train_loss": 1.971,
+      "val_ce": 2.647,
+      "val_acc": 0.0601
+    },
+    {
+      "chunk": 5,
+      "steps": 3000,
+      "train_loss": 1.9181,
+      "val_ce": 2.6701,
+      "val_acc": 0.0702
+    },
+    {
+      "chunk": 6,
+      "steps": 3500,
+      "train_loss": 1.9009,
+      "val_ce": 2.6705,
+      "val_acc": 0.0758
+    }
+  ],
+  "best_val_ce": 2.6456,
+  "baseline_holdout_agg": null,
+  "bc_holdout_per_day": [
+    {
+      "date": "2026-05-20",
+      "pairs_opened": 124,
+      "arbs_completed": 5,
+      "arbs_force_closed": 114,
+      "day_pnl": -235.29,
+      "locked_pnl": 9.8,
+      "mat_pct": 4.03,
+      "fc_pct": 91.94
+    },
+    {
+      "date": "2026-05-21",
+      "pairs_opened": 100,
+      "arbs_completed": 7,
+      "arbs_force_closed": 88,
+      "day_pnl": -220.23,
+      "locked_pnl": 4.8,
+      "mat_pct": 7.0,
+      "fc_pct": 88.0
+    },
+    {
+      "date": "2026-05-22",
+      "pairs_opened": 134,
+      "arbs_completed": 3,
+      "arbs_force_closed": 126,
+      "day_pnl": -164.17,
+      "locked_pnl": 21.96,
+      "mat_pct": 2.24,
+      "fc_pct": 94.03
+    },
+    {
+      "date": "2026-05-25",
+      "pairs_opened": 114,
+      "arbs_completed": 3,
+      "arbs_force_closed": 103,
+      "day_pnl": -216.96,
+      "locked_pnl": 14.4,
+      "mat_pct": 2.63,
+      "fc_pct": 90.35
+    },
+    {
+      "date": "2026-05-27",
+      "pairs_opened": 101,
+      "arbs_completed": 8,
+      "arbs_force_closed": 89,
+      "day_pnl": -208.15,
+      "locked_pnl": 7.13,
+      "mat_pct": 7.92,
+      "fc_pct": 88.12
+    },
+    {
+      "date": "2026-05-28",
+      "pairs_opened": 97,
+      "arbs_completed": 4,
+      "arbs_force_closed": 90,
+      "day_pnl": -159.27,
+      "locked_pnl": 9.12,
+      "mat_pct": 4.12,
+      "fc_pct": 92.78
+    },
+    {
+      "date": "2026-05-29",
+      "pairs_opened": 179,
+      "arbs_completed": 5,
+      "arbs_force_closed": 165,
+      "day_pnl": -308.95,
+      "locked_pnl": 14.98,
+      "mat_pct": 2.79,
+      "fc_pct": 92.18
+    }
+  ],
+  "bc_holdout_agg": {
+    "pairs_opened": 849,
+    "arbs_completed": 35,
+    "arbs_force_closed": 775,
+    "day_pnl": -1513.02,
+    "locked_pnl": 82.19,
+    "mat_pct": 4.12,
+    "fc_pct": 91.28
+  }
+}

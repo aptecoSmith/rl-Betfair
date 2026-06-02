@@ -1,0 +1,21 @@
+{
+  "n": 505183,
+  "base_rate": 0.1233,
+  "signals": {
+    "mispricing_abs (pwin-implied)": {
+      "auc": 0.5019,
+      "top_decile_mat": 0.1165,
+      "top_decile_lift": 0.945
+    },
+    "mispricing_rel ((pwin-implied)/implied)": {
+      "auc": 0.4999,
+      "top_decile_mat": 0.114,
+      "top_decile_lift": 0.925
+    },
+    "value_edge (pwin*ltp-1)": {
+      "auc": 0.4999,
+      "top_decile_mat": 0.114,
+      "top_decile_lift": 0.925
+    }
+  }
+}

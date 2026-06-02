@@ -1,0 +1,39 @@
+{
+  "warm_start": "plans/bc-getting-it-right/_scripts/stepB_alltrain_wd3e-3.pt",
+  "train_days": [
+    "2026-05-15",
+    "2026-05-16"
+  ],
+  "eval_days": "2026-05-20",
+  "epochs": 1,
+  "budget": 200.0,
+  "open_cost": 0.5,
+  "maturation_reward_mode": "full",
+  "mature_prob_loss_weight": 1.0,
+  "mature_open_threshold": 0.0,
+  "baseline_holdout": null,
+  "ppo_trace": [
+    {
+      "epoch": 0,
+      "day": "2026-05-15",
+      "reward": -341.341,
+      "day_pnl": -732.55,
+      "policy_loss": 0.0201,
+      "mature_bce": 0.0068,
+      "kl": 0.1382,
+      "n_updates": 3
+    },
+    {
+      "epoch": 0,
+      "day": "2026-05-16",
+      "reward": -1.0,
+      "day_pnl": -13.74,
+      "policy_loss": 0.0028,
+      "mature_bce": 0.0,
+      "kl": 0.029,
+      "n_updates": 18
+    }
+  ],
+  "holdout_agg": null,
+  "holdout_rows": null
+}

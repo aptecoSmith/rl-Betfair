@@ -1,0 +1,82 @@
+{
+  "policy": "plans/bc-getting-it-right/_scripts/stepB_alltrain_wd3e-3.pt",
+  "thresholds": [
+    0.3
+  ],
+  "holdout": [
+    "2026-05-20",
+    "2026-05-22",
+    "2026-05-29"
+  ],
+  "stake": 10.0,
+  "results": [
+    {
+      "agg": {
+        "pairs_opened": 43,
+        "arbs_completed": 4,
+        "arbs_force_closed": 16,
+        "arbs_stop_closed": 22,
+        "day_pnl": -42.03,
+        "locked_pnl": 3.65,
+        "budget_lay_rejects": 20,
+        "back_staked": 348.26,
+        "mat_pct": 9.3,
+        "fc_pct": 37.21,
+        "sc_pct": 51.16,
+        "peak_open_liability_max": 205.84,
+        "peak_open_liability_mean": 143.29,
+        "threshold": 0.3
+      },
+      "per_day": [
+        {
+          "date": "2026-05-20",
+          "pairs_opened": 10,
+          "arbs_completed": 3,
+          "arbs_force_closed": 1,
+          "day_pnl": -10.92,
+          "locked_pnl": 0.86,
+          "arbs_stop_closed": 5,
+          "mat_pct": 30.0,
+          "fc_pct": 10.0,
+          "sc_pct": 50.0,
+          "peak_open_liability": 77.45,
+          "peak_drawdown": 10.92,
+          "budget_lay_rejects": 2,
+          "back_staked": 88.2
+        },
+        {
+          "date": "2026-05-22",
+          "pairs_opened": 12,
+          "arbs_completed": 1,
+          "arbs_force_closed": 4,
+          "day_pnl": -24.23,
+          "locked_pnl": 1.27,
+          "arbs_stop_closed": 7,
+          "mat_pct": 8.33,
+          "fc_pct": 33.33,
+          "sc_pct": 58.33,
+          "peak_open_liability": 146.57,
+          "peak_drawdown": 24.23,
+          "budget_lay_rejects": 5,
+          "back_staked": 100.87
+        },
+        {
+          "date": "2026-05-29",
+          "pairs_opened": 21,
+          "arbs_completed": 0,
+          "arbs_force_closed": 11,
+          "day_pnl": -6.88,
+          "locked_pnl": 1.52,
+          "arbs_stop_closed": 10,
+          "mat_pct": 0.0,
+          "fc_pct": 52.38,
+          "sc_pct": 47.62,
+          "peak_open_liability": 205.84,
+          "peak_drawdown": 18.77,
+          "budget_lay_rejects": 13,
+          "back_staked": 159.19
+        }
+      ]
+    }
+  ]
+}

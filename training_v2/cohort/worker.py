@@ -64,6 +64,8 @@ from training_v2.discrete_ppo.bc_pretrain import (
     build_direction_bce_label_map,
     build_direction_target_map,
     load_direction_labels_for_dates,
+    load_close_hold_samples_for_dates,
+    load_negative_samples_for_dates,
     load_oracle_samples_for_dates,
     measure_post_bc_entropy,
 )
@@ -168,6 +170,39 @@ _PHASE14_TRAINER_HP_KEYS: frozenset[str] = frozenset({
     "direction_gate_threshold",
     "direction_gate_warmup_eps",
 })
+
+
+def _resolve_direction_gate_enabled(
+    *, cli_flag: bool, trainer_hp: dict,
+) -> bool:
+    """Return whether the policy-side direction gate should be active.
+
+    Two sources can enable the gate:
+
+    - ``cli_flag``: ``True`` when the operator passed
+      ``--direction-gate-enabled`` to the cohort runner.
+    - ``trainer_hp["direction_gate_enabled"]``: ``True`` when the
+      operator passed ``--reward-overrides direction_gate_enabled=true``
+      OR (in principle) when a per-agent gene draws ``True``. The
+      gene's dataclass default is ``False``, so absent an explicit
+      override this contributes ``False``.
+
+    **OR semantics**: enable if EITHER source says enable. This was
+    a 2026-05-24 fix — the prior implementation used
+    ``trainer_hp.get("direction_gate_enabled", cli_flag)``, which
+    failed because ``to_dict()`` always populates the key with the
+    gene default ``False``, so the CLI flag was silently overridden.
+    Result: ``--direction-gate-enabled`` only flipped the ENV-side
+    gate (built via ``_build_env_for_day``); the POLICY-side gate
+    (action-mask + ``gate_refusals`` counter) stayed OFF unless the
+    operator also passed ``--reward-overrides direction_gate_enabled=true``.
+
+    Regression-guarded in
+    ``tests/test_v2_direction_gate.py::TestResolvePolicyGateEnabled``.
+    """
+    return bool(cli_flag) or bool(
+        trainer_hp.get("direction_gate_enabled", False)
+    )
 
 
 # ── Public dataclasses ────────────────────────────────────────────────────
@@ -480,6 +515,7 @@ def _build_env_for_day(
     use_direction_predictor: bool | None = None,
     predictor_lean_obs: bool = False,
     predictor_p_win_back_threshold: float = 0.0,
+    predictor_p_win_back_max_threshold: float = 1.0,
     predictor_p_win_lay_threshold: float = 1.0,
     direction_gate_enabled: bool = False,
     race_confidence_threshold: float = 0.0,
@@ -512,6 +548,7 @@ def _build_env_for_day(
         use_direction_predictor=use_direction_predictor,
         predictor_lean_obs=predictor_lean_obs,
         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
         direction_gate_enabled=direction_gate_enabled,
         race_confidence_threshold=race_confidence_threshold,
@@ -974,6 +1011,9 @@ def train_one_agent(
     bc_pretrain_steps_override: int | None = None,
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
+    bc_include_negative_samples: bool = False,
+    bc_positive_weight: float = 1.0,
+    bc_include_close_hold_samples: bool = False,
     arb_spread_target_lock_pct_override: float | None = None,
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
@@ -981,8 +1021,10 @@ def train_one_agent(
     predictor_lean_obs: bool = False,
     use_direction_predictor: bool = False,
     predictor_p_win_back_threshold: float = 0.0,
+    predictor_p_win_back_max_threshold: float = 1.0,
     predictor_p_win_lay_threshold: float = 1.0,
     direction_gate_enabled: bool = False,
+    mature_prob_open_threshold: float = 0.0,
     race_confidence_threshold: float = 0.0,
     lay_price_max: float = 0.0,
     composite_score_mode: str = "total_reward",
@@ -1117,6 +1159,7 @@ def train_one_agent(
         predictor_bundle=predictor_bundle,
         predictor_lean_obs=predictor_lean_obs,
         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
         direction_gate_enabled=direction_gate_enabled,
         race_confidence_threshold=race_confidence_threshold,
@@ -1133,16 +1176,28 @@ def train_one_agent(
     # CLI flag is set. The threshold gene evolves per-agent if the
     # operator opted in via ``--enable-gene direction_gate_threshold``.
     #
-    # 2026-05-24 fix: before this, the function-arg was silently
-    # overwritten by the trainer_hp default of False, so
-    # ``--direction-gate-enabled`` only flipped the ENV-side gate
-    # (build_env_for_day) — the POLICY-side gate (used by the rollout
-    # to compute action masks + the gate_refusals counter) stayed
-    # OFF unless the operator also passed
-    # ``--reward-overrides direction_gate_enabled=true``. Now either
-    # the override or the CLI flag enables the policy-side gate.
-    direction_gate_enabled = bool(
-        trainer_hp.get("direction_gate_enabled", direction_gate_enabled),
+    # 2026-05-24 (commit `<this one>`) — ACTUAL CODE FIX. The earlier
+    # comment claimed this had been fixed but the code below was
+    # unchanged. The bug: ``trainer_hp`` is built from CohortGenes via
+    # ``to_dict()`` which ALWAYS includes ``"direction_gate_enabled":
+    # False`` (the dataclass default). So ``.get(key, fallback)``
+    # never reached the fallback — the function-arg (the CLI flag's
+    # value) was silently discarded and replaced with False from the
+    # gene dict. Result: ``--direction-gate-enabled`` only enabled the
+    # ENV-side gate (which uses dir_fire_drift from the upstream
+    # Conv1D predictor) and the POLICY-side gate (which uses
+    # max(direction_back_prob, direction_lay_prob) >= threshold from
+    # the frozen C11 head) stayed OFF. Verified in cohort
+    # ``_recipe_sensitivity_sweep_1779661887``: every agent showed
+    # ``gate_refusals=0`` despite a non-noop threshold gene draw.
+    #
+    # Fix: OR semantics — enable if EITHER the CLI flag OR the
+    # reward-override says enable. See _resolve_direction_gate_enabled
+    # for the documented contract and the regression test in
+    # tests/test_v2_direction_gate.py::TestResolvePolicyGateEnabled.
+    direction_gate_enabled = _resolve_direction_gate_enabled(
+        cli_flag=direction_gate_enabled,
+        trainer_hp=trainer_hp,
     )
     direction_gate_threshold = float(
         trainer_hp.get(
@@ -1176,15 +1231,38 @@ def train_one_agent(
             "REFUSES to fall back to a silent default of 143 "
             "after the 2026-05-24 incident."
         )
+    # Path C (2026-05-30): mature_prob open-gate. Plumbed as a single
+    # float (gate enabled iff > 0.0) straight to the policy ctor — NOT
+    # via trainer_hp.get(), which would hit the Path-A precedence foot
+    # gun (CohortGenes.to_dict() always populates the key, swallowing
+    # the CLI value). Log when active so the operator can confirm
+    # wiring on the first agent (the foot-gun detection rule).
+    if float(mature_prob_open_threshold) > 0.0:
+        logger.info(
+            "Agent %s: mature_prob open-gate ACTIVE — threshold=%.4f "
+            "(opens masked where mature_prob < threshold; refusals "
+            "surface in direction_gate_refusals)",
+            agent_id, float(mature_prob_open_threshold),
+        )
     policy = DiscreteLSTMPolicy(
         obs_dim=shim.obs_dim,
         action_space=shim.action_space,
         hidden_size=int(genes.hidden_size),
         direction_gate_enabled=direction_gate_enabled,
         direction_gate_threshold=direction_gate_threshold,
+        mature_prob_open_threshold=float(mature_prob_open_threshold),
         enable_fc_prob_head=enable_fc_prob_head,
         runner_dim=int(shim.env.active_runner_dim),
         frozen_direction_head_path=frozen_direction_head_path,
+        # input_norm (full obs): the 2254-d predictor-injected obs has raw
+        # dims up to ~190k that dominate the input_proj Linear and drown the
+        # well-scaled features (imitation-first Step 1b / memory
+        # feedback_full_obs_needs_input_norm). Register per-dim (mean, std)
+        # buffers; stats are set from the BC oracle obs just below (before
+        # BC/PPO). Default-unset buffers are (0, 1) → no-op, so this is safe
+        # even when BC is off. Fresh cohort agents only — no old checkpoint
+        # cross-load (arch-hash break, by design).
+        input_norm=True,
     )
 
     # 2026-05-24: when a shared frozen direction head is loaded, the
@@ -1281,6 +1359,25 @@ def train_one_agent(
             data_dir=data_dir,
             expected_obs_dim=int(shim.obs_dim),
         )
+        # input_norm: set per-dim standardization stats from the BC oracle
+        # obs BEFORE BC + PPO (so the LSTM trains on normalized obs). Only
+        # when the policy was built with input_norm=True and BC samples
+        # exist. See the policy-construction comment above.
+        if bc_samples and getattr(policy, "_input_norm_enabled", False):
+            _norm_src = np.stack(
+                [s.obs for s in bc_samples[:100000]], axis=0,
+            ).astype(np.float64)
+            policy.set_input_norm_stats(
+                _norm_src.mean(axis=0), _norm_src.std(axis=0),
+            )
+            logger.info(
+                "Agent %s: input_norm stats set from %d BC oracle obs "
+                "(std range [%.3g, %.3g])",
+                agent_id, len(_norm_src),
+                float(_norm_src.std(axis=0).min()),
+                float(_norm_src.std(axis=0).max()),
+            )
+            del _norm_src
         if not bc_samples:
             logger.warning(
                 "Agent %s: bc_pretrain_steps=%d but no oracle samples "
@@ -1353,6 +1450,78 @@ def train_one_agent(
                 )
             else:
                 direction_bce_label_map = None
+            # BC label augmentation Phase A
+            # (``plans/bc-label-augmentation/``). Load the negative-
+            # open cache when the CLI flag is set; otherwise pass
+            # ``None`` so the pretrainer's negative-sample code path
+            # stays gated off (byte-identical to pre-plan).
+            bc_negative_samples = None
+            if bc_include_negative_samples:
+                bc_negative_samples = load_negative_samples_for_dates(
+                    dates=list(days_to_train),
+                    data_dir=data_dir,
+                    expected_obs_dim=int(shim.obs_dim),
+                )
+                if not bc_negative_samples:
+                    logger.warning(
+                        "Agent %s: --bc-include-negative-samples set "
+                        "but no negative cache loaded across %d "
+                        "training day(s); BC will run positive-only. "
+                        "Run `python -m training_v2.oracle_cli scan "
+                        "--include-negative-samples --dates %s` to "
+                        "populate.",
+                        agent_id, len(days_to_train),
+                        ",".join(days_to_train),
+                    )
+                else:
+                    logger.info(
+                        "Agent %s: BC negative-sample augmentation "
+                        "active (%d negatives across %d day(s), "
+                        "positive_weight=%.3f)",
+                        agent_id, len(bc_negative_samples),
+                        len(days_to_train), float(bc_positive_weight),
+                    )
+            # BC label augmentation Phase B
+            # (``plans/bc-label-augmentation/``). Load the close/hold
+            # cache when the CLI flag is set; otherwise pass ``None``
+            # so the pretrainer's close/hold code path stays gated off
+            # (byte-identical to Phase A).
+            bc_close_hold_samples = None
+            if bc_include_close_hold_samples:
+                bc_close_hold_samples = (
+                    load_close_hold_samples_for_dates(
+                        dates=list(days_to_train),
+                        data_dir=data_dir,
+                        expected_obs_dim=int(shim.obs_dim),
+                    )
+                )
+                if not bc_close_hold_samples:
+                    logger.warning(
+                        "Agent %s: --bc-include-close-hold-samples "
+                        "set but no close/hold cache loaded across "
+                        "%d training day(s); BC will run without "
+                        "close/hold augmentation. Run `python -m "
+                        "training_v2.oracle_cli scan --include-"
+                        "close-hold-samples --dates %s` to populate.",
+                        agent_id, len(days_to_train),
+                        ",".join(days_to_train),
+                    )
+                else:
+                    n_close = sum(
+                        1 for s in bc_close_hold_samples
+                        if s.target_action_class == 0
+                    )
+                    n_hold = sum(
+                        1 for s in bc_close_hold_samples
+                        if s.target_action_class == 1
+                    )
+                    logger.info(
+                        "Agent %s: BC close/hold augmentation active "
+                        "(%d samples across %d day(s): close=%d "
+                        "hold=%d)",
+                        agent_id, len(bc_close_hold_samples),
+                        len(days_to_train), n_close, n_hold,
+                    )
             bc_history = DiscreteBCPretrainer(
                 lr=bc_lr, batch_size=64, seed=int(seed),
             ).pretrain(
@@ -1381,6 +1550,9 @@ def train_one_agent(
                         "direction_bce_use_pos_weight", True,
                     )
                 ),
+                negative_samples=bc_negative_samples,
+                positive_weight=float(bc_positive_weight),
+                close_hold_samples=bc_close_hold_samples,
             )
             post_bc_entropy = measure_post_bc_entropy(policy, bc_samples)
             trainer.set_post_bc_entropy(post_bc_entropy)
@@ -1549,6 +1721,7 @@ def train_one_agent(
                 predictor_bundle=predictor_bundle,
                 predictor_lean_obs=predictor_lean_obs,
                 predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
                 predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                 direction_gate_enabled=direction_gate_enabled,
                 race_confidence_threshold=race_confidence_threshold,
@@ -1773,6 +1946,7 @@ def train_one_agent(
             predictor_bundle=predictor_bundle,
             predictor_lean_obs=predictor_lean_obs,
             predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
             predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
             direction_gate_enabled=direction_gate_enabled,
             race_confidence_threshold=race_confidence_threshold,

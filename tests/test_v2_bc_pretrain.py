@@ -24,7 +24,13 @@ import torch
 
 from agents_v2.action_space import DiscreteActionSpace
 from agents_v2.discrete_policy import DiscreteLSTMPolicy
-from training_v2.arb_oracle import OracleSample
+from training_v2.arb_oracle import (
+    CloseHoldSample,
+    NegativeOracleSample,
+    OracleSample,
+    TARGET_CLASS_CLOSE,
+    TARGET_CLASS_HOLD,
+)
 from training_v2.discrete_ppo.bc_pretrain import (
     BCLossHistory,
     DiscreteBCPretrainer,
@@ -335,3 +341,406 @@ def test_measure_post_bc_entropy_returns_finite_scalar():
     # Empty pool → 0.0 by contract (caller should NOT then call
     # set_post_bc_entropy).
     assert measure_post_bc_entropy(policy, []) == 0.0
+
+
+# ── BC label augmentation Phase A tests ──────────────────────────────────────
+# plans/bc-label-augmentation/. Three regressions:
+# 1. Byte-identity when negatives are empty (load-bearing for backcompat).
+# 2. NOOP logits rise on negatives' obs vectors when neg-augmentation is on.
+# 3. The pre-existing zero-step / empty-pool byte-identity invariants still
+#    hold under the new code path (covered by the existing tests above —
+#    no change required because the new code only activates when neg_active
+#    is True).
+
+
+def _make_negative_samples(
+    n: int, seed: int = 0,
+) -> list[NegativeOracleSample]:
+    rng = np.random.default_rng(seed)
+    return [
+        NegativeOracleSample(
+            tick_index=10_000 + i,  # disjoint from positive tick range
+            runner_idx=int(rng.integers(0, _MAX_RUNNERS)),
+            obs=rng.standard_normal(_OBS_DIM).astype(np.float32),
+        )
+        for i in range(n)
+    ]
+
+
+class TestBCWithNegativesByteIdenticalWhenEmpty:
+    """When ``negative_samples=[]`` or ``None``, post-BC weights MUST
+    match the run with the same seed where the arg was omitted entirely.
+    This is the load-bearing backcompat invariant — every existing
+    cohort that doesn't opt into Phase A must train byte-identical
+    weights.
+    """
+
+    def test_negative_samples_none_vs_omitted(self):
+        policy_a = _make_policy(seed=42)
+        policy_b = _make_policy(seed=42)
+        samples = _make_samples(32, seed=1)
+
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(policy_a, samples, n_steps=10)
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(
+            policy_b, samples, n_steps=10, negative_samples=None,
+        )
+
+        for (kn, va), (_, vb) in zip(
+            policy_a.state_dict().items(),
+            policy_b.state_dict().items(),
+        ):
+            assert torch.equal(va, vb), (
+                f"param {kn!r} drifted when negative_samples=None was "
+                "passed explicitly — backcompat broken."
+            )
+
+    def test_negative_samples_empty_list_byte_identical(self):
+        policy_a = _make_policy(seed=42)
+        policy_b = _make_policy(seed=42)
+        samples = _make_samples(32, seed=1)
+
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(policy_a, samples, n_steps=10)
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(
+            policy_b, samples, n_steps=10, negative_samples=[],
+        )
+
+        for (kn, va), (_, vb) in zip(
+            policy_a.state_dict().items(),
+            policy_b.state_dict().items(),
+        ):
+            assert torch.equal(va, vb), (
+                f"param {kn!r} drifted under negative_samples=[] — "
+                "the §7 byte-identity contract is broken."
+            )
+
+
+class TestBCWithNegativesPushesNoopLogitsUp:
+    """When negatives are present and targeted at NOOP, the NOOP class
+    logit on the negatives' obs vectors MUST rise (or at minimum, the
+    NOOP advantage over the OPEN_BACK class on those obs must rise)
+    compared to a control run with no negative augmentation.
+    """
+
+    def test_noop_logit_rises_with_negative_augmentation(self):
+        from agents_v2.action_space import ActionType
+
+        # Small, fixed pools: 3 positives + 6 negatives. 50 BC steps is
+        # enough on a fresh policy to see a clear gradient signal.
+        positives = _make_samples(3, seed=11)
+        negatives = _make_negative_samples(6, seed=12)
+
+        policy_aug = _make_policy(seed=42)
+        policy_ctrl = _make_policy(seed=42)
+        # Pre-BC: byte-identical policies.
+
+        DiscreteBCPretrainer(
+            lr=3e-3, batch_size=8, seed=13,
+        ).pretrain(
+            policy_aug, positives, n_steps=50,
+            negative_samples=negatives, positive_weight=1.0,
+        )
+        DiscreteBCPretrainer(
+            lr=3e-3, batch_size=8, seed=13,
+        ).pretrain(policy_ctrl, positives, n_steps=50)
+
+        # Evaluate both policies on the negatives' obs vectors.
+        obs_t = torch.tensor(
+            np.stack([s.obs for s in negatives], axis=0),
+            dtype=torch.float32,
+        )
+        with torch.no_grad():
+            logits_aug = policy_aug(obs_t).logits  # (N, n_actions)
+            logits_ctrl = policy_ctrl(obs_t).logits
+
+        action_space = policy_aug.action_space
+        noop_idx = int(action_space.encode(ActionType.NOOP, None))
+
+        # Compare the NOOP logit's RELATIVE advantage vs the mean of
+        # every other action's logit on the same obs row. The
+        # augmented run should have a higher NOOP advantage than the
+        # control run.
+        def _noop_advantage(logits: torch.Tensor) -> float:
+            noop_l = logits[:, noop_idx]
+            others_mean = (
+                logits.sum(dim=1) - noop_l
+            ) / (logits.shape[1] - 1)
+            return float((noop_l - others_mean).mean().item())
+
+        adv_aug = _noop_advantage(logits_aug)
+        adv_ctrl = _noop_advantage(logits_ctrl)
+        assert adv_aug > adv_ctrl, (
+            f"NOOP advantage on negatives' obs: augmented={adv_aug:.4f}, "
+            f"control={adv_ctrl:.4f}. Augmentation should raise the "
+            "NOOP class above other classes on negative obs."
+        )
+
+
+class TestBCWithNegativesZeroStepsStillNoop:
+    """Phase A constraint: ``n_steps=0`` must remain byte-identical
+    regardless of whether ``negative_samples`` is set. The pretrainer
+    short-circuits before constructing the optimiser, so this should
+    trivially hold — but pin it with a regression test.
+    """
+
+    def test_zero_steps_with_negatives_byte_identical(self):
+        policy = _make_policy(seed=42)
+        samples = _make_samples(32, seed=4)
+        negatives = _make_negative_samples(16, seed=5)
+        before = _snapshot_state_dict(policy)
+
+        history = DiscreteBCPretrainer().pretrain(
+            policy, samples, n_steps=0,
+            negative_samples=negatives,
+        )
+
+        assert history.ce_losses == []
+        after = policy.state_dict()
+        for name, before_val in before.items():
+            assert torch.equal(before_val, after[name]), (
+                f"param {name!r} changed during a zero-step BC pass "
+                "with negative samples set — §7 violated."
+            )
+
+
+# ── BC label augmentation Phase B tests ─────────────────────────────────────
+# plans/bc-label-augmentation/. Three regressions:
+# 1. Byte-identity when close_hold_samples is None or empty
+#    (load-bearing backwards-compat invariant).
+# 2. CLOSE-target samples push the CLOSE logit up on their obs.
+# 3. HOLD-target samples push the NOOP logit up on their obs.
+
+
+def _make_close_hold_samples(
+    n_close: int,
+    n_hold: int,
+    seed: int = 0,
+) -> list[CloseHoldSample]:
+    rng = np.random.default_rng(seed)
+    out: list[CloseHoldSample] = []
+    for i in range(n_close):
+        out.append(CloseHoldSample(
+            tick_index=30_000 + i,
+            runner_idx=int(rng.integers(0, _MAX_RUNNERS)),
+            obs=rng.standard_normal(_OBS_DIM).astype(np.float32),
+            target_action_class=int(TARGET_CLASS_CLOSE),
+            lifecycle_position=float(rng.uniform(0.0, 1.0)),
+        ))
+    for i in range(n_hold):
+        out.append(CloseHoldSample(
+            tick_index=40_000 + i,
+            runner_idx=int(rng.integers(0, _MAX_RUNNERS)),
+            obs=rng.standard_normal(_OBS_DIM).astype(np.float32),
+            target_action_class=int(TARGET_CLASS_HOLD),
+            lifecycle_position=float(rng.uniform(0.0, 1.0)),
+        ))
+    return out
+
+
+class TestBCWithCloseHoldByteIdenticalWhenEmpty:
+    """When ``close_hold_samples=None`` or ``[]``, post-BC weights MUST
+    match a control run with the kwarg omitted entirely. This is the
+    load-bearing Phase B backcompat invariant.
+    """
+
+    def test_close_hold_samples_none_vs_omitted(self):
+        policy_a = _make_policy(seed=42)
+        policy_b = _make_policy(seed=42)
+        samples = _make_samples(32, seed=1)
+
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(policy_a, samples, n_steps=10)
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(
+            policy_b, samples, n_steps=10,
+            close_hold_samples=None,
+        )
+
+        for (kn, va), (_, vb) in zip(
+            policy_a.state_dict().items(),
+            policy_b.state_dict().items(),
+        ):
+            assert torch.equal(va, vb), (
+                f"param {kn!r} drifted when close_hold_samples=None "
+                "was passed explicitly — Phase B backcompat broken."
+            )
+
+    def test_close_hold_samples_empty_list_byte_identical(self):
+        policy_a = _make_policy(seed=42)
+        policy_b = _make_policy(seed=42)
+        samples = _make_samples(32, seed=1)
+
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(policy_a, samples, n_steps=10)
+        DiscreteBCPretrainer(
+            lr=3e-4, batch_size=16, seed=7,
+        ).pretrain(
+            policy_b, samples, n_steps=10,
+            close_hold_samples=[],
+        )
+
+        for (kn, va), (_, vb) in zip(
+            policy_a.state_dict().items(),
+            policy_b.state_dict().items(),
+        ):
+            assert torch.equal(va, vb), (
+                f"param {kn!r} drifted under close_hold_samples=[] — "
+                "the §7 byte-identity contract is broken."
+            )
+
+    def test_zero_steps_with_close_hold_byte_identical(self):
+        policy = _make_policy(seed=42)
+        samples = _make_samples(16, seed=1)
+        ch_samples = _make_close_hold_samples(8, 8, seed=2)
+        before = _snapshot_state_dict(policy)
+
+        history = DiscreteBCPretrainer().pretrain(
+            policy, samples, n_steps=0,
+            close_hold_samples=ch_samples,
+        )
+
+        assert history.ce_losses == []
+        after = policy.state_dict()
+        for name, before_val in before.items():
+            assert torch.equal(before_val, after[name]), (
+                f"param {name!r} changed during a zero-step BC pass "
+                "with close_hold samples set — §7 violated."
+            )
+
+
+class TestBCWithCloseHoldPushesCloseLogitsUp:
+    """When CLOSE-target close_hold samples are present, the CLOSE
+    action's logit on the CLOSE-target samples' obs MUST rise compared
+    to a control run without close_hold samples.
+    """
+
+    def test_close_logit_rises_with_close_hold_augmentation(self):
+        from agents_v2.action_space import ActionType
+
+        positives = _make_samples(3, seed=11)
+        # Pure-CLOSE pool: we want a clean signal that the CLOSE
+        # logit is pushed up on these obs. Use a small, fixed
+        # runner_idx so the CLOSE label hits the same action class
+        # repeatedly.
+        target_runner = 1
+        rng = np.random.default_rng(13)
+        close_samples = [
+            CloseHoldSample(
+                tick_index=30_000 + i,
+                runner_idx=target_runner,
+                obs=rng.standard_normal(_OBS_DIM).astype(np.float32),
+                target_action_class=int(TARGET_CLASS_CLOSE),
+                lifecycle_position=0.5,
+            )
+            for i in range(6)
+        ]
+
+        policy_aug = _make_policy(seed=42)
+        policy_ctrl = _make_policy(seed=42)
+
+        DiscreteBCPretrainer(
+            lr=3e-3, batch_size=8, seed=13,
+        ).pretrain(
+            policy_aug, positives, n_steps=100,
+            close_hold_samples=close_samples,
+        )
+        DiscreteBCPretrainer(
+            lr=3e-3, batch_size=8, seed=13,
+        ).pretrain(policy_ctrl, positives, n_steps=100)
+
+        obs_t = torch.tensor(
+            np.stack([s.obs for s in close_samples], axis=0),
+            dtype=torch.float32,
+        )
+        with torch.no_grad():
+            logits_aug = policy_aug(obs_t).logits
+            logits_ctrl = policy_ctrl(obs_t).logits
+
+        action_space = policy_aug.action_space
+        close_idx = int(action_space.encode(
+            ActionType.CLOSE, target_runner,
+        ))
+
+        close_logit_aug = float(logits_aug[:, close_idx].mean().item())
+        close_logit_ctrl = float(logits_ctrl[:, close_idx].mean().item())
+
+        assert close_logit_aug > close_logit_ctrl, (
+            f"CLOSE logit on close-target obs did not rise with "
+            f"augmentation: augmented={close_logit_aug:.4f}, "
+            f"control={close_logit_ctrl:.4f}."
+        )
+
+
+class TestBCWithCloseHoldPushesNoopLogitsUpOnHoldSamples:
+    """When HOLD-target close_hold samples are present, the NOOP
+    action's logit on the HOLD-target samples' obs MUST rise compared
+    to a control run without close_hold samples.
+    """
+
+    def test_noop_logit_rises_with_hold_augmentation(self):
+        from agents_v2.action_space import ActionType
+
+        positives = _make_samples(3, seed=11)
+        rng = np.random.default_rng(17)
+        hold_samples = [
+            CloseHoldSample(
+                tick_index=40_000 + i,
+                runner_idx=int(rng.integers(0, _MAX_RUNNERS)),
+                obs=rng.standard_normal(_OBS_DIM).astype(np.float32),
+                target_action_class=int(TARGET_CLASS_HOLD),
+                lifecycle_position=0.5,
+            )
+            for i in range(6)
+        ]
+
+        policy_aug = _make_policy(seed=42)
+        policy_ctrl = _make_policy(seed=42)
+
+        DiscreteBCPretrainer(
+            lr=3e-3, batch_size=8, seed=13,
+        ).pretrain(
+            policy_aug, positives, n_steps=100,
+            close_hold_samples=hold_samples,
+        )
+        DiscreteBCPretrainer(
+            lr=3e-3, batch_size=8, seed=13,
+        ).pretrain(policy_ctrl, positives, n_steps=100)
+
+        obs_t = torch.tensor(
+            np.stack([s.obs for s in hold_samples], axis=0),
+            dtype=torch.float32,
+        )
+        with torch.no_grad():
+            logits_aug = policy_aug(obs_t).logits
+            logits_ctrl = policy_ctrl(obs_t).logits
+
+        action_space = policy_aug.action_space
+        noop_idx = int(action_space.encode(ActionType.NOOP, None))
+
+        # Use a relative advantage so we don't confound with the
+        # overall logit scale changing across runs.
+        def _noop_advantage(logits: torch.Tensor) -> float:
+            noop_l = logits[:, noop_idx]
+            others_mean = (
+                logits.sum(dim=1) - noop_l
+            ) / (logits.shape[1] - 1)
+            return float((noop_l - others_mean).mean().item())
+
+        adv_aug = _noop_advantage(logits_aug)
+        adv_ctrl = _noop_advantage(logits_ctrl)
+
+        assert adv_aug > adv_ctrl, (
+            f"NOOP advantage on hold-target obs did not rise with "
+            f"augmentation: augmented={adv_aug:.4f}, "
+            f"control={adv_ctrl:.4f}."
+        )

@@ -1,0 +1,293 @@
+{
+  "bc_train_days": [
+    "2026-04-06",
+    "2026-04-07",
+    "2026-04-08",
+    "2026-04-09",
+    "2026-04-10",
+    "2026-04-11",
+    "2026-04-12",
+    "2026-04-13",
+    "2026-04-14",
+    "2026-04-15",
+    "2026-04-16",
+    "2026-04-17",
+    "2026-04-19",
+    "2026-04-20",
+    "2026-04-21",
+    "2026-04-22",
+    "2026-04-23",
+    "2026-04-24",
+    "2026-04-25",
+    "2026-04-26",
+    "2026-04-28",
+    "2026-04-29",
+    "2026-04-30",
+    "2026-05-01",
+    "2026-05-02",
+    "2026-05-03",
+    "2026-05-04",
+    "2026-05-05",
+    "2026-05-06",
+    "2026-05-07",
+    "2026-05-08",
+    "2026-05-09",
+    "2026-05-10",
+    "2026-05-11",
+    "2026-05-12",
+    "2026-05-13",
+    "2026-05-14",
+    "2026-05-15",
+    "2026-05-16",
+    "2026-05-17"
+  ],
+  "val_days": [
+    "2026-05-18",
+    "2026-05-19"
+  ],
+  "holdout": [
+    "2026-05-20",
+    "2026-05-21",
+    "2026-05-22",
+    "2026-05-25",
+    "2026-05-27",
+    "2026-05-28",
+    "2026-05-29"
+  ],
+  "obs_dim": 2254,
+  "pos": 384055,
+  "neg": 768110,
+  "bc_trace": [
+    {
+      "chunk": 0,
+      "steps": 500,
+      "train_loss": 3.8067,
+      "val_ce": 3.2562,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 1,
+      "steps": 1000,
+      "train_loss": 3.7365,
+      "val_ce": 3.2227,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 2,
+      "steps": 1500,
+      "train_loss": 3.7305,
+      "val_ce": 3.2655,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 3,
+      "steps": 2000,
+      "train_loss": 3.5902,
+      "val_ce": 3.2113,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 4,
+      "steps": 2500,
+      "train_loss": 3.5026,
+      "val_ce": 3.2236,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 5,
+      "steps": 3000,
+      "train_loss": 3.5612,
+      "val_ce": 3.2,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 6,
+      "steps": 3500,
+      "train_loss": 3.547,
+      "val_ce": 3.2603,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 7,
+      "steps": 4000,
+      "train_loss": 3.5222,
+      "val_ce": 3.2142,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 8,
+      "steps": 4500,
+      "train_loss": 3.5507,
+      "val_ce": 3.2062,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 9,
+      "steps": 5000,
+      "train_loss": 3.5227,
+      "val_ce": 3.1643,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 10,
+      "steps": 5500,
+      "train_loss": 3.5937,
+      "val_ce": 3.1761,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 11,
+      "steps": 6000,
+      "train_loss": 3.4588,
+      "val_ce": 3.1348,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 12,
+      "steps": 6500,
+      "train_loss": 3.4882,
+      "val_ce": 3.1562,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 13,
+      "steps": 7000,
+      "train_loss": 3.6235,
+      "val_ce": 3.146,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 14,
+      "steps": 7500,
+      "train_loss": 3.456,
+      "val_ce": 3.1789,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 15,
+      "steps": 8000,
+      "train_loss": 3.5404,
+      "val_ce": 3.0915,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 16,
+      "steps": 8500,
+      "train_loss": 3.5187,
+      "val_ce": 3.1343,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 17,
+      "steps": 9000,
+      "train_loss": 3.3978,
+      "val_ce": 3.2164,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 18,
+      "steps": 9500,
+      "train_loss": 3.6012,
+      "val_ce": 3.182,
+      "val_acc": 0.0
+    },
+    {
+      "chunk": 19,
+      "steps": 10000,
+      "train_loss": 3.4574,
+      "val_ce": 3.3123,
+      "val_acc": 0.0
+    }
+  ],
+  "best_val_ce": 3.0915,
+  "baseline_holdout_agg": {
+    "pairs_opened": 833,
+    "arbs_completed": 8,
+    "arbs_force_closed": 684,
+    "day_pnl": -1617.28,
+    "locked_pnl": 65.91,
+    "mat_pct": 0.96,
+    "fc_pct": 82.11
+  },
+  "bc_holdout_per_day": [
+    {
+      "date": "2026-05-20",
+      "pairs_opened": 0,
+      "arbs_completed": 0,
+      "arbs_force_closed": 0,
+      "day_pnl": 0.0,
+      "locked_pnl": 0.0,
+      "mat_pct": 0.0,
+      "fc_pct": 0.0
+    },
+    {
+      "date": "2026-05-21",
+      "pairs_opened": 0,
+      "arbs_completed": 0,
+      "arbs_force_closed": 0,
+      "day_pnl": 0.0,
+      "locked_pnl": 0.0,
+      "mat_pct": 0.0,
+      "fc_pct": 0.0
+    },
+    {
+      "date": "2026-05-22",
+      "pairs_opened": 0,
+      "arbs_completed": 0,
+      "arbs_force_closed": 0,
+      "day_pnl": 0.0,
+      "locked_pnl": 0.0,
+      "mat_pct": 0.0,
+      "fc_pct": 0.0
+    },
+    {
+      "date": "2026-05-25",
+      "pairs_opened": 0,
+      "arbs_completed": 0,
+      "arbs_force_closed": 0,
+      "day_pnl": 0.0,
+      "locked_pnl": 0.0,
+      "mat_pct": 0.0,
+      "fc_pct": 0.0
+    },
+    {
+      "date": "2026-05-27",
+      "pairs_opened": 0,
+      "arbs_completed": 0,
+      "arbs_force_closed": 0,
+      "day_pnl": 0.0,
+      "locked_pnl": 0.0,
+      "mat_pct": 0.0,
+      "fc_pct": 0.0
+    },
+    {
+      "date": "2026-05-28",
+      "pairs_opened": 0,
+      "arbs_completed": 0,
+      "arbs_force_closed": 0,
+      "day_pnl": 0.0,
+      "locked_pnl": 0.0,
+      "mat_pct": 0.0,
+      "fc_pct": 0.0
+    },
+    {
+      "date": "2026-05-29",
+      "pairs_opened": 0,
+      "arbs_completed": 0,
+      "arbs_force_closed": 0,
+      "day_pnl": 0.0,
+      "locked_pnl": 0.0,
+      "mat_pct": 0.0,
+      "fc_pct": 0.0
+    }
+  ],
+  "bc_holdout_agg": {
+    "pairs_opened": 0,
+    "arbs_completed": 0,
+    "arbs_force_closed": 0,
+    "day_pnl": 0.0,
+    "locked_pnl": 0.0,
+    "mat_pct": 0.0,
+    "fc_pct": 0.0
+  }
+}

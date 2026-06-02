@@ -187,6 +187,71 @@ Any PR that re-introduces ladder walking, drops the LTP requirement,
 or gates price constraints on the unfiltered top-of-book should be
 rejected — each of those independently caused the phantom-profit bug.
 
+### Sanctioned exception: bounded walk on the CLOSE path only (2026-05-30)
+
+The no-walk ban above applies to the **open** path. The
+**close / force-close** path may walk a bounded number of ticks to
+complete its hedge, gated by `close_walk_ticks` (default `0` = OFF =
+byte-identical single-level closing). This is NOT a regression of the
+no-walk rule — it is the operator-directed fix for the biggest single
+leak found in the recipe-expansion campaign (see
+`plans/recipe-expansion-and-robustness/findings.md` KEY FINDING #2).
+
+**Why it's safe / why it's not the phantom-profit bug:**
+- The phantom-profit bug was an *unbounded* sweep on **opens** that
+  matched through £1–£1000 parked junk. The close walk is **bounded**
+  (`close_walk_ticks`, e.g. 10) AND the hard price cap
+  (`max_back_price`/`max_lay_price`) is enforced on *every* walked
+  level, so it can never reach junk.
+- `docs/betfair_market_model.md` §2 confirms real Betfair fills "at the
+  named price OR BETTER, leaving the remainder resting" — a bounded
+  limit order DOES consume intervening levels up to its limit. The
+  single-level rule is *more* conservative than reality; the close walk
+  is a named limit order, exactly what the spec describes.
+- The leak it fixes: `_attempt_close` sizes the close leg at full
+  equal-profit but the single-level matcher only filled the best level,
+  leaving the aggressive leg under-hedged → directional variance. The
+  Runman example (findings.md) had £146 resting ONE tick away that
+  no-walk discarded, taking a −£27 directional loss to avoid laying £25
+  one tick worse. Quantified at ~£339/agent/7d of avoidable loss.
+
+**Mechanism (where it lives):**
+- `ExchangeMatcher._match` / `match_back` / `match_lay` gain
+  `walk_to_price: float | None = None`. When `None` (every OPEN call)
+  the strict single-level path runs unchanged. When set, the match
+  fills across successive levels from best toward (and including)
+  `walk_to_price`, returning a size-weighted average price. The matcher
+  stays dependency-free — the *caller* computes the limit via
+  `tick_offset`, so no `tick_ladder` import leaks into the matcher
+  (preserves the ai-betfair vendorability contract).
+- `BetManager.place_back` / `place_lay` thread `walk_to_price` through
+  (including the lay liability-scaledown re-match).
+- `env/betfair_env.py::_attempt_close` computes
+  `walk_to_price = tick_offset(close_price, self._close_walk_ticks, dir)`
+  where `dir = +1` for a LAY close (closing a back → walk to higher lay
+  prices) and `-1` for a BACK close (closing a lay → walk to lower back
+  prices). Applies to BOTH agent `close_signal` and env force-close.
+  The OPEN path (`_maybe_place_paired`, `_attempt_requote`) never passes
+  `walk_to_price`.
+- `close_walk_ticks` is a member of `_REWARD_OVERRIDE_KEYS` and read
+  from `reward_overrides` first, falling back to `betting_constraints`,
+  exactly like `force_close_before_off_seconds`. Cohort runners pin it
+  via `--reward-overrides close_walk_ticks=10`.
+
+Back-exposure closes (lay walk) are the priority; lay-exposure (back
+walk) is applied symmetrically for now and flagged for a separate
+experiment (operator note 2026-05-30). Runs with
+`close_walk_ticks > 0` are NOT byte-identical to pre-change runs;
+scoreboard rows are comparable only when the knob is 0 on both sides.
+
+Load-bearing regression guards: `tests/test_exchange_matcher.py::
+TestCloseWalk` (walk completes hedge, stops at limit, descends on the
+back side, never crosses the hard cap, partial when band too thin,
+and `walk_to_price=None` byte-identical) and
+`tests/test_forced_arbitrage.py::TestCloseWalkWiring` (the
+`--reward-overrides close_walk_ticks` → `env._close_walk_ticks`
+wiring guard).
+
 ---
 
 ## CLOSE_SIGNAL_BONUS zeroed 0.5 → 0.0 + matured_arb_bonus_weight scope narrowed (2026-05-23)
@@ -1474,3 +1539,49 @@ instead. This list accumulates across races in `BetfairEnv.step`
 just before the BetManager is replaced. The evaluator was silently
 truncating to the last race's bets before this was fixed (see
 `plans/next_steps/bugs.md` B1).
+
+---
+
+## Cohort launch flags: the Path-A precedence foot gun (2026-05-24)
+
+When a Phase-5 gene knob has BOTH a CLI flag (e.g.
+`--direction-gate-enabled`) AND a `trainer_hp` entry (populated by
+`CohortGenes.to_dict()` at the dataclass default), naive resolution
+via
+
+```python
+knob = bool(trainer_hp.get("knob", cli_flag_arg))
+```
+
+is **always broken**. `.get(key, fallback)` only uses `fallback`
+when the key is missing — and `to_dict()` always includes the key.
+So the CLI flag is silently discarded.
+
+The correct pattern is OR semantics:
+
+```python
+knob = bool(cli_flag_arg) or bool(trainer_hp.get("knob", False))
+```
+
+Wrapped in a `_resolve_<knob>` helper with a docstring and a
+regression test that exercises both sources. See
+`training_v2/cohort/worker.py::_resolve_direction_gate_enabled` and
+`tests/test_v2_direction_gate.py::TestResolvePolicyGateEnabled` for
+the canonical pattern.
+
+**How this hides**: the env-side and policy-side gates have
+SEPARATE code paths. The env's gate (built in `_build_env_for_day`)
+correctly received the CLI flag's value via direct function-arg
+passthrough. The policy's gate received the broken `.get(...)` value.
+So the CLI flag DID flip half the gate — the half nobody was
+debugging — and the half that mattered for `gate_refusals` and the
+action-mask stayed off.
+
+**Detection**: if a knob has a refusal/activity counter (like
+`gate_refusals`, `pwin_back_gate_refusals`), check that counter on
+the first agent's first-day log line. If it's zero when the knob
+should be active, the wiring is broken.
+
+Same shape of bug could exist for any other Phase-5 knob that has
+both a CLI flag and a `trainer_hp` key. Lessons-learned note:
+`~/.claude/projects/.../memory/feedback_audit_launch_wiring.md`.

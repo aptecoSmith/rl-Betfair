@@ -102,6 +102,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--direction-head-manifest", default=None,
+        help=(
+            "Path to a frozen direction-head dir (e.g. "
+            "models/direction_head/sweep_c11). REQUIRED to reeval "
+            "cohorts trained with --direction-head-manifest — without "
+            "it the policy builds a default direction_prob_head whose "
+            "shape mismatches the checkpoint and load_state_dict fails "
+            "(0 rows written). 2026-05-28."
+        ),
+    )
+    p.add_argument(
         "--use-race-outcome-predictor", action="store_true",
         help="Match training-time flag — env populates champion+ranker obs.",
     )
@@ -435,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
                 obs_dim=shim.obs_dim,
                 action_space=shim.action_space,
                 hidden_size=int(genes.hidden_size),
+                frozen_direction_head_path=(
+                    args.direction_head_manifest
+                    if args.direction_head_manifest else None
+                ),
             )
             try:
                 state = torch.load(

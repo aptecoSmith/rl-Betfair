@@ -38,10 +38,20 @@ from data.episode_builder import Day, PriceSize, Race, RunnerSnap, Tick
 from env.betfair_env import BetfairEnv
 from env.scalping_math import min_arb_ticks_for_profit
 from training_v2.arb_oracle import (
+    CloseHoldSample,
+    NegativeOracleSample,
     OracleSample,
+    TARGET_CLASS_CLOSE,
+    TARGET_CLASS_HOLD,
+    _passive_lay_fills_before_fc,
+    load_close_hold_samples,
+    load_negative_samples,
     load_samples,
+    save_close_hold_samples,
+    save_negative_samples,
     save_samples,
     scan_day,
+    scan_day_close_hold,
 )
 
 
@@ -363,3 +373,371 @@ class TestSchemaVersionMismatchRaises:
 
         with pytest.raises(ValueError, match="obs_schema_version"):
             load_samples("2026-04-10", data_dir, strict=True)
+
+
+# ── Test 8: negative-sample save/load round-trip ─────────────────────────────
+# BC label augmentation Phase A (plans/bc-label-augmentation/).
+
+
+class TestNegativeSampleSaveLoadRoundtrip:
+    def test_negative_sample_save_load_roundtrip(self, tmp_path):
+        # Build a tiny handcrafted negative pool — no env walk needed.
+        obs_dim = 16
+        negatives = [
+            NegativeOracleSample(
+                tick_index=i,
+                runner_idx=(i % 3),
+                obs=np.full((obs_dim,), float(i) * 0.1, dtype=np.float32),
+            )
+            for i in range(5)
+        ]
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        save_negative_samples(
+            negatives, "2026-04-10", data_dir, _MINIMAL_CONFIG, 100, obs_dim,
+        )
+
+        loaded = load_negative_samples("2026-04-10", data_dir, strict=True)
+        assert len(loaded) == len(negatives)
+        for orig, back in zip(negatives, loaded):
+            assert orig.tick_index == back.tick_index
+            assert orig.runner_idx == back.runner_idx
+            np.testing.assert_array_equal(orig.obs, back.obs)
+
+
+class TestLoadNegativeSamplesReturnsEmptyListWhenMissing:
+    def test_missing_cache_returns_empty_list(self, tmp_path):
+        # No oracle_cache_v2 dir exists at all. Loader MUST NOT raise.
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        out = load_negative_samples("2026-04-10", data_dir, strict=True)
+        assert out == []
+
+    def test_missing_cache_with_expected_obs_dim_returns_empty(
+        self, tmp_path,
+    ):
+        # Even with strict + expected_obs_dim, a missing file is a
+        # graceful empty list — the strict checks only apply when the
+        # file is present.
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        out = load_negative_samples(
+            "2026-04-10", data_dir, strict=True, expected_obs_dim=42,
+        )
+        assert out == []
+
+
+# ── BC label augmentation Phase B tests ─────────────────────────────────────
+# plans/bc-label-augmentation/. CloseHoldSample save/load roundtrip,
+# missing-cache graceful empty, and a synthetic scan that verifies the
+# paired CLOSE/HOLD emission contract.
+
+
+class TestCloseHoldSampleSaveLoadRoundtrip:
+    def test_close_hold_sample_save_load_roundtrip(self, tmp_path):
+        obs_dim = 16
+        rng = np.random.default_rng(7)
+        samples: list[CloseHoldSample] = []
+        for i in range(8):
+            tc = (
+                TARGET_CLASS_CLOSE if i % 2 == 0
+                else TARGET_CLASS_HOLD
+            )
+            samples.append(CloseHoldSample(
+                tick_index=int(i),
+                runner_idx=int(i % 3),
+                obs=rng.standard_normal(obs_dim).astype(np.float32),
+                target_action_class=int(tc),
+                lifecycle_position=float(i) / 10.0,
+            ))
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        save_close_hold_samples(
+            samples, "2026-04-10", data_dir, _MINIMAL_CONFIG,
+            total_ticks=100, obs_dim=obs_dim,
+        )
+
+        loaded = load_close_hold_samples(
+            "2026-04-10", data_dir, strict=True,
+        )
+        assert len(loaded) == len(samples)
+        for orig, back in zip(samples, loaded):
+            assert orig.tick_index == back.tick_index
+            assert orig.runner_idx == back.runner_idx
+            assert orig.target_action_class == back.target_action_class
+            assert abs(
+                orig.lifecycle_position - back.lifecycle_position
+            ) < 1e-6
+            np.testing.assert_array_equal(orig.obs, back.obs)
+
+
+class TestLoadCloseHoldSamplesReturnsEmptyListWhenMissing:
+    def test_missing_cache_returns_empty_list(self, tmp_path):
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        out = load_close_hold_samples(
+            "2026-04-10", data_dir, strict=True,
+        )
+        assert out == []
+
+    def test_missing_cache_with_expected_obs_dim_returns_empty(
+        self, tmp_path,
+    ):
+        data_dir = tmp_path / "processed"
+        data_dir.mkdir()
+        out = load_close_hold_samples(
+            "2026-04-10", data_dir, strict=True, expected_obs_dim=99,
+        )
+        assert out == []
+
+
+def _scan_close_hold_day_obj(
+    day: Day, config: dict, force_close_seconds: float = 120.0,
+    max_per_pair: int = 5,
+) -> list[CloseHoldSample]:
+    """Run scan_day_close_hold on a pre-built Day (bypasses file I/O)."""
+    import data.episode_builder as _eb
+    orig = _eb.load_day
+
+    def _fake_load(date, data_dir=None):  # noqa: ANN001
+        return day
+
+    _eb.load_day = _fake_load  # type: ignore[assignment]
+    try:
+        return scan_day_close_hold(
+            "2026-04-10", Path("data/processed"), config,
+            force_close_before_off_seconds=force_close_seconds,
+            max_samples_per_pair=max_per_pair,
+            seed=0,
+        )
+    finally:
+        _eb.load_day = orig  # type: ignore[assignment]
+
+
+class TestScanDayCloseHoldEmitsPairedCloseAndHold:
+    """Build a tiny synthetic day with two races: one where the lay
+    target gets crossed (HOLD emission), one where it stays unreached
+    (CLOSE emission). Assert that the scan produces both classes.
+    """
+
+    def _make_day_with_fill_and_no_fill(self) -> Day:
+        # Race A: ATB drops to a price reachable for the passive lay
+        # mid-race → HOLD/natural-fill emission. Race B: ATB stays
+        # high → CLOSE/force-close emission.
+        runners_a: list[list[RunnerSnap]] = []
+        for seq in range(35):
+            if 5 <= seq <= 12:
+                back_price = 4.4
+                ltp = 4.6
+            else:
+                back_price = 5.0
+                ltp = 5.0
+            r = _make_runner(
+                sid=101, ltp=ltp, back_price=back_price,
+                back_size=100.0,
+            )
+            runners_a.append([r])
+        race_a = _make_race("1.999900001", runners_a)
+
+        runners_b: list[list[RunnerSnap]] = []
+        for seq in range(35):
+            r = _make_runner(
+                sid=202, ltp=5.0, back_price=5.0, back_size=100.0,
+            )
+            runners_b.append([r])
+        race_b = _make_race("1.999900002", runners_b, winner_sid=202)
+
+        return Day(
+            date="2026-04-10",
+            races=[race_a, race_b],
+        )
+
+    def test_paired_close_and_hold_classes_present(self):
+        day = self._make_day_with_fill_and_no_fill()
+        # Use a small force-close threshold (1s) so the race's late
+        # ticks fall outside the "skip — too close to off" filter and
+        # we get a full life window. Default would skip many ticks.
+        samples = _scan_close_hold_day_obj(
+            day, _MINIMAL_CONFIG,
+            force_close_seconds=30.0, max_per_pair=5,
+        )
+        assert len(samples) > 0, (
+            "scan_day_close_hold emitted zero samples on a synthetic "
+            "day with two paired open opportunities."
+        )
+        classes = {s.target_action_class for s in samples}
+        assert TARGET_CLASS_CLOSE in classes, (
+            "no CLOSE-target samples emitted; race B was supposed to "
+            "force-close on the no-fill scenario."
+        )
+        assert TARGET_CLASS_HOLD in classes, (
+            "no HOLD-target samples emitted; race A was supposed to "
+            "produce natural-fill samples once the ATB drops to the "
+            "lay target."
+        )
+
+        for s in samples:
+            assert 0.0 <= s.lifecycle_position <= 1.0
+
+        env = BetfairEnv(day, _MINIMAL_CONFIG, scalping_mode=True)
+        shim = DiscreteActionShim(env)
+        for s in samples:
+            assert s.obs.shape[0] == shim.obs_dim
+            assert s.obs.dtype == np.float32
+
+        # Verify position-dim synthesis: at least one sample has
+        # has_arb=1.0 on its runner_idx slot (the load-bearing flag
+        # that tells the BC policy "agent has an open pair here").
+        from env.betfair_env import POSITION_DIM, SCALPING_POSITION_DIM
+        per_runner_pos = POSITION_DIM + SCALPING_POSITION_DIM
+        env_only_len = env.observation_space.shape[0]
+        position_region_len = env.max_runners * per_runner_pos
+        position_start = env_only_len - position_region_len
+        has_arb_in_slot = POSITION_DIM
+        any_has_arb = False
+        for s in samples:
+            slot_off = position_start + s.runner_idx * per_runner_pos
+            if s.obs[slot_off + has_arb_in_slot] > 0.5:
+                any_has_arb = True
+                break
+        assert any_has_arb, (
+            "No synthesised sample has has_arb=1.0 on its runner — "
+            "position-dim synthesis is broken and BC would condition "
+            "CLOSE/HOLD on a zero-position obs (meaningless)."
+        )
+
+
+# ── Maturation-conditioned oracle (Step 0.5, plans/imitation-first) ──────────
+
+
+def _mc_walk(ticks: list[dict]) -> tuple:
+    """Build a ``walk`` tuple for ``_passive_lay_fills_before_fc`` from a
+    compact per-tick spec (single runner sid=101). Each tick dict:
+    ``{"ttoff": float, "ltp": float, "atl": [(price, size), ...],
+    "tm": float}``.
+    """
+    sid = 101
+    ttoff = [t["ttoff"] for t in ticks]
+    ltp_by_sid = [{sid: t["ltp"]} for t in ticks]
+    atl_by_sid = [{sid: list(t["atl"])} for t in ticks]
+    tm_by_sid = [{sid: t["tm"]} for t in ticks]
+    return (ttoff, ltp_by_sid, atl_by_sid, tm_by_sid)
+
+
+def _run_scan_mc(day, config, *, maturation_conditioned):
+    import data.episode_builder as _eb
+    orig = _eb.load_day
+    _eb.load_day = lambda date, data_dir=None: day  # type: ignore[assignment]
+    try:
+        return scan_day(
+            "2026-04-10", Path("data/processed"), config,
+            maturation_conditioned=maturation_conditioned,
+            force_close_before_off_seconds=120.0,
+        )
+    finally:
+        _eb.load_day = orig  # type: ignore[assignment]
+
+
+class TestMaturationConditionedFill:
+    """Load-bearing guards for the env-faithful passive-fill forward walk
+    (``_passive_lay_fills_before_fc``) and the
+    ``scan_day(maturation_conditioned=True)`` gate. Step 0.5,
+    ``plans/imitation-first``. The walk must replicate
+    ``PassiveOrderBook.on_tick`` (volume mode): crossing latch on ATL +
+    cumulative traded volume >= queue_ahead, with the LTP<=P crossability
+    gate on volume accrual.
+    """
+
+    def test_crosses_with_zero_queue_fills(self):
+        # No ATL level at P at open -> queue_ahead=0. Tick1 ATL drops to
+        # 3.5 <= P=4.0 -> crosses -> fills immediately (queue 0).
+        walk = _mc_walk([
+            {"ttoff": 300, "ltp": 5.0, "atl": [(5.1, 100)], "tm": 1000.0},
+            {"ttoff": 250, "ltp": 3.8, "atl": [(3.5, 50)], "tm": 1100.0},
+            {"ttoff": 200, "ltp": 3.8, "atl": [(3.5, 50)], "tm": 1200.0},
+        ])
+        assert _passive_lay_fills_before_fc(
+            sid=101, lay_target=4.0, t_open_local=0, walk=walk,
+            fc_threshold=120.0,
+        ) is True
+
+    def test_never_crosses_does_not_fill(self):
+        # ATL min stays 10.0 > P=4.0 forever -> never crosses -> no fill,
+        # even with huge traded volume.
+        walk = _mc_walk([
+            {"ttoff": 300, "ltp": 5.0, "atl": [(5.1, 100)], "tm": 1000.0},
+            {"ttoff": 250, "ltp": 5.0, "atl": [(10.0, 50)], "tm": 9e9},
+            {"ttoff": 200, "ltp": 5.0, "atl": [(10.0, 50)], "tm": 9e12},
+        ])
+        assert _passive_lay_fills_before_fc(
+            sid=101, lay_target=4.0, t_open_local=0, walk=walk,
+            fc_threshold=120.0,
+        ) is False
+
+    def test_crosses_but_volume_below_queue_does_not_fill(self):
+        # queue_ahead=100 (ATL level at exactly P=4.0 at open). Crosses at
+        # tick1 but cumulative volume (10+10=20) < 100 -> no fill.
+        walk = _mc_walk([
+            {"ttoff": 300, "ltp": 3.8, "atl": [(4.0, 100)], "tm": 1000.0},
+            {"ttoff": 250, "ltp": 3.8, "atl": [(3.9, 50)], "tm": 1010.0},
+            {"ttoff": 200, "ltp": 3.8, "atl": [(3.9, 50)], "tm": 1020.0},
+        ])
+        assert _passive_lay_fills_before_fc(
+            sid=101, lay_target=4.0, t_open_local=0, walk=walk,
+            fc_threshold=120.0,
+        ) is False
+
+    def test_crosses_and_volume_meets_queue_fills(self):
+        # Same queue_ahead=100 but volume delta 60+60=120 >= 100 -> fills.
+        walk = _mc_walk([
+            {"ttoff": 300, "ltp": 3.8, "atl": [(4.0, 100)], "tm": 1000.0},
+            {"ttoff": 250, "ltp": 3.8, "atl": [(3.9, 50)], "tm": 1060.0},
+            {"ttoff": 200, "ltp": 3.8, "atl": [(3.9, 50)], "tm": 1120.0},
+        ])
+        assert _passive_lay_fills_before_fc(
+            sid=101, lay_target=4.0, t_open_local=0, walk=walk,
+            fc_threshold=120.0,
+        ) is True
+
+    def test_volume_only_counts_when_ltp_at_or_below_target(self):
+        # Crosses at tick1 (ATL 3.9<=4.0) but LTP=5.0 > P on every tick ->
+        # crossability gate blocks volume accrual -> queue (100) never
+        # cleared -> no fill. Isolates the LTP<=P gate.
+        walk = _mc_walk([
+            {"ttoff": 300, "ltp": 5.0, "atl": [(4.0, 100)], "tm": 1000.0},
+            {"ttoff": 250, "ltp": 5.0, "atl": [(3.9, 50)], "tm": 1500.0},
+            {"ttoff": 200, "ltp": 5.0, "atl": [(3.9, 50)], "tm": 2000.0},
+        ])
+        assert _passive_lay_fills_before_fc(
+            sid=101, lay_target=4.0, t_open_local=0, walk=walk,
+            fc_threshold=120.0,
+        ) is False
+
+    def test_no_life_window_does_not_fill(self):
+        # Open already inside the fc window -> no (T_open, T_fc] window.
+        walk = _mc_walk([
+            {"ttoff": 100, "ltp": 3.8, "atl": [(3.5, 50)], "tm": 1000.0},
+        ])
+        assert _passive_lay_fills_before_fc(
+            sid=101, lay_target=4.0, t_open_local=0, walk=walk,
+            fc_threshold=120.0,
+        ) is False
+
+    def test_scan_gate_is_strict_subset_and_off_matches_plain(self):
+        # The maturation gate must only ever REMOVE labels (subset), never
+        # add; and the off-default must equal plain scan_day (byte-identity
+        # of the default path).
+        runner = _profitable_runner(101)
+        day = Day(
+            date="2026-04-10",
+            races=[_make_race("1.999000777", [[runner] for _ in range(6)])],
+        )
+        plain = _scan_day_obj(day, _MINIMAL_CONFIG)
+        off = _run_scan_mc(day, _MINIMAL_CONFIG, maturation_conditioned=False)
+        on = _run_scan_mc(day, _MINIMAL_CONFIG, maturation_conditioned=True)
+        assert len(off) == len(plain)
+        off_keys = {(s.tick_index, s.runner_idx) for s in off}
+        on_keys = {(s.tick_index, s.runner_idx) for s in on}
+        assert on_keys <= off_keys
+        assert len(on) <= len(off)
+        assert len(off) >= 1

@@ -57,6 +57,12 @@ from training_v2.cohort.genes import (
     sample_genes,
 )
 from training_v2.cohort.batched_worker import train_cluster_batched
+from training_v2.cohort.multiproc_worker import (
+    train_cluster_multiproc,
+    prebuild_feature_cache,
+    save_shared_cache,
+    model_store_paths,
+)
 from training_v2.cohort.worker import (
     AgentResult,
     _build_env_for_day,
@@ -455,6 +461,7 @@ def _evaluate_agents_on_monitor_days(
                 use_direction_predictor=use_direction_predictor,
                 predictor_lean_obs=predictor_lean_obs,
                 predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
                 predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                 direction_gate_enabled=direction_gate_enabled,
                 race_confidence_threshold=race_confidence_threshold,
@@ -501,6 +508,7 @@ def _evaluate_agents_on_monitor_days(
                     use_direction_predictor=use_direction_predictor,
                     predictor_lean_obs=predictor_lean_obs,
                     predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
                     predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                     direction_gate_enabled=direction_gate_enabled,
                     race_confidence_threshold=race_confidence_threshold,
@@ -762,6 +770,7 @@ def run_cohort(
     reward_overrides: dict | None = None,
     enabled_set: frozenset[str] = frozenset(),
     batched: bool = False,
+    parallel_agents: int = 0,
     maturation_bonus_weight: float = 0.0,
     n_eval_days: int | None = None,
     argmax_eval: bool = False,
@@ -769,6 +778,9 @@ def run_cohort(
     bc_pretrain_steps_override: int | None = None,
     bc_learning_rate_override: float | None = None,
     bc_target_entropy_warmup_eps_override: int | None = None,
+    bc_include_negative_samples: bool = False,
+    bc_positive_weight: float = 1.0,
+    bc_include_close_hold_samples: bool = False,
     arb_spread_target_lock_pct_override: float | None = None,
     predictor_bundle: object | None = None,
     strategy_mode: str | None = None,
@@ -776,8 +788,10 @@ def run_cohort(
     predictor_lean_obs: bool = False,
     use_direction_predictor: bool = False,
     predictor_p_win_back_threshold: float = 0.0,
+    predictor_p_win_back_max_threshold: float = 1.0,
     predictor_p_win_lay_threshold: float = 1.0,
     direction_gate_enabled: bool = False,
+    mature_prob_open_threshold: float = 0.0,
     race_confidence_threshold: float = 0.0,
     lay_price_max: float = 0.0,
     exclude_days: list[str] | None = None,
@@ -791,6 +805,7 @@ def run_cohort(
     monitor_eval_top_k: int = 0,
     monitor_early_stop_patience: int = 0,
     frozen_direction_head_path: "Path | None" = None,
+    resume_from: "Path | None" = None,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -903,14 +918,34 @@ def run_cohort(
             rotating_eval_sample, len(eval_pool),
         )
 
-    # ── Initial population (gen 0) ───────────────────────────────────
+    # ── Initial population (gen 0) OR resume (ga-recipe-search §C) ────
     rng = random.Random(int(seed))
-    cohort: list[CohortGenes] = [
-        sample_genes(rng, enabled_set=enabled_set) for _ in range(n_agents)
-    ]
-    parent_ids: list[tuple[str | None, str | None]] = [
-        (None, None) for _ in range(n_agents)
-    ]
+    start_generation = 0
+    cohort: list[CohortGenes]
+    parent_ids: list[tuple[str | None, str | None]]
+    _resume = _load_resume_state(Path(resume_from)) if resume_from else None
+    if _resume is not None:
+        start_generation = int(_resume["generation"])
+        cohort = _resume["cohort"]
+        parent_ids = _resume["parent_ids"]
+        rng.setstate(_resume["rng_state"])
+        if len(cohort) != n_agents:
+            raise ValueError(
+                f"--resume-from cohort has {len(cohort)} agents but "
+                f"--n-agents={n_agents}; they must match. Re-run with the "
+                f"same --n-agents the checkpoint was created with."
+            )
+        logger.info(
+            "RESUME: continuing at generation %d/%d with %d-agent cohort "
+            "(checkpoint run_id=%s).",
+            start_generation + 1, n_generations, len(cohort),
+            _resume.get("run_id"),
+        )
+    else:
+        cohort = [
+            sample_genes(rng, enabled_set=enabled_set) for _ in range(n_agents)
+        ]
+        parent_ids = [(None, None) for _ in range(n_agents)]
 
     # ── Pre-flight cache schema check (2026-05-24) ────────────────────
     # Walk every training date and verify the caches this run will
@@ -959,6 +994,9 @@ def run_cohort(
                 predictor_lean_obs=predictor_lean_obs,
                 predictor_p_win_back_threshold=(
                     predictor_p_win_back_threshold
+                ),
+                predictor_p_win_back_max_threshold=(
+                    predictor_p_win_back_max_threshold
                 ),
                 predictor_p_win_lay_threshold=(
                     predictor_p_win_lay_threshold
@@ -1010,7 +1048,9 @@ def run_cohort(
     _monitor_history: list[dict] = []
     _monitor_stall = 0
     monitor_metrics_path = output_dir / "monitor_metrics.jsonl"
-    if monitor_metrics_path.exists():
+    # On resume, preserve completed gens' monitor metrics (the overfit
+    # tripwire trend must survive a restart); only wipe on a fresh run.
+    if _resume is None and monitor_metrics_path.exists():
         monitor_metrics_path.unlink()
     # Build a default training cfg here so the monitor eval can share it
     # with the per-agent training calls (cfg is otherwise constructed
@@ -1027,6 +1067,13 @@ def run_cohort(
     # differ. Memory: ~40 MB/day × #unique days; well under 1 GB for
     # a typical 23-day cohort.
     feature_cache: dict[str, list] = {}
+
+    # R5 multiprocess path: master engineered-feature cache, persisted across
+    # generations so each unique day is engineered ONCE in the parent. Per
+    # generation we write a SUBSET file (only that gen's train+eval days) for
+    # the workers to load — keeps the shared file small even as eval days
+    # rotate. Empty / unused unless ``parallel_agents > 0``.
+    mp_feature_cache: dict[str, list] = {}
 
     # Initial eval_days = full pool (used for the cohort_started event;
     # per-gen rotation re-samples inside the loop).
@@ -1046,9 +1093,28 @@ def run_cohort(
         except Exception:
             logger.exception("event_emitter raised on cohort_started; continuing")
 
-    with scoreboard_path.open("w", encoding="utf-8") as sf:
-        for generation in range(n_generations):
+    # On resume, drop any stale rows the interrupted generation wrote and
+    # APPEND (don't truncate completed generations); fresh runs truncate.
+    _sb_mode = "w"
+    if _resume is not None:
+        _kept = _truncate_scoreboard_at_generation(
+            scoreboard_path, start_generation,
+        )
+        _sb_mode = "a"
+        logger.info(
+            "RESUME: kept %d scoreboard rows from generations < %d.",
+            _kept, start_generation,
+        )
+    with scoreboard_path.open(_sb_mode, encoding="utf-8") as sf:
+        for generation in range(start_generation, n_generations):
             gen_t0 = time.perf_counter()
+            # Checkpoint BEFORE training this generation so --resume-from
+            # can re-run it cleanly after a crash (ga-recipe-search §C).
+            _write_resume_state(
+                output_dir, generation=generation, cohort=cohort,
+                parent_ids=parent_ids, rng=rng, run_id=run_id,
+                n_agents=n_agents, n_generations=n_generations,
+            )
             # Per-generation eval rotation (2026-05-22 overfitting fix).
             # When rotating is ON, sample N days from the pool using a
             # deterministic RNG seeded by (cohort_seed, generation_idx)
@@ -1081,7 +1147,109 @@ def run_cohort(
 
             results: list[AgentResult] = [None] * len(cohort)  # type: ignore[list-item]
 
-            if batched:
+            if parallel_agents and int(parallel_agents) > 0 and not batched:
+                # ── R5: parallel solo-agent processes (fast CPU path) ──
+                # Train the whole cohort as N parallel worker PROCESSES, each
+                # a single solo ``train_one_agent`` (the golden path) at its
+                # own seed, single-threaded. Bit-identical to the sequential
+                # ``else`` branch — proven by tests/test_v2_multiproc_cluster
+                # + the R5 probes (shared-cache parallel == sequential). The
+                # GPU-batched path only parallelised the forward; this
+                # parallelises the WHOLE per-agent rollout across cores
+                # (~7-9x cluster-day on a many-core box).
+                #
+                # NOTE: the spec kwargs below MUST stay in sync with the
+                # sequential ``else`` branch's ``train_one_agent_fn(...)``
+                # call — they are the same call, dispatched to a pool. A
+                # typo'd / removed key surfaces immediately as a worker
+                # TypeError (caught by the parallel-vs-sequential integration
+                # smoke); ``tests/test_v2_multiproc_cluster.py`` guards the
+                # worker plumbing (cache + store injection, key popping).
+                # Behaviour-knob drift is a review item when either path
+                # gains a kwarg.
+                if predictor_bundle is not None:
+                    raise ValueError(
+                        "parallel_agents (multiprocess) does not yet support "
+                        "predictor_bundle (spawn-pickling of the bundle is "
+                        "unverified). Use --batched or the sequential path "
+                        "for predictor runs."
+                    )
+                # Engineer each unique day ONCE (master cache persisted across
+                # generations); write a per-gen SUBSET file for the workers to
+                # load. engineer_day is a pure fn of day + cohort-fixed params,
+                # so the shared cache is bit-identical to per-worker
+                # engineering.
+                gen_days = list(dict.fromkeys(
+                    list(training_days) + list(eval_days)))
+                prebuild_feature_cache(
+                    gen_days, data_dir=data_dir, into=mp_feature_cache)
+                gen_cache = {d: mp_feature_cache[d] for d in gen_days}
+                mp_cache_file = save_shared_cache(
+                    gen_cache, output_dir / "mp_feature_cache.pkl")
+                store_paths = model_store_paths(model_store)
+                specs: list[dict] = []
+                for idx, genes in enumerate(cohort):
+                    pa_id, pb_id = parent_ids[idx]
+                    specs.append(dict(
+                        agent_id=agent_ids_gen[idx],
+                        genes=genes,
+                        days_to_train=list(training_days),
+                        eval_days=list(eval_days),
+                        data_dir=data_dir,
+                        device="cpu",       # multiprocess is CPU-parallel
+                        seed=per_agent_seeds[idx],
+                        model_store=None,   # worker rebuilds from paths
+                        generation=generation,
+                        parent_a_id=pa_id,
+                        parent_b_id=pb_id,
+                        event_emitter=None,  # callables can't cross spawn
+                        agent_idx=int(idx),
+                        n_agents=int(n_agents),
+                        reward_overrides=reward_overrides,
+                        enabled_set=enabled_set,
+                        argmax_eval=argmax_eval,
+                        per_transition_credit=per_transition_credit,
+                        bc_pretrain_steps_override=bc_pretrain_steps_override,
+                        bc_learning_rate_override=bc_learning_rate_override,
+                        bc_target_entropy_warmup_eps_override=(
+                            bc_target_entropy_warmup_eps_override),
+                        bc_include_negative_samples=bc_include_negative_samples,
+                        bc_positive_weight=bc_positive_weight,
+                        bc_include_close_hold_samples=(
+                            bc_include_close_hold_samples),
+                        arb_spread_target_lock_pct_override=(
+                            arb_spread_target_lock_pct_override),
+                        predictor_bundle=None,
+                        strategy_mode=strategy_mode,
+                        use_race_outcome_predictor=use_race_outcome_predictor,
+                        predictor_lean_obs=predictor_lean_obs,
+                        use_direction_predictor=use_direction_predictor,
+                        predictor_p_win_back_threshold=(
+                            predictor_p_win_back_threshold),
+                        predictor_p_win_back_max_threshold=(
+                            predictor_p_win_back_max_threshold),
+                        predictor_p_win_lay_threshold=(
+                            predictor_p_win_lay_threshold),
+                        direction_gate_enabled=direction_gate_enabled,
+                        mature_prob_open_threshold=mature_prob_open_threshold,
+                        race_confidence_threshold=race_confidence_threshold,
+                        lay_price_max=lay_price_max,
+                        composite_score_mode=composite_score_mode,
+                        feature_cache=None,
+                        frozen_direction_head_path=frozen_direction_head_path,
+                        _feature_cache_path=str(mp_cache_file),
+                        _model_store_paths=store_paths,
+                    ))
+                logger.info(
+                    "── Multiprocess: %d agents across %d processes ──",
+                    len(specs), int(parallel_agents),
+                )
+                cluster_results = train_cluster_multiproc(
+                    specs, n_workers=int(parallel_agents))
+                for idx, result in enumerate(cluster_results):
+                    results[idx] = result
+                    total_agents_trained += 1
+            elif batched:
                 # Cluster by architecture, run each cluster batched.
                 # Cross-cluster scheduling is sequential (one cluster
                 # consumes the GPU at a time — Session 02 prompt §2
@@ -1174,6 +1342,13 @@ def run_cohort(
                         bc_target_entropy_warmup_eps_override=(
                             bc_target_entropy_warmup_eps_override
                         ),
+                        bc_include_negative_samples=(
+                            bc_include_negative_samples
+                        ),
+                        bc_positive_weight=bc_positive_weight,
+                        bc_include_close_hold_samples=(
+                            bc_include_close_hold_samples
+                        ),
                         arb_spread_target_lock_pct_override=(
                             arb_spread_target_lock_pct_override
                         ),
@@ -1183,8 +1358,10 @@ def run_cohort(
                         predictor_lean_obs=predictor_lean_obs,
                         use_direction_predictor=use_direction_predictor,
                         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
                         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
                         direction_gate_enabled=direction_gate_enabled,
+                        mature_prob_open_threshold=mature_prob_open_threshold,
                         race_confidence_threshold=race_confidence_threshold,
                         lay_price_max=lay_price_max,
                         composite_score_mode=composite_score_mode,
@@ -1217,13 +1394,13 @@ def run_cohort(
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
 
-            if batched:
-                # Batched branch: write scoreboard rows after the cluster
-                # loop above has populated ``results``. Per-agent live
-                # visibility within a batched cluster needs the batched-
-                # rollout collector to emit per-agent sub-events — out
-                # of scope for this plan; documented as a known
-                # limitation in cohort-visibility/purpose.md.
+            if batched or (parallel_agents and int(parallel_agents) > 0):
+                # Batched / multiprocess branches: write scoreboard rows after
+                # the cluster has populated ``results`` (the agents don't
+                # finish independently / live worker events don't cross the
+                # spawn boundary — the solo ``else`` branch writes its rows
+                # inline instead). Per-agent live visibility within a cluster
+                # is documented in cohort-visibility/purpose.md.
                 for idx, result in enumerate(results):
                     row = _agent_result_to_scoreboard_row(
                         result=result,
@@ -1309,6 +1486,7 @@ def run_cohort(
                     use_direction_predictor=bool(use_direction_predictor),
                     predictor_lean_obs=bool(predictor_lean_obs),
                     predictor_p_win_back_threshold=float(predictor_p_win_back_threshold),
+                    predictor_p_win_back_max_threshold=float(predictor_p_win_back_max_threshold),
                     predictor_p_win_lay_threshold=float(predictor_p_win_lay_threshold),
                     direction_gate_enabled=bool(direction_gate_enabled),
                     race_confidence_threshold=float(race_confidence_threshold),
@@ -1581,6 +1759,110 @@ def _make_genetic_event(
             f"child genes={child_genes.to_dict()}"
         ),
     )
+
+
+# ── Resume / checkpoint (ga-recipe-search §C, 2026-05-30) ──────────────────
+#
+# Multi-day GA runs need to survive a crash/reboot without restarting from
+# generation 0. Breeding is PURELY gene-based (``_breed_next_generation``
+# carries only ``e.genes``; each generation trains fresh from genes, no
+# weight inheritance), so a checkpoint only needs the cohort genes +
+# parent_ids + the breeding RNG state + the generation index — NO weights.
+# We write one ``_resume_state.json`` at the START of each generation
+# (overwritten each gen; only the latest is needed). ``--resume-from``
+# loads it, drops any stale scoreboard rows from the interrupted gen, and
+# re-runs from there. Idempotent: completed generations are skipped.
+
+RESUME_STATE_FILENAME = "_resume_state.json"
+
+
+def _write_resume_state(
+    output_dir: Path,
+    *,
+    generation: int,
+    cohort: "list[CohortGenes]",
+    parent_ids: list[tuple[str | None, str | None]],
+    rng: random.Random,
+    run_id: str,
+    n_agents: int,
+    n_generations: int,
+) -> None:
+    """Persist the state needed to resume at ``generation``.
+
+    ``rng.getstate()`` returns ``(version, internalstate_tuple, gauss)``;
+    the middle tuple is JSON-encoded as a list and restored as a tuple by
+    :func:`_load_resume_state`.
+    """
+    version, internalstate, gauss = rng.getstate()
+    state = {
+        "schema": "ga_resume_v1",
+        "generation": int(generation),
+        "run_id": str(run_id),
+        "n_agents": int(n_agents),
+        "n_generations": int(n_generations),
+        "cohort": [g.to_dict() for g in cohort],
+        "parent_ids": [list(p) for p in parent_ids],
+        "rng_state": [version, list(internalstate), gauss],
+    }
+    tmp = output_dir / (RESUME_STATE_FILENAME + ".tmp")
+    final = output_dir / RESUME_STATE_FILENAME
+    # Atomic-ish: write to tmp then replace, so a crash mid-write can't
+    # corrupt the checkpoint we'd resume from.
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(state, f)
+    tmp.replace(final)
+
+
+def _load_resume_state(resume_dir: Path) -> dict | None:
+    """Load ``_resume_state.json`` from *resume_dir*, or ``None`` if absent.
+
+    Returns a dict with ``generation`` (int), ``cohort``
+    (``list[CohortGenes]``), ``parent_ids`` (list of 2-tuples), and
+    ``rng_state`` (a tuple ready for ``random.Random.setstate``).
+    """
+    path = Path(resume_dir) / RESUME_STATE_FILENAME
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as f:
+        raw = json.load(f)
+    version, internalstate, gauss = raw["rng_state"]
+    return {
+        "generation": int(raw["generation"]),
+        "run_id": raw.get("run_id"),
+        "cohort": [CohortGenes(**g) for g in raw["cohort"]],
+        "parent_ids": [tuple(p) for p in raw["parent_ids"]],
+        "rng_state": (version, tuple(internalstate), gauss),
+        "n_agents": int(raw.get("n_agents", len(raw["cohort"]))),
+        "n_generations": int(raw.get("n_generations", 0)),
+    }
+
+
+def _truncate_scoreboard_at_generation(path: Path, min_gen: int) -> int:
+    """Drop scoreboard rows with ``generation >= min_gen`` (in place).
+
+    On resume we re-run the interrupted generation from its checkpointed
+    cohort, so any partial rows it already wrote are stale and must be
+    removed before we append fresh ones. Rows for completed generations
+    (``generation < min_gen``) are preserved. Returns the number of rows
+    kept. A missing file is a no-op (returns 0).
+    """
+    path = Path(path)
+    if not path.exists():
+        return 0
+    kept_lines: list[str] = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if int(row.get("generation", 0)) < min_gen:
+                kept_lines.append(line if line.endswith("\n") else line + "\n")
+    with path.open("w", encoding="utf-8") as f:
+        f.writelines(kept_lines)
+    return len(kept_lines)
 
 
 # ── Scoreboard row builder ────────────────────────────────────────────────
@@ -2035,6 +2317,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--parallel-agents", type=int, default=0, metavar="N",
+        help=(
+            "training-speedup-v2 R5: train the cohort as N parallel solo-"
+            "agent PROCESSES (CPU, 1 thread each) — the fastest path on a "
+            "many-core box (~7-9x cluster-day, bit-identical to the "
+            "sequential path; each worker is the golden solo train_one_agent "
+            "at its own seed). Engineers each day ONCE in the parent and "
+            "shares the feature_cache to workers by file. 0 = OFF (default). "
+            "Mutually exclusive with --batched (raises if both set); does "
+            "NOT support --predictor-* runs yet (bundle spawn-pickling "
+            "unverified). Pick N ~= cores-2."
+        ),
+    )
+    p.add_argument(
         "--argmax-eval", action="store_true",
         help=(
             "Use deterministic (argmax) action selection for eval "
@@ -2088,6 +2384,50 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--bc-include-negative-samples", action="store_true",
+        help=(
+            "BC label augmentation Phase A "
+            "(``plans/bc-label-augmentation/``). Also load the "
+            "negative-sample cache (``oracle_samples_negative.npz`` "
+            "per training day) and use it during BC pretrain to target "
+            "the NOOP action class on (tick, runner) pairs that are "
+            "NOT in the oracle's positive arb set. Adds positive "
+            "gradient on NOOP so it doesn't softmax-decay across BC "
+            "steps. Default OFF = byte-identical to pre-plan. Requires "
+            "caches scanned with ``--include-negative-samples``."
+        ),
+    )
+    p.add_argument(
+        "--bc-positive-weight", type=float, default=1.0, metavar="FLOAT",
+        help=(
+            "BC label augmentation Phase A. Multiplicative weight on "
+            "the positive (oracle + direction + dir-BCE) loss term "
+            "when negative samples are active. Default 1.0 keeps the "
+            "positive loss at unit scale; the negative-NOOP CE term "
+            "is added with weight 1.0. Set < 1.0 to soften positive "
+            "pressure relative to NOOP (more NOOP authority); > 1.0 "
+            "to prioritise positives. Ignored when "
+            "``--bc-include-negative-samples`` is off."
+        ),
+    )
+    p.add_argument(
+        "--bc-include-close-hold-samples", action="store_true",
+        help=(
+            "BC label augmentation Phase B "
+            "(``plans/bc-label-augmentation/``). Also load the "
+            "close/hold sample cache (``oracle_samples_close_hold.npz`` "
+            "per training day) and use it during BC pretrain. Each "
+            "sample carries a target action class — CLOSE on the "
+            "open pair's runner_idx when the env would have force-"
+            "closed the pair, NOOP when it would have matured "
+            "naturally. Adds positive gradient on both CLOSE and "
+            "NOOP for obs vectors that include an open-pair "
+            "position signature. Default OFF = byte-identical to "
+            "pre-plan. Requires caches scanned with ``--include-"
+            "close-hold-samples``."
+        ),
+    )
+    p.add_argument(
         "--arb-spread-target-lock-pct", type=float, default=None,
         metavar="PCT",
         help=(
@@ -2115,6 +2455,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "per-update log reports n_mature_targets and per-episode "
             "stats carry per_transition_credit_active=True. fill_prob "
             "and risk_nll stay on the per-slot path."
+        ),
+    )
+    p.add_argument(
+        "--resume-from", default=None, metavar="DIR",
+        help=(
+            "Resume an interrupted GA run from its output dir "
+            "(ga-recipe-search §C). Loads <DIR>/_resume_state.json "
+            "(cohort genes + parent_ids + RNG state + generation index), "
+            "drops stale scoreboard rows from the interrupted generation, "
+            "and continues from there. Completed generations are skipped. "
+            "Use the SAME --n-agents and gene/reward flags as the original "
+            "run. Default None = fresh run from generation 0."
         ),
     )
     # Predictor-integration (plans/predictor-integration/).
@@ -2184,6 +2536,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--predictor-p-win-back-max-threshold", type=float, default=1.0,
+        help=(
+            "Action-mask gate (added 2026-05-27): refuse OPEN_BACK "
+            "on runners whose champion p_win is ABOVE this. Combined "
+            "with --predictor-p-win-back-threshold, defines a pwin "
+            "BAND for back-leg selection. Default 1.0 = no upper "
+            "bound. Motivated by Round 9 EV-by-pwin analysis showing "
+            "p_win 0.40-0.50 has negative naked EV (-£0.19/pair) "
+            "while p_win 0.30-0.35 peaks at +£9.49/pair."
+        ),
+    )
+    p.add_argument(
         "--predictor-p-win-lay-threshold", type=float, default=1.0,
         help=(
             "Action-mask gate: refuse OPEN_LAY on runners whose "
@@ -2200,6 +2564,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "--predictor-p-win-back-threshold / "
             "--predictor-p-win-lay-threshold (champion gate). See "
             "plans/scalping-direction-gate/."
+        ),
+    )
+    p.add_argument(
+        "--mature-prob-open-threshold", type=float, default=0.0,
+        help=(
+            "Policy-side action-mask gate: refuse OPEN_BACK/OPEN_LAY "
+            "on runners whose own mature_prob_head sigmoid output is "
+            "below this threshold. Default 0.0 = gate disabled. "
+            "Refusals surface in the direction_gate_refusals counter. "
+            "Effective threshold anneals from 0.0 up to this value "
+            "over mature_gate_warmup_eps episodes to avoid cold-start "
+            "collapse. See plans/recipe-expansion-and-robustness/ "
+            "(Path C)."
         ),
     )
     p.add_argument(
@@ -2391,6 +2768,13 @@ def main(argv: list[str] | None = None) -> int:
             "--predictor-bundle-manifests CHAMPION RANKER DIRECTION",
         )
 
+    if int(getattr(args, "parallel_agents", 0) or 0) > 0 and args.batched:
+        raise SystemExit(
+            "--parallel-agents and --batched are mutually exclusive: "
+            "--parallel-agents runs N solo agents as parallel CPU processes; "
+            "--batched runs one GPU-batched cluster. Pick one."
+        )
+
     try:
         run_cohort(
             n_agents=args.n_agents,
@@ -2405,6 +2789,7 @@ def main(argv: list[str] | None = None) -> int:
             reward_overrides=reward_overrides or None,
             enabled_set=enabled_set,
             batched=bool(args.batched),
+            parallel_agents=int(getattr(args, "parallel_agents", 0) or 0),
             maturation_bonus_weight=float(args.maturation_bonus_weight),
             n_eval_days=(
                 int(args.n_eval_days) if args.n_eval_days is not None else None
@@ -2423,6 +2808,11 @@ def main(argv: list[str] | None = None) -> int:
                 int(args.bc_target_entropy_warmup_eps)
                 if args.bc_target_entropy_warmup_eps is not None else None
             ),
+            bc_include_negative_samples=bool(args.bc_include_negative_samples),
+            bc_positive_weight=float(args.bc_positive_weight),
+            bc_include_close_hold_samples=bool(
+                args.bc_include_close_hold_samples,
+            ),
             arb_spread_target_lock_pct_override=(
                 float(args.arb_spread_target_lock_pct)
                 if args.arb_spread_target_lock_pct is not None else None
@@ -2433,8 +2823,10 @@ def main(argv: list[str] | None = None) -> int:
             predictor_lean_obs=bool(args.predictor_lean_obs),
             use_direction_predictor=bool(args.use_direction_predictor),
             predictor_p_win_back_threshold=float(args.predictor_p_win_back_threshold),
+            predictor_p_win_back_max_threshold=float(args.predictor_p_win_back_max_threshold),
             predictor_p_win_lay_threshold=float(args.predictor_p_win_lay_threshold),
             direction_gate_enabled=bool(args.direction_gate_enabled),
+            mature_prob_open_threshold=float(args.mature_prob_open_threshold),
             race_confidence_threshold=float(args.race_confidence_threshold),
             lay_price_max=float(args.lay_price_max),
             exclude_days=list(args.exclude_days) if args.exclude_days else None,
@@ -2457,6 +2849,9 @@ def main(argv: list[str] | None = None) -> int:
             frozen_direction_head_path=(
                 Path(args.direction_head_manifest)
                 if args.direction_head_manifest else None
+            ),
+            resume_from=(
+                Path(args.resume_from) if args.resume_from else None
             ),
         )
     finally:

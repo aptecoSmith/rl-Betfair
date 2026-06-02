@@ -277,9 +277,17 @@ class ModelStore:
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        # timeout / busy_timeout: training-speedup-v2 R5 runs the cohort's
+        # agents as N parallel worker PROCESSES, each writing its own model
+        # rows to this shared WAL db. WAL permits one writer at a time;
+        # without a busy timeout a concurrent writer raises "database is
+        # locked" immediately. 60s lets the brief per-agent writes (create
+        # at start, weights+eval at end — staggered across agents) serialise
+        # cleanly. Harmless for single-process callers.
+        conn = sqlite3.connect(str(self.db_path), timeout=60.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=60000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
