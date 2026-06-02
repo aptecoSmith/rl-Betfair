@@ -112,6 +112,43 @@ M=30 → 2 waves ~330s. Set `--parallel-agents 16` regardless of M; never set
 it to M (30 procs on 20 cores oversubscribes and is *slower* than 16
 waving through 30).
 
+### Predictor support (done, gated bit-identical)
+
+Multiprocess now supports predictor runs — the intended training config.
+Each worker **rebuilds the predictor bundle from its manifest paths**
+(`_worker_load_bundle`, cached per-worker by manifests tuple) rather than
+receiving a pickled bundle across the spawn boundary. This sidesteps the
+pickle risk, avoids serialising a large model object N times, and is
+bit-identical (same manifests → same files → same deterministic LightGBM /
+sklearn / conv1d inference). `run_cohort` gains `predictor_manifests`; the
+branch passes the paths (raises if a bundle is set without them);
+`_resolve_parallel_agents` no longer disables on predictors.
+
+Gate: predictor-ON `run_cohort` parallel == sequential, bit-identical on
+every deterministic scoreboard field, against the real production bundle
+(race-outcome champion + ranker + direction head). So `--parallel-agents
+16` applies to the real (predictor) training config, not just
+predictor-off runs.
+
+**Predictors-ON throughput (measured).** Predictor inference is extra
+per-tick CPU, so the curve differs from predictors-OFF:
+
+| config | K=1 solo | K=16 wave | throughput@16 | speedup (16 vs 1) |
+|---|---:|---:|---:|---:|
+| predictors-OFF | 72s | 170s | 0.094 ag/s | 9.7× |
+| **predictors-ON** | **99s** | **202s** | **0.079 ag/s** | **7.9×** |
+
+Predictors add ~27s/agent of inference (99 vs 72 solo) plus mild contention,
+so ~8× rather than ~9.7×. The feared LightGBM/OpenMP oversubscription did NOT
+materialise: at K=16 each predictor worker pulls ~1.25 cores → ~20 cores
+used (full box), so N=16 stays about right for predictors-ON. **Bottom line:
+a 17h/gen sequential predictor run → ~2.2h/gen (~8×)** — the speedup applies
+to the real (predictor) training config, not just predictor-off.
+
+Re-calibrate on other hardware / predictors with
+`python -m tools.measure_optimal_n --predictor-manifests CHAMP RANK DIR
+--ks 1,16` (the K=16-vs-K=1 ratio is the multiprocess speedup factor).
+
 ---
 
 ## Prior headline: ~2.55× cluster-day wall, bit-identical, using the idle GPU

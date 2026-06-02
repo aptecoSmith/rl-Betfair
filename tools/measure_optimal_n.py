@@ -32,12 +32,12 @@ from pathlib import Path
 
 
 def _spec(i: int, day_paths: dict, train_day: str, eval_day: str,
-          data_dir: Path) -> dict:
+          data_dir: Path, manifests=None) -> dict:
     from training_v2.cohort.genes import CohortGenes
     base = dict(learning_rate=3e-4, entropy_coeff=0.01, clip_range=0.2,
                 gae_lambda=0.95, value_coeff=0.5, mini_batch_size=64,
                 hidden_size=128)
-    return dict(
+    spec = dict(
         agent_id=f"r{i}", genes=CohortGenes(**base),
         days_to_train=[train_day], eval_days=[eval_day],
         data_dir=data_dir, device="cpu", seed=42 + i,
@@ -46,6 +46,12 @@ def _spec(i: int, day_paths: dict, train_day: str, eval_day: str,
                           "locked_pnl_reward_weight": 9.0},
         _feature_cache_day_paths=day_paths,
     )
+    if manifests:
+        # predictors-ON calibration: workers rebuild the bundle from these
+        # manifest paths. Throughput here reflects per-tick inference cost.
+        spec["use_race_outcome_predictor"] = True
+        spec["_predictor_manifests"] = tuple(manifests)
+    return spec
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,23 +73,32 @@ def main(argv: list[str] | None = None) -> int:
                    help="warm each pool with a throwaway run before timing "
                         "(isolates steady-state training contention; ~2x "
                         "slower to run)")
+    p.add_argument("--predictor-manifests", nargs=3, default=None,
+                   metavar=("CHAMP", "RANK", "DIR"),
+                   help="calibrate predictors-ON: pass champion, ranker, "
+                        "direction manifest paths. Workers rebuild the bundle "
+                        "from these; throughput then reflects per-tick "
+                        "inference cost (differs from the predictors-OFF "
+                        "curve). Tip: include --ks 1,16 to read off the "
+                        "K=16-vs-K=1 multiprocess speedup factor directly.")
     args = p.parse_args(argv)
 
     ks = [int(x) for x in args.ks.split(",")]
     data_dir = Path(args.data_dir)
     days = [args.train_day, args.eval_day]
+    manifests = args.predictor_manifests
 
     cache = prebuild_feature_cache(days, data_dir=data_dir)
     day_paths = save_shared_cache_per_day(cache, Path(args.cache_dir), days)
 
-    print(f"[optn] cores={os.cpu_count()}  Ks={ks}  warm={args.warm}",
-          flush=True)
+    print(f"[optn] cores={os.cpu_count()}  Ks={ks}  warm={args.warm}  "
+          f"predictors={'ON' if manifests else 'off'}", flush=True)
     rows = []
     for k in ks:
         pool = make_pool(k)
         try:
             specs = [_spec(i, day_paths, args.train_day, args.eval_day,
-                           data_dir) for i in range(k)]
+                           data_dir, manifests) for i in range(k)]
             if args.warm:
                 train_cluster_multiproc(specs, executor=pool)
             t0 = time.perf_counter()
