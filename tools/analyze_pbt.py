@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import statistics
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -247,6 +248,12 @@ def _fmt(report: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The report contains a few non-ASCII glyphs (->, ÷); force UTF-8 so it
+    # prints cleanly on a cp1252 Windows console instead of crashing.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except Exception:
+        pass
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("lineage", type=Path,
                    help="path to a PBT run's pbt_lineage.jsonl")
