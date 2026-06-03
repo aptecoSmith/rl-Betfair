@@ -229,6 +229,11 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             "each_way_kelly_fraction",
             # scalping-tight-naked-variance Phase 2A (added 2026-05-15).
             "naked_variance_penalty_beta",
+            # pbt-breeding Step 1b (added 2026-06-03). Structural
+            # architecture genes — pinned to the LSTM default under the
+            # base sampler (only sample_fresh_blood_genes draws them).
+            "architecture", "transformer_depth", "transformer_heads",
+            "transformer_ctx_ticks",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2

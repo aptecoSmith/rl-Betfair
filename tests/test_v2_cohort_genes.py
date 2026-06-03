@@ -357,7 +357,7 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_35_fields(self):
+    def test_to_dict_serialises_all_39_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
@@ -366,8 +366,16 @@ class TestPhase5Genes:
         # naked_variance_penalty_beta) + 3 Phase 8 BC + 4 Phase-13
         # direction + 1 Phase-13 S05 BC + 1 Phase-14 S03
         # (direction_gate_enabled) + 1 Phase-14 S06
-        # (direction_gate_warmup_eps) = 35.
-        assert len(d) == 35
+        # (direction_gate_warmup_eps) + 4 pbt-breeding architecture
+        # (architecture + transformer depth/heads/ctx_ticks) = 39.
+        assert len(d) == 39
+        # Architecture genes default to the LSTM schema under the base
+        # sampler (byte-identity with the gene-only GA — only
+        # sample_fresh_blood_genes draws across architectures).
+        assert d["architecture"] == "lstm"
+        assert d["transformer_depth"] == 2
+        assert d["transformer_heads"] == 4
+        assert d["transformer_ctx_ticks"] == 32
         for name in PHASE5_GENE_NAMES:
             assert name in d
             assert isinstance(d[name], float)

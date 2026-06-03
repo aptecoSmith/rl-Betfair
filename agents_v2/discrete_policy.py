@@ -49,6 +49,7 @@ __all__ = [
     "DiscretePolicyOutput",
     "BaseDiscretePolicy",
     "DiscreteLSTMPolicy",
+    "DiscreteTransformerPolicy",
 ]
 
 
@@ -1408,6 +1409,346 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         gate_mask[:, open_back_start: open_back_start + R] = gate_pass
         gate_mask[:, open_lay_start: open_lay_start + R] = gate_pass
         return logits.masked_fill(~gate_mask, float("-inf"))
+
+
+# ── Discrete Transformer ───────────────────────────────────────────────────
+
+
+class DiscreteTransformerPolicy(DiscreteLSTMPolicy):
+    """Transformer-encoder backbone on the v2 discrete contract.
+
+    pbt-breeding Step 1b (2026-06-03). Ports v1's
+    ``PPOTransformerPolicy`` backbone — a rolling ``ctx_ticks`` context
+    buffer, a learned positional embedding, and a causal
+    ``nn.TransformerEncoder`` — onto the v2 ``BaseDiscretePolicy``
+    contract, while SHARING the entire v2 head stack with
+    :class:`DiscreteLSTMPolicy`.
+
+    It subclasses :class:`DiscreteLSTMPolicy` purely to REUSE that class's
+    head construction (the intricate part: ``fill`` / ``mature`` / ``risk``
+    heads, the per-runner ``direction_prob_head`` with its frozen-manifest
+    loading + runner-block-offset edge cases, the per-runner ``actor_head``
+    fed the fill/mature/direction columns, both open-gates, the Beta stake
+    heads, the per-runner value head, and opt-in ``input_norm``). The
+    parent ``__init__`` runs first and builds all of that (plus an
+    ``nn.LSTM`` we immediately ``del``), then we swap in the transformer
+    backbone. ``hidden_size`` IS the transformer's ``d_model`` (every
+    allowed ``(hidden_size, n_heads)`` pair divides evenly).
+
+    The ONLY behavioural differences from the LSTM are (1) the backbone
+    (transformer encoder vs LSTM) and (2) the hidden-state protocol:
+    ``(buffer, valid_count)`` where ``buffer`` is
+    ``(batch, ctx_ticks, d_model)`` (the last ``ctx_ticks`` projected
+    ticks, zero-padded during warmup) and ``valid_count`` is ``(batch,)``
+    long. Because that state's batch axis is dim 0, the policy uses the
+    ``BaseDiscretePolicy`` DEFAULT pack/slice/pack_buffer helpers (the
+    LSTM's dim-1 overrides are NOT appropriate and are re-overridden
+    below). The v2 rollout collector + PPO update were written generically
+    against this protocol (``rollout.py`` pre-allocates one capture buffer
+    per hidden-state element from its ``shape``/``dtype``; CLAUDE.md
+    "Recurrent PPO: hidden-state protocol on update").
+
+    The forward computation (backbone + the head/actor/gate tail) is
+    duplicated from :meth:`DiscreteLSTMPolicy._forward_core` rather than
+    shared via a mixin: the LSTM is load-bearing for every shipped cohort,
+    and leaving it byte-for-byte untouched is worth the duplication. **Keep
+    the tail below in sync** when either policy's head wiring changes — the
+    load-bearing guard is ``tests/test_v2_transformer_policy.py`` (forward
+    parity of the shared heads between the two backbones on identical head
+    weights).
+
+    NB: the v1-style GPU ``vmap`` batched-forward path is NOT implemented
+    for the transformer (``nn.TransformerEncoder`` has no vmap batching
+    rule). The pbt cohort runs one process per agent (the fast path), which
+    only uses the standard ``forward`` — so this is not a limitation in
+    practice. The ``--batched`` mode is unsupported for transformer agents.
+    """
+
+    architecture_name = "discrete_transformer_v2"
+    description = (
+        "v2 discrete-action policy: causal transformer encoder over a "
+        "rolling ctx_ticks tick-context buffer + learned positional "
+        "embedding. Shares the per-runner actor (fed fill/mature/direction "
+        "columns), aux heads, Beta stake head, and per-runner value head "
+        "with DiscreteLSTMPolicy; d_model = hidden_size."
+    )
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_space: DiscreteActionSpace,
+        hidden_size: int = 128,
+        *,
+        depth: int = 2,
+        n_heads: int = 4,
+        ctx_ticks: int = 32,
+        runner_embed_dim: int | None = None,
+        actor_mlp_hidden: int | None = None,
+        direction_gate_enabled: bool = False,
+        direction_gate_threshold: float = 0.5,
+        mature_prob_open_threshold: float = 0.0,
+        enable_fc_prob_head: bool = False,
+        runner_dim: int | None = None,
+        frozen_direction_head_path: "Path | None" = None,
+        input_norm: bool = False,
+    ) -> None:
+        # Build the full v2 head stack + input_proj + input_norm + gates
+        # via the LSTM parent (which also builds an nn.LSTM we discard).
+        super().__init__(
+            obs_dim,
+            action_space,
+            hidden_size=hidden_size,
+            runner_embed_dim=runner_embed_dim,
+            actor_mlp_hidden=actor_mlp_hidden,
+            direction_gate_enabled=direction_gate_enabled,
+            direction_gate_threshold=direction_gate_threshold,
+            mature_prob_open_threshold=mature_prob_open_threshold,
+            enable_fc_prob_head=enable_fc_prob_head,
+            runner_dim=runner_dim,
+            frozen_direction_head_path=frozen_direction_head_path,
+            input_norm=input_norm,
+        )
+        # Discard the parent's recurrent backbone — the transformer
+        # replaces it. ``del`` removes it from ``_modules`` so it does not
+        # appear in ``state_dict`` (a transformer checkpoint has only the
+        # transformer backbone keys + the shared head keys).
+        del self.lstm
+
+        # ``hidden_size`` doubles as ``d_model``.
+        self.d_model = int(hidden_size)
+        self.ctx_ticks = int(ctx_ticks)
+        self.n_heads = int(n_heads)
+        self.depth = int(depth)
+        if self.ctx_ticks <= 0:
+            raise ValueError(f"ctx_ticks must be positive, got {ctx_ticks!r}")
+        if self.depth <= 0:
+            raise ValueError(f"depth must be positive, got {depth!r}")
+        if self.d_model % self.n_heads != 0:
+            raise ValueError(
+                f"d_model={self.d_model} (hidden_size) must be divisible "
+                f"by n_heads={self.n_heads}",
+            )
+
+        # ── Transformer backbone ─────────────────────────────────────────
+        # ``self.input_proj`` (Linear(obs_dim, d_model) + ReLU) built by the
+        # parent is reused verbatim as the per-tick projection.
+        self.position_embedding = nn.Embedding(self.ctx_ticks, self.d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.d_model,
+            nhead=self.n_heads,
+            dim_feedforward=max(self.d_model * 2, self.actor_mlp_hidden),
+            dropout=0.0,
+            batch_first=True,
+            activation="gelu",
+            norm_first=True,
+        )
+        # ``enable_nested_tensor=False`` avoids a UserWarning under
+        # ``norm_first=True`` (the nested-tensor fast path is disabled in
+        # that config anyway; we never pass a key-padding mask).
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=self.depth,
+            enable_nested_tensor=False,
+        )
+        self.transformer_norm = nn.LayerNorm(self.d_model)
+        # Causal mask (non-persistent buffer so .to(device) moves it but it
+        # stays out of state_dict — it's a deterministic constant).
+        causal_mask = torch.triu(
+            torch.full((self.ctx_ticks, self.ctx_ticks), float("-inf")),
+            diagonal=1,
+        )
+        self.register_buffer("causal_mask", causal_mask, persistent=False)
+
+    # ── Hidden state: (buffer, valid_count), batch on dim 0 ───────────────
+
+    def init_hidden(
+        self, batch: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        buffer = torch.zeros(batch, self.ctx_ticks, self.d_model)
+        valid_count = torch.zeros(batch, dtype=torch.long)
+        return buffer, valid_count
+
+    # The LSTM parent overrides pack/slice/pack_buffer to the dim=1 batch
+    # axis of ``nn.LSTM``'s ``(num_layers, batch, hidden)`` state. The
+    # transformer's ``(buffer (batch, ctx, d_model), valid_count (batch,))``
+    # has batch on dim 0, so it needs the ``BaseDiscretePolicy`` defaults.
+    pack_hidden_states = staticmethod(BaseDiscretePolicy.pack_hidden_states)
+    slice_hidden_states = staticmethod(BaseDiscretePolicy.slice_hidden_states)
+    pack_hidden_buffer = staticmethod(BaseDiscretePolicy.pack_hidden_buffer)
+
+    # ── Forward ───────────────────────────────────────────────────────────
+
+    def _forward_core(
+        self,
+        obs: torch.Tensor,
+        hidden_state: tuple[torch.Tensor, ...] | None = None,
+        mask: torch.Tensor | None = None,
+        apply_direction_gate: bool | None = None,
+        apply_mature_prob_gate: bool | None = None,
+    ) -> "_ForwardTensors":
+        if obs.dim() == 2:
+            obs = obs.unsqueeze(1)  # (batch, 1, obs_dim)
+        if obs.dim() != 3:
+            raise ValueError(
+                f"obs must be (batch, obs_dim) or (batch, ctx, obs_dim), "
+                f"got shape {tuple(obs.shape)}",
+            )
+        batch, seq_len, obs_dim = obs.shape
+        if obs_dim != self.obs_dim:
+            raise ValueError(
+                f"obs_dim mismatch: expected {self.obs_dim}, got {obs_dim}",
+            )
+
+        if hidden_state is None:
+            buf0, vc0 = self.init_hidden(batch)
+            hidden_state = (buf0.to(obs.device), vc0.to(obs.device))
+
+        # Opt-in per-dim input standardization (identical to the LSTM).
+        if self._input_norm_enabled:
+            obs = (obs - self.obs_mean) / self.obs_std
+
+        # Project every tick of the input sequence to d_model.
+        flat = obs.reshape(batch * seq_len, obs_dim)
+        proj = self.input_proj(flat).reshape(batch, seq_len, self.d_model)
+
+        # Shift-left-and-append each projected tick into the rolling buffer
+        # (one at a time; seq_len == 1 on the production rollout path).
+        buffer, valid_count = hidden_state
+        for t in range(seq_len):
+            buffer = torch.cat(
+                [buffer[:, 1:, :], proj[:, t:t + 1, :]], dim=1,
+            )
+            valid_count = torch.clamp(valid_count + 1, max=self.ctx_ticks)
+
+        # Positional embedding + causal transformer encode + final norm.
+        pos_ids = torch.arange(self.ctx_ticks, device=buffer.device)
+        pos_emb = self.position_embedding(pos_ids)  # (ctx_ticks, d_model)
+        x = buffer + pos_emb.unsqueeze(0)
+        encoded = self.transformer_encoder(x, mask=self.causal_mask)
+        encoded = self.transformer_norm(encoded)
+        out_last = encoded[:, -1, :]  # (batch, d_model) — most recent tick
+
+        # ── Head/actor/gate tail — MIRRORS DiscreteLSTMPolicy._forward_core
+        #    (out_last plays the role of lstm_last). Keep in sync. ─────────
+        fill_logit = self.fill_prob_head(out_last)
+        mature_logit = self.mature_prob_head(out_last)
+        fill_prob = torch.sigmoid(fill_logit)
+        mature_prob = torch.sigmoid(mature_logit)
+        if self.enable_fc_prob_head:
+            fc_prob_logit = self.fc_prob_head(out_last)
+            fc_prob = torch.sigmoid(fc_prob_logit)
+        else:
+            fc_prob_logit = None
+            fc_prob = None
+
+        slot_idx = torch.arange(self.max_runners, device=out_last.device)
+        runner_embs = self.runner_slot_embedding(slot_idx)
+        runner_embs_b = runner_embs.unsqueeze(0).expand(batch, -1, -1)
+        out_expanded = out_last.unsqueeze(1).expand(
+            -1, self.max_runners, -1,
+        )
+
+        # Per-runner direction head reads the runner's RAW feature slice
+        # from the last tick's obs (same contract as the LSTM).
+        obs_last = obs[:, -1, :]
+        runners_flat = obs_last[
+            :,
+            self._runner_block_offset:
+            self._runner_block_offset + self._runner_block_size,
+        ]
+        if self._runner_block_size < self._runner_block_full_size:
+            pad_width = (
+                self._runner_block_full_size - self._runner_block_size
+            )
+            pad = torch.zeros(
+                batch, pad_width,
+                dtype=runners_flat.dtype, device=runners_flat.device,
+            )
+            runners_flat = torch.cat([runners_flat, pad], dim=-1)
+        runner_feats_raw = runners_flat.view(
+            batch, self.max_runners, self._runner_dim,
+        )
+        direction_input_flat = runner_feats_raw.reshape(
+            batch * self.max_runners, self._runner_dim,
+        )
+        direction_logits_flat = self.direction_prob_head(direction_input_flat)
+        direction_logits = direction_logits_flat.view(
+            batch, self.max_runners, 2,
+        )
+        direction_back_logits = direction_logits[..., 0]
+        direction_lay_logits = direction_logits[..., 1]
+        direction_back_prob = torch.sigmoid(direction_back_logits)
+        direction_lay_prob = torch.sigmoid(direction_lay_logits)
+
+        risk_out = self.risk_head(out_last).view(batch, self.max_runners, 2)
+        risk_mean = risk_out[..., 0]
+        risk_log_var = risk_out[..., 1].clamp(
+            RISK_LOG_VAR_MIN, RISK_LOG_VAR_MAX,
+        )
+
+        _actor_input_parts = [
+            runner_embs_b,
+            out_expanded,
+            fill_prob.unsqueeze(-1),
+            mature_prob.unsqueeze(-1),
+            direction_back_prob.detach().unsqueeze(-1),
+            direction_lay_prob.detach().unsqueeze(-1),
+        ]
+        if self.enable_fc_prob_head:
+            _actor_input_parts.append(fc_prob.unsqueeze(-1))
+        actor_input = torch.cat(_actor_input_parts, dim=-1)
+        per_runner_logits = self.actor_head(actor_input)
+        ob_logits = per_runner_logits[..., 0]
+        ol_logits = per_runner_logits[..., 1]
+        cl_logits = per_runner_logits[..., 2]
+
+        noop_logit = self.noop_head(out_last)
+        logits = torch.cat(
+            [noop_logit, ob_logits, ol_logits, cl_logits], dim=-1,
+        )
+        masked_logits = self._apply_mask(logits, mask)
+        if apply_direction_gate is None:
+            apply_direction_gate = self.direction_gate_enabled
+        if apply_direction_gate:
+            masked_logits = self._apply_direction_gate(
+                masked_logits,
+                direction_back_prob=direction_back_prob,
+                direction_lay_prob=direction_lay_prob,
+            )
+        if apply_mature_prob_gate is None:
+            apply_mature_prob_gate = self.mature_prob_open_gate_enabled
+        if apply_mature_prob_gate:
+            masked_logits = self._apply_mature_prob_gate(
+                masked_logits, mature_prob=mature_prob,
+            )
+
+        stake_alpha = nn.functional.softplus(
+            self.stake_alpha_head(out_last),
+        ).squeeze(-1) + 1.0
+        stake_beta = nn.functional.softplus(
+            self.stake_beta_head(out_last),
+        ).squeeze(-1) + 1.0
+        value_per_runner = self.value_head(out_last)
+
+        return _ForwardTensors(
+            logits=logits,
+            masked_logits=masked_logits,
+            stake_alpha=stake_alpha,
+            stake_beta=stake_beta,
+            value_per_runner=value_per_runner,
+            new_h=buffer,
+            new_c=valid_count,
+            fill_prob=fill_prob,
+            mature_prob=mature_prob,
+            risk_mean=risk_mean,
+            risk_log_var=risk_log_var,
+            direction_back_prob=direction_back_prob,
+            direction_lay_prob=direction_lay_prob,
+            direction_back_logits=direction_back_logits,
+            direction_lay_logits=direction_lay_logits,
+            fc_prob=fc_prob,
+            fc_prob_logit=fc_prob_logit,
+        )
 
 
 def make_stake_distribution(

@@ -223,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     import torch
 
     from agents_v2.discrete_policy import DiscreteLSTMPolicy
+    from agents_v2.policy_factory import build_policy
     from agents_v2.env_shim import DEFAULT_SCORER_DIR
     from training_v2.cohort.genes import CohortGenes
     from training_v2.cohort.worker import (
@@ -473,14 +474,24 @@ def main(argv: list[str] | None = None) -> int:
             has_input_norm = any(
                 k in state for k in ("obs_mean", "obs_std")
             )
-            policy = DiscreteLSTMPolicy(
+            # Build through the SINGLE factory (pbt-breeding HC#11) — the
+            # SAME constructor the worker trains with. ``genes.architecture``
+            # (read from the cohort row's hyperparameters) selects
+            # LSTM vs transformer so a transformer checkpoint never gets
+            # silently loaded into an LSTM (strict load would drop the
+            # agent). ``runner_dim`` is passed from the (re-)built env to
+            # match training — previously omitted here, which strict-load-
+            # rejected every lean-obs checkpoint (the input_norm-class bug
+            # this factory exists to prevent).
+            policy = build_policy(
+                genes,
                 obs_dim=shim.obs_dim,
                 action_space=shim.action_space,
-                hidden_size=int(genes.hidden_size),
+                runner_dim=int(shim.env.active_runner_dim),
+                input_norm=has_input_norm,
                 mature_prob_open_threshold=float(
                     args.mature_prob_open_threshold
                 ),
-                input_norm=has_input_norm,
                 frozen_direction_head_path=(
                     args.direction_head_manifest
                     if args.direction_head_manifest else None

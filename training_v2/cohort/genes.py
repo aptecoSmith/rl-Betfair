@@ -51,6 +51,35 @@ MINI_BATCH_SIZE_CHOICES: tuple[int, ...] = (32, 64, 128)
 HIDDEN_SIZE_CHOICES: tuple[int, ...] = (64, 128, 256)
 
 
+# ── Architecture genes (pbt-breeding Step 1b, 2026-06-03) ─────────────────
+# STRUCTURAL genes: set ONLY at fresh-blood birth and FROZEN within a
+# lineage (warm-start weight inheritance requires matching weight shapes —
+# HC#10). The gauntlet's hall-of-fame records each champion's architecture
+# so the system *reports which architecture wins* (design.md). The
+# defaults below (``"lstm"`` + the v1 transformer defaults) reproduce the
+# pre-pbt schema byte-identically: the base ``sample_genes`` / gene-only GA
+# never sample these (``_sample_field`` pins them), so an existing launch
+# is unchanged. Only ``sample_fresh_blood_genes`` draws across the choices.
+ARCHITECTURE_CHOICES: tuple[str, ...] = ("lstm", "transformer")
+# ``hidden_size`` doubles as the transformer's ``d_model``; every
+# (hidden_size, n_heads) pair from the choice lists divides evenly
+# (64/128/256 % 2/4/8 == 0) so d_model % n_heads == 0 always holds.
+TRANSFORMER_DEPTH_CHOICES: tuple[int, ...] = (1, 2, 3)
+TRANSFORMER_HEADS_CHOICES: tuple[int, ...] = (2, 4, 8)
+TRANSFORMER_CTX_TICKS_CHOICES: tuple[int, ...] = (32, 64, 128, 256)
+
+#: The structural gene names — frozen within a lineage, sampled only at
+#: fresh-blood birth. ``hidden_size`` (a legacy gene) is structural too
+#: under warm-start (mutating it breaks weight inheritance) but stays in
+#: its own legacy handling; this set covers the pbt-added ones.
+ARCHITECTURE_GENE_NAMES: frozenset[str] = frozenset({
+    "architecture",
+    "transformer_depth",
+    "transformer_heads",
+    "transformer_ctx_ticks",
+})
+
+
 # ── Phase 5 range constants (2026-05-03) ──────────────────────────────────
 
 
@@ -371,6 +400,16 @@ class CohortGenes:
     each_way_edge_threshold: float = 0.05
     each_way_kelly_fraction: float = 0.25
 
+    # Architecture genes (pbt-breeding Step 1b, 2026-06-03). STRUCTURAL —
+    # sampled only at fresh-blood birth, frozen within a lineage (HC#10).
+    # Defaults reproduce the pre-pbt all-LSTM schema; ``hidden_size``
+    # (above) doubles as the transformer's ``d_model``. ``transformer_*``
+    # are unread when ``architecture == "lstm"``.
+    architecture: str = "lstm"
+    transformer_depth: int = 2
+    transformer_heads: int = 4
+    transformer_ctx_ticks: int = 32
+
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
         return {
@@ -425,6 +464,10 @@ class CohortGenes:
             "value_kelly_fraction": float(self.value_kelly_fraction),
             "each_way_edge_threshold": float(self.each_way_edge_threshold),
             "each_way_kelly_fraction": float(self.each_way_kelly_fraction),
+            "architecture": str(self.architecture),
+            "transformer_depth": int(self.transformer_depth),
+            "transformer_heads": int(self.transformer_heads),
+            "transformer_ctx_ticks": int(self.transformer_ctx_ticks),
         }
 
 
@@ -501,6 +544,18 @@ def _sample_field(rng: random.Random, field_name: str):
     # never sampled per-agent. Pin to default 5.
     if field_name == "direction_gate_warmup_eps":
         return 5
+    # Architecture genes (pbt-breeding Step 1b). The BASE sampler (used by
+    # the gene-only GA + every existing launch) PINS these to the LSTM
+    # defaults so it stays byte-identical to the pre-pbt schema — only
+    # ``sample_fresh_blood_genes`` draws across the architecture choices.
+    if field_name == "architecture":
+        return "lstm"
+    if field_name == "transformer_depth":
+        return 2
+    if field_name == "transformer_heads":
+        return 4
+    if field_name == "transformer_ctx_ticks":
+        return 32
     raise KeyError(f"Unknown gene field: {field_name!r}")
 
 
@@ -524,6 +579,49 @@ def sample_genes(
     return CohortGenes(**kwargs)
 
 
+def _sample_architecture_field(rng: random.Random, field_name: str):
+    """Draw one STRUCTURAL architecture gene across its full choice set."""
+    if field_name == "architecture":
+        return rng.choice(ARCHITECTURE_CHOICES)
+    if field_name == "transformer_depth":
+        return int(rng.choice(TRANSFORMER_DEPTH_CHOICES))
+    if field_name == "transformer_heads":
+        return int(rng.choice(TRANSFORMER_HEADS_CHOICES))
+    if field_name == "transformer_ctx_ticks":
+        return int(rng.choice(TRANSFORMER_CTX_TICKS_CHOICES))
+    raise KeyError(f"Not an architecture gene: {field_name!r}")
+
+
+def sample_fresh_blood_genes(
+    rng: random.Random,
+    enabled_set: frozenset[str] = frozenset(),
+) -> CohortGenes:
+    """PBT fresh blood (pbt-breeding Step 1b/2, HC#9).
+
+    Samples the 7 legacy genes + the STRUCTURAL architecture genes
+    (``architecture`` ∈ {lstm, transformer} + transformer
+    depth/heads/ctx_ticks) across their full choice sets — this is the
+    architecture tournament's entry point, and the only sampler that
+    draws an architecture (the base :func:`sample_genes` pins them to the
+    LSTM default so the gene-only GA stays byte-identical). Phase 5 genes
+    follow the same ``enabled_set`` convention as :func:`sample_genes`.
+
+    The drawn structural genes are then FROZEN for the lineage's life —
+    the breed step (:func:`make_offspring`) perturbs only non-structural
+    genes, because warm-start weight inheritance needs matching weight
+    shapes (HC#10).
+    """
+    kwargs: dict = {}
+    for f in fields(CohortGenes):
+        if f.name in ARCHITECTURE_GENE_NAMES:
+            kwargs[f.name] = _sample_architecture_field(rng, f.name)
+        elif f.name in PHASE5_GENE_NAMES and f.name not in enabled_set:
+            kwargs[f.name] = PHASE5_GENE_DEFAULTS[f.name]
+        else:
+            kwargs[f.name] = _sample_field(rng, f.name)
+    return CohortGenes(**kwargs)
+
+
 # ── Crossover / mutation ──────────────────────────────────────────────────
 
 
@@ -541,6 +639,14 @@ def crossover(
     """
     child: dict = {}
     for f in fields(CohortGenes):
+        if f.name in ARCHITECTURE_GENE_NAMES:
+            # Structural — frozen within a lineage (HC#10). Inherit from
+            # parent_a verbatim with NO rng draw, so adding these genes
+            # leaves the pre-pbt RNG stream untouched (HC#1 byte-identity
+            # when --breeding pbt is off; both gene-only-GA parents are
+            # LSTM so this is a content no-op there too).
+            child[f.name] = getattr(parent_a, f.name)
+            continue
         if f.name in PHASE5_GENE_NAMES and f.name not in enabled_set:
             child[f.name] = PHASE5_GENE_DEFAULTS[f.name]
             continue
@@ -575,6 +681,11 @@ def mutate(
         )
     out: dict = {}
     for f in fields(CohortGenes):
+        if f.name in ARCHITECTURE_GENE_NAMES:
+            # Structural — never mutated (frozen within a lineage, HC#10).
+            # NO rng draw → preserves the pre-pbt RNG stream (HC#1).
+            out[f.name] = getattr(genes, f.name)
+            continue
         if f.name in PHASE5_GENE_NAMES and f.name not in enabled_set:
             out[f.name] = PHASE5_GENE_DEFAULTS[f.name]
             continue
@@ -639,3 +750,24 @@ def assert_in_range(genes: CohortGenes) -> None:
             raise ValueError(
                 f"{name} {value} outside [{lo}, {hi}]",
             )
+    # Architecture genes (pbt-breeding Step 1b). Structural choices.
+    if genes.architecture not in ARCHITECTURE_CHOICES:
+        raise ValueError(
+            f"architecture {genes.architecture!r} not in "
+            f"{ARCHITECTURE_CHOICES}",
+        )
+    if genes.transformer_depth not in TRANSFORMER_DEPTH_CHOICES:
+        raise ValueError(
+            f"transformer_depth {genes.transformer_depth} not in "
+            f"{TRANSFORMER_DEPTH_CHOICES}",
+        )
+    if genes.transformer_heads not in TRANSFORMER_HEADS_CHOICES:
+        raise ValueError(
+            f"transformer_heads {genes.transformer_heads} not in "
+            f"{TRANSFORMER_HEADS_CHOICES}",
+        )
+    if genes.transformer_ctx_ticks not in TRANSFORMER_CTX_TICKS_CHOICES:
+        raise ValueError(
+            f"transformer_ctx_ticks {genes.transformer_ctx_ticks} not in "
+            f"{TRANSFORMER_CTX_TICKS_CHOICES}",
+        )

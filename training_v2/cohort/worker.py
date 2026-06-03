@@ -36,7 +36,7 @@ import numpy as np
 import torch
 
 from agents_v2.action_space import ActionType
-from agents_v2.discrete_policy import DiscreteLSTMPolicy
+from agents_v2.policy_factory import build_policy, policy_arch_name
 from agents_v2.env_shim import DEFAULT_SCORER_DIR, DiscreteActionShim
 from data.episode_builder import load_day
 from env.betfair_env import (
@@ -446,16 +446,17 @@ class AgentResult:
 
 
 def arch_name_for_genes(genes: CohortGenes) -> str:
-    """``v2_discrete_ppo_lstm_h{hidden_size}`` — registry discriminator.
+    """Registry ``architecture_name`` discriminator — delegates to the
+    single source of truth in :func:`agents_v2.policy_factory.policy_arch_name`.
 
-    Different ``hidden_size`` → different ``arch_name``. The registry's
-    weight-shape hash adds a second layer of protection (state dict
-    shapes differ across hidden sizes), but the arch_name is the
-    primary discriminator the UI / scoreboard reads. ``v1`` weights
-    use a different prefix entirely, so v2 cohorts never collide with
-    v1 cohorts in the same registry.
+    LSTM agents keep the prior ``v2_discrete_ppo_lstm_h{hidden_size}``
+    name (byte-identical discriminator for existing cohorts); transformer
+    agents (pbt-breeding Step 1b) carry their depth/heads/ctx in the name
+    so the registry's weight-shape hash + UI never confuse the two and
+    weights never cross-load. ``v1`` weights use a different prefix
+    entirely, so v2 cohorts never collide with v1 cohorts.
     """
-    return f"v2_discrete_ppo_lstm_h{int(genes.hidden_size)}"
+    return policy_arch_name(genes)
 
 
 _ARCH_DESCRIPTION = (
@@ -1324,25 +1325,35 @@ def train_one_agent(
             "surface in direction_gate_refusals)",
             agent_id, float(mature_prob_open_threshold),
         )
-    policy = DiscreteLSTMPolicy(
+    # ── Build the policy via the SINGLE factory (pbt-breeding HC#11) ──
+    # ``build_policy`` reads the structural genes (architecture + sizing)
+    # off ``genes`` and dispatches to DiscreteLSTMPolicy /
+    # DiscreteTransformerPolicy. With ``genes.architecture == "lstm"``
+    # (every existing cohort + the gene-only GA) this is byte-identical to
+    # the prior inline ``DiscreteLSTMPolicy(...)`` construction.
+    # tools/reevaluate_cohort.py builds through the SAME factory, so the
+    # trained policy and the held-out re-eval policy are the same module —
+    # the input_norm divergence that bit us is structurally impossible now.
+    #
+    # input_norm (full obs): the 2254-d predictor-injected obs has raw
+    # dims up to ~190k that dominate the input_proj Linear and drown the
+    # well-scaled features (imitation-first Step 1b / memory
+    # feedback_full_obs_needs_input_norm). Register per-dim (mean, std)
+    # buffers; stats are set from the BC oracle obs just below (before
+    # BC/PPO) for fresh blood, or INHERITED via warm-start (Step 1).
+    # Default-unset buffers are (0, 1) → no-op, so this is safe even when
+    # BC is off.
+    policy = build_policy(
+        genes,
         obs_dim=shim.obs_dim,
         action_space=shim.action_space,
-        hidden_size=int(genes.hidden_size),
+        runner_dim=int(shim.env.active_runner_dim),
+        input_norm=True,
         direction_gate_enabled=direction_gate_enabled,
         direction_gate_threshold=direction_gate_threshold,
         mature_prob_open_threshold=float(mature_prob_open_threshold),
         enable_fc_prob_head=enable_fc_prob_head,
-        runner_dim=int(shim.env.active_runner_dim),
         frozen_direction_head_path=frozen_direction_head_path,
-        # input_norm (full obs): the 2254-d predictor-injected obs has raw
-        # dims up to ~190k that dominate the input_proj Linear and drown the
-        # well-scaled features (imitation-first Step 1b / memory
-        # feedback_full_obs_needs_input_norm). Register per-dim (mean, std)
-        # buffers; stats are set from the BC oracle obs just below (before
-        # BC/PPO). Default-unset buffers are (0, 1) → no-op, so this is safe
-        # even when BC is off. Fresh cohort agents only — no old checkpoint
-        # cross-load (arch-hash break, by design).
-        input_norm=True,
     )
 
     # ── PBT warm-start (plans/pbt-breeding Step 1) ───────────────────
