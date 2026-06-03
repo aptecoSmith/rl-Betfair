@@ -67,4 +67,63 @@ lineage/rotation state introduced in Steps 2–3. No physical copy is needed.
 - `814eadf` — Step 1: warm-start weight-threading + forward-match gate.
 
 → **STOPPED here for operator review** (the brief's first mandatory
-stop-point: "after Step 1's forward-match gate").
+stop-point: "after Step 1's forward-match gate"). Operator: "proceed, and
+keep going to completion without asking me" → continuing autonomously
+through the remaining steps; the only remaining hard stop is before the
+Step 5 A/B burns compute, which I'll launch detached + logged + monitored
+(per the autonomous-when-away pattern) rather than block on.
+
+---
+
+## Step 1b — Architecture genes + v2 transformer + ONE policy factory ✅ (2026-06-03)
+
+**Built.** The architecture tournament's foundation.
+
+- **4 structural genes** on `CohortGenes`: `architecture` ∈ {lstm,
+  transformer} + transformer `depth`/`heads`/`ctx_ticks` (hidden_size
+  doubles as d_model). Frozen within a lineage (HC#10).
+  `sample_fresh_blood_genes(rng)` draws them across the full choice sets
+  (HC#9); the base `sample_genes` PINS them to the LSTM default and
+  `crossover`/`mutate` SKIP them with **no rng draw** — so `--breeding pbt`
+  off stays byte-identical to the gene-only GA (HC#1; the
+  "adding-a-field-shifts-the-RNG-stream" trap, guarded by a test).
+- **`DiscreteTransformerPolicy`** (`agents_v2/discrete_policy.py`): ports
+  v1's `PPOTransformerPolicy` backbone (rolling ctx-tick buffer + learned
+  positional embedding + causal `nn.TransformerEncoder`) onto
+  `BaseDiscretePolicy`. It SUBCLASSES `DiscreteLSTMPolicy` purely to reuse
+  the intricate head construction (fill/mature/risk + per-runner direction
+  head w/ frozen-manifest loading + actor + both gates + input_norm), then
+  `del`s the LSTM and swaps in the transformer backbone. **The LSTM is left
+  byte-for-byte untouched** (its 28-file test suite is the safety net). The
+  forward tail is duplicated (commented "keep in sync") rather than shared
+  via a mixin, to avoid touching the load-bearing LSTM. Hidden state is
+  `(buffer, valid_count)` (batch on dim 0) → re-overrides the LSTM's dim-1
+  pack/slice helpers back to the BasePolicy defaults.
+- **`agents_v2/policy_factory.py::build_policy(genes, ...)`** — THE single
+  genome→policy constructor (HC#11), duck-typed on the genome (no
+  training_v2 import). `policy_arch_name(genes)` gives the registry
+  discriminator. The worker AND `tools/reevaluate_cohort.py` both build
+  through it; reeval now also threads `runner_dim` from its env (it was
+  omitted before, which strict-load-rejected every lean-obs checkpoint —
+  the same class of bug input_norm was).
+
+**Gates — all pass** (`tests/test_v2_transformer_policy.py` ×10,
+`test_v2_policy_factory.py` ×13, `test_v2_pbt_fresh_blood.py` ×8):
+
+- Factory builds + a forward runs for every architecture/sizing.
+- Transformer checkpoint round-trips strict (no `lstm.*` keys; shares the
+  exact head-module keys with the LSTM).
+- **Transformer TRAINS END-TO-END through the real v2 PPO trainer** — the
+  load-bearing de-risk: its `(buffer, valid_count)` state survives the
+  rollout collector's pre-allocated capture buffers and the PPO update's
+  pack/slice helpers, and backbone weights move after an update.
+- Warm-start (Step 1) composes with the transformer (forward reproduces).
+- LSTM factory path is byte-identical to a direct `DiscreteLSTMPolicy(...)`.
+- Fresh blood covers both architectures; structural genes never shift the
+  base sampler / crossover / mutate RNG stream.
+
+**Regression:** the wider v2 suite (cohort runner, multiproc cluster,
+discrete-ppo trainer/rollout, multi-day, gates) passes; two schema-count
+guards updated for the 4 new gene keys (39 total).
+
+**Commit:** `pbt-breeding` — see `git log`.

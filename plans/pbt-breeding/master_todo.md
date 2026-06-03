@@ -35,17 +35,20 @@ parent's existing `registry/weights/<model_id>.pt` (no physical copy) and
 riding the lineage/rotation state. STOPPED here for operator review (the
 brief's first mandatory stop-point).
 
-## Step 1b — Architecture genes + v2 transformer + policy factory  `[ ]`
-Add the structural genes (`architecture` ∈ {lstm, transformer}; transformer
-`depth`/`n_heads`/`ctx_ticks`; keep `hidden_size`) to `CohortGenes`. Port v1's
-`PPOTransformerPolicy` → a v2 `DiscreteTransformerPolicy` on
-`BaseDiscretePolicy`. Add a **policy factory** `build_policy(genes)` that the
-worker + reeval tool both call (one source of truth for genome→architecture).
-Structural genes are sampled ONLY at fresh-blood birth and frozen within a
-lineage (so warm-start weight inheritance always sees matching shapes).
-GATE: factory builds + a forward runs for every architecture/sizing in range;
-a transformer checkpoint round-trips (save→load, strict); fresh-blood sampling
-covers the full gene space (no `enabled_set` restriction).
+## Step 1b — Architecture genes + v2 transformer + policy factory  `[x]`
+**DONE 2026-06-03 — see `findings.md` "Step 1b".** 4 structural genes
+(`architecture` + transformer `depth`/`heads`/`ctx_ticks`) on `CohortGenes`,
+frozen within a lineage; `sample_fresh_blood_genes` draws them (HC#9), base
+`sample_genes`/crossover/mutate keep them at the LSTM default with NO rng draw
+(HC#1 byte-identity). `DiscreteTransformerPolicy` ports v1's encoder onto
+`BaseDiscretePolicy`, subclassing the LSTM to reuse its head stack (LSTM left
+untouched). `agents_v2/policy_factory.py::build_policy` is the single
+constructor; worker + reeval both call it (reeval now also threads
+`runner_dim`). GATE PASSED: factory builds + forward for every arch/sizing;
+transformer checkpoint round-trips strict; **transformer trains end-to-end
+through the real v2 PPO trainer** (buffer hidden state survives); warm-start
+composes with both arches; LSTM factory path byte-identical; fresh blood
+covers both arches. 31 new tests + 152 existing v2 tests pass.
 
 ## Step 2 — 3-way breed step  `[ ]`
 New `_breed_next_generation_pbt`: elites preserve (weights+recipe, continue
