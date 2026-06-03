@@ -82,6 +82,7 @@ __all__ = [
     "EvalSummary",
     "arch_name_for_genes",
     "scalping_train_config",
+    "load_warm_start_weights",
     "train_one_agent",
     "_build_per_agent_reward_overrides",
     "_build_per_agent_scalping_overrides",
@@ -988,6 +989,64 @@ def _build_eval_bet_records(
     return records
 
 
+# ── PBT warm-start (plans/pbt-breeding Step 1) ──────────────────────────
+
+
+def load_warm_start_weights(
+    policy: "torch.nn.Module",
+    init_weights_path: "str | Path",
+) -> None:
+    """Load an inherited ``state_dict`` into ``policy`` in place (strict).
+
+    PBT warm-start (``plans/pbt-breeding`` Step 1, HC#5/#10). The whole
+    PBT mechanism rests on weight inheritance being REAL: a warm-started
+    child must load the parent's ACTUAL trained weights so its gen-0
+    forward reproduces the parent's final forward before any new gradient
+    step. (The gene-only GA threw the weights away and re-trained from
+    scratch every generation, so a champion's identity never reproduced.)
+
+    ``init_weights_path`` points at a registry weights file
+    (``registry/weights/<model_id>.pt``) saved by
+    :meth:`ModelStore.save_weights`, which wraps the raw ``state_dict`` as
+    ``{"weights": ..., "obs_schema_version": N, "action_schema_version":
+    M}``. We unwrap that envelope (mirroring :meth:`ModelStore.load_weights`)
+    and ``load_state_dict(..., strict=True)``.
+
+    **Strict is load-bearing (HC#10).** The warm-start contract requires
+    the child's weight shapes to match the parent's exactly. A structural-
+    gene mismatch (different ``architecture`` / ``hidden_size`` / aux-head
+    layout) therefore raises a ``RuntimeError`` HERE — loud — rather than
+    silently truncating the inherited tensor into a garbled brain. The
+    breed step (Step 2) keeps structural genes frozen within a lineage so
+    this never fires in normal operation; if it does, the lineage
+    bookkeeping has a bug.
+
+    This is THE single warm-start load path — both the worker
+    (``train_one_agent``) and any reeval/factory caller load through this
+    function so the inherited brain is reconstructed identically (HC#11).
+    The policy is mutated in place; nothing is returned. Forward-match
+    gate: ``tests/test_v2_pbt_warm_start.py``.
+    """
+    path = Path(init_weights_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"init_weights_path does not exist: {path}",
+        )
+    # map_location='cpu': the policy is still on CPU at warm-start time
+    # (the trainer moves it to ``device`` afterwards), and we don't want
+    # to allocate GPU memory for the checkpoint. ``load_state_dict`` copies
+    # values into the existing params regardless of the loaded tensors'
+    # device, so this is correct for CUDA runs too.
+    raw = torch.load(str(path), weights_only=True, map_location="cpu")
+    if isinstance(raw, dict) and "weights" in raw:
+        state_dict = raw["weights"]
+    else:
+        # Tolerate a bare state_dict (forward-compat with any caller that
+        # saved one without the ModelStore version envelope).
+        state_dict = raw
+    policy.load_state_dict(state_dict, strict=True)
+
+
 # ── Main entry point ────────────────────────────────────────────────────
 
 
@@ -1037,6 +1096,7 @@ def train_one_agent(
     feature_cache: dict[str, list] | None = None,
     static_obs_cache: dict | None = None,
     frozen_direction_head_path: "Path | None" = None,
+    init_weights_path: "str | Path | None" = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -1071,6 +1131,18 @@ def train_one_agent(
         emitted events. Defaults of ``0`` / ``1`` produce a sensible
         single-agent snapshot when the worker is invoked outside a
         cohort context.
+    init_weights_path:
+        PBT warm-start (``plans/pbt-breeding`` Step 1). When set, the
+        agent loads an inherited ``state_dict`` (a parent's or its own
+        prior-generation weights, saved at
+        ``registry/weights/<model_id>.pt``) into the freshly-built
+        policy BEFORE any BC / PPO, then continues with a PPO fine-tune
+        — this is what makes a champion's learned identity heritable
+        across generations. ``None`` (the default) = cold-start =
+        byte-identical to the pre-pbt gene-only path (HC#1). A
+        warm-started agent SKIPS BC pretrain (it already has a trained
+        actor_head; re-running BC would overwrite it). The load is
+        strict, so a structural-gene mismatch raises (HC#10).
 
     Returns
     -------
@@ -1273,6 +1345,30 @@ def train_one_agent(
         input_norm=True,
     )
 
+    # ── PBT warm-start (plans/pbt-breeding Step 1) ───────────────────
+    # Load an inherited brain (a parent's or this lineage's own
+    # prior-generation weights) into the freshly-built policy BEFORE any
+    # BC / PPO. This is what makes a champion's learned IDENTITY (its
+    # weights), not just its recipe, heritable across generations — the
+    # gene-only GA re-trained every agent from scratch each gen, so
+    # champions never reproduced. ``init_weights_path=None`` (the
+    # default) is cold-start = byte-identical to the pre-pbt path (HC#1).
+    # The load is strict: a structural-gene mismatch (architecture /
+    # hidden_size / aux-head layout) raises here rather than silently
+    # truncating (HC#10). The forward-match gate
+    # (tests/test_v2_pbt_warm_start.py) proves the inherited brain
+    # reproduces the parent's forward on a fixed obs before any new
+    # gradient step (HC#5).
+    warm_started = False
+    if init_weights_path is not None:
+        load_warm_start_weights(policy, init_weights_path)
+        warm_started = True
+        logger.info(
+            "Agent %s: WARM-START — loaded inherited weights from %s "
+            "(strict); will skip BC and continue with a PPO fine-tune.",
+            agent_id, init_weights_path,
+        )
+
     # 2026-05-24: when a shared frozen direction head is loaded, the
     # supervised loss weights MUST be zero (hard_constraints §4 of
     # plans/shared-direction-head/). Force them here even if the
@@ -1338,6 +1434,20 @@ def train_one_agent(
         if bc_pretrain_steps_override is not None
         else int(getattr(genes, "bc_pretrain_steps", 0))
     )
+    # PBT warm-start (Step 1): a warm-started agent inherits a trained
+    # actor_head. Re-running BC would overwrite it from this agent's
+    # oracle obs (and re-set the input_norm buffers away from the
+    # parent's inherited stats), partially undoing the inheritance.
+    # Warm-start is a pure PPO fine-tune — skip BC. Fresh blood / cold
+    # agents are unaffected (init_weights_path is None for them, so
+    # warm_started is False and BC runs exactly as before — HC#1).
+    if warm_started and bc_steps > 0:
+        logger.info(
+            "Agent %s: warm-start active — skipping BC pretrain "
+            "(%d steps) to preserve the inherited weights.",
+            agent_id, bc_steps,
+        )
+        bc_steps = 0
     # Pre-existing scoping fix (caught by predictor-integration smoke
     # 2026-05-10): `direction_bce_label_map` is only assigned inside
     # the `if bc_steps > 0:` branch but referenced unconditionally at
