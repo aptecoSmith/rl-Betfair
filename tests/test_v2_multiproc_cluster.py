@@ -24,9 +24,11 @@ import os
 import pickle
 import types
 
+import numpy as np
 import pytest
 
 from training_v2.cohort import multiproc_worker as mp
+from training_v2.cohort.static_obs_cache import DayStaticObs
 
 
 def test_default_worker_count_one_per_agent_capped():
@@ -175,6 +177,102 @@ def test_worker_injects_day_paths_via_cache(tmp_path, monkeypatch):
     assert captured["feature_cache"] == {"d1": ["x"], "d2": ["y"]}
     assert "_feature_cache_day_paths" not in captured
     mp._WORKER_DAY_CACHE.clear()
+
+
+# ── shared-memory-day-cache: static_obs worker plumbing ─────────────────────
+
+
+def _make_artifact(day: str, n_races: int = 2) -> DayStaticObs:
+    """Tiny synthetic DayStaticObs (obs_dim 50, max_runners 2)."""
+    counts = [2] * n_races
+    total = sum(counts)
+    return DayStaticObs(
+        day=day,
+        static_obs_flat=np.arange(total * 50, dtype=np.float32).reshape(total, 50),
+        race_tick_counts=counts,
+        runner_maps=[{} for _ in range(n_races)],
+        slot_maps=[{} for _ in range(n_races)],
+        race_p_win_by_race=[{} for _ in range(n_races)],
+        tick_drift_fires_by_race=[{} for _ in range(n_races)],
+        race_durations=[1.0] * n_races,
+        obs_dim=50, active_runner_dim=1, max_runners=2,
+        predictor_lean_obs=False,
+        use_race_outcome_predictor=True,
+        use_direction_predictor=True,
+    )
+
+
+def test_worker_injects_static_obs_day_paths(tmp_path, monkeypatch):
+    """``_static_obs_day_paths`` → ``static_obs_cache`` injected (memmapped),
+    private key popped, and the dict ``feature_cache`` path NOT taken."""
+    mp._WORKER_STATIC_OBS_CACHE.clear()
+    art = _make_artifact("d1")
+    npy = tmp_path / "static_obs_d1.npy"
+    side = tmp_path / "meta_d1.pkl"
+    art.save(npy, side)
+    captured: dict = {}
+
+    def fake_train_one_agent(**kw):
+        captured.update(kw)
+        return types.SimpleNamespace(
+            train=types.SimpleNamespace(wall_time_sec=0.0))
+
+    import training_v2.cohort.worker as worker
+    monkeypatch.setattr(worker, "train_one_agent", fake_train_one_agent)
+    mp._train_agent_worker(dict(
+        agent_id="r0", _static_obs_day_paths={"d1": (str(npy), str(side))},
+    ))
+    assert "_static_obs_day_paths" not in captured
+    assert "feature_cache" not in captured        # static_obs path wins
+    soc = captured["static_obs_cache"]
+    assert set(soc) == {"d1"}
+    np.testing.assert_array_equal(soc["d1"].static_obs_flat, art.static_obs_flat)
+    assert not soc["d1"].static_obs_flat.flags.writeable   # memmap read-only
+    mp._WORKER_STATIC_OBS_CACHE.clear()
+
+
+def test_worker_static_obs_missing_file_falls_back(tmp_path, monkeypatch):
+    """A missing/unloadable day is OMITTED (env rebuilds it from scratch,
+    HC#3). With every day missing, ``static_obs_cache`` isn't passed at all."""
+    mp._WORKER_STATIC_OBS_CACHE.clear()
+    captured: dict = {}
+
+    def fake_train_one_agent(**kw):
+        captured.update(kw)
+        return types.SimpleNamespace(
+            train=types.SimpleNamespace(wall_time_sec=0.0))
+
+    import training_v2.cohort.worker as worker
+    monkeypatch.setattr(worker, "train_one_agent", fake_train_one_agent)
+    missing = (str(tmp_path / "nope.npy"), str(tmp_path / "nope.pkl"))
+    mp._train_agent_worker(dict(
+        agent_id="r0", _static_obs_day_paths={"d1": missing},
+    ))
+    assert "static_obs_cache" not in captured   # all failed → omit entirely
+    assert "_static_obs_day_paths" not in captured
+    mp._WORKER_STATIC_OBS_CACHE.clear()
+
+
+def test_worker_static_obs_cache_loads_once_then_reuses(tmp_path, monkeypatch):
+    mp._WORKER_STATIC_OBS_CACHE.clear()
+    art = _make_artifact("2026-05-09")
+    npy = tmp_path / "static_obs_x.npy"
+    side = tmp_path / "meta_x.pkl"
+    art.save(npy, side)
+    a = mp._worker_load_static_obs("2026-05-09", str(npy), str(side))
+    assert a is not None and "2026-05-09" in mp._WORKER_STATIC_OBS_CACHE
+    # A second load MUST come from the cache, not disk. (On Windows an open
+    # memmap locks the .npy file so we can't delete it to prove that; instead
+    # make a fresh DayStaticObs.load() blow up and assert it was NOT called.)
+    import training_v2.cohort.static_obs_cache as soc
+
+    def _boom(*a, **k):
+        raise AssertionError("cache miss — re-loaded from disk")
+
+    monkeypatch.setattr(soc.DayStaticObs, "load", staticmethod(_boom))
+    b = mp._worker_load_static_obs("2026-05-09", str(npy), str(side))
+    assert b is a   # exact cached object, no disk re-read
+    mp._WORKER_STATIC_OBS_CACHE.clear()
 
 
 def test_make_pool_returns_executor():

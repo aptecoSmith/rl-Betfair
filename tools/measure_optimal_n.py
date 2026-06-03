@@ -31,8 +31,9 @@ import time
 from pathlib import Path
 
 
-def _spec(i: int, day_paths: dict, train_day: str, eval_day: str,
-          data_dir: Path, manifests=None) -> dict:
+def _spec(i: int, train_day: str, eval_day: str, data_dir: Path,
+          *, day_paths: dict | None = None,
+          static_obs_paths: dict | None = None, manifests=None) -> dict:
     from training_v2.cohort.genes import CohortGenes
     base = dict(learning_rate=3e-4, entropy_coeff=0.01, clip_range=0.2,
                 gae_lambda=0.95, value_coeff=0.5, mini_batch_size=64,
@@ -44,13 +45,24 @@ def _spec(i: int, day_paths: dict, train_day: str, eval_day: str,
         model_store=None, generation=0,
         reward_overrides={"per_pair_reward_at_resolution": True,
                           "locked_pnl_reward_weight": 9.0},
-        _feature_cache_day_paths=day_paths,
     )
-    if manifests:
-        # predictors-ON calibration: workers rebuild the bundle from these
-        # manifest paths. Throughput here reflects per-tick inference cost.
+    if static_obs_paths is not None:
+        # predictors-ON via the SHARED static_obs path (the production path
+        # post shared-memory-day-cache): predictors are BAKED into the shared
+        # memmap, so workers do NO per-tick inference here — throughput
+        # reflects pure training-under-contention on the real path. The
+        # bundle is still rebuilt per worker (env ctor) from the manifests.
         spec["use_race_outcome_predictor"] = True
+        spec["use_direction_predictor"] = True
+        spec["_static_obs_day_paths"] = static_obs_paths
         spec["_predictor_manifests"] = tuple(manifests)
+    else:
+        # legacy dict-cache path (predictors-OFF, or predictors-ON pre-fix
+        # where workers ran per-tick inference).
+        spec["_feature_cache_day_paths"] = day_paths
+        if manifests:
+            spec["use_race_outcome_predictor"] = True
+            spec["_predictor_manifests"] = tuple(manifests)
     return spec
 
 
@@ -59,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     torch.set_num_threads(1)
     from training_v2.cohort.multiproc_worker import (
         train_cluster_multiproc, prebuild_feature_cache,
-        save_shared_cache_per_day, make_pool,
+        save_shared_cache_per_day, prebuild_static_obs_cache, make_pool,
     )
 
     p = argparse.ArgumentParser(description=__doc__)
@@ -88,17 +100,36 @@ def main(argv: list[str] | None = None) -> int:
     days = [args.train_day, args.eval_day]
     manifests = args.predictor_manifests
 
-    cache = prebuild_feature_cache(days, data_dir=data_dir)
-    day_paths = save_shared_cache_per_day(cache, Path(args.cache_dir), days)
+    day_paths = static_obs_paths = None
+    if manifests:
+        # Production path post shared-memory-day-cache: bake the shared
+        # static_obs memmap (predictors baked in) ONCE, workers consume it.
+        from predictors import PredictorBundle
+        bundle = PredictorBundle.from_manifests(
+            champion_manifest=manifests[0], ranker_manifest=manifests[1],
+            direction_manifest=manifests[2],
+        )
+        static_obs_paths = prebuild_static_obs_cache(
+            days, data_dir=data_dir,
+            cache_dir=Path(args.cache_dir) / "static_obs",
+            predictor_bundle=bundle,
+            use_race_outcome_predictor=True, use_direction_predictor=True,
+        )
+    else:
+        cache = prebuild_feature_cache(days, data_dir=data_dir)
+        day_paths = save_shared_cache_per_day(cache, Path(args.cache_dir), days)
 
     print(f"[optn] cores={os.cpu_count()}  Ks={ks}  warm={args.warm}  "
-          f"predictors={'ON' if manifests else 'off'}", flush=True)
+          f"predictors={'ON (shared static_obs)' if manifests else 'off'}",
+          flush=True)
     rows = []
     for k in ks:
         pool = make_pool(k)
         try:
-            specs = [_spec(i, day_paths, args.train_day, args.eval_day,
-                           data_dir, manifests) for i in range(k)]
+            specs = [_spec(i, args.train_day, args.eval_day, data_dir,
+                           day_paths=day_paths,
+                           static_obs_paths=static_obs_paths,
+                           manifests=manifests) for i in range(k)]
             if args.warm:
                 train_cluster_multiproc(specs, executor=pool)
             t0 = time.perf_counter()

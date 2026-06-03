@@ -2389,3 +2389,45 @@ max|Δobs|=0, 0 flips). Measured: cluster N=11 rollout **392s → 287s** (−105
 **cluster-day ~450s, ~2.5× vs the 1130s baseline.** Gate:
 `test_r2_scorer_cache_is_bit_identical`. R1+R2 banked; R3 (batched update) +
 R4 (env-core hybrid) next.
+
+---
+
+## 2026-06-02 — shared-memory-day-cache (infra; restores predictors-ON ~9×)
+
+**Intention.** The predictors-ON multiprocess path (`--parallel-agents`)
+OOM'd a 128 GB box at N=8 on 2026-06-02 and was band-aided to N=4
+(`_WORKER_DAY_CACHE_MAX 4`), crippling throughput. Each worker held its own
+~1 GB/day private copy of the engineered day features on top of the master's
+~47 GB. Goal: store each day's features once, shared read-only across
+processes — a pure MEMORY change, bit-identical.
+
+**Implementation brief.** Step 0 corrected the plan's premise: `engineer_day`
+returns nested Python **dicts** (~1 GB/day, not memmappable), and the numpy
+arrays the fix wants are the downstream `env._static_obs` (built by
+`_features_to_array`, ~93 MB/day full-obs — ~10–20× smaller, and the obs the
+env actually reads). So the master bakes each day's `static_obs` float32
+arrays (predictors baked in) as a per-day `.npy` + a `meta_{day}.pkl` sidecar
+(predictor gate caches + obs-contract manifest); workers
+`np.load(mmap_mode='r')` so the OS page cache holds ONE physical copy.
+New `training_v2/cohort/static_obs_cache.py::DayStaticObs`,
+`multiproc_worker.prebuild_static_obs_cache` + `_worker_load_static_obs`, a
+gated `BetfairEnv(static_obs_cache=)` consume-path (default None =
+byte-identical). Runner auto-selects it for predictors-ON multiprocess;
+predictor-OFF keeps the legacy dict path. Gated by
+`test_env_golden_parity.py::test_static_obs_cache_path_matches_from_scratch`
+(normal/gated/force-close all bit-identical) + `test_static_obs_cache.py`.
+
+**Result.** **GATE PASSED.** Measured RAM-vs-N (real box, 127.7 GB,
+predictors-ON, 8 days): N=4 → 20 GB used / 107 GB free · **N=8 → 30 GB / 97.5
+GB** (was 128 GB → OOM; ~4× cut, ~80 GB under the 110 GB gate) · N=12 → 36 GB
+/ 91 GB (the "impossible" config now fits). Scales `≈ baseline + N×2.4 GB`;
+per-worker private ~2.2 GB (CPU workers ⇒ no per-worker CUDA context, far
+below the 6 GB first projected). RAM no longer caps N; the K≈12–20 throughput
+plateau does. Cleanup verified: RAM → 116 GB baseline + 0 orphaned procs after
+every kill AND normal completion. **Recalibrated speedup** (`measure_optimal_n`
+updated to the static_obs path): K=8 6.0× · K=12 8.0× · K=16 **9.1×** · K=20
+9.4× (peak) — ~36 % faster than the pre-fix curve (workers skip per-tick
+inference). Retired the band-aids (`_WORKER_DAY_CACHE_MAX 4→16`,
+`--parallel-agents 4→16`); restored the BC A/B run (`ab_bc_chain.sh`) from the
+band-aided ~48h (N=4) to ~16h (N=16). Full record:
+`plans/shared-memory-day-cache/{step0_structure,step3_memory}.md`.

@@ -523,6 +523,7 @@ def _build_env_for_day(
     market_type_filter: str | None = None,
     emit_debug_features: bool = False,
     feature_cache: dict[str, list] | None = None,
+    static_obs_cache: dict | None = None,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     """Build a BetfairEnv + DiscreteActionShim for a single day.
 
@@ -564,6 +565,11 @@ def _build_env_for_day(
     # ~10s of the 16s env-build wall (63% reduction, measured).
     if feature_cache is not None:
         env_kwargs["feature_cache"] = feature_cache
+    # shared-memory-day-cache (2026-06-02): the cross-process memmap path.
+    # When present for this day the env skips engineer_day + predictor
+    # inference and reads the pre-baked shared arrays + gate caches.
+    if static_obs_cache is not None:
+        env_kwargs["static_obs_cache"] = static_obs_cache
     env = BetfairEnv(day, cfg, **env_kwargs)
     shim = DiscreteActionShim(env, scorer_dir=scorer_dir)
     return env, shim
@@ -1029,6 +1035,7 @@ def train_one_agent(
     lay_price_max: float = 0.0,
     composite_score_mode: str = "total_reward",
     feature_cache: dict[str, list] | None = None,
+    static_obs_cache: dict | None = None,
     frozen_direction_head_path: "Path | None" = None,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
@@ -1165,6 +1172,7 @@ def train_one_agent(
         race_confidence_threshold=race_confidence_threshold,
         lay_price_max=lay_price_max,
         feature_cache=feature_cache,
+        static_obs_cache=static_obs_cache,
     )
 
     # Phase-14 S03 — direction gate config flows through trainer_hp
@@ -1727,6 +1735,7 @@ def train_one_agent(
                 race_confidence_threshold=race_confidence_threshold,
                 lay_price_max=lay_price_max,
                 feature_cache=feature_cache,
+                static_obs_cache=static_obs_cache,
             )
             _rebind_trainer(trainer, new_shim)
 
@@ -1952,6 +1961,7 @@ def train_one_agent(
             race_confidence_threshold=race_confidence_threshold,
             lay_price_max=lay_price_max,
             feature_cache=feature_cache,
+            static_obs_cache=static_obs_cache,
         )
         # phase-3 Option A — eval has no PPO update so the rollout
         # always uses the trainer's rollout_device (CPU when on CUDA).

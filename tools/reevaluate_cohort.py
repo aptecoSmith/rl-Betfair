@@ -164,6 +164,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--mature-prob-open-threshold", type=float, default=0.0,
+        help=(
+            "Match the training-time mature-prob open-gate (policy "
+            "masks OPENs where mature_prob < threshold). Default 0.0 = "
+            "no gate. Pass the same value the cohort trained with (e.g. "
+            "0.30) for a faithful re-eval — otherwise agents open pairs "
+            "the gate blocked, overstating naked outcomes."
+        ),
+    )
+    p.add_argument(
         "--reward-overrides", action="append", default=[],
         metavar="KEY=VALUE",
         help=(
@@ -442,21 +452,41 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 continue
 
-            policy = DiscreteLSTMPolicy(
-                obs_dim=shim.obs_dim,
-                action_space=shim.action_space,
-                hidden_size=int(genes.hidden_size),
-                frozen_direction_head_path=(
-                    args.direction_head_manifest
-                    if args.direction_head_manifest else None
-                ),
-            )
+            # Load the checkpoint FIRST so we can match the trained policy's
+            # architecture. Cohorts trained with input_norm=True
+            # (worker.py) carry obs_mean/obs_std buffers in the state_dict;
+            # building the policy without input_norm makes strict
+            # load_state_dict reject EVERY checkpoint ("Unexpected key(s):
+            # obs_mean, obs_std") and silently write 0 rows. Auto-detect.
             try:
                 state = torch.load(
                     weights_path, weights_only=True, map_location="cpu",
                 )
                 if isinstance(state, dict) and "weights" in state:
                     state = state["weights"]
+            except Exception as e:
+                logger.warning(
+                    "[%d/%d] %s: failed to read weights file (%s)",
+                    row_idx + 1, len(rows), agent_id[:12], e,
+                )
+                continue
+            has_input_norm = any(
+                k in state for k in ("obs_mean", "obs_std")
+            )
+            policy = DiscreteLSTMPolicy(
+                obs_dim=shim.obs_dim,
+                action_space=shim.action_space,
+                hidden_size=int(genes.hidden_size),
+                mature_prob_open_threshold=float(
+                    args.mature_prob_open_threshold
+                ),
+                input_norm=has_input_norm,
+                frozen_direction_head_path=(
+                    args.direction_head_manifest
+                    if args.direction_head_manifest else None
+                ),
+            )
+            try:
                 policy.load_state_dict(state, strict=True)
             except Exception as e:
                 logger.warning(
@@ -688,6 +718,19 @@ def main(argv: list[str] | None = None) -> int:
         "Re-eval complete in %.1fs. Wrote %d rows to %s",
         time.perf_counter() - t0, n_done, output_path,
     )
+    if n_done == 0:
+        # Loud, non-zero exit on the silent-failure class: every agent was
+        # skipped (weights-load mismatch, missing weights, env-build error),
+        # so the output is empty. Returning 0 here previously let a broken
+        # re-eval look "complete" — exactly the trap this guards.
+        logger.error(
+            "Re-eval wrote 0 rows of %d candidate agents — EVERY agent was "
+            "skipped (see the per-agent 'failed to ...' warnings above; "
+            "common cause: policy-arch mismatch vs the checkpoint). The "
+            "output file is empty and MUST NOT be trusted.",
+            len(rows),
+        )
+        return 1
     return 0
 
 

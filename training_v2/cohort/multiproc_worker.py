@@ -48,6 +48,7 @@ __all__ = [
     "prebuild_feature_cache",
     "save_shared_cache",
     "save_shared_cache_per_day",
+    "prebuild_static_obs_cache",
     "model_store_paths",
     "make_pool",
 ]
@@ -65,6 +66,17 @@ __all__ = [
 # without limit; fixed training days are touched every task so they're MRU
 # and never evicted.
 _WORKER_DAY_CACHE: dict = {}
+# 2026-06-02 (shared-memory-day-cache): RESTORED 4 -> 16. The 4 was a firefight
+# band-aid: predictors-ON + full obs dicts are ~1.4 GB each, so 16 days x N
+# workers OOM'd a 128 GB box at N>=4. That OOM is now fixed at the source —
+# predictors-ON multiprocess uses the SHARED static_obs memmap path
+# (_WORKER_STATIC_OBS_CACHE, below), which holds cheap page-cache-shared views
+# (~2.2 GB private/worker, measured), NOT per-worker GB dict copies. This dict
+# cache (_WORKER_DAY_CACHE) is now reached ONLY on the legacy predictor-OFF
+# multiprocess path or the static_obs graceful-fallback (HC#3). 16 restores the
+# pre-band-aid reuse depth for those paths. NB: predictor-OFF dicts are still
+# ~1.4 GB, so a predictor-OFF cohort at very high N could still pressure RAM —
+# route predictor-OFF through the static_obs path too if that ever bites.
 _WORKER_DAY_CACHE_MAX = 16
 
 
@@ -82,6 +94,60 @@ def _worker_load_day(day: str, path: str):
     while len(cache) > _WORKER_DAY_CACHE_MAX:
         del cache[next(iter(cache))]  # evict least-recently-used
     return feats
+
+
+# ── Per-worker static_obs artifact cache (shared-memory-day-cache) ──────────
+# Holds DayStaticObs objects, NOT the GB-sized dicts of _WORKER_DAY_CACHE.
+# Each value is a thin handle: a read-only memmap VIEW (the actual array data
+# lives in the OS page cache, shared across processes) + the small gate-cache
+# sidecar. So the per-worker RAM cost is bytes, not GBs — the cap can be high
+# (just bounds open-handle / sidecar accumulation over a long cohort with many
+# rotating eval days). Keyed by day string; bit-identical across agents (pure
+# fn of day + cohort-fixed params + bundle).
+_WORKER_STATIC_OBS_CACHE: dict = {}
+_WORKER_STATIC_OBS_CACHE_MAX = 64  # cheap views, not the GB dict copies
+
+
+def _worker_load_static_obs(day: str, npy_path: str, sidecar_path: str):
+    """Return the ``DayStaticObs`` for ``day`` (memmapped, read-only), from
+    the per-worker cache if present (move-to-MRU), else load it.
+
+    Graceful fallback (HC#3): on a memmap error retry a full (non-mmap) read
+    into RAM (slower + more RAM, still correct); on any other failure
+    (missing file, schema/contract mismatch, corruption) return ``None`` so
+    the caller omits this day from ``static_obs_cache`` and the env rebuilds
+    it from scratch (``engineer_day`` + inference). Shared memory is an
+    optimisation — its failure must degrade, never kill the cohort.
+    """
+    cache = _WORKER_STATIC_OBS_CACHE
+    if day in cache:
+        cache[day] = cache.pop(day)  # mark most-recently-used
+        return cache[day]
+    from training_v2.cohort.static_obs_cache import DayStaticObs
+
+    art = None
+    try:
+        art = DayStaticObs.load(npy_path, sidecar_path, mmap=True)
+    except Exception as exc:  # noqa: BLE001 — degrade on ANY load failure
+        # One retry without mmap handles a pure mmap/page-mapping error
+        # (rare on Windows); a contract/schema mismatch or missing file
+        # fails again here and drops to the from-scratch fallback below.
+        try:
+            art = DayStaticObs.load(npy_path, sidecar_path, mmap=False)
+            logger.warning(
+                "static_obs cache for %s: mmap failed (%s); read full into "
+                "RAM (slower + more RAM, still correct)", day, exc,
+            )
+        except Exception as exc2:  # noqa: BLE001
+            logger.warning(
+                "static_obs cache load failed for %s (%s); falling back to "
+                "from-scratch env build for this day", day, exc2,
+            )
+            return None
+    cache[day] = art
+    while len(cache) > _WORKER_STATIC_OBS_CACHE_MAX:
+        del cache[next(iter(cache))]  # evict least-recently-used
+    return art
 
 
 # ── Per-worker predictor-bundle cache (predictor support, 2026-06-02) ───────
@@ -181,9 +247,22 @@ def _train_agent_worker(spec: dict):
     from training_v2.cohort.worker import train_one_agent
 
     spec = dict(spec)
+    static_obs_paths = spec.pop("_static_obs_day_paths", None)
     day_paths = spec.pop("_feature_cache_day_paths", None)
     cache_path = spec.pop("_feature_cache_path", None)
-    if day_paths is not None:
+    if static_obs_paths is not None:
+        # shared-memory-day-cache: load each day's DayStaticObs (memmapped,
+        # read-only → one physical copy shared across processes via the OS
+        # page cache). A day that fails to load is omitted, so the env
+        # rebuilds just that day from scratch (HC#3 graceful fallback).
+        static_obs_cache = {}
+        for day, (npy, side) in static_obs_paths.items():
+            art = _worker_load_static_obs(day, npy, side)
+            if art is not None:
+                static_obs_cache[day] = art
+        if static_obs_cache:
+            spec["static_obs_cache"] = static_obs_cache
+    elif day_paths is not None:
         spec["feature_cache"] = {
             day: _worker_load_day(day, path) for day, path in day_paths.items()
         }
@@ -358,4 +437,98 @@ def save_shared_cache_per_day(
             with open(p, "wb") as fh:
                 pickle.dump(cache[day], fh, protocol=pickle.HIGHEST_PROTOCOL)
         out[day] = str(p)
+    return out
+
+
+def prebuild_static_obs_cache(
+    days: list[str],
+    *,
+    data_dir: "Path",
+    cache_dir: "Path",
+    predictor_bundle: object,
+    use_race_outcome_predictor: bool,
+    use_direction_predictor: bool,
+    predictor_lean_obs: bool = False,
+    scorer_dir: "Path | None" = None,
+) -> dict:
+    """Bake each day's shareable ``static_obs`` artifact ONCE, in the master.
+
+    The shared-memory-day-cache replacement for ``prebuild_feature_cache`` +
+    ``save_shared_cache_per_day`` on the multiprocess path. For each unique
+    day it builds the **canonical predictors-ON env** (the exact path a
+    worker uses, via ``_build_env_for_day``), captures ``env._static_obs`` +
+    the predictor gate caches into a
+    :class:`training_v2.cohort.static_obs_cache.DayStaticObs`, and writes
+    ``static_obs_{day}.npy`` (the big memmappable array, predictors baked in)
+    + ``meta_{day}.pkl`` (gate caches + obs-contract manifest) under
+    ``cache_dir``. Returns ``{day: (npy_path, sidecar_path)}``.
+
+    Why this replaces the dict prebuild (see
+    ``plans/shared-memory-day-cache/step0_structure.md``):
+
+    * The old ``mp_day_{day}.pkl`` held the ``engineer_day`` DICTS (~1 GB/day
+      of Python objects, NOT memmappable, copied master + N workers → OOM).
+    * The ``.npy`` here holds the downstream ``static_obs`` arrays
+      (~90 MB/day full-obs, ~10–20× smaller) that workers
+      ``np.load(mmap_mode='r')`` so the OS page cache holds ONE physical copy
+      shared across processes.
+    * **Predictors are baked here** (the master holds the bundle), so workers
+      skip ``engineer_day`` + ``_features_to_array`` + per-worker predictor
+      inference — and the in-place dict mutation that made the dicts
+      unshareable never happens on the shared object.
+
+    Master RAM stays ~one day's arrays (build → save → drop), not the
+    all-days dict footprint. A day whose artifact already exists is left
+    untouched (deterministic build, cross-generation reuse — same contract
+    as ``save_shared_cache_per_day``). Bit-identity is gated by
+    ``tests/test_env_golden_parity.py`` (the env consume-path reproduces the
+    from-scratch build).
+    """
+    from training_v2.cohort.worker import (
+        DEFAULT_SCORER_DIR,
+        _build_env_for_day,
+        scalping_train_config,
+    )
+    from training_v2.cohort.static_obs_cache import DayStaticObs
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sdir = scorer_dir if scorer_dir is not None else DEFAULT_SCORER_DIR
+
+    # Mirror the worker's env config: predictor flags flow via
+    # cfg["observations"] (train_one_agent sets them there and lets the env
+    # resolve), so the prebuilt env is byte-identical to the worker's.
+    # Action-side config (reward overrides, pwin thresholds, race-confidence,
+    # direction gate) does NOT affect static_obs or the cached gate caches,
+    # so it is intentionally omitted here (verified by golden parity).
+    cfg = scalping_train_config()
+    if use_race_outcome_predictor:
+        cfg.setdefault("observations", {})["use_race_outcome_predictor"] = True
+    if use_direction_predictor:
+        cfg.setdefault("observations", {})["use_direction_predictor"] = True
+
+    out: dict = {}
+    for day in dict.fromkeys(days):
+        npy_path = cache_dir / f"static_obs_{day}.npy"
+        side_path = cache_dir / f"meta_{day}.pkl"
+        if npy_path.exists() and side_path.exists():
+            out[day] = (str(npy_path), str(side_path))
+            continue
+        t0 = time.perf_counter()
+        env, _shim = _build_env_for_day(
+            day_str=day, data_dir=data_dir, cfg=cfg, scorer_dir=sdir,
+            predictor_bundle=predictor_bundle,
+            predictor_lean_obs=predictor_lean_obs,
+        )
+        artifact = DayStaticObs.from_env(env)
+        artifact.save(npy_path, side_path)
+        n_ticks = int(artifact.static_obs_flat.shape[0])
+        mb = artifact.static_obs_flat.nbytes / 1e6
+        del env, artifact
+        out[day] = (str(npy_path), str(side_path))
+        logger.info(
+            "prebuild_static_obs_cache: baked %s in %.0fs "
+            "(%d ticks, %.0f MB → %s)",
+            day, time.perf_counter() - t0, n_ticks, mb, npy_path.name,
+        )
     return out

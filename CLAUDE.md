@@ -19,14 +19,35 @@ golden solo path at its own seed). This is the default now —
   span waves+generations (only the first wave is cold).
 - **Predictor runs are supported** (the intended config): workers rebuild
   the bundle from manifest paths (`_worker_load_bundle`), not pickled across
-  spawn. predictors-ON ≈ 7.9x (17h/gen → ~2.2h). Just pass
-  `--use-race-outcome-predictor --predictor-bundle-manifests ...` as usual.
+  spawn. Just pass `--use-race-outcome-predictor
+  --predictor-bundle-manifests ...` as usual.
+- **Shared-memory day cache (2026-06-02, the OOM fix).** Predictors-ON
+  multiprocess no longer duplicates the ~1 GB/day engineered features per
+  worker. The master bakes each day's downstream `static_obs` float32 arrays
+  (~93 MB/day, predictors baked in) as a per-day `.npy` + gate-cache sidecar;
+  workers `np.load(mmap_mode='r')` so the **OS page cache holds ONE shared
+  copy**. Automatic for predictors-ON multiprocess (no flag); predictor-OFF
+  keeps the legacy per-day dict cache. **N=8 now ~30 GB (was 128 GB → OOM);
+  per-worker ~2.2 GB; RAM no longer caps N** up to the core count. Engine:
+  `training_v2/cohort/static_obs_cache.py` + `multiproc_worker.
+  prebuild_static_obs_cache`. See `plans/shared-memory-day-cache/`. This
+  retired the firefight band-aids (`_WORKER_DAY_CACHE_MAX 4→16`,
+  `--parallel-agents 4→16`).
+- **Calibrated speedup (2026-06-02, 20-core box, predictors-ON via the shared
+  static_obs path):** K=8 6.0× · K=12 8.0× · K=16 **9.1×** · K=20 9.4× (peak).
+  ~36 % faster than the pre-fix curve (workers skip per-tick inference). The
+  default **16** is the sweet spot (9.1×, leaves cores for the master/OS;
+  K=20 oversubscribes 20 cores for +3 %). Recalibrate per machine with
+  `tools/measure_optimal_n.py --predictor-manifests CHAMP RANK DIR` (now
+  measures the shared static_obs path).
 - Mutually exclusive with `--batched` (the older GPU-batched path, 2.55x).
   `0` = sequential. The per-generation wall is memory-bandwidth-contention-
   bound, so going past ~9x needs the tensor-env rewrite (R4), not tuning.
 - Engine: `training_v2/cohort/multiproc_worker.py`. Gates:
   `tests/test_v2_multiproc_cluster.py` + the parallel-vs-sequential
-  bit-identity probes. Full record: `plans/training-speedup-v2/results.md`.
+  bit-identity probes + `tests/test_env_golden_parity.py::
+  test_static_obs_cache_path_matches_from_scratch`. Full record:
+  `plans/training-speedup-v2/results.md` + `plans/shared-memory-day-cache/`.
 
 ---
 

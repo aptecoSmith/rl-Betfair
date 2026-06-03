@@ -105,12 +105,19 @@ CASES: list[Case] = [
 def build_env(
     cfg_name: str, *, day: str, n_races: int,
     data_dir: Path = DEFAULT_DATA_DIR,
+    static_obs_cache: dict | None = None,
 ) -> tuple[BetfairEnv, DiscreteActionShim]:
     """Build a predictors-ON env+shim for ``cfg_name`` on a sliced day.
 
     Mirrors ``worker._build_env_for_day``'s env_kwargs but (a) slices the
     day to ``n_races`` for speed and (b) hard-wires predictors ON — the
     Step-0 operator decision that the golden config is the intended one.
+
+    ``static_obs_cache`` (shared-memory-day-cache gate, 2026-06-02): when a
+    ``{day: DayStaticObs}`` mapping is passed, the env consumes the pre-baked
+    shared arrays + gate caches instead of running engineer_day + predictor
+    inference. Used by the parity test to prove the shared path reproduces
+    the from-scratch build bit-for-bit. Default None = from-scratch.
     """
     ec = ENV_CONFIGS[cfg_name]
     loaded = load_day(day, data_dir=data_dir)
@@ -141,6 +148,7 @@ def build_env(
         race_confidence_threshold=ec.race_conf,
         direction_gate_enabled=ec.direction_gate,
         emit_debug_features=False,
+        static_obs_cache=static_obs_cache,
     )
     shim = DiscreteActionShim(env, scorer_dir=DEFAULT_SCORER_DIR)
     return env, shim

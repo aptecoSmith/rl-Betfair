@@ -61,6 +61,7 @@ from training_v2.cohort.multiproc_worker import (
     train_cluster_multiproc,
     prebuild_feature_cache,
     save_shared_cache_per_day,
+    prebuild_static_obs_cache,
     model_store_paths,
     make_pool,
 )
@@ -1202,10 +1203,36 @@ def run_cohort(
                 # the shared cache is bit-identical to per-worker engineering.
                 gen_days = list(dict.fromkeys(
                     list(training_days) + list(eval_days)))
-                prebuild_feature_cache(
-                    gen_days, data_dir=data_dir, into=mp_feature_cache)
-                day_cache_paths = save_shared_cache_per_day(
-                    mp_feature_cache, output_dir / "mp_cache", gen_days)
+                # shared-memory-day-cache (2026-06-02): on predictors-ON runs
+                # — the OOM case, where each full-obs day's engineer_day DICTS
+                # are ~1 GB duplicated master + N workers — bake the downstream
+                # static_obs arrays ONCE (predictors baked in) and share them
+                # read-only via memmap, so the OS page cache holds a single
+                # physical copy across all processes. ~10-20x smaller per day
+                # AND shared. Predictor-OFF runs keep the legacy per-day dict
+                # cache (lower priority; not the OOM trigger). See
+                # plans/shared-memory-day-cache/.
+                use_static_obs_cache = (
+                    predictor_bundle is not None
+                    and bool(use_race_outcome_predictor)
+                )
+                if use_static_obs_cache:
+                    static_obs_day_paths = prebuild_static_obs_cache(
+                        gen_days, data_dir=data_dir,
+                        cache_dir=output_dir / "mp_static_obs_cache",
+                        predictor_bundle=predictor_bundle,
+                        use_race_outcome_predictor=bool(
+                            use_race_outcome_predictor),
+                        use_direction_predictor=bool(use_direction_predictor),
+                        predictor_lean_obs=bool(predictor_lean_obs),
+                    )
+                    day_cache_paths = None
+                else:
+                    prebuild_feature_cache(
+                        gen_days, data_dir=data_dir, into=mp_feature_cache)
+                    day_cache_paths = save_shared_cache_per_day(
+                        mp_feature_cache, output_dir / "mp_cache", gen_days)
+                    static_obs_day_paths = None
                 store_paths = model_store_paths(model_store)
                 specs: list[dict] = []
                 for idx, genes in enumerate(cohort):
@@ -1258,6 +1285,7 @@ def run_cohort(
                         feature_cache=None,
                         frozen_direction_head_path=frozen_direction_head_path,
                         _feature_cache_day_paths=day_cache_paths,
+                        _static_obs_day_paths=static_obs_day_paths,
                         _model_store_paths=store_paths,
                         _predictor_manifests=mp_predictor_manifests,
                     ))

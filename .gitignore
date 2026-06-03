@@ -110,6 +110,12 @@ registry/_*_ready
 registry/scalping_ga_*/
 registry/smoke_*/
 registry/probe_*/
+registry/ab_*/
+registry/ab_*.log
+registry/ab_*.txt
+registry/smdc_*/
+registry/smdc_*.log
+registry/smdc_*.txt
 
 # Stray top-level archive dirs (registry/archive_* is already covered above)
 registry_archive_*/

@@ -1106,6 +1106,17 @@ class BetfairEnv(gymnasium.Env):
         day: Day,
         config: dict,
         feature_cache: dict[str, list] | None = None,
+        # shared-memory-day-cache (2026-06-02). When provided and it
+        # contains ``day.date``, ``_precompute`` consumes the pre-baked
+        # memmapped ``static_obs`` arrays + gate caches from the artifact
+        # instead of running ``engineer_day`` + ``_features_to_array`` +
+        # predictor inference. A duck-typed ``DayStaticObs`` (see
+        # ``training_v2/cohort/static_obs_cache.py``) — the env only reads
+        # attributes, so it does NOT import that module (keeps the env
+        # dependency-light). Default ``None`` ⇒ byte-identical to the
+        # pre-change build path. Mutually exclusive in practice with
+        # ``feature_cache`` for the same day (the static-obs path wins).
+        static_obs_cache: dict | None = None,
         reward_overrides: dict | None = None,
         emit_debug_features: bool = True,
         market_type_filter: str = "BOTH",
@@ -1448,8 +1459,12 @@ class BetfairEnv(gymnasium.Env):
                     if (r.market_type or "").upper() == self.market_type_filter
                 ],
             )
-            # Filtered subsets can't share the full-day feature cache.
+            # Filtered subsets can't share the full-day feature cache —
+            # the cached arrays / gate caches are indexed by the FULL day's
+            # race order, which the filter reorders/drops. Fall back to the
+            # from-scratch build for filtered envs.
             feature_cache = None
+            static_obs_cache = None
 
         self._total_races = len(self.day.races)
         feat_cfg = config.get("features", {})
@@ -2061,7 +2076,7 @@ class BetfairEnv(gymnasium.Env):
             )
 
         # Pre-compute features and runner mappings
-        self._precompute(feature_cache)
+        self._precompute(feature_cache, static_obs_cache)
 
         # Observation / action spaces
         extra_position_dim = SCALPING_POSITION_DIM if self.scalping_mode else 0
@@ -2136,17 +2151,75 @@ class BetfairEnv(gymnasium.Env):
 
     # ── Pre-computation ───────────────────────────────────────────────────
 
+    def _precompute_from_static_obs(
+        self, artifact, n_races: int, n_ticks: int,
+    ) -> None:
+        """Consume a pre-baked ``DayStaticObs`` artifact (shared-memory path).
+
+        Sets the exact same instance attributes the from-scratch
+        ``_precompute`` loop sets, so all downstream env code is unaffected:
+        ``_static_obs`` (per-race 2-D memmap views — read-only, one physical
+        copy shared across processes via the OS page cache),
+        ``_runner_maps`` / ``_slot_maps``, the predictor gate caches
+        ``_race_p_win_by_race`` / ``_tick_drift_fires_by_race``, and
+        ``_race_durations``. ``_race_is_confident_by_race`` is DERIVED here
+        from the cached p_win + THIS env's ``_race_confidence_threshold``
+        (the cache is threshold-independent, so one artifact serves every
+        confidence-gate setting).
+
+        Bit-identical by construction: the artifact was extracted from this
+        same precompute on the master. ``validate_against_env`` enforces the
+        obs contract (HC#5) and raises on a stale/wrong-variant cache.
+        """
+        artifact.validate_against_env(self)  # HC#5: no silent feature drops
+
+        # Per-race 2-D views into the shared flat array; [race][tick] → 1-D
+        # read-only row, exactly what _get_obs indexes. No data copy.
+        self._static_obs = artifact.race_views()
+        self._runner_maps = artifact.runner_maps
+        self._slot_maps = artifact.slot_maps
+        self._race_p_win_by_race = artifact.race_p_win_by_race
+        self._tick_drift_fires_by_race = artifact.tick_drift_fires_by_race
+        self._race_durations = artifact.race_durations
+        # Derived per-env from the threshold (matches the from-scratch loop:
+        # max p_win over the race's runners >= confidence threshold).
+        self._race_is_confident_by_race = [
+            (max(d.values()) if d else 0.0) >= self._race_confidence_threshold
+            for d in artifact.race_p_win_by_race
+        ]
+        logger.info(
+            "static_obs cache hit for %s (%d races, %d ticks) — shared "
+            "memmap, skipped engineer_day + predictor inference",
+            self.day.date, n_races, n_ticks,
+        )
+
     def _precompute(
-        self, feature_cache: dict[str, list] | None = None,
+        self,
+        feature_cache: dict[str, list] | None = None,
+        static_obs_cache: dict | None = None,
     ) -> None:
         """Pre-compute all tick features and runner-slot mappings.
 
-        If *feature_cache* is provided and contains ``day.date``, the cached
-        features are reused instead of calling ``engineer_day()`` again.
-        New results are stored back into the cache for future reuse.
+        If *static_obs_cache* contains ``day.date`` (shared-memory-day-cache,
+        2026-06-02), the pre-baked memmapped ``static_obs`` arrays + gate
+        caches are consumed directly — skipping ``engineer_day``,
+        ``_features_to_array``, AND per-worker predictor inference. This is
+        the cross-process-shared path; the bytes are bit-identical to the
+        from-scratch build (the artifact was captured from this exact
+        ``_precompute`` on the master, gated by golden parity).
+
+        Else if *feature_cache* is provided and contains ``day.date``, the
+        cached ``engineer_day`` dicts are reused instead of re-engineering
+        (the legacy in-process cache). New results are stored back.
         """
         n_races = len(self.day.races)
         n_ticks = sum(len(r.ticks) for r in self.day.races)
+
+        if static_obs_cache is not None and self.day.date in static_obs_cache:
+            self._precompute_from_static_obs(
+                static_obs_cache[self.day.date], n_races, n_ticks,
+            )
+            return
 
         if feature_cache is not None and self.day.date in feature_cache:
             day_features = feature_cache[self.day.date]

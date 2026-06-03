@@ -48,6 +48,7 @@ pytestmark = [pytest.mark.slow, _requires_assets]
 
 from env.exchange_matcher import ExchangeMatcher, MatchResult  # noqa: E402
 from env.tick_ladder import tick_offset  # noqa: E402
+from training_v2.cohort.static_obs_cache import DayStaticObs  # noqa: E402
 from training_v2.golden_cases import CASES, build_env, build_policy  # noqa: E402
 from training_v2.golden_parity import (  # noqa: E402
     capture_golden,
@@ -196,4 +197,69 @@ def test_batched_path_matches_golden_fixture(case_name):
         f"GATE FAIL: batched path diverged from golden '{case.name}' on a "
         f"load-bearing quantity:\n"
         + "\n".join(f"  {d}" for d in diffs[:20])
+    )
+
+
+# ── shared-memory-day-cache gate: the static_obs memmap path == from-scratch ─
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    ["normal_h128_s1", "gated_h128_s2", "forceclose_h128_s1"],
+)
+def test_static_obs_cache_path_matches_from_scratch(case_name, tmp_path):
+    """The shared-memory ``static_obs`` path reproduces the from-scratch env
+    bit-for-bit (shared-memory-day-cache HC#1).
+
+    A worker that consumes the pre-baked :class:`DayStaticObs` artifact
+    (memmapped ``static_obs`` arrays + sidecar predictor gate caches) must
+    produce the SAME obs → action → match → reward → settle stream as the
+    canonical ``engineer_day`` + ``_features_to_array`` + per-worker
+    predictor-inference path. We capture both and compare directly (no
+    committed fixture needed): cache-path == from-scratch, and GATE (a)
+    already pins from-scratch == fixture.
+
+    Cases exercise a normal day, a **predictor-gated** day (proves the
+    cached ``_race_p_win_by_race`` / ``_tick_drift_fires_by_race`` gate
+    caches drive the same gate decisions) and a **force-close** day.
+    """
+    case = next(c for c in CASES if c.name == case_name)
+
+    # 1. From-scratch env → extract + persist the artifact while pristine.
+    src_env, src_shim = build_env(
+        case.env_config, day=case.day, n_races=case.n_races,
+    )
+    artifact = DayStaticObs.from_env(src_env)
+    npy = tmp_path / f"static_obs_{case.day}.npy"
+    side = tmp_path / f"meta_{case.day}.pkl"
+    artifact.save(npy, side)
+    loaded = DayStaticObs.load(npy, side, mmap=True)
+    # HC#2: the shared array is read-only (a worker mutation corrupts siblings).
+    assert not loaded.static_obs_flat.flags.writeable, (
+        "memmapped static_obs must be read-only"
+    )
+
+    # 2. Capture the from-scratch stream (env is pristine post-extraction —
+    #    extraction only reads precompute outputs).
+    src_policy = build_policy(src_shim, hidden=case.hidden, seed=case.seed)
+    golden_fresh = capture_golden(
+        src_shim, src_policy, seed=case.seed, case=case.name,
+    )
+
+    # 3. Cache-consuming env → capture its stream.
+    env, shim = build_env(
+        case.env_config, day=case.day, n_races=case.n_races,
+        static_obs_cache={case.day: loaded},
+    )
+    cached = capture_golden(
+        shim, build_policy(shim, hidden=case.hidden, seed=case.seed),
+        seed=case.seed, case=case.name,
+    )
+
+    diffs = compare_streams(
+        golden_fresh, cached, label=f"static_obs:{case.name}",
+    )
+    assert not diffs, (
+        f"GATE FAIL: static_obs cache path diverged from from-scratch "
+        f"'{case.name}':\n" + "\n".join(f"  {d}" for d in diffs[:20])
     )
