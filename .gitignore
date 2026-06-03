@@ -116,6 +116,8 @@ registry/ab_*.txt
 registry/smdc_*/
 registry/smdc_*.log
 registry/smdc_*.txt
+registry/pbt_*/
+registry/pbt_*.log
 
 # Stray top-level archive dirs (registry/archive_* is already covered above)
 registry_archive_*/

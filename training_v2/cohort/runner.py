@@ -1809,15 +1809,43 @@ def run_cohort(
                         (s.parent_model_id, None) for s in pbt_specs
                     ]
                     if _frozen:
+                        from datetime import datetime, timezone
+                        _frozen_at = datetime.now(timezone.utc).isoformat(
+                            timespec="seconds")
+                        _write_pbt_hall_of_fame(
+                            output_dir / "pbt_hall_of_fame.jsonl",
+                            generation=generation, frozen=_frozen,
+                            score_fn=_pbt_score, frozen_at=_frozen_at,
+                        )
                         logger.info(
                             "PBT: %d R3 champion(s) FROZEN to the "
-                            "hall-of-fame (total %d). Winning "
+                            "hall-of-fame at %s (total %d). Winning "
                             "architectures: %s",
-                            len(_frozen), len(pbt_hall_of_fame),
+                            len(_frozen), _frozen_at, len(pbt_hall_of_fame),
                             ", ".join(sorted({
                                 sp.genes.architecture for sp, _ in _frozen
                             })),
                         )
+                    # Regenerate the live leaderboard.txt + model_register.csv
+                    # each gen (cheap JSONL read + 2 writes) so the operator
+                    # has fresh viewable files throughout an 18-20h run.
+                    try:
+                        from tools.pbt_leaderboard import regenerate as _regen
+                        from datetime import datetime as _dt
+                        from datetime import timezone as _tz
+                        _nc, _nm = _regen(
+                            output_dir,
+                            now_iso=_dt.now(_tz.utc).isoformat(
+                                timespec="seconds"),
+                        )
+                        logger.info(
+                            "PBT leaderboard: %d R3 champions, %d model-rows "
+                            "-> %s", _nc, _nm,
+                            output_dir / "leaderboard.txt",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "PBT leaderboard regenerate failed; continuing")
                 else:
                     cohort, parent_ids = _breed_next_generation(
                         parents_ranked=results,
@@ -1943,6 +1971,68 @@ def _breed_next_generation(
     return next_cohort, next_parent_ids
 
 
+def _pbt_naked_std(res) -> float:
+    """Std of per-eval-day naked_pnl — a per-model naked-variance proxy
+    (the deployment-critical noise channel; see the canonical metric panel).
+    Needs >= 2 eval days; returns 0.0 otherwise."""
+    try:
+        import statistics
+        per = list(getattr(res.eval, "per_day", []) or [])
+        nks = [float(getattr(s, "naked_pnl", 0.0)) for s in per]
+        if len(nks) >= 2:
+            return float(statistics.pstdev(nks))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _pbt_model_row(spec, res, *, generation: int, score: float) -> dict:
+    """Full per-model record: lineage + architecture + FULL genes + every
+    eval metric we rank on. The shared schema for the per-gen register
+    (``pbt_lineage.jsonl``) and the R3 hall-of-fame
+    (``pbt_hall_of_fame.jsonl``) — one source of truth so the leaderboard +
+    register never drift."""
+    ev = res.eval
+    g = spec.genes
+    return {
+        "generation": int(generation),
+        "agent_id": getattr(res, "agent_id", None),
+        "model_id": getattr(res, "model_id", None),
+        "lineage_id": spec.lineage_id,
+        "tier": int(spec.tier),
+        "role": spec.role,
+        "rotations_seen": sorted(int(r) for r in spec.rotations_seen),
+        "arch_name": getattr(res, "architecture_name", ""),
+        "architecture": str(g.architecture),
+        "hidden_size": int(g.hidden_size),
+        "transformer_depth": int(g.transformer_depth),
+        "transformer_heads": int(g.transformer_heads),
+        "transformer_ctx_ticks": int(g.transformer_ctx_ticks),
+        "init_weights_path": spec.init_weights_path,
+        "parent_model_id": spec.parent_model_id,
+        "score": float(score),
+        "composite_score": float(score),
+        "locked_pnl": float(getattr(ev, "locked_pnl", 0.0)),
+        "naked_pnl": float(getattr(ev, "naked_pnl", 0.0)),
+        "naked_std": _pbt_naked_std(res),
+        "closed_pnl": float(getattr(ev, "closed_pnl", 0.0)),
+        "force_closed_pnl": float(getattr(ev, "force_closed_pnl", 0.0)),
+        "stop_closed_pnl": float(getattr(ev, "stop_closed_pnl", 0.0)),
+        "day_pnl": float(getattr(ev, "day_pnl", 0.0)),
+        "total_reward": float(getattr(ev, "total_reward", 0.0)),
+        "bet_count": int(getattr(ev, "bet_count", 0)),
+        "winning_bets": int(getattr(ev, "winning_bets", 0)),
+        "bet_precision": float(getattr(ev, "bet_precision", 0.0)),
+        "arbs_completed": int(getattr(ev, "arbs_completed", 0)),
+        "arbs_naked": int(getattr(ev, "arbs_naked", 0)),
+        "arbs_closed": int(getattr(ev, "arbs_closed", 0)),
+        "arbs_force_closed": int(getattr(ev, "arbs_force_closed", 0)),
+        "arbs_stop_closed": int(getattr(ev, "arbs_stop_closed", 0)),
+        "pairs_opened": int(getattr(ev, "pairs_opened", 0)),
+        "genes": g.to_dict(),
+    }
+
+
 def _write_pbt_lineage(
     path: "Path",
     *,
@@ -1950,33 +2040,32 @@ def _write_pbt_lineage(
     pairs: list,
     score_fn,
 ) -> None:
-    """Append one JSONL row per agent this generation — the raw lineage /
-    tier / role / score record Step 4's heritability + diversity analysis
-    reads (the scoreboard carries genes but not lineage_id / tier / role).
-    """
+    """Append one rich JSONL row per agent this generation — the per-model
+    parameter register + Step 4's heritability/diversity source. Carries the
+    lineage/tier/role the scoreboard lacks PLUS the full genes + metrics."""
     with open(path, "a", encoding="utf-8") as f:
         for spec, res in pairs:
-            f.write(json.dumps({
-                "generation": int(generation),
-                "agent_id": getattr(res, "agent_id", None),
-                "model_id": getattr(res, "model_id", None),
-                "lineage_id": spec.lineage_id,
-                "tier": int(spec.tier),
-                "role": spec.role,
-                "rotations_seen": sorted(int(r) for r in spec.rotations_seen),
-                "architecture": str(spec.genes.architecture),
-                "hidden_size": int(spec.genes.hidden_size),
-                "transformer_depth": int(spec.genes.transformer_depth),
-                "transformer_heads": int(spec.genes.transformer_heads),
-                "transformer_ctx_ticks": int(spec.genes.transformer_ctx_ticks),
-                "init_weights_path": spec.init_weights_path,
-                "parent_model_id": spec.parent_model_id,
-                "score": float(score_fn(res)),
-                "locked_pnl": float(getattr(res.eval, "locked_pnl", 0.0)),
-                "naked_pnl": float(getattr(res.eval, "naked_pnl", 0.0)),
-                "day_pnl": float(getattr(res.eval, "day_pnl", 0.0)),
-                "total_reward": float(getattr(res.eval, "total_reward", 0.0)),
-            }) + "\n")
+            row = _pbt_model_row(
+                spec, res, generation=generation, score=float(score_fn(res)))
+            f.write(json.dumps(row) + "\n")
+
+
+def _write_pbt_hall_of_fame(
+    path: "Path",
+    *,
+    generation: int,
+    frozen: list,
+    score_fn,
+    frozen_at: str,
+) -> None:
+    """Append the R3 champions that froze this generation, stamped with the
+    ``frozen_at`` datetime they SCORED in R3 — the leaderboard.txt source."""
+    with open(path, "a", encoding="utf-8") as f:
+        for spec, res in frozen:
+            row = _pbt_model_row(
+                spec, res, generation=generation, score=float(score_fn(res)))
+            row["frozen_at"] = frozen_at
+            f.write(json.dumps(row) + "\n")
 
 
 def _make_genetic_event(

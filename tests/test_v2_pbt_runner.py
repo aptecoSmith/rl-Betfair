@@ -91,3 +91,47 @@ def test_pbt_runner_warm_starts_and_rotates(tmp_path: Path) -> None:
     assert any(r["init_weights_path"] for r in rows)
     # Roles present: fresh (both gens) + elite/offspring (gen 1).
     assert {r["role"] for r in rows} >= {"fresh", "elite", "offspring"}
+    # The live leaderboard + register are regenerated each gen.
+    assert (out_dir / "leaderboard.txt").exists()
+    assert (out_dir / "model_register.csv").exists()
+
+
+def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
+    tmp_path: Path,
+) -> None:
+    """Run enough gens for the gauntlet to reach R3, then assert an R3
+    champion freezes with a frozen_at datetime, lands in
+    pbt_hall_of_fame.jsonl, and appears in leaderboard.txt."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _populate_data_dir(data_dir, [f"2026-04-{d:02d}" for d in range(6, 20)])
+    out_dir = tmp_path / "pbt_hof"
+
+    cfg = PbtConfig(
+        n_agents=6, n_rotations=3, train_per_rotation=1, eval_per_rotation=1,
+        r2_size=2, r3_size=2, promote_from_r1=1, promote_from_r2=1,
+        freeze_top_r3=1,
+    )
+    runner_mod.run_cohort(
+        n_agents=6, n_generations=4, days=12, data_dir=data_dir,
+        device="cpu", seed=3, output_dir=out_dir, breeding="pbt",
+        pbt_config=cfg, parallel_agents=0,
+        train_one_agent_fn=_stub_train_one_agent,
+    )
+
+    hof = out_dir / "pbt_hall_of_fame.jsonl"
+    assert hof.exists(), "no hall-of-fame written"
+    champs = [json.loads(line) for line in hof.read_text().splitlines() if line]
+    assert champs, "no R3 champion frozen"
+    for c in champs:
+        assert c["frozen_at"], "champion missing frozen_at datetime"
+        assert c["tier"] == 3
+        assert set(c["rotations_seen"]) == {1, 2, 3}  # climbed all 3 rotations
+        assert "genes" in c and "learning_rate" in c["genes"]
+        assert "locked_pnl" in c and "bet_count" in c
+
+    lb = (out_dir / "leaderboard.txt").read_text()
+    assert "R3 HALL-OF-FAME" in lb
+    assert "frozen_at(R3)" in lb and "locked" in lb
+    # The frozen champion's short model id appears in the table.
+    assert champs[0]["model_id"][:8] in lb
