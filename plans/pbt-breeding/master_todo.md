@@ -19,13 +19,21 @@ mixed-rotation population each gen (no within-gen barrier) + static_obs cache +
 warm-start load.** Remaining knobs (episodes/gen under warm-start, per-gene
 perturbation form) are Step-1 implementation details, not blockers.
 
-## Step 1 — Weight-threading infrastructure  `[ ]`
-Save each agent's final weights per gen (registry `weights/` already does);
-add a parent→child weight COPY and a worker WARM-START load (train_one_agent
-gains an optional `init_weights_path`). Extend the resume/checkpoint to carry
-the weight pointers (it is gene-only today — the biggest change).
-GATE: a child built with `init_weights_path=parent` reproduces the parent's
-forward on a fixed obs BEFORE any new training (HC#5).
+## Step 1 — Weight-threading infrastructure  `[x]`
+**DONE 2026-06-03 — see `findings.md` "Step 1".** Worker WARM-START load
+landed: `train_one_agent(init_weights_path=...)` + the single
+`load_warm_start_weights(policy, path)` load path (HC#11); warm-started
+agents skip BC; threads through the multiprocess pool automatically (it's
+a picklable spec-dict kwarg). GATE PASSED: `tests/test_v2_pbt_warm_start.py`
+(5 tests) proves a warm-started child's gen-0 forward is BIT-identical to
+the parent's on a fixed obs before any new training (HC#5), incl. the
+`input_norm` buffers; strict load raises on a structural mismatch (HC#10);
+default-off byte-identity holds (HC#1, 38 worker+genes tests still pass).
+TAIL (parent→child weight COPY + checkpoint weight-pointers) folds into
+Step 2/3 — it's just pointing the offspring's `init_weights_path` at the
+parent's existing `registry/weights/<model_id>.pt` (no physical copy) and
+riding the lineage/rotation state. STOPPED here for operator review (the
+brief's first mandatory stop-point).
 
 ## Step 1b — Architecture genes + v2 transformer + policy factory  `[ ]`
 Add the structural genes (`architecture` ∈ {lstm, transformer}; transformer
