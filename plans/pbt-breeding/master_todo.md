@@ -50,24 +50,34 @@ through the real v2 PPO trainer** (buffer hidden state survives); warm-start
 composes with both arches; LSTM factory path byte-identical; fresh blood
 covers both arches. 31 new tests + 152 existing v2 tests pass.
 
-## Step 2 — 3-way breed step  `[ ]`
-New `_breed_next_generation_pbt`: elites preserve (weights+recipe, continue
-training), offspring exploit (inherit top brain + ±20% recipe), immigrants
-explore (inherit-brain + bold recipe, plus the protected from-scratch quota
-with K-gen cull-immunity). Behind `--breeding pbt`; default path untouched.
-GATE: unit tests on the partition (counts, immunity bookkeeping, parent links)
-+ default-off byte-identity (HC#1).
+## Step 2 — 3-way breed step  `[x]`
+**DONE 2026-06-03 — `training_v2/cohort/pbt.py` + runner `--breeding pbt`.**
+Promotion-ladder (the design's refinement of the purpose.md 3-way split):
+`init_pbt_population` (gen-0 fresh blood) + `breed_pbt` (R1 fresh; R2+ = 50%
+promoted elites with weights intact + 50% offspring bred from them via
+`make_offspring` = copy-one + perturb non-structural ±20%, structural frozen
+HC#10; R3 winners FREEZE to a hall-of-fame; R1 absorbs transient slack so each
+gen = exactly n_agents). Behind `--breeding pbt`; GA path byte-identical
+(HC#1). GATE PASSED: `test_v2_pbt_ladder.py` (partition/counts/freeze/lineage/
+parent-links ×13) + `test_v2_pbt_runner.py` (stub-driven run_cohort wiring) +
+28 GA runner tests still pass.
 
-## Step 3 — Day rotation  `[ ]`
-Per-gen training-day sampling from a larger pool + rotating iteration-eval,
-sealed test excluded. Deterministic per (cohort_seed, gen) so the A/B is paired.
-GATE: no sealed-test leak (assert); paired determinism across a re-run.
+## Step 3 — Day rotation  `[x]`
+**DONE 2026-06-03 — `pbt.make_rotations` + runner per-tier day threading.**
+3 random equal i.i.d. folds (6 train / 4 eval), deterministic in cohort_seed
+(paired A/B). Each agent trains on ITS TIER's rotation; `gen_days` = union over
+tiers. GATE PASSED: disjoint folds, deterministic across re-run, no sealed leak
+(`test_v2_pbt_ladder.py::TestMakeRotations`); the runner test confirms R2
+agents train on rotation 2, disjoint from R1's rotation 1.
 
-## Step 4 — Heritability + diversity instrumentation  `[ ]`
-Per-gen metrics: champion-performance reproduction across gens, selection
-spread÷signal, recipe + behavioural diversity, immigrant survival rate. Written
-to the scoreboard/an analysis JSONL.
-GATE: the metrics exist and are readable from a short run.
+## Step 4 — Heritability + diversity instrumentation  `[x]`
+**DONE 2026-06-03 — per-gen `pbt_lineage.jsonl` + `tools/analyze_pbt.py`.**
+The runner writes per-agent lineage/tier/role/score rows each gen; the tool
+computes heritability (lineage score gen→gen+1 ρ), selection spread÷signal,
+lineage diversity (monoculture observable), fresh-blood survival, and the
+architecture leaderboard, with an optional `--ga scoreboard.jsonl` side-by-side.
+GATE PASSED: the runner test asserts the lineage rows; the tool runs on a run's
+JSONL.
 
 ## Step 5 — A/B run + held-out validation  `[ ]`
 PBT vs gene-only GA, same seed + day pool, both judged on the sealed days.

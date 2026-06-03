@@ -127,3 +127,64 @@ discrete-ppo trainer/rollout, multi-day, gates) passes; two schema-count
 guards updated for the 4 new gene keys (39 total).
 
 **Commit:** `pbt-breeding` — see `git log`.
+
+---
+
+## Steps 2-4 — Breed ladder + day rotation + instrumentation ✅ (2026-06-03)
+
+**Built** (`training_v2/cohort/pbt.py`, unit-tested in isolation, then wired
+into `runner.py` behind `--breeding pbt`; GA path byte-identical, HC#1):
+
+- **Day rotation** (`make_rotations`): the non-sealed pool → N random equal
+  i.i.d. folds (train/eval), deterministic in `cohort_seed` (paired A/B).
+- **Offspring** (`make_offspring`): copy ONE winner + perturb only
+  NON-structural recipe ±20%; structural genes (architecture + sizing +
+  `hidden_size`) frozen so warm-start shapes match (HC#10). Pluggable.
+- **Promotion ladder** (`init_pbt_population` / `breed_pbt`): R1 fresh blood;
+  R2+ = 50% promoted elites (own weights, climb to the next unseen rotation) +
+  50% offspring bred from them; R3 winners FREEZE to a hall-of-fame; R1 absorbs
+  the transient pipeline slack so each gen = exactly `n_agents`.
+- **Runner integration**: per-tier rotation days + warm-start `init_weights_path`
+  threaded into BOTH the multiprocess and sequential specs; `gen_days` = union
+  over tiers; same composite-score metric as the GA arm (paired selection);
+  per-gen `pbt_lineage.jsonl`. PBT rejects the GA-only optional machinery
+  (batched/resume/monitor/early-stop/rotating-eval). CLI: `--breeding` + 9
+  `--pbt-*` knobs.
+- **Step 4 analysis** (`tools/analyze_pbt.py`): heritability (lineage score
+  gen→gen+1 ρ), selection spread÷signal, lineage diversity (monoculture
+  observable), fresh-blood survival, architecture leaderboard, optional `--ga`
+  side-by-side.
+
+**Gates — all pass.** `test_v2_pbt_ladder.py` (13: partition/counts/freeze/
+lineage/parent-links + rotation disjoint/deterministic/no-sealed-leak +
+offspring structural-freeze) + `test_v2_pbt_runner.py` (a FAST stub-driven
+`run_cohort(breeding="pbt")` proving gen-0 cold → gen-1 R2 warm-starts from
+real gen-0 weight files on rotation 2, with lineage logging) + 28 GA runner
+tests (byte-identity). **136 PBT + regression tests green.**
+
+**Real end-to-end confirmation.** A tiny multiprocess PBT cohort (4 agents,
+2 gens) trained + bred on real days — including a **transformer fresh-blood
+agent** training through the real multiproc worker (the architecture tournament
+works end-to-end). Gen 0 (4 agents, 1 train day) = 323s wall.
+
+**COMPUTE NOTE (load-bearing for the A/B scale).** The v1-ported transformer
+re-runs the full causal encoder over the ctx buffer EVERY tick, so on CPU
+(the multiprocess path is CPU-only — the GPU isn't shared across N processes)
+a transformer agent-day is ~5-20 min vs ~30-60s for an LSTM. Fresh blood is
+~50% transformer, so the PBT arm is transformer-bottlenecked. The A/B
+(`_scripts/run_ab.ps1`) is therefore sized MODERATE for a first verdict
+(16 agents, 6 gens, 3×5 rotation, ~1.5-2h) and parameterised to scale up.
+
+---
+
+## Step 5 — A/B + held-out verdict  ⏳ (launching)
+
+`plans/pbt-breeding/_scripts/run_ab.ps1`: PBT vs gene-only GA, paired
+`--seed 1234` + same 15-day non-sealed pool + same 16 agents / 6 gens /
+`locked_weighted` selection; sealed May 20-29 excluded from both arms'
+training+selection. Arms train SEQUENTIALLY (no 2×16-worker contention); the
+held-out re-eval on the sealed days runs AFTER all training (free box — never
+alongside training). `analyze_pbt --ga` produces the heritability / selection-
+noise / diversity / architecture-leaderboard comparison; the `*_reeval.log`
+rows give the sealed-day `locked` / `naked` verdict. Results recorded here +
+in `plans/EXPERIMENTS.md` when complete.
