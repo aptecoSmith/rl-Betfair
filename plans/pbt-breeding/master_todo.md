@@ -79,11 +79,21 @@ architecture leaderboard, with an optional `--ga scoreboard.jsonl` side-by-side.
 GATE PASSED: the runner test asserts the lineage rows; the tool runs on a run's
 JSONL.
 
-## Step 5 — A/B run + held-out validation  `[ ]`
-PBT vs gene-only GA, same seed + day pool, both judged on the sealed days.
-DELIVERABLE: `findings.md` — heritability, selection-noise, held-out
-locked_per_std, diversity, wall-clock parity.
-GATE: purpose.md success criteria (a)-(d) evaluated honestly (HC#7).
+## Step 5 — A/B run + held-out validation  `[~]`
+**RUNNING 2026-06-03 (operator pivot to a long autonomous campaign).** Instead
+of the short paired A/B, the operator (away ~18-20h) asked for a CONTINUOUS PBT
+run accumulating a rich R3 leaderboard + a per-model register. Launched
+`plans/pbt-breeding/_scripts/run_pbt_long.ps1` → `registry/pbt_long/`: wrapper
+loops to a ~20h deadline, 16 agents × 25 gens/run, relaunch-on-exit with a new
+seed (resets pool memory + explores new fresh blood), one dir so the
+hall-of-fame + register accumulate. Live `leaderboard.txt` (R3 champions,
+usual columns + `frozen_at`) + `model_register.csv` regenerate every gen. A
+persistent Monitor heartbeats + alerts on stall/OOM. On return: sealed-day
+re-eval of the top champions + `analyze_pbt` → `findings.md` +
+`plans/EXPERIMENTS.md`. The paired A/B harness (`run_ab.ps1`) remains for a
+later head-to-head verdict.
+DELIVERABLE: leaderboard.txt + model_register.csv + (on return) held-out
+locked verdict, heritability, selection-noise, diversity.
 
 ---
 

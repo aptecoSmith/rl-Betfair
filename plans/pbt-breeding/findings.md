@@ -177,14 +177,32 @@ a transformer agent-day is ~5-20 min vs ~30-60s for an LSTM. Fresh blood is
 
 ---
 
-## Step 5 — A/B + held-out verdict  ⏳ (launching)
+## Step 5 — LONG autonomous PBT campaign + leaderboard  ⏳ (running 2026-06-03→04)
 
-`plans/pbt-breeding/_scripts/run_ab.ps1`: PBT vs gene-only GA, paired
-`--seed 1234` + same 15-day non-sealed pool + same 16 agents / 6 gens /
-`locked_weighted` selection; sealed May 20-29 excluded from both arms'
-training+selection. Arms train SEQUENTIALLY (no 2×16-worker contention); the
-held-out re-eval on the sealed days runs AFTER all training (free box — never
-alongside training). `analyze_pbt --ga` produces the heritability / selection-
-noise / diversity / architecture-leaderboard comparison; the `*_reeval.log`
-rows give the sealed-day `locked` / `naked` verdict. Results recorded here +
-in `plans/EXPERIMENTS.md` when complete.
+Operator pivot (away ~18-20h): instead of the short paired A/B, run the PBT
+ladder CONTINUOUSLY to accumulate a rich R3 hall-of-fame, with a viewable
+leaderboard + a per-model parameter register. (The A/B harness `run_ab.ps1`
+remains for a later paired verdict; the short A/B was stopped to free the box.)
+
+**Run:** `plans/pbt-breeding/_scripts/run_pbt_long.ps1` →
+`registry/pbt_long/` (gitignored). A wrapper loops until a ~20h deadline,
+each campaign-run = 16 agents × 25 gens, 3×4 rotation (2 train/2 eval),
+sealed May 20-29 excluded, `locked_weighted` selection, `--parallel-agents
+16`. The wrapper RELAUNCHES on exit with a new seed — a fresh pool resets
+per-worker memory (guards the warm-pool-growth risk) and explores new
+fresh-blood configs; all runs share one dir so the hall-of-fame + register
+APPEND across the campaign.
+
+**Viewable artifacts (regenerated every generation):**
+- `registry/pbt_long/leaderboard.txt` — R3 champions sorted by `locked_pnl`
+  (primary deployment metric), with the datetime each SCORED in R3
+  (`frozen_at`) + locked / naked / locked_share / naked_sd / day_pnl /
+  total_reward / composite / bets / precision / arbs lifecycle (mat/cls/nkd/
+  fc/sc) / pairs / architecture / lr / entropy / lineage.
+- `registry/pbt_long/model_register.csv` — EVERY model trained: full genes +
+  metrics + tier/role/lineage/frozen, for trend/gap mining.
+
+Health: a persistent Monitor heartbeats champions/gen/memory every ~2h and
+alerts on stall/OOM. On the operator's return: stop the campaign, run the
+sealed-day re-eval (`reevaluate_cohort.py`) on the top champions for the
+held-out verdict, write `plans/EXPERIMENTS.md`, update the CLAUDE.md GA note.
