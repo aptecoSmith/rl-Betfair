@@ -56,6 +56,12 @@ from training_v2.cohort.genes import (
     mutate,
     sample_genes,
 )
+from training_v2.cohort.pbt import (
+    PbtConfig,
+    breed_pbt,
+    init_pbt_population,
+    make_rotations,
+)
 from training_v2.cohort.batched_worker import train_cluster_batched
 from training_v2.cohort.multiproc_worker import (
     train_cluster_multiproc,
@@ -767,6 +773,8 @@ def run_cohort(
     seed: int,
     output_dir: Path,
     mutation_rate: float = 0.1,
+    breeding: str = "ga",
+    pbt_config: "PbtConfig | None" = None,
     train_one_agent_fn: Callable[..., AgentResult] = train_one_agent,
     event_emitter: Callable[[dict], None] | None = None,
     reward_overrides: dict | None = None,
@@ -921,6 +929,82 @@ def run_cohort(
             rotating_eval_sample, len(eval_pool),
         )
 
+    # ── PBT promotion ladder setup (pbt-breeding Steps 2-3) ───────────
+    # Opt-in via ``breeding="pbt"``. The GA path (default) is untouched
+    # below (HC#1). PBT carries learned IDENTITY across generations via
+    # warm-start + a day-rotation gauntlet; it has its OWN per-tier eval
+    # and runs a fixed generation budget, so it is deliberately
+    # incompatible with the GA-only optional machinery (reject, don't
+    # silently ignore). ``rotations`` / ``pbt_specs`` stay unused on the
+    # GA path.
+    breeding = str(breeding).lower()
+    if breeding not in ("ga", "pbt"):
+        raise ValueError(f"breeding must be 'ga' or 'pbt', got {breeding!r}")
+    pbt_specs: "list | None" = None
+    pbt_rotations: list = []
+    pbt_hall_of_fame: list = []   # [(spec, result)] R3 champions, frozen
+    pbt_gen_metrics: list = []    # per-gen heritability/diversity rows
+    if breeding == "pbt":
+        _incompat = []
+        if resume_from is not None:
+            _incompat.append("--resume-from")
+        if batched:
+            _incompat.append("--batched")
+        if monitor_days:
+            _incompat.append("--monitor-days")
+        if early_stop_patience > 0:
+            _incompat.append("--early-stop-patience")
+        if rotating_eval_sample > 0:
+            _incompat.append("--rotating-eval-sample")
+        if _incompat:
+            raise ValueError(
+                f"--breeding pbt is incompatible with "
+                f"{', '.join(_incompat)} (PBT uses its own per-rotation "
+                f"eval + a fixed generation budget for a paired A/B).",
+            )
+        if not (parallel_agents and int(parallel_agents) > 0):
+            logger.warning(
+                "--breeding pbt without --parallel-agents runs the SLOW "
+                "sequential path. The multiprocess path (--parallel-agents "
+                "N) is strongly recommended for real runs; sequential is "
+                "fine for tests / tiny smokes.",
+            )
+        if pbt_config is None:
+            pbt_config = PbtConfig(n_agents=int(n_agents))
+        elif int(pbt_config.n_agents) != int(n_agents):
+            raise ValueError(
+                f"pbt_config.n_agents={pbt_config.n_agents} must equal "
+                f"--n-agents={n_agents}.",
+            )
+        pbt_config.validate()
+        # Rotations come from the FULL non-sealed pool the runner selected
+        # (training_days ∪ eval_pool). The sealed final-test days are
+        # excluded by the operator's day selection — never in
+        # training_days/eval_pool — exactly as for the GA arm.
+        nonsealed_pool = sorted(set(training_days) | set(eval_pool))
+        pbt_rotations = make_rotations(
+            nonsealed_pool, cohort_seed=int(seed),
+            n_rotations=pbt_config.n_rotations,
+            train_per_rotation=pbt_config.train_per_rotation,
+            eval_per_rotation=pbt_config.eval_per_rotation,
+        )
+        logger.info(
+            "── PBT ladder: %d agents, %d rotations of %d/%d (train/eval) "
+            "from %d non-sealed days. R2=%d (%d elite), R3=%d (%d elite), "
+            "freeze top-%d of R3, offspring perturb ±%.0f%%. ──",
+            n_agents, pbt_config.n_rotations,
+            pbt_config.train_per_rotation, pbt_config.eval_per_rotation,
+            len(nonsealed_pool), pbt_config.r2_size,
+            pbt_config.promote_from_r1, pbt_config.r3_size,
+            pbt_config.promote_from_r2, pbt_config.freeze_top_r3,
+            pbt_config.perturb_frac * 100.0,
+        )
+        for rot in pbt_rotations:
+            logger.info(
+                "   rotation %d: train=%s eval=%s",
+                rot.index, list(rot.train_days), list(rot.eval_days),
+            )
+
     # ── Initial population (gen 0) OR resume (ga-recipe-search §C) ────
     rng = random.Random(int(seed))
     start_generation = 0
@@ -944,6 +1028,13 @@ def run_cohort(
             start_generation + 1, n_generations, len(cohort),
             _resume.get("run_id"),
         )
+    elif breeding == "pbt":
+        # Generation 0: n_agents fresh-blood lineages, all in tier 1 (the
+        # rookie division). The pipeline fills on later gens as winners
+        # promote to unseen rotations.
+        pbt_specs = init_pbt_population(rng, pbt_config, enabled_set=enabled_set)
+        cohort = [s.genes for s in pbt_specs]
+        parent_ids = [(s.parent_model_id, None) for s in pbt_specs]
     else:
         cohort = [
             sample_genes(rng, enabled_set=enabled_set) for _ in range(n_agents)
@@ -1144,6 +1235,24 @@ def run_cohort(
                 (int(seed) * 1_000_003 + generation * 10_000 + i) & 0x7FFFFFFF
                 for i in range(len(cohort))
             ]
+            # Per-agent train/eval days + warm-start pointers. GA: every
+            # agent trains on the gen's global days, cold-start. PBT: each
+            # agent trains on ITS TIER's rotation, warm-starting from its
+            # parent's on-disk weights (Step 1 ⊕ Steps 2-3).
+            if breeding == "pbt":
+                _agent_train_days = [
+                    list(pbt_rotations[s.tier - 1].train_days)
+                    for s in pbt_specs
+                ]
+                _agent_eval_days = [
+                    list(pbt_rotations[s.tier - 1].eval_days)
+                    for s in pbt_specs
+                ]
+                _agent_init_weights = [s.init_weights_path for s in pbt_specs]
+            else:
+                _agent_train_days = [list(training_days) for _ in cohort]
+                _agent_eval_days = [list(eval_days) for _ in cohort]
+                _agent_init_weights = [None for _ in cohort]
             for idx, genes in enumerate(cohort):
                 assert_in_range(genes)
                 logger.info(
@@ -1201,8 +1310,12 @@ def run_cohort(
                 # deserialises each day at most once over the whole run.
                 # engineer_day is a pure fn of day + cohort-fixed params, so
                 # the shared cache is bit-identical to per-worker engineering.
+                # Union over EVERY agent's train+eval days — for GA this is
+                # just unique(training_days + eval_days); for PBT it spans
+                # all in-use rotations so the cache covers every tier.
                 gen_days = list(dict.fromkeys(
-                    list(training_days) + list(eval_days)))
+                    [d for tr in _agent_train_days for d in tr]
+                    + [d for ev in _agent_eval_days for d in ev]))
                 # shared-memory-day-cache (2026-06-02): on predictors-ON runs
                 # — the OOM case, where each full-obs day's engineer_day DICTS
                 # are ~1 GB duplicated master + N workers — bake the downstream
@@ -1240,8 +1353,9 @@ def run_cohort(
                     specs.append(dict(
                         agent_id=agent_ids_gen[idx],
                         genes=genes,
-                        days_to_train=list(training_days),
-                        eval_days=list(eval_days),
+                        days_to_train=list(_agent_train_days[idx]),
+                        eval_days=list(_agent_eval_days[idx]),
+                        init_weights_path=_agent_init_weights[idx],
                         data_dir=data_dir,
                         device="cpu",       # multiprocess is CPU-parallel
                         seed=per_agent_seeds[idx],
@@ -1370,8 +1484,9 @@ def run_cohort(
                     result = train_one_agent_fn(
                         agent_id=agent_ids_gen[idx],
                         genes=genes,
-                        days_to_train=list(training_days),
-                        eval_days=list(eval_days),
+                        days_to_train=list(_agent_train_days[idx]),
+                        eval_days=list(_agent_eval_days[idx]),
+                        init_weights_path=_agent_init_weights[idx],
                         data_dir=data_dir,
                         device=device,
                         seed=per_agent_seeds[idx],
@@ -1466,6 +1581,22 @@ def run_cohort(
 
             # Sort by composite_score (descending) — equals total_reward
             # when ``maturation_bonus_weight = 0.0`` (byte-identical to
+            # PBT: capture the spec↔result pairing in agent-INDEX order
+            # BEFORE the in-place sort below scrambles it — breed_pbt ranks
+            # within each tier itself.
+            _pbt_pairs_this_gen = (
+                list(zip(pbt_specs, results)) if breeding == "pbt" else None
+            )
+            if _pbt_pairs_this_gen is not None:
+                _write_pbt_lineage(
+                    output_dir / "pbt_lineage.jsonl",
+                    generation=generation,
+                    pairs=_pbt_pairs_this_gen,
+                    score_fn=lambda res: _composite_score(
+                        res.eval, maturation_bonus_weight,
+                        composite_score_mode,
+                    ),
+                )
             # pre-2026-05-04). When > 0 the GA also rewards matured + agent-
             # closed pairs at the operator-specified £-scale. Ties are
             # broken by day_pnl (descending) so a higher cash-P&L agent
@@ -1662,15 +1793,41 @@ def run_cohort(
 
             # ── Breed next generation if any left ─────────────────
             if generation < n_generations - 1:
-                cohort, parent_ids = _breed_next_generation(
-                    parents_ranked=results,
-                    rng=rng,
-                    n_agents=n_agents,
-                    mutation_rate=mutation_rate,
-                    model_store=model_store,
-                    next_generation=generation + 1,
-                    enabled_set=enabled_set,
-                )
+                if breeding == "pbt":
+                    def _pbt_score(res):
+                        return _composite_score(
+                            res.eval, maturation_bonus_weight,
+                            composite_score_mode,
+                        )
+                    pbt_specs, _frozen = breed_pbt(
+                        _pbt_pairs_this_gen, rng, pbt_config,
+                        score_fn=_pbt_score, enabled_set=enabled_set,
+                    )
+                    pbt_hall_of_fame.extend(_frozen)
+                    cohort = [s.genes for s in pbt_specs]
+                    parent_ids = [
+                        (s.parent_model_id, None) for s in pbt_specs
+                    ]
+                    if _frozen:
+                        logger.info(
+                            "PBT: %d R3 champion(s) FROZEN to the "
+                            "hall-of-fame (total %d). Winning "
+                            "architectures: %s",
+                            len(_frozen), len(pbt_hall_of_fame),
+                            ", ".join(sorted({
+                                sp.genes.architecture for sp, _ in _frozen
+                            })),
+                        )
+                else:
+                    cohort, parent_ids = _breed_next_generation(
+                        parents_ranked=results,
+                        rng=rng,
+                        n_agents=n_agents,
+                        mutation_rate=mutation_rate,
+                        model_store=model_store,
+                        next_generation=generation + 1,
+                        enabled_set=enabled_set,
+                    )
 
     cohort_wall = time.perf_counter() - cohort_t0
     logger.info(
@@ -1784,6 +1941,42 @@ def _breed_next_generation(
             ))
 
     return next_cohort, next_parent_ids
+
+
+def _write_pbt_lineage(
+    path: "Path",
+    *,
+    generation: int,
+    pairs: list,
+    score_fn,
+) -> None:
+    """Append one JSONL row per agent this generation — the raw lineage /
+    tier / role / score record Step 4's heritability + diversity analysis
+    reads (the scoreboard carries genes but not lineage_id / tier / role).
+    """
+    with open(path, "a", encoding="utf-8") as f:
+        for spec, res in pairs:
+            f.write(json.dumps({
+                "generation": int(generation),
+                "agent_id": getattr(res, "agent_id", None),
+                "model_id": getattr(res, "model_id", None),
+                "lineage_id": spec.lineage_id,
+                "tier": int(spec.tier),
+                "role": spec.role,
+                "rotations_seen": sorted(int(r) for r in spec.rotations_seen),
+                "architecture": str(spec.genes.architecture),
+                "hidden_size": int(spec.genes.hidden_size),
+                "transformer_depth": int(spec.genes.transformer_depth),
+                "transformer_heads": int(spec.genes.transformer_heads),
+                "transformer_ctx_ticks": int(spec.genes.transformer_ctx_ticks),
+                "init_weights_path": spec.init_weights_path,
+                "parent_model_id": spec.parent_model_id,
+                "score": float(score_fn(res)),
+                "locked_pnl": float(getattr(res.eval, "locked_pnl", 0.0)),
+                "naked_pnl": float(getattr(res.eval, "naked_pnl", 0.0)),
+                "day_pnl": float(getattr(res.eval, "day_pnl", 0.0)),
+                "total_reward": float(getattr(res.eval, "total_reward", 0.0)),
+            }) + "\n")
 
 
 def _make_genetic_event(
@@ -2157,6 +2350,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--mutation-rate", type=float, default=0.1,
         help="Per-gene mutation probability for breeding. Default 0.1.",
     )
+    # ── PBT promotion ladder (pbt-breeding) ──────────────────────────
+    p.add_argument(
+        "--breeding", choices=["ga", "pbt"], default="ga",
+        help=(
+            "Breeding mechanism. 'ga' (default) = the gene-only GA "
+            "(re-trains from scratch each gen; byte-identical to before). "
+            "'pbt' = Population-Based-Training promotion ladder: warm-start "
+            "weight inheritance + a day-rotation gauntlet (fresh blood -> "
+            "rotation 1; winning earns the next unseen rotation; R3 winners "
+            "freeze to a hall-of-fame). Requires --parallel-agents > 0 and "
+            "is incompatible with --batched / --resume-from / --monitor-days "
+            "/ --early-stop-patience / --rotating-eval-sample."
+        ),
+    )
+    p.add_argument("--pbt-rotations", type=int, default=3,
+                   help="PBT: number of day-fold rotations. Default 3.")
+    p.add_argument("--pbt-train-per-rotation", type=int, default=6,
+                   help="PBT: train days per rotation. Default 6.")
+    p.add_argument("--pbt-eval-per-rotation", type=int, default=4,
+                   help="PBT: held-out eval days per rotation. Default 4.")
+    p.add_argument("--pbt-r2-size", type=int, default=10,
+                   help="PBT: steady-state tier-2 size. Default 10.")
+    p.add_argument("--pbt-r3-size", type=int, default=6,
+                   help="PBT: steady-state tier-3 size. Default 6.")
+    p.add_argument("--pbt-promote-from-r1", type=int, default=5,
+                   help="PBT: top-K of R1 promoted to R2 elites. Default 5.")
+    p.add_argument("--pbt-promote-from-r2", type=int, default=3,
+                   help="PBT: top-K of R2 promoted to R3 elites. Default 3.")
+    p.add_argument("--pbt-freeze-top-r3", type=int, default=3,
+                   help="PBT: top-K of R3 frozen to hall-of-fame/gen. Default 3.")
+    p.add_argument("--pbt-perturb-frac", type=float, default=0.20,
+                   help="PBT: offspring recipe perturbation ±frac. Default 0.20.")
     p.add_argument(
         "--emit-websocket", action="store_true",
         help=(
@@ -2872,6 +3097,21 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             output_dir=Path(args.output_dir),
             mutation_rate=args.mutation_rate,
+            breeding=args.breeding,
+            pbt_config=(
+                PbtConfig(
+                    n_agents=int(args.n_agents),
+                    n_rotations=int(args.pbt_rotations),
+                    train_per_rotation=int(args.pbt_train_per_rotation),
+                    eval_per_rotation=int(args.pbt_eval_per_rotation),
+                    r2_size=int(args.pbt_r2_size),
+                    r3_size=int(args.pbt_r3_size),
+                    promote_from_r1=int(args.pbt_promote_from_r1),
+                    promote_from_r2=int(args.pbt_promote_from_r2),
+                    freeze_top_r3=int(args.pbt_freeze_top_r3),
+                    perturb_frac=float(args.pbt_perturb_frac),
+                ) if args.breeding == "pbt" else None
+            ),
             event_emitter=emitter,
             reward_overrides=reward_overrides or None,
             enabled_set=enabled_set,
