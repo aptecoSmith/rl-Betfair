@@ -172,3 +172,24 @@ Corrections this forces:
 **Unified conclusion:** the box is CPU-core-bound at the R5 sweet spot; nothing
 (threads or GPU) accelerates the per-tick batch=1 work without contending for
 cores that are already fully employed. **Pure R5, `--big-model-threads 1`.**
+
+---
+
+## CORRECTION (2026-06-04) — the "86–97% LightGBM floor" above is wrong
+
+A cached-path full-agent profile (`_measure/profile_cached_agent.py`,
+LSTM-128 lean-obs, day 2026-04-10) showed the predictor/scorer is NOT 86–97%
+of the agent-day. The per-RACE race-outcome predictor + base `engineer_day`
+features DO bake into static_obs (~10 s saved live→cached), but the per-TICK
+direction (price-mover) predictor + its scorer FeatureExtractor run live even
+on the cached path: **~24%** of the agent-day, not 86–97%. The original
+number took a no-cache scorer profile and applied it to a cache-on agent-day.
+
+Real split: forward+update (GPU-able; biggest single bucket; DOMINANT for a
+big transformer) > predictor/scorer ~24% (CPU) > env-sim ~16% > per-tick
+Python loop. This does NOT reopen the GPU lane for the SMALL (ctx<=64)
+transformers the campaign sampled (forward still ~4%), but it DOES validate
+it for big-ctx (>=128) transformers (ctx256 forward GPU 6.3×) — now built as
+`--gpu-policy-lane`. The two CPU levers surfaced (native-compile the
+direction predictor ~6–10%; optimise the scorer FeatureExtractor ~14%) are
+logged in `plans/EXPLORATIONS.md` (2026-06-04).

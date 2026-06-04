@@ -89,10 +89,13 @@ class TestFreshBloodSamplesArchitecture:
         # (lean<->full changes obs_dim -> weight shapes, breaks warm-start).
         assert "predictor_lean_obs" in ARCHITECTURE_GENE_NAMES
 
-    def test_lstm_fresh_blood_can_go_larger_transformer_capped(self):
+    def test_lstm_fresh_blood_large_transformer_to_512_on_gpu_lane(self):
         """Fresh-blood LSTMs may draw large hidden sizes (512/1024); a
-        transformer's d_model (hidden_size) stays <= 256 for CPU. The
-        gene-only GA is unchanged (64/128/256 only) -> byte-identity."""
+        transformer's d_model (hidden_size) now reaches 512 (pbt-gpu-forward:
+        big-ctx transformers train on the GPU lane, so the prior CPU-bound
+        256 cap is lifted to 512). 1024 stays LSTM-only (d_model=1024
+        attention is heavy even on GPU). The gene-only GA is unchanged
+        (64/128/256 only) -> byte-identity."""
         from training_v2.cohort.genes import sample_genes
         rng = random.Random(13)
         lstm_h, tf_h = set(), set()
@@ -101,10 +104,34 @@ class TestFreshBloodSamplesArchitecture:
             (lstm_h if g.architecture == "lstm" else tf_h).add(g.hidden_size)
             assert_in_range(g)  # the widened _VALID set must accept it
         assert lstm_h & {512, 1024}, f"LSTM never went large: {lstm_h}"
-        assert tf_h <= {64, 128, 256}, f"transformer d_model uncapped: {tf_h}"
+        assert 512 in tf_h, f"transformer never reached 512: {tf_h}"
+        assert tf_h <= {64, 128, 256, 512}, f"transformer d_model > 512: {tf_h}"
         # gene-only GA stays at the original sizes (byte-identity).
         ga = {sample_genes(random.Random(s)).hidden_size for s in range(80)}
         assert ga <= {64, 128, 256}, ga
+
+    def test_transformer_config_genes_drawn_and_structural(self):
+        """pbt-gpu-forward: fresh-blood transformers draw transformer_ffn_mult
+        {2,4} and (sampling-gated) transformer_pos_encoding; both are
+        STRUCTURAL (frozen per lineage — they change weight shapes / the
+        encoder module set, so warm-start must not cross them). depth now
+        reaches 4/6 for the GPU lane."""
+        rng = random.Random(21)
+        ffn, pos, depth = set(), set(), set()
+        for _ in range(400):
+            g = sample_fresh_blood_genes(rng)
+            assert_in_range(g)
+            if g.architecture == "transformer":
+                ffn.add(g.transformer_ffn_mult)
+                pos.add(g.transformer_pos_encoding)
+                depth.add(g.transformer_depth)
+        assert ffn == {2, 4}, f"ffn_mult not fully sampled: {ffn}"
+        # "rope" is sampling-gated until the policy implements it (task #8),
+        # so fresh blood currently only draws "learned".
+        assert pos == {"learned"}, f"pos_encoding sampled rope too early: {pos}"
+        assert {4, 6} & depth, f"transformer depth never went deep: {depth}"
+        assert "transformer_ffn_mult" in ARCHITECTURE_GENE_NAMES
+        assert "transformer_pos_encoding" in ARCHITECTURE_GENE_NAMES
 
     def test_transformer_d_model_divisible_by_heads(self):
         # Every (hidden_size, n_heads) combo the sampler can draw must

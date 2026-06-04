@@ -119,6 +119,76 @@ class TestArchName:
         assert a != b
 
 
+class TestTransformerConfigGenes:
+    """pbt-gpu-forward transformer-config genes: transformer_ffn_mult {2,4}
+    and transformer_pos_encoding {learned, rope}. The arch_name suffixes
+    ONLY for non-default values so existing ffn=2/learned champions keep
+    their exact pre-gene hash (warm-load intact), while ffn=4 / rope —
+    which change weight shapes / the encoder module set — carry a distinct
+    hash the registry never cross-loads."""
+
+    def _ffn_width(self, p):
+        return p.transformer_encoder.layers[0].linear1.out_features
+
+    def test_ffn2_learned_name_is_byte_identical_no_suffix(self):
+        # The default (ffn_mult=2, pos="learned") must reproduce the exact
+        # pre-gene transformer hash — no suffix — so a pre-gene champion
+        # warm-loads under the same name.
+        name = policy_arch_name(_genes(
+            "transformer", 256, transformer_depth=3, transformer_heads=8,
+            transformer_ctx_ticks=256,
+        ))
+        assert name == "v2_discrete_ppo_transformer_d256_L3_h8_ctx256"
+
+    def test_ffn4_gets_distinct_name_suffix(self):
+        name = policy_arch_name(_genes(
+            "transformer", 256, transformer_depth=3, transformer_heads=8,
+            transformer_ctx_ticks=256, transformer_ffn_mult=4,
+        ))
+        assert name == "v2_discrete_ppo_transformer_d256_L3_h8_ctx256_ffn4"
+
+    def test_rope_gets_distinct_name_suffix(self):
+        name = policy_arch_name(_genes(
+            "transformer", 256, transformer_depth=3, transformer_heads=8,
+            transformer_ctx_ticks=256, transformer_pos_encoding="rope",
+        ))
+        assert name == "v2_discrete_ppo_transformer_d256_L3_h8_ctx256_posrope"
+
+    def test_ffn2_dim_feedforward_byte_identical(self):
+        # ffn_mult=2 reproduces the old max(d_model*2, actor_mlp_hidden=64)
+        # = d_model*2 exactly (64 never binds for any transformer d_model).
+        p = build_policy(
+            _genes("transformer", 256, transformer_depth=2,
+                   transformer_heads=8, transformer_ctx_ticks=64),
+            obs_dim=64, action_space=_space(),
+        )
+        assert self._ffn_width(p) == 512  # 256 * 2
+
+    def test_ffn4_doubles_dim_feedforward(self):
+        p = build_policy(
+            _genes("transformer", 256, transformer_depth=2,
+                   transformer_heads=8, transformer_ctx_ticks=64,
+                   transformer_ffn_mult=4),
+            obs_dim=64, action_space=_space(),
+        )
+        assert self._ffn_width(p) == 1024  # 256 * 4
+        # ...and it still forwards.
+        out = p(torch.randn(2, 64), hidden_state=p.init_hidden(2))
+        assert out.logits.shape[0] == 2
+
+    def test_rope_is_gated_and_raises_until_implemented(self):
+        # The gene + valid set are in place but the custom RoPE attention
+        # is not built yet (task #8). Sampling is gated to "learned", so a
+        # hand-built rope gene must fail LOUDLY, not silently fall back.
+        with pytest.raises(NotImplementedError):
+            build_policy(
+                _genes("transformer", 128, transformer_depth=2,
+                       transformer_heads=4, transformer_ctx_ticks=32,
+                       transformer_pos_encoding="rope"),
+                obs_dim=64, action_space=_space(),
+            )
+
+
 class TestFactoryComposesWithWarmStart:
     """Build → save → build → warm-start, through the factory, for BOTH
     architectures: the forward reproduces (Step 1 ⊕ Step 1b)."""

@@ -84,6 +84,8 @@ def build_policy(
             depth=int(getattr(genes, "transformer_depth", 2)),
             n_heads=int(getattr(genes, "transformer_heads", 4)),
             ctx_ticks=int(getattr(genes, "transformer_ctx_ticks", 32)),
+            ffn_mult=int(getattr(genes, "transformer_ffn_mult", 2)),
+            pos_encoding=str(getattr(genes, "transformer_pos_encoding", "learned")),
             **common,
         )
     raise ValueError(
@@ -103,10 +105,23 @@ def policy_arch_name(genes) -> str:
     """
     arch = str(getattr(genes, "architecture", "lstm"))
     if arch == "transformer":
-        return (
+        name = (
             f"v2_discrete_ppo_transformer_d{int(genes.hidden_size)}"
             f"_L{int(genes.transformer_depth)}"
             f"_h{int(genes.transformer_heads)}"
             f"_ctx{int(genes.transformer_ctx_ticks)}"
         )
+        # Suffix ONLY for non-default values so existing ffn=2 / learned
+        # transformer champions keep their exact pre-gene hash (warm-load
+        # intact); ffn=4 and rope DO change the weight shapes / module set,
+        # so they MUST carry a distinct hash (the registry never cross-loads
+        # incompatible shapes). The dataclass defaults are ffn_mult=2,
+        # pos_encoding="learned".
+        ffn_mult = int(getattr(genes, "transformer_ffn_mult", 2))
+        if ffn_mult != 2:
+            name += f"_ffn{ffn_mult}"
+        pos_encoding = str(getattr(genes, "transformer_pos_encoding", "learned"))
+        if pos_encoding != "learned":
+            name += f"_pos{pos_encoding}"
+        return name
     return f"v2_discrete_ppo_lstm_h{int(genes.hidden_size)}"

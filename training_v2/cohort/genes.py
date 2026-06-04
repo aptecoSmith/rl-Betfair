@@ -58,10 +58,12 @@ HIDDEN_SIZE_VALID: tuple[int, ...] = (64, 128, 256, 512, 1024)
 # Fresh-blood LSTM sampling: larger sizes allowed (LSTM is cheap per tick on
 # CPU vs the transformer's per-tick encoder). NB larger = slower gens.
 HIDDEN_SIZE_LSTM_SAMPLE: tuple[int, ...] = (64, 128, 256, 512, 1024)
-# Fresh-blood transformer d_model: CAPPED at 256 (the multiprocess path is
-# CPU-only; a big transformer already gates whole generations -- a bigger
-# d_model would make it worse). Every value divides the head counts {2,4,8}.
-HIDDEN_SIZE_TRANSFORMER_SAMPLE: tuple[int, ...] = (64, 128, 256)
+# Fresh-blood transformer d_model. Un-capped to 512 (2026-06-04) for the GPU
+# lane — a d512 transformer is affordable on GPU (the lane routes its
+# forward+update to CUDA). Every value divides the head counts {2,4,8} (512%8=0)
+# so d_model % n_heads == 0 always holds. d512 raises GPU memory (the semaphore
+# caps concurrency); 1024 left out (the activations balloon as O(mb*heads*ctx^2)).
+HIDDEN_SIZE_TRANSFORMER_SAMPLE: tuple[int, ...] = (64, 128, 256, 512)
 
 
 # ── Architecture genes (pbt-breeding Step 1b, 2026-06-03) ─────────────────
@@ -77,9 +79,17 @@ ARCHITECTURE_CHOICES: tuple[str, ...] = ("lstm", "transformer")
 # ``hidden_size`` doubles as the transformer's ``d_model``; every
 # (hidden_size, n_heads) pair from the choice lists divides evenly
 # (64/128/256 % 2/4/8 == 0) so d_model % n_heads == 0 always holds.
-TRANSFORMER_DEPTH_CHOICES: tuple[int, ...] = (1, 2, 3)
+TRANSFORMER_DEPTH_CHOICES: tuple[int, ...] = (1, 2, 3, 4, 6)
 TRANSFORMER_HEADS_CHOICES: tuple[int, ...] = (2, 4, 8)
 TRANSFORMER_CTX_TICKS_CHOICES: tuple[int, ...] = (32, 64, 128, 256)
+# FFN expansion: dim_feedforward = mult * d_model (gene 2026-06-04). 2x is the
+# current narrow default; 4x is the standard transformer width (more per-token
+# capacity, more cost). STRUCTURAL (weight shapes) -> frozen per lineage.
+TRANSFORMER_FFN_MULT_CHOICES: tuple[int, ...] = (2, 4)
+# Positional encoding (gene 2026-06-04): "learned" = the current absolute
+# nn.Embedding; "rope" = rotary RELATIVE encoding (better for a time-series
+# where "N ticks ago" matters). STRUCTURAL (different params) -> frozen.
+TRANSFORMER_POS_ENCODING_CHOICES: tuple[str, ...] = ("learned", "rope")
 
 # Fresh-blood SAMPLING (2026-06-04, UN-CAPPED 2026-06-04 for the GPU lane).
 # History: a ctx256/depth3 transformer took ~74 min/agent ON CPU and gated the
@@ -89,8 +99,15 @@ TRANSFORMER_CTX_TICKS_CHOICES: tuple[int, ...] = (32, 64, 128, 256)
 # the ctx256 forward), collapsing their agent-day toward the env-sim floor —
 # LSTM-comparable. So fresh blood may again draw the full range; the lane keeps
 # the big ones affordable while small transformers + LSTMs stay on pure CPU.
-TRANSFORMER_DEPTH_SAMPLE: tuple[int, ...] = (1, 2, 3)
+TRANSFORMER_DEPTH_SAMPLE: tuple[int, ...] = (1, 2, 3, 4, 6)
 TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64, 128, 256)
+TRANSFORMER_FFN_MULT_SAMPLE: tuple[int, ...] = (2, 4)
+# "rope" stays OUT of sampling until the policy implements the custom RoPE
+# attention (task #8) — gene infra + valid CHOICES are in place; flip this to
+# ("learned", "rope") the moment RoPE is built + smoke-ablated, and the campaign
+# picks it up on its next relaunch. Keeps fresh blood from drawing a path the
+# policy can't build yet.
+TRANSFORMER_POS_ENCODING_SAMPLE: tuple[str, ...] = ("learned",)
 
 # GPU policy lane (plans/pbt-gpu-forward, 2026-06-04). A transformer whose
 # context window is at least this routes its policy FORWARD + batched PPO
@@ -98,6 +115,35 @@ TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64, 128, 256)
 # — the batch=1 forward is launch-bound on GPU (measured: ctx64 GPU ~= CPU; the
 # LSTM's batch=1 GEMV loses on GPU), so they stay on the pure-CPU R5 path.
 GPU_LANE_MIN_CTX: int = 128
+
+# ── Transformer size spec for the GPU lane (2026-06-04) ───────────────────────
+# GRADUATE TO GPU: architecture == transformer AND ctx_ticks >= GPU_LANE_MIN_CTX
+#   (128). Keyed on ctx — the dominant O(ctx^2) attention cost. ctx 32/64
+#   transformers + EVERY LSTM stay CPU (batch=1 forward is launch-bound on GPU).
+# CEILING on ctx = 256. Races are ~150-250 ticks, so ctx256 already spans the
+#   FULL race; ctx > 256 is just padding, no signal gain. Do not raise it.
+# ROOM TO GROW with the lane is d_model + depth (NOT ctx). MEASURED:
+#   ctx256/d256/depth3/heads8 = ~200s/agent-day on GPU, ~4GB (~= a full-obs
+#   LSTM). CONSERVATIVE MAX to explore next: ctx256, d_model 512, depth 4-6,
+#   heads 8-16 (est ~1.5-2x -> ~300-450s; beyond d512/depth6 ~600-800s starts
+#   to gate gens). Only ctx256/d256/depth3 is measured — smoke-bench a bigger
+#   build (plans/pbt-gpu-forward/_measure/bench_ctx256_threads.py) before a
+#   campaign. To enable: widen HIDDEN_SIZE_TRANSFORMER_SAMPLE (caps d_model at
+#   256 today) to add 512, and TRANSFORMER_DEPTH_SAMPLE/_CHOICES for depth > 3.
+#
+# NON-SIZE CONFIG LEVERS (operator 2026-06-04 — make these genes so the
+#   gauntlet explores them; both currently HARDCODED in DiscreteTransformerPolicy):
+#   * FFN ratio: dim_feedforward is 2x d_model today (vs the standard 4x) — a
+#     per-token capacity knob -> `transformer_ffn_mult` gene {2, 4}. STRUCTURAL
+#     (changes weight shapes) -> frozen per lineage, in ARCHITECTURE_GENE_NAMES.
+#   * Positional encoding: learned-absolute nn.Embedding today. RELATIVE
+#     encodings (RoPE / ALiBi) usually beat absolute on time-series (price
+#     dynamics care about "N ticks ago") -> `transformer_pos_encoding` gene
+#     {learned, rope}. STRUCTURAL (different params) -> frozen per lineage.
+#     RoPE needs a custom attention path -> build carefully + smoke-ablate.
+#   Plus KV-cache the rollout (efficiency, not a gene) — O(ctx^2)/tick re-encode
+#     is the dominant ctx256 forward cost; pbt-gpu-forward flagged it for ctx>=256.
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def is_gpu_lane_eligible(genes) -> bool:
@@ -119,6 +165,8 @@ ARCHITECTURE_GENE_NAMES: frozenset[str] = frozenset({
     "transformer_depth",
     "transformer_heads",
     "transformer_ctx_ticks",
+    "transformer_ffn_mult",      # FFN width -> weight shapes (structural)
+    "transformer_pos_encoding",  # learned vs RoPE -> different params (structural)
     # Obs representation is structural too (different obs_dim/runner_dim ->
     # different weight shapes -> warm-start can't cross it). Sampled at
     # fresh-blood birth, frozen for the lineage, never perturbed in breeding.
@@ -455,6 +503,8 @@ class CohortGenes:
     transformer_depth: int = 2
     transformer_heads: int = 4
     transformer_ctx_ticks: int = 32
+    transformer_ffn_mult: int = 2          # dim_feedforward = mult * d_model
+    transformer_pos_encoding: str = "learned"   # "learned" | "rope"
     # Predictor obs representation — STRUCTURAL (changes obs_dim + runner_dim
     # -> weight shapes, so frozen within a lineage). A fresh-blood OPTION so
     # the gauntlet explores BOTH the lean predictor obs (~370-d, well-scaled,
@@ -520,6 +570,8 @@ class CohortGenes:
             "transformer_depth": int(self.transformer_depth),
             "transformer_heads": int(self.transformer_heads),
             "transformer_ctx_ticks": int(self.transformer_ctx_ticks),
+            "transformer_ffn_mult": int(self.transformer_ffn_mult),
+            "transformer_pos_encoding": str(self.transformer_pos_encoding),
             "predictor_lean_obs": bool(self.predictor_lean_obs),
         }
 
@@ -609,6 +661,10 @@ def _sample_field(rng: random.Random, field_name: str):
         return 4
     if field_name == "transformer_ctx_ticks":
         return 32
+    if field_name == "transformer_ffn_mult":
+        return 2
+    if field_name == "transformer_pos_encoding":
+        return "learned"
     if field_name == "predictor_lean_obs":
         return False
     raise KeyError(f"Unknown gene field: {field_name!r}")
@@ -644,6 +700,10 @@ def _sample_architecture_field(rng: random.Random, field_name: str):
         return int(rng.choice(TRANSFORMER_HEADS_CHOICES))
     if field_name == "transformer_ctx_ticks":
         return int(rng.choice(TRANSFORMER_CTX_TICKS_SAMPLE))
+    if field_name == "transformer_ffn_mult":
+        return int(rng.choice(TRANSFORMER_FFN_MULT_SAMPLE))
+    if field_name == "transformer_pos_encoding":
+        return str(rng.choice(TRANSFORMER_POS_ENCODING_SAMPLE))
     if field_name == "predictor_lean_obs":
         # ~50/50 lean vs full so the gauntlet explores both representations.
         return bool(rng.random() < 0.5)
@@ -841,6 +901,16 @@ def assert_in_range(genes: CohortGenes) -> None:
         raise ValueError(
             f"transformer_ctx_ticks {genes.transformer_ctx_ticks} not in "
             f"{TRANSFORMER_CTX_TICKS_CHOICES}",
+        )
+    if genes.transformer_ffn_mult not in TRANSFORMER_FFN_MULT_CHOICES:
+        raise ValueError(
+            f"transformer_ffn_mult {genes.transformer_ffn_mult} not in "
+            f"{TRANSFORMER_FFN_MULT_CHOICES}",
+        )
+    if genes.transformer_pos_encoding not in TRANSFORMER_POS_ENCODING_CHOICES:
+        raise ValueError(
+            f"transformer_pos_encoding {genes.transformer_pos_encoding!r} not in "
+            f"{TRANSFORMER_POS_ENCODING_CHOICES}",
         )
     if not isinstance(genes.predictor_lean_obs, bool):
         raise ValueError(

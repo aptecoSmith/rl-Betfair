@@ -357,7 +357,7 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_40_fields(self):
+    def test_to_dict_serialises_all_42_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
@@ -368,8 +368,10 @@ class TestPhase5Genes:
         # (direction_gate_enabled) + 1 Phase-14 S06
         # (direction_gate_warmup_eps) + 4 pbt-breeding architecture
         # (architecture + transformer depth/heads/ctx_ticks) + 1 pbt
-        # predictor_lean_obs structural gene = 40.
-        assert len(d) == 40
+        # predictor_lean_obs structural gene + 2 pbt-gpu-forward
+        # transformer-config genes (transformer_ffn_mult +
+        # transformer_pos_encoding) = 42.
+        assert len(d) == 42
         # Architecture genes default to the LSTM schema under the base
         # sampler (byte-identity with the gene-only GA — only
         # sample_fresh_blood_genes draws across architectures).
@@ -377,6 +379,10 @@ class TestPhase5Genes:
         assert d["transformer_depth"] == 2
         assert d["transformer_heads"] == 4
         assert d["transformer_ctx_ticks"] == 32
+        # The two new transformer-config genes pin to their defaults under
+        # the base sampler (GA byte-identity): ffn_mult=2, pos="learned".
+        assert d["transformer_ffn_mult"] == 2
+        assert d["transformer_pos_encoding"] == "learned"
         assert d["predictor_lean_obs"] is False
         for name in PHASE5_GENE_NAMES:
             assert name in d

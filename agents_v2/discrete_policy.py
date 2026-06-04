@@ -1482,6 +1482,8 @@ class DiscreteTransformerPolicy(DiscreteLSTMPolicy):
         depth: int = 2,
         n_heads: int = 4,
         ctx_ticks: int = 32,
+        ffn_mult: int = 2,
+        pos_encoding: str = "learned",
         runner_embed_dim: int | None = None,
         actor_mlp_hidden: int | None = None,
         direction_gate_enabled: bool = False,
@@ -1519,6 +1521,26 @@ class DiscreteTransformerPolicy(DiscreteLSTMPolicy):
         self.ctx_ticks = int(ctx_ticks)
         self.n_heads = int(n_heads)
         self.depth = int(depth)
+        self.ffn_mult = int(ffn_mult)
+        self.pos_encoding = str(pos_encoding)
+        if self.ffn_mult <= 0:
+            raise ValueError(f"ffn_mult must be positive, got {ffn_mult!r}")
+        if self.pos_encoding not in ("learned", "rope"):
+            raise ValueError(
+                f"pos_encoding must be 'learned' or 'rope', got "
+                f"{pos_encoding!r}",
+            )
+        if self.pos_encoding == "rope":
+            # Gene infra + valid set are in place, but the custom RoPE
+            # attention block is not built yet (task #8). Sampling is gated
+            # to "learned" in genes.py so fresh blood never reaches here;
+            # this guard turns a hand-built rope gene into a loud failure
+            # rather than a silent learned-fallback.
+            raise NotImplementedError(
+                "transformer_pos_encoding='rope' is not implemented yet — "
+                "the custom RoPE attention block is the next build (task #8). "
+                "Sampling is gated to 'learned' until then.",
+            )
         if self.ctx_ticks <= 0:
             raise ValueError(f"ctx_ticks must be positive, got {ctx_ticks!r}")
         if self.depth <= 0:
@@ -1536,7 +1558,7 @@ class DiscreteTransformerPolicy(DiscreteLSTMPolicy):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.d_model,
             nhead=self.n_heads,
-            dim_feedforward=max(self.d_model * 2, self.actor_mlp_hidden),
+            dim_feedforward=max(self.d_model * self.ffn_mult, self.actor_mlp_hidden),
             dropout=0.0,
             batch_first=True,
             activation="gelu",
