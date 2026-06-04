@@ -1048,6 +1048,44 @@ def load_warm_start_weights(
     policy.load_state_dict(state_dict, strict=True)
 
 
+def _load_bc_oracle_or_skip(
+    *,
+    dates: list[str],
+    data_dir: Path,
+    obs_dim: int,
+    agent_id: str,
+) -> list | None:
+    """Load BC oracle samples, or return ``None`` (skip BC) when the oracle's
+    obs config doesn't match this agent's ``obs_dim``.
+
+    The oracle cache is scanned at ONE obs config (one ``obs_dim``).
+    ``load_oracle_samples_for_dates`` does a STRICT obs_dim check and RAISES
+    ``ValueError`` on a mismatch. An agent whose obs config differs — e.g. a
+    lean-obs fresh-blood lineage (``obs_dim`` 574) when only a full-obs oracle
+    (2254) exists — must therefore SKIP BC gracefully, NOT crash the worker.
+    Returns ``None`` on mismatch so the caller falls through to its
+    "no samples -> skip BC" path; the agent still trains via PPO (+ warm-start
+    for non-fresh lineages). pbt-breeding 2026-06-04: a lean agent crashed the
+    multiprocess pool here ("Cache obs_dim=2254 but caller expects 574").
+    Guarded by ``tests/test_v2_bc_obs_dim_mismatch.py``.
+    """
+    try:
+        return load_oracle_samples_for_dates(
+            dates=list(dates),
+            data_dir=data_dir,
+            expected_obs_dim=int(obs_dim),
+        )
+    except ValueError as err:
+        logger.warning(
+            "Agent %s: BC oracle obs_dim mismatch (%s) — this agent's obs "
+            "config (obs_dim=%d) has no matching oracle cache; SKIPPING BC "
+            "(it still trains via PPO + warm-start). Scan a matching oracle "
+            "to enable BC for this obs config.",
+            agent_id, err, int(obs_dim),
+        )
+        return None
+
+
 # ── Main entry point ────────────────────────────────────────────────────
 
 
@@ -1483,10 +1521,11 @@ def train_one_agent(
         # when no override (gene default already in place).
         if bc_target_entropy_warmup_eps_override is not None:
             trainer._bc_warmup_eps = bc_warmup_eps
-        bc_samples = load_oracle_samples_for_dates(
+        bc_samples = _load_bc_oracle_or_skip(
             dates=list(days_to_train),
             data_dir=data_dir,
-            expected_obs_dim=int(shim.obs_dim),
+            obs_dim=int(shim.obs_dim),
+            agent_id=str(agent_id),
         )
         # input_norm: set per-dim standardization stats from the BC oracle
         # obs BEFORE BC + PPO (so the LSTM trains on normalized obs). Only
