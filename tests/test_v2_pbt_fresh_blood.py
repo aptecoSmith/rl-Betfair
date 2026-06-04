@@ -126,9 +126,8 @@ class TestFreshBloodSamplesArchitecture:
                 pos.add(g.transformer_pos_encoding)
                 depth.add(g.transformer_depth)
         assert ffn == {2, 4}, f"ffn_mult not fully sampled: {ffn}"
-        # "rope" is sampling-gated until the policy implements it (task #8),
-        # so fresh blood currently only draws "learned".
-        assert pos == {"learned"}, f"pos_encoding sampled rope too early: {pos}"
+        # Both positional schemes are live (task #8 — RoPE built).
+        assert pos == {"learned", "rope"}, f"pos_encoding not fully sampled: {pos}"
         assert {4, 6} & depth, f"transformer depth never went deep: {depth}"
         assert "transformer_ffn_mult" in ARCHITECTURE_GENE_NAMES
         assert "transformer_pos_encoding" in ARCHITECTURE_GENE_NAMES

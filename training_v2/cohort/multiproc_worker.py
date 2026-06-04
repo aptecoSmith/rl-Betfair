@@ -260,7 +260,8 @@ def _train_agent_worker(spec: dict):
       the whole file each call (no cross-task reuse). Used by the probes.
     """
     import torch
-    from training_v2.cohort.worker import train_one_agent
+    from training_v2.cohort.gpu_slot import gpu_slot
+    from training_v2.cohort.worker import gpu_slot_cap_for, train_one_agent
 
     spec = dict(spec)
     # Size-aware threading (default 1 == single-thread == bit-identical). The
@@ -315,8 +316,24 @@ def _train_agent_worker(spec: dict):
     if manifests is not None:
         spec["predictor_bundle"] = _worker_load_bundle(manifests)
 
+    # GPU policy-lane concurrency cap: a GPU-lane agent (big-ctx transformer
+    # under --gpu-policy-lane) takes one of N slots before it builds its CUDA
+    # policy and holds it through eval, so at most N hold the card at once
+    # (OOM guard — 4 ctx256 transformers peaked at 18.7/24 GB, d512/depth6 are
+    # heavier). CPU-lane agents get cap 0 (no-op) and run unthrottled. The
+    # `with` guarantees the OS lock releases even if train raises — vital on
+    # the WARM pool where a leaked slot would wedge the lane for the worker's
+    # whole life. Pop the cap key unconditionally so it never leaks into
+    # **spec; mock specs without "genes" (unit tests) take the uncapped path.
+    _gpu_max = int(spec.pop("gpu_lane_max_concurrent", 2))
+    _genes = spec.get("genes")
+    gpu_cap = (
+        gpu_slot_cap_for(_genes, bool(spec.get("gpu_policy_lane", False)), _gpu_max)
+        if _genes is not None else 0
+    )
     t0 = time.perf_counter()
-    result = train_one_agent(**spec)
+    with gpu_slot(gpu_cap, label=str(spec.get("agent_id", ""))):
+        result = train_one_agent(**spec)
     # Stamp the per-agent wall (the cluster wall is max over workers).
     try:
         result.train.wall_time_sec = time.perf_counter() - t0

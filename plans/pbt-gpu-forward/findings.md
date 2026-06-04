@@ -193,3 +193,79 @@ it for big-ctx (>=128) transformers (ctx256 forward GPU 6.3×) — now built as
 `--gpu-policy-lane`. The two CPU levers surfaced (native-compile the
 direction predictor ~6–10%; optimise the scorer FeatureExtractor ~14%) are
 logged in `plans/EXPLORATIONS.md` (2026-06-04).
+
+---
+
+## Transformer-config genes + GPU-lane safety (2026-06-04)
+
+Now that big-ctx transformers train on the GPU lane, the CPU-era caps are
+lifted and the config levers are genes:
+
+**`transformer_ffn_mult` {2,4}** — STRUCTURAL gene. `dim_feedforward =
+max(d_model*ffn_mult, 64)`. `ffn_mult=2` is byte-identical to the old
+`d_model*2` (the 64 floor never binds); `ffn_mult=4` doubles it. GA pins to 2.
+
+**`transformer_pos_encoding` {learned, rope}** — STRUCTURAL gene. `learned` =
+the existing additive slot embedding; `rope` = a custom rotary-attention
+backbone (`_RoPECausalEncoderLayer`, rotary positions on Q/K inside SDPA,
+`is_causal=True`). Built + validated:
+* RoPE math signature holds (relative-position invariance to 1e-6,
+  norm-preserving, pos-0 identity) — `tests/test_v2_transformer_policy.py::
+  TestRoPEMath`.
+* GPU agent-day smoke (`_measure/smoke_rope_gpu.py`, ctx256/d256): rope **209s
+  vs learned 203s (1.03×)**, peak mem 4.02 vs 3.99 GB — the Q/K rotation is
+  free; the ctx² attention that dominates is unchanged. Trains end-to-end on
+  CUDA, arch-hash `..._posrope` distinct so weights never cross-load.
+
+**Size un-cap:** fresh-blood transformer `d_model` → 512 (was 256), `depth` →
+{1,2,3,4,6} (was ≤3). 1024 stays LSTM-only. GA unchanged.
+
+**GPU concurrency cap (`--gpu-lane-max-concurrent`, default 2).** N OS
+advisory-lock slots; a GPU-lane agent holds one across train+eval, an
+(N+1)-th blocks. OS auto-releases the lock on process death, so a crashed
+warm-pool worker never wedges a slot. Measure-validated
+(`_measure/probe_big_transformer_mem.py`, batched update step, mini_batch=64):
+
+| config | peak (update step) |
+|---|---|
+| d256/L3/h8/ctx256/ffn2 (validated agent) | 0.82 GB |
+| d512/L4/h8/ctx256/ffn2 (mid-large) | 2.07 GB |
+| d512/L6/h16/ctx256/ffn4 (BIGGEST learned) | 3.87 GB |
+| d512/L6/h16/ctx256/ffn4 (BIGGEST rope) | 4.03 GB |
+
+The full agent-day peak runs higher than the single-step probe (rollout
+hidden-state storage + CUDA context + optimiser state); the GPU-lane
+validation measured ~4.7 GB/agent for FOUR concurrent d256 (18.7/24 GB). A
+d512/depth6 pair at the full-agent peak is ~16–18 GB — **cap 2 fits with
+headroom; cap 3 would risk OOM.** So 2 is the measure-backed default; drop to
+1 only if a future cohort evolves transformers past d512/depth6.
+
+## KV-cache the transformer rollout — DEFERRED (evidence-based)
+
+Task #9 (KV-cache the big-ctx rollout for per-tick efficiency) is **not
+built**, deliberately. The analysis:
+
+1. **Marginal on the lane that would use it.** The KV-cache speeds up the
+   rollout's O(ctx²) attention. But big transformers (the only ones it helps)
+   run on the GPU lane, where that attention is already cheap — the rope smoke
+   showed rope=learned wall (1.03×), i.e. the rotation/attention is NOT the
+   bottleneck; the GPU lane already delivered the 6.3× forward win. The cache
+   optimises a slice the GPU already handles fast.
+2. **Architectural mismatch.** The rolling context buffer SHIFTS every tick
+   (newest always at slot ctx-1; a tick's slot — hence its positional
+   encoding — changes as it ages). A naive KV-cache (store rotated K) is
+   invalid because positions shift. A correct cache needs an absolute-position
+   rework (store UN-rotated K/V, apply relative rotation at attention time,
+   LLM-style sliding window) — RoPE-only and invasive.
+3. **PPO-correctness risk.** The cached rollout forward must produce output
+   IDENTICAL to the update's full-buffer forward, or `old_log_probs` vs
+   `new_log_probs` diverge and `approx_kl` blows up (CLAUDE.md "Recurrent PPO"
+   — the codebase is acutely sensitive to exactly this). A second forward path
+   that must match bit-for-bit is high-risk for a small gain.
+4. **Not needed for the launch.** The run works without it (slightly slower
+   rollout); it is a pure optimisation, not a correctness/safety item.
+
+Design-for-later if the rollout speedup is wanted: per-layer K/V cache keyed by
+ABSOLUTE tick index with a ctx sliding-window causal mask (so a tick's rotation
+is fixed once and cacheable), RoPE-only, default-off, gated behind a
+rollout/update bit-identity test before any cohort uses it.

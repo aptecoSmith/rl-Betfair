@@ -1087,6 +1087,31 @@ def _load_bc_oracle_or_skip(
         return None
 
 
+# ── GPU policy lane: eligibility + concurrency cap ────────────────────────
+
+
+def resolve_gpu_lane(genes: CohortGenes, gpu_policy_lane: bool) -> bool:
+    """True iff this agent's policy should run on the GPU lane: the operator
+    enabled ``--gpu-policy-lane`` AND the genome is a big-ctx transformer
+    (:func:`is_gpu_lane_eligible`) AND CUDA is actually present. Single source
+    of truth — used by :func:`train_one_agent` to flip ``device`` and by the
+    call sites to decide whether to take a GPU concurrency slot."""
+    return bool(
+        bool(gpu_policy_lane)
+        and is_gpu_lane_eligible(genes)
+        and torch.cuda.is_available(),
+    )
+
+
+def gpu_slot_cap_for(
+    genes: CohortGenes, gpu_policy_lane: bool, max_concurrent: int,
+) -> int:
+    """The GPU concurrency cap to apply around THIS agent's train+eval:
+    ``max_concurrent`` for a GPU-lane agent, else ``0`` (no-op / uncapped).
+    CPU-lane agents never gate, so they run fully parallel."""
+    return int(max_concurrent) if resolve_gpu_lane(genes, gpu_policy_lane) else 0
+
+
 # ── Main entry point ────────────────────────────────────────────────────
 
 
@@ -1213,11 +1238,7 @@ def train_one_agent(
     # only is_gpu_lane_eligible() agents flip. Resolved ONCE here so the seed,
     # policy build, BC, and trainer all see the right device. Default off →
     # device unchanged → byte-identical to the pure-CPU R5 path.
-    _gpu_lane = (
-        bool(gpu_policy_lane)
-        and is_gpu_lane_eligible(genes)
-        and torch.cuda.is_available()
-    )
+    _gpu_lane = resolve_gpu_lane(genes, gpu_policy_lane)
     if _gpu_lane:
         device = "cuda"
 

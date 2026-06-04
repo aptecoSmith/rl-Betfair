@@ -1411,6 +1411,103 @@ class DiscreteLSTMPolicy(BaseDiscretePolicy):
         return logits.masked_fill(~gate_mask, float("-inf"))
 
 
+# ── Rotary positional embedding (RoPE) — pbt-gpu-forward task #8 ────────────
+
+
+def _rope_cos_sin(
+    ctx_ticks: int, head_dim: int, base: float = 10000.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute ``(ctx_ticks, head_dim)`` cos/sin tables for rotary
+    positional embedding (GPT-NeoX / LLaMA ``rotate_half`` convention: the
+    ``head_dim/2`` frequencies are DUPLICATED across the two halves so dim
+    ``i`` pairs with dim ``i + head_dim/2``).
+
+    The buffer SLOT index is the position. Because the rolling context
+    buffer is right-aligned (the newest tick is always at slot
+    ``ctx_ticks-1``, zero-padded at the front during warmup), RoPE's
+    relative-position property makes the attention score between the newest
+    tick and a tick ``k`` slots back depend only on ``k`` — i.e. tick-age.
+    That is the same "position relative to now" the learned embedding gets
+    from its right-alignment, but expressed as a rotation rather than a
+    learned vector.
+    """
+    if head_dim % 2 != 0:
+        raise ValueError(f"RoPE needs an even head_dim, got {head_dim}")
+    half = head_dim // 2
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, half, dtype=torch.float32) / half)
+    )  # (half,)  exponent 2i/head_dim
+    pos = torch.arange(ctx_ticks, dtype=torch.float32)  # (ctx,)
+    freqs = torch.outer(pos, inv_freq)  # (ctx, half)
+    emb = torch.cat([freqs, freqs], dim=-1)  # (ctx, head_dim)
+    return emb.cos(), emb.sin()
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """``(x1, x2) -> (-x2, x1)`` over the last dim split in half — the
+    rotation partner for the duplicated-frequency cos/sin layout above."""
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat([-x2, x1], dim=-1)
+
+
+def _apply_rope(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+) -> torch.Tensor:
+    """Rotate ``x`` ``(B, heads, T, head_dim)`` by the per-position angles in
+    ``cos`` / ``sin`` ``(T, head_dim)``. Norm-preserving (a rotation)."""
+    cos = cos[None, None, :, :]
+    sin = sin[None, None, :, :]
+    return x * cos + _rotate_half(x) * sin
+
+
+class _RoPECausalEncoderLayer(nn.Module):
+    """One pre-LN causal transformer-encoder layer with rotary positional
+    embedding applied to Q/K inside attention (instead of an additive
+    positional embedding on the input). Mirrors the structure of
+    ``nn.TransformerEncoderLayer(norm_first=True, activation='gelu')`` — the
+    learned-pos path — so the only behavioural difference is RoPE vs additive
+    position. Causality comes from ``F.scaled_dot_product_attention(...,
+    is_causal=True)``, equivalent to the learned path's ``triu`` mask.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, dim_feedforward: int) -> None:
+        super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError(
+                f"d_model={d_model} must be divisible by n_heads={n_heads}",
+            )
+        self.n_heads = int(n_heads)
+        self.head_dim = d_model // n_heads
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.GELU(),
+            nn.Linear(dim_feedforward, d_model),
+        )
+
+    def forward(
+        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+    ) -> torch.Tensor:
+        # x: (B, T, d_model). Pre-LN self-attention with RoPE on Q/K.
+        b, t, d = x.shape
+        h = self.norm1(x)
+        qkv = self.qkv(h).view(b, t, 3, self.n_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, T, head_dim)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
+        attn = nn.functional.scaled_dot_product_attention(
+            q, k, v, is_causal=True,
+        )  # (B, heads, T, head_dim)
+        attn = attn.transpose(1, 2).reshape(b, t, d)
+        x = x + self.out_proj(attn)
+        x = x + self.ff(self.norm2(x))
+        return x
+
+
 # ── Discrete Transformer ───────────────────────────────────────────────────
 
 
@@ -1530,17 +1627,6 @@ class DiscreteTransformerPolicy(DiscreteLSTMPolicy):
                 f"pos_encoding must be 'learned' or 'rope', got "
                 f"{pos_encoding!r}",
             )
-        if self.pos_encoding == "rope":
-            # Gene infra + valid set are in place, but the custom RoPE
-            # attention block is not built yet (task #8). Sampling is gated
-            # to "learned" in genes.py so fresh blood never reaches here;
-            # this guard turns a hand-built rope gene into a loud failure
-            # rather than a silent learned-fallback.
-            raise NotImplementedError(
-                "transformer_pos_encoding='rope' is not implemented yet — "
-                "the custom RoPE attention block is the next build (task #8). "
-                "Sampling is gated to 'learned' until then.",
-            )
         if self.ctx_ticks <= 0:
             raise ValueError(f"ctx_ticks must be positive, got {ctx_ticks!r}")
         if self.depth <= 0:
@@ -1553,33 +1639,55 @@ class DiscreteTransformerPolicy(DiscreteLSTMPolicy):
 
         # ── Transformer backbone ─────────────────────────────────────────
         # ``self.input_proj`` (Linear(obs_dim, d_model) + ReLU) built by the
-        # parent is reused verbatim as the per-tick projection.
-        self.position_embedding = nn.Embedding(self.ctx_ticks, self.d_model)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.d_model,
-            nhead=self.n_heads,
-            dim_feedforward=max(self.d_model * self.ffn_mult, self.actor_mlp_hidden),
-            dropout=0.0,
-            batch_first=True,
-            activation="gelu",
-            norm_first=True,
-        )
-        # ``enable_nested_tensor=False`` avoids a UserWarning under
-        # ``norm_first=True`` (the nested-tensor fast path is disabled in
-        # that config anyway; we never pass a key-padding mask).
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=self.depth,
-            enable_nested_tensor=False,
-        )
+        # parent is reused verbatim as the per-tick projection. The final
+        # ``transformer_norm`` is shared by BOTH positional schemes.
+        dim_ff = max(self.d_model * self.ffn_mult, self.actor_mlp_hidden)
         self.transformer_norm = nn.LayerNorm(self.d_model)
-        # Causal mask (non-persistent buffer so .to(device) moves it but it
-        # stays out of state_dict — it's a deterministic constant).
-        causal_mask = torch.triu(
-            torch.full((self.ctx_ticks, self.ctx_ticks), float("-inf")),
-            diagonal=1,
-        )
-        self.register_buffer("causal_mask", causal_mask, persistent=False)
+
+        if self.pos_encoding == "rope":
+            # RoPE path: rotary positions applied to Q/K inside attention,
+            # so NO additive position embedding and NO triu mask buffer
+            # (``is_causal=True`` inside each layer). The cos/sin tables are
+            # deterministic constants -> non-persistent buffers (moved by
+            # ``.to(device)``, kept OUT of state_dict). A rope checkpoint's
+            # backbone keys are ``rope_layers.*`` (distinct from the learned
+            # path's ``transformer_encoder.*`` / ``position_embedding`` —
+            # the arch-hash already carries this via the ``_posrope`` suffix
+            # so weights never cross-load).
+            self.rope_layers = nn.ModuleList(
+                _RoPECausalEncoderLayer(self.d_model, self.n_heads, dim_ff)
+                for _ in range(self.depth)
+            )
+            cos, sin = _rope_cos_sin(self.ctx_ticks, self.d_model // self.n_heads)
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
+        else:
+            # Learned-position path (byte-identical to pre-gene transformers).
+            self.position_embedding = nn.Embedding(self.ctx_ticks, self.d_model)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=self.d_model,
+                nhead=self.n_heads,
+                dim_feedforward=dim_ff,
+                dropout=0.0,
+                batch_first=True,
+                activation="gelu",
+                norm_first=True,
+            )
+            # ``enable_nested_tensor=False`` avoids a UserWarning under
+            # ``norm_first=True`` (the nested-tensor fast path is disabled in
+            # that config anyway; we never pass a key-padding mask).
+            self.transformer_encoder = nn.TransformerEncoder(
+                encoder_layer,
+                num_layers=self.depth,
+                enable_nested_tensor=False,
+            )
+            # Causal mask (non-persistent buffer so .to(device) moves it but
+            # it stays out of state_dict — it's a deterministic constant).
+            causal_mask = torch.triu(
+                torch.full((self.ctx_ticks, self.ctx_ticks), float("-inf")),
+                diagonal=1,
+            )
+            self.register_buffer("causal_mask", causal_mask, persistent=False)
 
     # ── Hidden state: (buffer, valid_count), batch on dim 0 ───────────────
 
@@ -1642,12 +1750,21 @@ class DiscreteTransformerPolicy(DiscreteLSTMPolicy):
             )
             valid_count = torch.clamp(valid_count + 1, max=self.ctx_ticks)
 
-        # Positional embedding + causal transformer encode + final norm.
-        pos_ids = torch.arange(self.ctx_ticks, device=buffer.device)
-        pos_emb = self.position_embedding(pos_ids)  # (ctx_ticks, d_model)
-        x = buffer + pos_emb.unsqueeze(0)
-        encoded = self.transformer_encoder(x, mask=self.causal_mask)
-        encoded = self.transformer_norm(encoded)
+        # Causal transformer encode + final norm. RoPE applies rotary
+        # positions to Q/K inside each layer (no additive pos embedding);
+        # the learned path adds an absolute slot embedding then runs the
+        # masked encoder. Both end with the shared ``transformer_norm``.
+        if self.pos_encoding == "rope":
+            x = buffer
+            for layer in self.rope_layers:
+                x = layer(x, self.rope_cos, self.rope_sin)
+            encoded = self.transformer_norm(x)
+        else:
+            pos_ids = torch.arange(self.ctx_ticks, device=buffer.device)
+            pos_emb = self.position_embedding(pos_ids)  # (ctx_ticks, d_model)
+            x = buffer + pos_emb.unsqueeze(0)
+            encoded = self.transformer_encoder(x, mask=self.causal_mask)
+            encoded = self.transformer_norm(encoded)
         out_last = encoded[:, -1, :]  # (batch, d_model) — most recent tick
 
         # ── Head/actor/gate tail — MIRRORS DiscreteLSTMPolicy._forward_core

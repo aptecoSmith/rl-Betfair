@@ -176,17 +176,25 @@ class TestTransformerConfigGenes:
         out = p(torch.randn(2, 64), hidden_state=p.init_hidden(2))
         assert out.logits.shape[0] == 2
 
-    def test_rope_is_gated_and_raises_until_implemented(self):
-        # The gene + valid set are in place but the custom RoPE attention
-        # is not built yet (task #8). Sampling is gated to "learned", so a
-        # hand-built rope gene must fail LOUDLY, not silently fall back.
-        with pytest.raises(NotImplementedError):
-            build_policy(
-                _genes("transformer", 128, transformer_depth=2,
-                       transformer_heads=4, transformer_ctx_ticks=32,
-                       transformer_pos_encoding="rope"),
-                obs_dim=64, action_space=_space(),
-            )
+    def test_rope_builds_and_forwards(self):
+        # RoPE path (task #8): the custom rotary-attention backbone builds
+        # and forwards; its state_dict carries rope_layers.* and NONE of the
+        # learned path's transformer_encoder.* / position_embedding keys.
+        p = build_policy(
+            _genes("transformer", 128, transformer_depth=3,
+                   transformer_heads=4, transformer_ctx_ticks=64,
+                   transformer_pos_encoding="rope"),
+            obs_dim=64, action_space=_space(),
+        )
+        out = p(torch.randn(3, 64), hidden_state=p.init_hidden(3))
+        assert out.logits.shape[0] == 3
+        keys = list(p.state_dict().keys())
+        assert any(k.startswith("rope_layers.") for k in keys)
+        assert not any(
+            "transformer_encoder" in k or "position_embedding" in k
+            for k in keys
+        )
+        assert len(p.rope_layers) == 3
 
 
 class TestFactoryComposesWithWarmStart:

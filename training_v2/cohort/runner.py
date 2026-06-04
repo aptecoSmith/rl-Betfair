@@ -839,6 +839,7 @@ def run_cohort(
     resume_from: "Path | None" = None,
     big_model_threads: int = 1,
     gpu_policy_lane: bool = False,
+    gpu_lane_max_concurrent: int = 2,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -1492,6 +1493,7 @@ def run_cohort(
                         feature_cache=None,
                         frozen_direction_head_path=frozen_direction_head_path,
                         gpu_policy_lane=bool(gpu_policy_lane),
+                        gpu_lane_max_concurrent=int(gpu_lane_max_concurrent),
                         _feature_cache_day_paths=day_cache_paths,
                         _static_obs_day_paths=_sobs_agent,
                         _model_store_paths=store_paths,
@@ -2984,6 +2986,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "No-op without a CUDA device. See plans/pbt-gpu-forward/."
         ),
     )
+    p.add_argument(
+        "--gpu-lane-max-concurrent", type=int, default=2,
+        help=(
+            "Max GPU-lane agents holding the GPU at once (OOM cap). A big-ctx "
+            "transformer takes one of N OS-lock slots before building its CUDA "
+            "policy and holds it through eval; an (N+1)-th waits. 4 ctx256 "
+            "transformers peaked at 18.7/24 GB, and the d512/depth6 size genes "
+            "are heavier, so 2 leaves headroom for the biggest pair; set 1 if "
+            "evolving very large transformers. Only affects --gpu-policy-lane "
+            "multiprocess runs; CPU-lane agents are never gated."
+        ),
+    )
     # Predictor-integration (plans/predictor-integration/).
     p.add_argument(
         "--strategy-mode", default=None,
@@ -3415,6 +3429,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             big_model_threads=int(args.big_model_threads),
             gpu_policy_lane=bool(args.gpu_policy_lane),
+            gpu_lane_max_concurrent=int(args.gpu_lane_max_concurrent),
         )
     finally:
         if server is not None:

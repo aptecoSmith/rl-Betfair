@@ -102,12 +102,12 @@ TRANSFORMER_POS_ENCODING_CHOICES: tuple[str, ...] = ("learned", "rope")
 TRANSFORMER_DEPTH_SAMPLE: tuple[int, ...] = (1, 2, 3, 4, 6)
 TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64, 128, 256)
 TRANSFORMER_FFN_MULT_SAMPLE: tuple[int, ...] = (2, 4)
-# "rope" stays OUT of sampling until the policy implements the custom RoPE
-# attention (task #8) — gene infra + valid CHOICES are in place; flip this to
-# ("learned", "rope") the moment RoPE is built + smoke-ablated, and the campaign
-# picks it up on its next relaunch. Keeps fresh blood from drawing a path the
-# policy can't build yet.
-TRANSFORMER_POS_ENCODING_SAMPLE: tuple[str, ...] = ("learned",)
+# Both positional schemes are live (pbt-gpu-forward task #8): "learned" =
+# additive slot embedding; "rope" = rotary positions on Q/K inside attention
+# (relative tick-age encoding; see DiscreteTransformerPolicy + _rope_cos_sin).
+# Structural/frozen per lineage — the two have disjoint backbone weights
+# (transformer_encoder.* vs rope_layers.*) and distinct arch-hashes.
+TRANSFORMER_POS_ENCODING_SAMPLE: tuple[str, ...] = ("learned", "rope")
 
 # GPU policy lane (plans/pbt-gpu-forward, 2026-06-04). A transformer whose
 # context window is at least this routes its policy FORWARD + batched PPO
