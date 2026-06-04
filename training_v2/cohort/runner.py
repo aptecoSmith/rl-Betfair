@@ -2093,6 +2093,12 @@ def _pbt_model_row(spec, res, *, generation: int, score: float) -> dict:
         "arbs_force_closed": int(getattr(ev, "arbs_force_closed", 0)),
         "arbs_stop_closed": int(getattr(ev, "arbs_stop_closed", 0)),
         "pairs_opened": int(getattr(ev, "pairs_opened", 0)),
+        # Per-agent train wall-clock (seconds). Already measured by
+        # train_one_agent (TrainSummary.wall_time_sec) on BOTH the sequential
+        # and the multiprocess worker path — surfaced here so the leaderboard
+        # exposes the speed cost of bigger architectures (operator 2026-06-04).
+        "train_seconds": float(
+            getattr(getattr(res, "train", None), "wall_time_sec", 0.0) or 0.0),
         "genes": g.to_dict(),
     }
 

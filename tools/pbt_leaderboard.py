@@ -52,8 +52,20 @@ _LB_COLS = [
     ("lr", "_lr", "{:>9.2e}"),
     ("ent", "_ent", "{:>7.4f}"),
     ("gen", "generation", "{:>4}"),
+    ("train", "_train_hms", "{:>8}"),
     ("lineage", "_lineage6", "{:<6}"),
 ]
+
+
+def _fmt_hms(seconds: float) -> str:
+    """Human-readable train wall-clock: ``m:ss`` under an hour, ``h:mm:ss``
+    above, ``-`` when missing/zero (old rows predating the column)."""
+    s = int(round(seconds))
+    if s <= 0:
+        return "-"
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:d}:{sec:02d}"
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -94,6 +106,7 @@ def _derive(r: dict, rank: int) -> dict:
         float(r.get("locked_pnl", 0.0)), float(r.get("naked_pnl", 0.0)))
     d["_lr"] = float(genes.get("learning_rate", float("nan")))
     d["_ent"] = float(genes.get("entropy_coeff", float("nan")))
+    d["_train_hms"] = _fmt_hms(float(r.get("train_seconds", 0.0) or 0.0))
     d["_lineage6"] = str(r.get("lineage_id", ""))[:6]
     # Truncate the ISO timestamp to seconds for the table.
     fa = str(r.get("frozen_at", ""))
@@ -179,7 +192,7 @@ _REGISTER_LEAD = [
     "locked_pnl", "naked_pnl", "locked_share", "naked_std", "day_pnl",
     "total_reward", "composite_score", "score", "bet_count", "bet_precision",
     "arbs_completed", "arbs_closed", "arbs_naked", "arbs_force_closed",
-    "arbs_stop_closed", "pairs_opened",
+    "arbs_stop_closed", "pairs_opened", "train_seconds",
 ]
 
 

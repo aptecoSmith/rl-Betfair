@@ -95,6 +95,13 @@ def test_pbt_runner_warm_starts_and_rotates(tmp_path: Path) -> None:
     assert (out_dir / "leaderboard.txt").exists()
     assert (out_dir / "model_register.csv").exists()
 
+    # Per-agent train time flows TrainSummary.wall_time_sec -> lineage row ->
+    # leaderboard + register (2026-06-04). The stub measures a positive time.
+    assert all(r.get("train_seconds", 0) > 0 for r in rows)
+    assert "train" in (out_dir / "leaderboard.txt").read_text()
+    assert "train_seconds" in (
+        out_dir / "model_register.csv").read_text().splitlines()[0]
+
 
 def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
     tmp_path: Path,
@@ -133,6 +140,8 @@ def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
     lb = (out_dir / "leaderboard.txt").read_text()
     assert "R3 HALL-OF-FAME" in lb
     assert "frozen_at(R3)" in lb and "locked" in lb
+    assert "train" in lb  # train-time column (2026-06-04)
+    assert "train_seconds" in champs[0]  # plumbed into the hall-of-fame row
     # The frozen champion's short model id appears in the table.
     assert champs[0]["model_id"][:8] in lb
 
