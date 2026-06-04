@@ -79,6 +79,23 @@ class TestFreshBloodSamplesArchitecture:
         # (lean<->full changes obs_dim -> weight shapes, breaks warm-start).
         assert "predictor_lean_obs" in ARCHITECTURE_GENE_NAMES
 
+    def test_lstm_fresh_blood_can_go_larger_transformer_capped(self):
+        """Fresh-blood LSTMs may draw large hidden sizes (512/1024); a
+        transformer's d_model (hidden_size) stays <= 256 for CPU. The
+        gene-only GA is unchanged (64/128/256 only) -> byte-identity."""
+        from training_v2.cohort.genes import sample_genes
+        rng = random.Random(13)
+        lstm_h, tf_h = set(), set()
+        for _ in range(400):
+            g = sample_fresh_blood_genes(rng)
+            (lstm_h if g.architecture == "lstm" else tf_h).add(g.hidden_size)
+            assert_in_range(g)  # the widened _VALID set must accept it
+        assert lstm_h & {512, 1024}, f"LSTM never went large: {lstm_h}"
+        assert tf_h <= {64, 128, 256}, f"transformer d_model uncapped: {tf_h}"
+        # gene-only GA stays at the original sizes (byte-identity).
+        ga = {sample_genes(random.Random(s)).hidden_size for s in range(80)}
+        assert ga <= {64, 128, 256}, ga
+
     def test_transformer_d_model_divisible_by_heads(self):
         # Every (hidden_size, n_heads) combo the sampler can draw must
         # satisfy the transformer's d_model % n_heads == 0 constraint, so

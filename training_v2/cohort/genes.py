@@ -48,7 +48,20 @@ CLIP_RANGE_RANGE: tuple[float, float] = (0.1, 0.3)
 GAE_LAMBDA_RANGE: tuple[float, float] = (0.9, 0.99)
 VALUE_COEFF_RANGE: tuple[float, float] = (0.25, 1.0)
 MINI_BATCH_SIZE_CHOICES: tuple[int, ...] = (32, 64, 128)
+# The gene-only GA + every existing launch sample this (UNCHANGED ->
+# byte-identity, HC#1). Fresh blood uses the per-architecture *_SAMPLE sets
+# below; assert_in_range accepts the wider _VALID set.
 HIDDEN_SIZE_CHOICES: tuple[int, ...] = (64, 128, 256)
+# Valid hidden sizes (assert_in_range). Widened 2026-06-04 so fresh-blood
+# LSTMs can go larger (operator: bigger LSTMs ranked higher in gen-0 R1).
+HIDDEN_SIZE_VALID: tuple[int, ...] = (64, 128, 256, 512, 1024)
+# Fresh-blood LSTM sampling: larger sizes allowed (LSTM is cheap per tick on
+# CPU vs the transformer's per-tick encoder). NB larger = slower gens.
+HIDDEN_SIZE_LSTM_SAMPLE: tuple[int, ...] = (64, 128, 256, 512, 1024)
+# Fresh-blood transformer d_model: CAPPED at 256 (the multiprocess path is
+# CPU-only; a big transformer already gates whole generations -- a bigger
+# d_model would make it worse). Every value divides the head counts {2,4,8}.
+HIDDEN_SIZE_TRANSFORMER_SAMPLE: tuple[int, ...] = (64, 128, 256)
 
 
 # ── Architecture genes (pbt-breeding Step 1b, 2026-06-03) ─────────────────
@@ -637,9 +650,22 @@ def sample_fresh_blood_genes(
     genes, because warm-start weight inheritance needs matching weight
     shapes (HC#10).
     """
+    # Sample the architecture FIRST so hidden_size can be conditioned on it:
+    # an LSTM may go large (cheap per tick on CPU); a transformer's d_model
+    # is capped at 256 (its per-tick encoder makes a big d_model gate whole
+    # generations on the CPU-only multiprocess path).
+    arch = _sample_architecture_field(rng, "architecture")
+    hidden_choices = (
+        HIDDEN_SIZE_LSTM_SAMPLE if arch == "lstm"
+        else HIDDEN_SIZE_TRANSFORMER_SAMPLE
+    )
     kwargs: dict = {}
     for f in fields(CohortGenes):
-        if f.name in ARCHITECTURE_GENE_NAMES:
+        if f.name == "architecture":
+            kwargs[f.name] = arch
+        elif f.name == "hidden_size":
+            kwargs[f.name] = int(rng.choice(hidden_choices))
+        elif f.name in ARCHITECTURE_GENE_NAMES:
             kwargs[f.name] = _sample_architecture_field(rng, f.name)
         elif f.name in PHASE5_GENE_NAMES and f.name not in enabled_set:
             kwargs[f.name] = PHASE5_GENE_DEFAULTS[f.name]
@@ -757,9 +783,9 @@ def assert_in_range(genes: CohortGenes) -> None:
             f"mini_batch_size {genes.mini_batch_size} not in "
             f"{MINI_BATCH_SIZE_CHOICES}",
         )
-    if genes.hidden_size not in HIDDEN_SIZE_CHOICES:
+    if genes.hidden_size not in HIDDEN_SIZE_VALID:
         raise ValueError(
-            f"hidden_size {genes.hidden_size} not in {HIDDEN_SIZE_CHOICES}",
+            f"hidden_size {genes.hidden_size} not in {HIDDEN_SIZE_VALID}",
         )
     for name, (lo, hi) in _PHASE5_RANGES.items():
         value = getattr(genes, name)
