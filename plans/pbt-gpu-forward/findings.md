@@ -143,3 +143,32 @@ keep R5 multiprocess (~8–9×, bit-identical).
 transformers' forward is ~4 % and ~1 ms; the O(ctx²) re-encode isn't a
 meaningful cost at these ctx. Revisit only if ctx≥256 transformers become common
 AND the predictor floor is reduced.
+
+---
+
+## Step 0 addendum — `--big-model-threads` is NET-NEGATIVE at cohort scale (operator clock, 2026-06-04)
+
+The microbench's **CPU/6 column is single-process isolation** — it showed 6
+threads speed the h1024 forward (5.16→2.99 ms) because nothing else contended.
+At real cohort scale the operator measured the OPPOSITE: **gen-0 with
+`--big-model-threads 6` ran ~60 min vs ~45 min single-threaded — a ~20–35 %
+SLOWDOWN.** 16 workers × 6 threads = 96 threads oversubscribing 20 cores; the
+batch=1 LSTM matmuls are too small to gain from intra-op parallelism, so the
+thread spawn + oversubscription is pure overhead. (My isolation microbench
+measured the forward correctly but MISSED the cohort-level core contention —
+the operator's end-to-end clock is the authoritative number.)
+
+Corrections this forces:
+- **True baseline = CPU/1 (pure R5), not CPU/6.** Revert `--big-model-threads`
+  to 1 (the byte-identical default): a free ~20–35 % gen-0 speedup, zero risk.
+- Against CPU/1 the GPU does beat the h1024 *forward* (5.16→1.25 ms) — but that
+  does NOT reopen the lane: h1024 is a minority of agents, the forward is only
+  14 % of even an h1024 agent-day, and **the box is CPU-core-bound at N=16 —
+  there are no spare cores** to run a GPU lane's env (still CPU) without stealing
+  from the saturated pool. Any scheme that adds work beside the 16-worker pool —
+  more threads OR a GPU lane whose env needs CPU — hits the exact contention
+  wall the threading experiment just measured.
+
+**Unified conclusion:** the box is CPU-core-bound at the R5 sweet spot; nothing
+(threads or GPU) accelerates the per-tick batch=1 work without contending for
+cores that are already fully employed. **Pure R5, `--big-model-threads 1`.**

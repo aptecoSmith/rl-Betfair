@@ -2464,3 +2464,11 @@ forward edge. Tiers 1–3 not pursued; keep R5 (~8–9×). The real lever is the
 predictor/scorer floor (already attacked by the R2 scorer cache + static_obs
 memmap), out of scope here by HC#2. Step 0 cost ~1 h and prevented a multi-day
 build of a net-negative lane. Tensor-env (3C/R4) remains NO.
+
+**Addendum (operator clock, same day).** The `--big-model-threads 6` CPU
+mitigation is itself net-negative at cohort scale: gen-0 ran ~60 min vs ~45 min
+single-threaded (~20–35 % slower) — 16 × 6 = 96 threads oversubscribe 20 cores
+for no batch=1 gain. The box is **CPU-core-bound at N=16**; nothing (threads, or
+a GPU lane whose env still needs cores) accelerates the per-tick work without
+contending for the saturated pool. Fix: revert to `--big-model-threads 1` (pure
+R5, byte-identical). Same batch=1 penalty, now measured end-to-end.
