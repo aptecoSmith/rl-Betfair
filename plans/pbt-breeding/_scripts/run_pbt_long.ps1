@@ -28,7 +28,7 @@ $MANIFESTS = @(
   "$PRED\race-outcome-ranker\manifest.json",
   "$PRED\direction-predictor\manifest.json"
 )
-$DEADLINE = (Get-Date).AddHours(20)
+$DEADLINE = (Get-Date).AddHours(72)   # multi-day; operator: "keep it for a few days"
 New-Item -ItemType Directory -Force -Path $DIR | Out-Null
 function Log($m) {
   "$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')) $m" |
@@ -39,7 +39,12 @@ Log "PBT LONG campaign START -- deadline $($DEADLINE.ToString('yyyy-MM-dd HH:mm'
 $run = 0
 while ((Get-Date) -lt $DEADLINE) {
   $run++
-  $seed = 770 + $run
+  # Persistent seed counter so relaunches (supervisor-triggered, crash/reboot
+  # recovery, or manual) NEVER repeat fresh-blood draws across the multi-day
+  # campaign -- each wrapper invocation otherwise restarts run=1 -> seed 771.
+  $seedFile = "$DIR\seed_counter.txt"
+  if (Test-Path $seedFile) { $seed = [int]((Get-Content $seedFile -Raw).Trim()) } else { $seed = 771 }
+  ($seed + 1) | Out-File -Encoding ascii -NoNewline $seedFile
   Log "campaign run $run (seed $seed) starting -- 16 agents, 25 gens, 3x(6 train/4 eval) rotation, predictors-ON, BC-on"
   # OOM FIX (2026-06-04): the overnight predictors-OFF run cached each ~1.45GB
   # full-obs engineered DAY in EVERY worker -> 16 workers x 12 days plateaued
