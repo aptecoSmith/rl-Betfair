@@ -44,6 +44,26 @@ class TestFreshBloodSamplesArchitecture:
             assert g.transformer_heads in TRANSFORMER_HEADS_CHOICES
             assert g.transformer_ctx_ticks in TRANSFORMER_CTX_TICKS_CHOICES
 
+    def test_fresh_blood_caps_transformer_size_for_cpu(self):
+        """Fresh blood only SAMPLES CPU-affordable transformer sizes
+        (ctx {32,64}, depth {1,2}) — a ctx256/depth3 transformer gated whole
+        generations on CPU (2026-06-04). The wider CHOICES stay valid for
+        assert_in_range (e.g. a GPU run)."""
+        from training_v2.cohort.genes import (
+            TRANSFORMER_CTX_TICKS_SAMPLE,
+            TRANSFORMER_DEPTH_SAMPLE,
+        )
+        rng = random.Random(7)
+        ctx_seen, depth_seen = set(), set()
+        for _ in range(300):
+            g = sample_fresh_blood_genes(rng)
+            if g.architecture == "transformer":
+                ctx_seen.add(g.transformer_ctx_ticks)
+                depth_seen.add(g.transformer_depth)
+        assert ctx_seen <= set(TRANSFORMER_CTX_TICKS_SAMPLE) == {32, 64}
+        assert depth_seen <= set(TRANSFORMER_DEPTH_SAMPLE) == {1, 2}
+        assert 256 not in ctx_seen and 3 not in depth_seen
+
     def test_draws_both_lean_and_full_obs(self):
         """predictor_lean_obs is a fresh-blood OPTION — some lineages explore
         lean predictor obs, some full (operator 2026-06-04)."""

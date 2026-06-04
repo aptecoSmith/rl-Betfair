@@ -68,6 +68,16 @@ TRANSFORMER_DEPTH_CHOICES: tuple[int, ...] = (1, 2, 3)
 TRANSFORMER_HEADS_CHOICES: tuple[int, ...] = (2, 4, 8)
 TRANSFORMER_CTX_TICKS_CHOICES: tuple[int, ...] = (32, 64, 128, 256)
 
+# Fresh-blood SAMPLING is capped to CPU-affordable transformer sizes
+# (2026-06-04). The multiprocess path is CPU-only, and a ctx256/depth3
+# transformer over a 6/4 rotation took ~74 min for ONE agent and gated the
+# whole generation (a gen completes only when EVERY agent finishes). The
+# wider _CHOICES above stay VALID (assert_in_range accepts them — e.g. a GPU
+# run or a hand-built policy); only fresh blood is capped, so the
+# lstm-vs-transformer tournament continues at sizes that keep gens fast.
+TRANSFORMER_DEPTH_SAMPLE: tuple[int, ...] = (1, 2)
+TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64)
+
 #: The structural gene names — frozen within a lineage, sampled only at
 #: fresh-blood birth. ``hidden_size`` (a legacy gene) is structural too
 #: under warm-start (mutating it breaks weight inheritance) but stays in
@@ -597,11 +607,11 @@ def _sample_architecture_field(rng: random.Random, field_name: str):
     if field_name == "architecture":
         return rng.choice(ARCHITECTURE_CHOICES)
     if field_name == "transformer_depth":
-        return int(rng.choice(TRANSFORMER_DEPTH_CHOICES))
+        return int(rng.choice(TRANSFORMER_DEPTH_SAMPLE))
     if field_name == "transformer_heads":
         return int(rng.choice(TRANSFORMER_HEADS_CHOICES))
     if field_name == "transformer_ctx_ticks":
-        return int(rng.choice(TRANSFORMER_CTX_TICKS_CHOICES))
+        return int(rng.choice(TRANSFORMER_CTX_TICKS_SAMPLE))
     if field_name == "predictor_lean_obs":
         # ~50/50 lean vs full so the gauntlet explores both representations.
         return bool(rng.random() < 0.5)
