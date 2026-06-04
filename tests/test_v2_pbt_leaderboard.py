@@ -53,3 +53,37 @@ class TestLeaderboardTrainColumn:
             [self._row(125)], "run", frozen=False, tier_label="R1 TIER")
         assert "train" in txt and "2:05" in txt
         assert "frozen_at" not in txt
+
+
+class TestTrainedAtColumn:
+    """`trained_at` (when the agent trained) shows on R1/R2 so the operator can
+    tell which agents are the latest across the multi-day campaign (gen resets
+    per run). R3 keeps frozen_at instead (== trained_at for a champion)."""
+
+    def _row(self, trained_at="2026-06-04T13:25:00+00:00", frozen_at=""):
+        return {
+            "model_id": "abc12345", "architecture": "lstm", "hidden_size": 256,
+            "locked_pnl": 10.0, "naked_pnl": -5.0, "train_seconds": 300,
+            "trained_at": trained_at, "frozen_at": frozen_at,
+            "genes": {"learning_rate": 1e-4, "entropy_coeff": 0.01},
+        }
+
+    def test_r1_r2_show_trained_at_not_frozen_at(self):
+        txt = build_leaderboard_text(
+            [self._row()], "run", frozen=False, tier_label="R1 TIER")
+        assert "trained_at" in txt
+        assert "2026-06-04T13:25:00" in txt   # rendered value
+        assert "frozen_at" not in txt
+
+    def test_r3_shows_frozen_at_not_redundant_trained_at(self):
+        txt = build_leaderboard_text(
+            [self._row(frozen_at="2026-06-04T14:00:00+00:00")],
+            "run", frozen=True)
+        assert "frozen_at" in txt and "2026-06-04T14:00:00" in txt
+        assert "trained_at" not in txt   # dropped on R3 (redundant)
+
+    def test_missing_trained_at_renders_blank_not_crash(self):
+        r = self._row()
+        del r["trained_at"]
+        txt = build_leaderboard_text([r], "run", frozen=False)
+        assert "trained_at" in txt and "abc12345" in txt   # header + row OK

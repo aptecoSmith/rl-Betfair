@@ -2050,7 +2050,8 @@ def _pbt_naked_std(res) -> float:
     return 0.0
 
 
-def _pbt_model_row(spec, res, *, generation: int, score: float) -> dict:
+def _pbt_model_row(spec, res, *, generation: int, score: float,
+                   trained_at: str | None = None) -> dict:
     """Full per-model record: lineage + architecture + FULL genes + every
     eval metric we rank on. The shared schema for the per-gen register
     (``pbt_lineage.jsonl``) and the R3 hall-of-fame
@@ -2099,6 +2100,12 @@ def _pbt_model_row(spec, res, *, generation: int, score: float) -> dict:
         # exposes the speed cost of bigger architectures (operator 2026-06-04).
         "train_seconds": float(
             getattr(getattr(res, "train", None), "wall_time_sec", 0.0) or 0.0),
+        # Wall-clock datetime this agent finished training (the generation's
+        # completion time). The `generation` counter RESETS to 0 every wrapper
+        # run, so over a multi-day campaign `trained_at` is the only way to
+        # order agents by recency and see whether the LATEST ones do better
+        # (operator 2026-06-04).
+        "trained_at": trained_at,
         "genes": g.to_dict(),
     }
 
@@ -2113,10 +2120,13 @@ def _write_pbt_lineage(
     """Append one rich JSONL row per agent this generation — the per-model
     parameter register + Step 4's heritability/diversity source. Carries the
     lineage/tier/role the scoreboard lacks PLUS the full genes + metrics."""
+    from datetime import datetime, timezone
+    trained_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with open(path, "a", encoding="utf-8") as f:
         for spec, res in pairs:
             row = _pbt_model_row(
-                spec, res, generation=generation, score=float(score_fn(res)))
+                spec, res, generation=generation, score=float(score_fn(res)),
+                trained_at=trained_at)
             f.write(json.dumps(row) + "\n")
 
 
@@ -2133,7 +2143,8 @@ def _write_pbt_hall_of_fame(
     with open(path, "a", encoding="utf-8") as f:
         for spec, res in frozen:
             row = _pbt_model_row(
-                spec, res, generation=generation, score=float(score_fn(res)))
+                spec, res, generation=generation, score=float(score_fn(res)),
+                trained_at=frozen_at)
             row["frozen_at"] = frozen_at
             f.write(json.dumps(row) + "\n")
 

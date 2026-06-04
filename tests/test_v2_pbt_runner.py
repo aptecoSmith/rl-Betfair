@@ -99,8 +99,13 @@ def test_pbt_runner_warm_starts_and_rotates(tmp_path: Path) -> None:
     # leaderboard + register (2026-06-04). The stub measures a positive time.
     assert all(r.get("train_seconds", 0) > 0 for r in rows)
     assert "train" in (out_dir / "leaderboard.txt").read_text()
-    assert "train_seconds" in (
-        out_dir / "model_register.csv").read_text().splitlines()[0]
+    reg_header = (out_dir / "model_register.csv").read_text().splitlines()[0]
+    assert "train_seconds" in reg_header
+    # Every lineage row carries a wall-clock trained_at datetime, and it lands
+    # in the register + the R1/R2 boards (recency across the multi-day campaign).
+    assert all(r.get("trained_at") for r in rows)
+    assert "trained_at" in reg_header
+    assert "trained_at" in (out_dir / "leaderboard_r1.txt").read_text()
 
 
 def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
@@ -142,6 +147,7 @@ def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
     assert "frozen_at(R3)" in lb and "locked" in lb
     assert "train" in lb  # train-time column (2026-06-04)
     assert "train_seconds" in champs[0]  # plumbed into the hall-of-fame row
+    assert "trained_at" not in lb  # R3 uses frozen_at, not trained_at
     # The frozen champion's short model id appears in the table.
     assert champs[0]["model_id"][:8] in lb
 
@@ -151,4 +157,5 @@ def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
     r2 = (out_dir / "leaderboard_r2.txt").read_text()
     assert "R1 TIER" in r1 and "R2 TIER" in r2
     assert "frozen_at(R3)" not in r1  # tiers aren't frozen
+    assert "trained_at" in r1 and "trained_at" in r2  # when-trained datetime
     assert "locked" in r1 and "lineage" in r2

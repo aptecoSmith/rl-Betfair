@@ -32,6 +32,7 @@ from pathlib import Path
 _LB_COLS = [
     ("rank", "_rank", "{:>4}"),
     ("frozen_at(R3)", "frozen_at", "{:<19}"),
+    ("trained_at", "_trained_at", "{:<19}"),
     ("model", "_model8", "{:<8}"),
     ("architecture", "_arch", "{:<26}"),
     ("locked", "locked_pnl", "{:>9.2f}"),
@@ -108,9 +109,10 @@ def _derive(r: dict, rank: int) -> dict:
     d["_ent"] = float(genes.get("entropy_coeff", float("nan")))
     d["_train_hms"] = _fmt_hms(float(r.get("train_seconds", 0.0) or 0.0))
     d["_lineage6"] = str(r.get("lineage_id", ""))[:6]
-    # Truncate the ISO timestamp to seconds for the table.
+    # Truncate the ISO timestamps to seconds for the table.
     fa = str(r.get("frozen_at", ""))
     d["frozen_at"] = fa[:19]
+    d["_trained_at"] = str(r.get("trained_at") or "")[:19]
     return d
 
 
@@ -125,7 +127,11 @@ def build_leaderboard_text(
     ``frozen=False`` (R1 / R2 live tiers): drop it (those agents aren't
     frozen) — the ``gen`` column carries the when. ``top_n`` caps the rows.
     """
-    cols = _LB_COLS if frozen else [c for c in _LB_COLS if c[1] != "frozen_at"]
+    # R3 (frozen) shows frozen_at (when it scored in R3); R1/R2 show trained_at
+    # (when trained) -- they're not frozen. Never show both (they'd be redundant
+    # for a champion, whose trained_at == frozen_at).
+    drop = "_trained_at" if frozen else "frozen_at"
+    cols = [c for c in _LB_COLS if c[1] != drop]
     # Sort by locked_pnl desc (the primary selection metric). Ties -> higher
     # locked_share, then total_reward.
     ordered = sorted(
@@ -186,7 +192,8 @@ def build_leaderboard_text(
 # genes appear automatically. The lineage rows already carry genes + metrics.
 _REGISTER_LEAD = [
     "generation", "model_id", "agent_id", "lineage_id", "tier", "role",
-    "rotations_seen", "frozen", "frozen_at", "arch_name", "architecture",
+    "rotations_seen", "frozen", "frozen_at", "trained_at",
+    "arch_name", "architecture",
     "hidden_size", "transformer_depth", "transformer_heads",
     "transformer_ctx_ticks",
     "locked_pnl", "naked_pnl", "locked_share", "naked_std", "day_pnl",
