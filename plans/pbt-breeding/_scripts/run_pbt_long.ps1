@@ -22,6 +22,12 @@ $SEALED = @(
   "2026-05-20","2026-05-21","2026-05-22","2026-05-23","2026-05-24",
   "2026-05-25","2026-05-26","2026-05-27","2026-05-28","2026-05-29"
 )
+$PRED = "..\betfair-predictors\production"
+$MANIFESTS = @(
+  "$PRED\race-outcome\manifest.json",
+  "$PRED\race-outcome-ranker\manifest.json",
+  "$PRED\direction-predictor\manifest.json"
+)
 $DEADLINE = (Get-Date).AddHours(20)
 New-Item -ItemType Directory -Force -Path $DIR | Out-Null
 function Log($m) {
@@ -35,10 +41,21 @@ while ((Get-Date) -lt $DEADLINE) {
   $run++
   $seed = 770 + $run
   Log "campaign run $run (seed $seed) starting -- 16 agents, 25 gens, 3x4 rotation"
+  # OOM FIX (2026-06-04): the overnight predictors-OFF run cached each ~1.45GB
+  # full-obs engineered DAY in EVERY worker -> 16 workers x 12 days plateaued
+  # at ~128GB by gen 2 -> MemoryError before R3 ever formed (zero champions).
+  # Fix: run predictors-ON (the brief's "intended config"), which activates
+  # the VALIDATED static_obs memmap cache -- each day baked ONCE as a ~93MB
+  # float32 .npy that workers np.load(mmap_mode='r') so the OS page cache
+  # holds ONE shared copy. ~36GB total at 16 workers (the foundation's OOM
+  # fix), AND faster (workers skip engineer_day + per-tick predictor
+  # inference). Bundle rebuilt per-worker from the 3 manifests.
   & $py -m training_v2.cohort.runner `
     --breeding pbt --n-agents 16 --generations 25 --days 12 `
     --exclude-days $SEALED --seed $seed --parallel-agents 16 --device cpu `
     --composite-score-mode locked_weighted `
+    --use-race-outcome-predictor `
+    --predictor-bundle-manifests $MANIFESTS[0] $MANIFESTS[1] $MANIFESTS[2] `
     --pbt-rotations 3 --pbt-train-per-rotation 2 --pbt-eval-per-rotation 2 `
     --pbt-r2-size 6 --pbt-r3-size 4 --pbt-promote-from-r1 3 `
     --pbt-promote-from-r2 2 --pbt-freeze-top-r3 2 `
