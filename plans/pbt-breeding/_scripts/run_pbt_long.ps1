@@ -72,7 +72,7 @@ while ((Get-Date) -lt $DEADLINE) {
   & $py -m training_v2.cohort.runner `
     --breeding pbt --n-agents 16 --generations 25 --days 30 `
     --exclude-days $SEALED --seed $seed --parallel-agents 16 --device cpu `
-    --composite-score-mode locked_weighted `
+    --composite-score-mode locked_weighted --big-model-threads 6 `
     --use-race-outcome-predictor --bc-pretrain-steps 500 `
     --predictor-bundle-manifests $MANIFESTS[0] $MANIFESTS[1] $MANIFESTS[2] `
     --pbt-rotations 3 --pbt-train-per-rotation 6 --pbt-eval-per-rotation 4 `

@@ -25,14 +25,23 @@ from __future__ import annotations
 
 import os
 
-# Single-thread BLAS/OMP per process. Set BEFORE torch/numpy import so the
-# spawned worker (which re-imports this module) picks it up. Unconditional
-# (not setdefault) so an inherited multi-thread value can't leak in.
+# Per-process BLAS/OMP cap. Set BEFORE torch/numpy import so the spawned
+# worker (which re-imports this module) picks it up. Default "1" == single
+# thread per worker — the load-bearing no-oversubscription invariant AND the
+# bit-identity guarantee. When the runner enables size-aware threading
+# (--big-model-threads N) it sets SES_MP_MAX_THREADS=N in the PARENT before
+# spawning the pool, so each worker inherits it and raises the cap to N; the
+# actual per-AGENT thread count is then set at runtime by
+# torch.set_num_threads() from each spec's ``_num_threads`` (big models get N,
+# the rest stay 1, so their large matmuls spread onto the cores small agents
+# free as they finish). Unconditional (not setdefault) so an inherited
+# multi-thread value can't leak in when threading is OFF.
+_mp_max_threads = os.environ.get("SES_MP_MAX_THREADS", "1")
 for _v in (
     "MKL_NUM_THREADS", "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
 ):
-    os.environ[_v] = "1"
+    os.environ[_v] = _mp_max_threads
 
 import logging
 import pickle
@@ -251,10 +260,15 @@ def _train_agent_worker(spec: dict):
       the whole file each call (no cross-task reuse). Used by the probes.
     """
     import torch
-    torch.set_num_threads(1)
     from training_v2.cohort.worker import train_one_agent
 
     spec = dict(spec)
+    # Size-aware threading (default 1 == single-thread == bit-identical). The
+    # master sets ``_num_threads`` per agent from its hidden_size: big LSTMs get
+    # N so their 1024-wide matmuls spread across the cores small agents free as
+    # they finish; everything else stays 1. The import-time SES_MP_MAX_THREADS
+    # cap must be >= this for it to take effect (the runner sets both together).
+    torch.set_num_threads(max(1, int(spec.pop("_num_threads", 1))))
     static_obs_paths = spec.pop("_static_obs_day_paths", None)
     day_paths = spec.pop("_feature_cache_day_paths", None)
     cache_path = spec.pop("_feature_cache_path", None)

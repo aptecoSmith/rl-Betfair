@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
 import sys
 import time
@@ -322,6 +323,25 @@ def _composite_score(
 # Thresholds for "improvement" on each of the three signals. Tuned so the
 # default ``early_stop_patience=3`` only fires when the cohort has clearly
 # exhausted exploration on all three axes simultaneously.
+# Size-aware threading: agents whose hidden_size (d_model) is at least this
+# get --big-model-threads threads in the multiprocess path; smaller agents stay
+# single-threaded. 512 targets the h512/h1024 LSTMs that gate generations
+# (h256 and below already finish well inside the gen wall).
+_BIG_MODEL_HIDDEN = 512
+
+
+def _threads_for_hidden(hidden_size: int, big_model_threads: int) -> int:
+    """BLAS/OMP thread count for one multiprocess worker, by model size.
+
+    Big LSTMs (``d_model >= _BIG_MODEL_HIDDEN``) get ``big_model_threads`` so
+    their large matmuls can use the cores small agents free as they finish;
+    everything else stays single-threaded. ``big_model_threads == 1`` (the
+    default) returns 1 for every size — byte-identical to the single-thread
+    golden path.
+    """
+    n = int(big_model_threads)
+    return n if (n > 1 and int(hidden_size) >= _BIG_MODEL_HIDDEN) else 1
+
 _EARLY_STOP_STD_IMPROVEMENT_THRESHOLD = 5.0   # £/day
 _EARLY_STOP_COMPOSITE_REL_THRESHOLD = 0.01    # 1 %
 _EARLY_STOP_BETA_REL_THRESHOLD = 0.10         # 10 %
@@ -817,6 +837,7 @@ def run_cohort(
     monitor_early_stop_patience: int = 0,
     frozen_direction_head_path: "Path | None" = None,
     resume_from: "Path | None" = None,
+    big_model_threads: int = 1,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -1306,6 +1327,13 @@ def run_cohort(
                     tuple(predictor_manifests)
                     if predictor_bundle is not None else None
                 )
+                # Size-aware threading (--big-model-threads N>1): raise the
+                # workers' BLAS/OMP cap to N BEFORE the pool spawns so big
+                # models can use it. MUST be set in the parent before make_pool
+                # — the worker reads SES_MP_MAX_THREADS at import (in the spawned
+                # process). Default 1 leaves it single-threaded (bit-identical).
+                if int(big_model_threads) > 1:
+                    os.environ["SES_MP_MAX_THREADS"] = str(int(big_model_threads))
                 # Warm persistent pool: create once, reuse across generations
                 # so workers stay alive (torch imported once, per-worker day
                 # cache survives → gen 2+ skips both startup costs).
@@ -1466,6 +1494,11 @@ def run_cohort(
                         _static_obs_day_paths=_sobs_agent,
                         _model_store_paths=store_paths,
                         _predictor_manifests=mp_predictor_manifests,
+                        # Size-aware threading: big LSTMs get N threads so their
+                        # matmuls use the cores small agents free as they
+                        # finish; the rest stay 1. Default N=1 -> bit-identical.
+                        _num_threads=_threads_for_hidden(
+                            genes.hidden_size, big_model_threads),
                     ))
                 logger.info(
                     "── Multiprocess: %d agents on warm pool (%d workers) ──",
@@ -2922,6 +2955,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "run. Default None = fresh run from generation 0."
         ),
     )
+    p.add_argument(
+        "--big-model-threads", type=int, default=1, metavar="N",
+        help=(
+            "Multiprocess size-aware threading. Big LSTMs (d_model >= 512) get "
+            "N BLAS/OMP threads so their large matmuls spread across the cores "
+            "smaller agents free as they finish — turning the lone h1024 "
+            "straggler that gates a generation into a much shorter one. "
+            "Smaller agents stay single-threaded. Default 1 = single-thread "
+            "everywhere = byte-identical to the bit-identical golden path; "
+            "N>1 relaxes bit-identity (multi-threaded float reduction order) "
+            "in exchange for ~1.5-2.5x on the big-model stragglers. Try 4-6."
+        ),
+    )
     # Predictor-integration (plans/predictor-integration/).
     p.add_argument(
         "--strategy-mode", default=None,
@@ -3351,6 +3397,7 @@ def main(argv: list[str] | None = None) -> int:
             resume_from=(
                 Path(args.resume_from) if args.resume_from else None
             ),
+            big_model_threads=int(args.big_model_threads),
         )
     finally:
         if server is not None:
