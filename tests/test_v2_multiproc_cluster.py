@@ -260,7 +260,10 @@ def test_worker_static_obs_cache_loads_once_then_reuses(tmp_path, monkeypatch):
     side = tmp_path / "meta_x.pkl"
     art.save(npy, side)
     a = mp._worker_load_static_obs("2026-05-09", str(npy), str(side))
-    assert a is not None and "2026-05-09" in mp._WORKER_STATIC_OBS_CACHE
+    # Cache is keyed by (day, npy_path) so lean/full variants of the same day
+    # don't collide (pbt-breeding 2026-06-04).
+    assert a is not None
+    assert ("2026-05-09", str(npy)) in mp._WORKER_STATIC_OBS_CACHE
     # A second load MUST come from the cache, not disk. (On Windows an open
     # memmap locks the .npy file so we can't delete it to prove that; instead
     # make a fresh DayStaticObs.load() blow up and assert it was NOT called.)

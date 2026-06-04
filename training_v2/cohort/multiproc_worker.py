@@ -120,9 +120,17 @@ def _worker_load_static_obs(day: str, npy_path: str, sidecar_path: str):
     optimisation — its failure must degrade, never kill the cohort.
     """
     cache = _WORKER_STATIC_OBS_CACHE
-    if day in cache:
-        cache[day] = cache.pop(day)  # mark most-recently-used
-        return cache[day]
+    # Key by (day, npy_path), NOT day alone: a single warm worker may serve
+    # agents on DIFFERENT obs representations (lean vs full are a fresh-blood
+    # gene) whose static_obs for the same day live in different cache dirs.
+    # Keying on day alone returned the first-loaded variant for both -> a
+    # StaticObsCacheMismatch crash (pbt-breeding 2026-06-04). The npy_path
+    # encodes the variant. Guarded by
+    # tests/test_v2_static_obs_variant_cache.py.
+    key = (day, npy_path)
+    if key in cache:
+        cache[key] = cache.pop(key)  # mark most-recently-used
+        return cache[key]
     from training_v2.cohort.static_obs_cache import DayStaticObs
 
     art = None
@@ -144,7 +152,7 @@ def _worker_load_static_obs(day: str, npy_path: str, sidecar_path: str):
                 "from-scratch env build for this day", day, exc2,
             )
             return None
-    cache[day] = art
+    cache[key] = art
     while len(cache) > _WORKER_STATIC_OBS_CACHE_MAX:
         del cache[next(iter(cache))]  # evict least-recently-used
     return art
