@@ -4,6 +4,12 @@ Forward-path GPU acceleration for the heterogeneous PBT population. Smallest
 risk first; **Step 0 is a hard go/no-go gate**. Env core + predictors are out of
 scope (HC#2). See `purpose.md`, `hard_constraints.md`.
 
+> **OUTCOME (2026-06-04): Step 0 → NO-GO.** Measured forward share is **3–14 %**
+> of the predictors-ON agent-day (transformers ~4 %); GPU batch=1 loses for all
+> but the h1024 LSTM. The bottleneck is the LightGBM predictor/scorer floor
+> (~86–97 %, out of scope by HC#2), not the forward. Tiers 1–3 NOT PURSUED;
+> keep R5 (~8–9×). Data + verdict in `findings.md`.
+
 ---
 
 ## Step 0 — Measure & decide  ⟵ HARD GATE (do first, ~1 day)

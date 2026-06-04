@@ -2431,3 +2431,36 @@ inference). Retired the band-aids (`_WORKER_DAY_CACHE_MAX 4→16`,
 `--parallel-agents 4→16`); restored the BC A/B run (`ab_bc_chain.sh`) from the
 band-aided ~48h (N=4) to ~16h (N=16). Full record:
 `plans/shared-memory-day-cache/{step0_structure,step3_memory}.md`.
+
+---
+
+## 2026-06-04 — pbt-gpu-forward Step 0: GPU forward lane — NO-GO (measured)
+
+**Plan.** `plans/pbt-gpu-forward/`.
+
+**Intention.** PBT made the population heterogeneous (transformers + wide LSTMs).
+Hypothesis (from the pbt-breeding COMPUTE NOTE — transformer 5–20 min/agent-day
+vs LSTM 30–60 s): heavy-arch forwards are FLOP-bound and starved on the CPU-only
+1-thread multiprocess path → route them to the idle RTX 3090. Scoped Tiers 1–3,
+forward-path only; tensor-env explicitly NO. Step 0 = a measure-and-decide hard
+gate before any build.
+
+**Implementation brief.** Read per-arch agent-day wall from the stopped
+campaign's `registry/pbt_long/` register/scoreboard + a forward microbench
+(`plans/pbt-gpu-forward/_measure/bench_forward.py`) timing 12,368-step batch=1
+forwards for the real archs (full obs 2254-d) on CPU 1t/6t vs CUDA, scaled to a
+per-day forward wall ÷ measured agent-day = forward share.
+
+**Result.** **NO-GO.** Under the real **predictors-ON** config the forward is
+only **3–14 %** of the agent-day (transformers ~4 %; h1024 LSTM 14 % @1t, 8 % @
+the real 6-thread baseline) — the LightGBM predictor+scorer floor is the other
+~86–97 % (corroborates Phase-6's 74 % scorer). And GPU batch=1 *loses* for every
+arch except the FLOP-bound h1024 LSTM (launch-bound; transformers 1.5–2× slower
+on CUDA), which `--big-model-threads 6` already mitigates. A GPU forward lane
+saves ~5 % on the costliest agents at best while slowing most of the population →
+net-negative. The premise was wrong because the COMPUTE NOTE was a predictors-OFF
+lean smoke; predictors-ON dominates every arch and erases the transformer's
+forward edge. Tiers 1–3 not pursued; keep R5 (~8–9×). The real lever is the
+predictor/scorer floor (already attacked by the R2 scorer cache + static_obs
+memmap), out of scope here by HC#2. Step 0 cost ~1 h and prevented a multi-day
+build of a net-negative lane. Tensor-env (3C/R4) remains NO.
