@@ -838,6 +838,7 @@ def run_cohort(
     frozen_direction_head_path: "Path | None" = None,
     resume_from: "Path | None" = None,
     big_model_threads: int = 1,
+    gpu_policy_lane: bool = False,
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -1490,6 +1491,7 @@ def run_cohort(
                         composite_score_mode=composite_score_mode,
                         feature_cache=None,
                         frozen_direction_head_path=frozen_direction_head_path,
+                        gpu_policy_lane=bool(gpu_policy_lane),
                         _feature_cache_day_paths=day_cache_paths,
                         _static_obs_day_paths=_sobs_agent,
                         _model_store_paths=store_paths,
@@ -1630,6 +1632,7 @@ def run_cohort(
                         frozen_direction_head_path=(
                             frozen_direction_head_path
                         ),
+                        gpu_policy_lane=bool(gpu_policy_lane),
                     )
                     results[idx] = result
                     total_agents_trained += 1
@@ -2968,6 +2971,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "in exchange for ~1.5-2.5x on the big-model stragglers. Try 4-6."
         ),
     )
+    p.add_argument(
+        "--gpu-policy-lane", action="store_true",
+        help=(
+            "Route big-context transformers' policy (batch=1 attention forward "
+            "+ batched PPO update) to CUDA while their env stays on CPU; LSTMs "
+            "and small transformers stay on the pure-CPU R5 path. Only agents "
+            "with architecture=transformer AND ctx_ticks>=128 flip (where the "
+            "O(ctx^2) forward beats CPU even at batch=1 — measured 6.3x at "
+            "ctx256). Collapses a big transformer's agent-day toward its "
+            "env-sim floor, making big-context attention affordable to train. "
+            "No-op without a CUDA device. See plans/pbt-gpu-forward/."
+        ),
+    )
     # Predictor-integration (plans/predictor-integration/).
     p.add_argument(
         "--strategy-mode", default=None,
@@ -3398,6 +3414,7 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.resume_from) if args.resume_from else None
             ),
             big_model_threads=int(args.big_model_threads),
+            gpu_policy_lane=bool(args.gpu_policy_lane),
         )
     finally:
         if server is not None:

@@ -81,15 +81,34 @@ TRANSFORMER_DEPTH_CHOICES: tuple[int, ...] = (1, 2, 3)
 TRANSFORMER_HEADS_CHOICES: tuple[int, ...] = (2, 4, 8)
 TRANSFORMER_CTX_TICKS_CHOICES: tuple[int, ...] = (32, 64, 128, 256)
 
-# Fresh-blood SAMPLING is capped to CPU-affordable transformer sizes
-# (2026-06-04). The multiprocess path is CPU-only, and a ctx256/depth3
-# transformer over a 6/4 rotation took ~74 min for ONE agent and gated the
-# whole generation (a gen completes only when EVERY agent finishes). The
-# wider _CHOICES above stay VALID (assert_in_range accepts them — e.g. a GPU
-# run or a hand-built policy); only fresh blood is capped, so the
-# lstm-vs-transformer tournament continues at sizes that keep gens fast.
-TRANSFORMER_DEPTH_SAMPLE: tuple[int, ...] = (1, 2)
-TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64)
+# Fresh-blood SAMPLING (2026-06-04, UN-CAPPED 2026-06-04 for the GPU lane).
+# History: a ctx256/depth3 transformer took ~74 min/agent ON CPU and gated the
+# whole generation, so sampling was capped to ctx{32,64}/depth{1,2}. The GPU
+# policy lane (plans/pbt-gpu-forward) removes that cap's reason: big-ctx
+# transformers (ctx>=128) route their forward+update to CUDA (measured 6.3x on
+# the ctx256 forward), collapsing their agent-day toward the env-sim floor —
+# LSTM-comparable. So fresh blood may again draw the full range; the lane keeps
+# the big ones affordable while small transformers + LSTMs stay on pure CPU.
+TRANSFORMER_DEPTH_SAMPLE: tuple[int, ...] = (1, 2, 3)
+TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64, 128, 256)
+
+# GPU policy lane (plans/pbt-gpu-forward, 2026-06-04). A transformer whose
+# context window is at least this routes its policy FORWARD + batched PPO
+# UPDATE to CUDA (the env always stays on CPU). Below this — and for every LSTM
+# — the batch=1 forward is launch-bound on GPU (measured: ctx64 GPU ~= CPU; the
+# LSTM's batch=1 GEMV loses on GPU), so they stay on the pure-CPU R5 path.
+GPU_LANE_MIN_CTX: int = 128
+
+
+def is_gpu_lane_eligible(genes) -> bool:
+    """Whether this agent's policy compute should run on CUDA. True only for
+    big-context transformers (ctx_ticks >= GPU_LANE_MIN_CTX) — the case where
+    the O(ctx^2) attention forward is large enough that GPU beats CPU even at
+    batch=1. Env stays on CPU regardless; only forward + update move. Duck-typed
+    on ``.architecture`` / ``.transformer_ctx_ticks`` so it also accepts a
+    trainer_hp-style mapping via getattr-friendly objects."""
+    return (str(getattr(genes, "architecture", "lstm")) == "transformer"
+            and int(getattr(genes, "transformer_ctx_ticks", 0)) >= GPU_LANE_MIN_CTX)
 
 #: The structural gene names — frozen within a lineage, sampled only at
 #: fresh-blood birth. ``hidden_size`` (a legacy gene) is structural too

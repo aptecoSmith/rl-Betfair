@@ -44,25 +44,35 @@ class TestFreshBloodSamplesArchitecture:
             assert g.transformer_heads in TRANSFORMER_HEADS_CHOICES
             assert g.transformer_ctx_ticks in TRANSFORMER_CTX_TICKS_CHOICES
 
-    def test_fresh_blood_caps_transformer_size_for_cpu(self):
-        """Fresh blood only SAMPLES CPU-affordable transformer sizes
-        (ctx {32,64}, depth {1,2}) — a ctx256/depth3 transformer gated whole
-        generations on CPU (2026-06-04). The wider CHOICES stay valid for
-        assert_in_range (e.g. a GPU run)."""
+    def test_fresh_blood_samples_full_transformer_range_for_gpu_lane(self):
+        """Un-capped 2026-06-04 for the GPU lane: fresh blood may again draw
+        big-ctx transformers (the lane routes their forward+update to CUDA, so
+        they no longer gate CPU generations). Big-ctx (>=128) are GPU-eligible;
+        small transformers + every LSTM stay on the pure-CPU path."""
+        from types import SimpleNamespace
+
         from training_v2.cohort.genes import (
             TRANSFORMER_CTX_TICKS_SAMPLE,
-            TRANSFORMER_DEPTH_SAMPLE,
+            is_gpu_lane_eligible,
         )
         rng = random.Random(7)
-        ctx_seen, depth_seen = set(), set()
-        for _ in range(300):
+        ctx_seen = set()
+        for _ in range(400):
             g = sample_fresh_blood_genes(rng)
             if g.architecture == "transformer":
                 ctx_seen.add(g.transformer_ctx_ticks)
-                depth_seen.add(g.transformer_depth)
-        assert ctx_seen <= set(TRANSFORMER_CTX_TICKS_SAMPLE) == {32, 64}
-        assert depth_seen <= set(TRANSFORMER_DEPTH_SAMPLE) == {1, 2}
-        assert 256 not in ctx_seen and 3 not in depth_seen
+        assert ctx_seen <= set(TRANSFORMER_CTX_TICKS_SAMPLE)
+        assert ctx_seen & {128, 256}, f"big-ctx never sampled: {ctx_seen}"
+
+        def tf(ctx):
+            return SimpleNamespace(architecture="transformer",
+                                   transformer_ctx_ticks=ctx)
+        assert is_gpu_lane_eligible(tf(256))
+        assert is_gpu_lane_eligible(tf(128))
+        assert not is_gpu_lane_eligible(tf(64))    # launch-bound on GPU
+        assert not is_gpu_lane_eligible(tf(32))
+        assert not is_gpu_lane_eligible(
+            SimpleNamespace(architecture="lstm", transformer_ctx_ticks=0))
 
     def test_draws_both_lean_and_full_obs(self):
         """predictor_lean_obs is a fresh-blood OPTION — some lineages explore

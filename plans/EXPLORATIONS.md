@@ -502,3 +502,52 @@ reward-aware selective BC→PPO; first unblock the policy input-norm
 fc=120 + close_walk=10 pinned, select on LOCKED, eval on the reserved 7
 holdout days once. (3) The recipe + caches are staged
 (`plans/imitation-first/`).
+
+---
+
+## 2026-06-04 — Where the training-throughput floor actually goes (two CPU levers we wrongly dismissed)
+
+**Question**: `plans/pbt-gpu-forward/findings.md` concluded the LightGBM
+predictor/scorer is **86–97%** of the agent-day (forward 3–14%). Is that
+right, and what is the real throughput lever — before building a GPU lane?
+
+**What the data showed** (full-agent profiles, LSTM-128, lean-obs, day
+2026-04-10, in `plans/pbt-gpu-forward/_measure/`; cProfile inflates
+Python-heavy code, so treat as buckets not decimals):
+
+- **Live env** `train_episode` = 72.9 s. **Cached env** (static_obs cache
+  injected — the real multiprocess path) = 62.2 s. Baking saved **~10.6 s**
+  = the base `engineer_day` features + the per-RACE race-outcome predictor.
+- **The per-TICK direction predictor + scorer do NOT bake out** — even on
+  the cached path `feature_extractor` (~8 s), `lightgbm.predict` (~4 s) and
+  `isotonic.predict` (~3 s) all still run: ~15 s, **~24%** of the agent-day.
+- Forward + PPO update (lstm/linear/backward/adam) = the biggest single
+  GPU-able bucket (~20–25% for LSTM-128; **dominant for a big transformer**,
+  whose ctx²-attention forward is ~10× the LSTM's). Env sim
+  (matching/settlement) ~16%, un-cacheable (depends on the agent's actions).
+
+**Interpretation**: BOTH prior claims were wrong. The doc's "86–97%
+LightGBM" took a no-cache scorer profile and pinned it on a cache-on
+agent-day. The counter-claim that LightGBM is "baked away / negligible" was
+also wrong — the *race-outcome* model bakes (per-race), but the *direction*
+(price-mover) model + its scorer features run **per tick** and survive the
+cache. Truth in between.
+
+**Implications / queued thoughts**:
+- The GPU policy lane (`--gpu-policy-lane`, built 2026-06-04) addresses
+  forward+update for big-ctx transformers — the priority.
+- **Two CPU levers left on the table — REVISIT when cohort throughput
+  matters** (both real, both measured here, both wrongly dismissed earlier):
+  1. **Native-compile the direction predictor** (LightGBM → Treelite /
+     `lleaves`): ~6–10% of the agent-day, typically 2–10× faster tree
+     inference, identical outputs. ALSO helps live deployment
+     (`ai-betfair`), where it runs per tick uncached.
+  2. **Optimise the scorer `FeatureExtractor`**
+     (`training_v2/scorer/feature_extractor.py`): ~14%, Python/numpy
+     per-tick velocity loops (`_extract_into`, `_delta_window`,
+     `_best_back`, `_spread_in_ticks`). Vectorise / Numba, or bake the
+     per-tick direction features into static_obs the way `engineer_day`
+     already is.
+- Both are dwarfed by the env-sim + per-tick Python-loop floor that only the
+  tensor-env (R4) rewrite removes — but they are cheap, self-contained
+  ~10–20% wins if a campaign ever needs the cohort faster.

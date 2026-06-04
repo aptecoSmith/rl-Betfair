@@ -58,6 +58,7 @@ from training_v2.cohort.genes import (
     PHASE5_GENE_NAMES,
     CohortGenes,
     assert_in_range,
+    is_gpu_lane_eligible,
 )
 from training_v2.discrete_ppo.bc_pretrain import (
     DiscreteBCPretrainer,
@@ -1136,6 +1137,7 @@ def train_one_agent(
     static_obs_cache: dict | None = None,
     frozen_direction_head_path: "Path | None" = None,
     init_weights_path: "str | Path | None" = None,
+    gpu_policy_lane: bool = False,
 ) -> AgentResult:
     """Train one agent through ``days_to_train`` and eval on ``eval_days``.
 
@@ -1203,6 +1205,21 @@ def train_one_agent(
         eval_days = [str(eval_day)]
     if not eval_days:
         raise ValueError("eval_days must contain at least one date.")
+
+    # GPU policy lane (plans/pbt-gpu-forward, 2026-06-04): a big-ctx transformer
+    # routes its WHOLE policy — the batch=1 attention forward AND the batched
+    # PPO update — to CUDA; the env stays on CPU. The O(ctx^2) forward wins on
+    # GPU (measured 6.3x at ctx256) where an LSTM's batch=1 GEMV does not, so
+    # only is_gpu_lane_eligible() agents flip. Resolved ONCE here so the seed,
+    # policy build, BC, and trainer all see the right device. Default off →
+    # device unchanged → byte-identical to the pure-CPU R5 path.
+    _gpu_lane = (
+        bool(gpu_policy_lane)
+        and is_gpu_lane_eligible(genes)
+        and torch.cuda.is_available()
+    )
+    if _gpu_lane:
+        device = "cuda"
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -1451,7 +1468,14 @@ def train_one_agent(
     # ("--device cpu") keep the rollout on CPU and so retain byte-
     # identical behaviour. The trainer handles the policy + optimiser
     # round-trip per episode.
-    rollout_device = "cpu" if str(device) == "cuda" else device
+    # rollout_device: the GPU lane keeps the batch=1 forward ON cuda — a big-ctx
+    # transformer's attention forward wins there (the whole point of the lane).
+    # The default split-device path (an incidental --device cuda on an LSTM)
+    # keeps the launch-bound batch=1 forward on CPU and only the update on GPU.
+    if _gpu_lane:
+        rollout_device = "cuda"
+    else:
+        rollout_device = "cpu" if str(device) == "cuda" else device
     trainer = DiscretePPOTrainer(
         policy=policy,
         shim=shim,
