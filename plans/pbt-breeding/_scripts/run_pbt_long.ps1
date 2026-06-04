@@ -50,13 +50,18 @@ while ((Get-Date) -lt $DEADLINE) {
   # holds ONE shared copy. ~36GB total at 16 workers (the foundation's OOM
   # fix), AND faster (workers skip engineer_day + per-tick predictor
   # inference). Bundle rebuilt per-worker from the 3 manifests.
+  # Rotation depth = the brief's settled design (6 train / 4 eval per
+  # rotation, 3 rotations = 30 non-sealed days). LEAN predictor obs (370-d,
+  # ~19MB/day baked) is the deployment path: well-scaled (no full-obs
+  # input-norm drown), tiny + shared via the static_obs memmap cache
+  # (~0.6GB for 30 days + ~40GB workers -> the runner's memory guard OKs it).
   & $py -m training_v2.cohort.runner `
-    --breeding pbt --n-agents 16 --generations 25 --days 12 `
+    --breeding pbt --n-agents 16 --generations 25 --days 30 `
     --exclude-days $SEALED --seed $seed --parallel-agents 16 --device cpu `
     --composite-score-mode locked_weighted `
-    --use-race-outcome-predictor `
+    --use-race-outcome-predictor --predictor-lean-obs `
     --predictor-bundle-manifests $MANIFESTS[0] $MANIFESTS[1] $MANIFESTS[2] `
-    --pbt-rotations 3 --pbt-train-per-rotation 2 --pbt-eval-per-rotation 2 `
+    --pbt-rotations 3 --pbt-train-per-rotation 6 --pbt-eval-per-rotation 4 `
     --pbt-r2-size 6 --pbt-r3-size 4 --pbt-promote-from-r1 3 `
     --pbt-promote-from-r2 2 --pbt-freeze-top-r3 2 `
     --output-dir $DIR *>> "$DIR\train.log"

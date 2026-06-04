@@ -1346,6 +1346,32 @@ def run_cohort(
                     day_cache_paths = save_shared_cache_per_day(
                         mp_feature_cache, output_dir / "mp_cache", gen_days)
                     static_obs_day_paths = None
+                # Memory-budget guard (2026-06-04): refuse a day-cache config
+                # that would OOM the worker pool BEFORE training starts. The
+                # overnight pbt_long campaign OOM'd at gen 2 every run (the
+                # per-worker dict path x 16 workers x 12 large days ~ 128GB)
+                # with no guard. Only fires on the FIRST generation's prebuild
+                # (gen_days is the same set each gen for a fixed rotation pool).
+                if generation == start_generation:
+                    from training_v2.cohort.multiproc_worker import (
+                        assert_day_cache_fits,
+                    )
+                    if static_obs_day_paths is not None:
+                        _dc_bytes = [
+                            Path(npy).stat().st_size
+                            for (npy, _side) in static_obs_day_paths.values()
+                        ]
+                        assert_day_cache_fits(
+                            day_cache_bytes=_dc_bytes,
+                            n_workers=int(parallel_agents), shared=True)
+                    elif day_cache_paths is not None:
+                        _dc_bytes = [
+                            Path(p).stat().st_size
+                            for p in day_cache_paths.values()
+                        ]
+                        assert_day_cache_fits(
+                            day_cache_bytes=_dc_bytes,
+                            n_workers=int(parallel_agents), shared=False)
                 store_paths = model_store_paths(model_store)
                 specs: list[dict] = []
                 for idx, genes in enumerate(cohort):

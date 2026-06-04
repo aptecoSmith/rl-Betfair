@@ -440,6 +440,104 @@ def save_shared_cache_per_day(
     return out
 
 
+# ── Multiprocess day-cache memory-budget guard (2026-06-04) ───────────────
+#
+# The overnight pbt_long campaign OOM-crashed at gen 2 of every run (before
+# the gauntlet ever reached R3 -> ZERO champions, a whole night wasted with
+# NO guard): predictors-OFF caches each ~1.45GB engineered DAY in EVERY
+# worker, so 16 workers x 12 days plateaus at ~128GB -> MemoryError. This
+# estimator + assert catch that config BEFORE training starts. The
+# per-worker DICT path multiplies day bytes by n_workers; the shared
+# static_obs MEMMAP path (predictors-ON) holds ONE copy across all workers.
+
+# Unpickled engineered-day dicts measured ~5x their on-disk pickle (numpy +
+# Python object overhead): a 0.30GB pickle -> 1.45GB resident.
+_DICT_UNPICKLE_FACTOR = 5.0
+# Rough non-day per-worker resident (torch + policy + PPO buffers + interp).
+_PER_WORKER_OVERHEAD_GB = 2.5
+
+
+def estimate_day_cache_peak_gb(
+    *,
+    day_cache_bytes: "list[int]",
+    n_workers: int,
+    shared: bool,
+    per_worker_overhead_gb: float = _PER_WORKER_OVERHEAD_GB,
+) -> float:
+    """Estimate peak RAM (GB) the day cache adds across the worker pool.
+
+    ``shared=True`` (static_obs memmap path): each day's ``.npy`` is loaded
+    ``mmap_mode='r'`` so the OS page cache holds ONE physical copy across all
+    workers -> ``sum(days) + n_workers * overhead``.
+
+    ``shared=False`` (per-worker engineered-dict path): EVERY worker
+    deserialises EVERY day it touches into its OWN dict cache ->
+    ``n_workers * sum(days) * UNPICKLE_FACTOR + n_workers * overhead``. This
+    is the OOM trap the overnight run fell into.
+    """
+    total_days_gb = sum(int(b) for b in day_cache_bytes) / 1e9
+    if shared:
+        return total_days_gb + n_workers * per_worker_overhead_gb
+    return (
+        n_workers * total_days_gb * _DICT_UNPICKLE_FACTOR
+        + n_workers * per_worker_overhead_gb
+    )
+
+
+def assert_day_cache_fits(
+    *,
+    day_cache_bytes: "list[int]",
+    n_workers: int,
+    shared: bool,
+    total_ram_gb: float | None = None,
+    refuse_frac: float = 0.90,
+    warn_frac: float = 0.70,
+) -> float:
+    """Refuse a multiprocess config whose projected day-cache RAM would OOM.
+
+    Returns the estimate (GB). Raises :class:`MemoryError` (caught early,
+    before any training) when the estimate exceeds ``refuse_frac`` of system
+    RAM; logs a loud warning above ``warn_frac``. The message points at the
+    fixes: fewer ``--parallel-agents`` / ``--days``, or predictors-ON (which
+    shares one copy per day via the static_obs memmap cache).
+    """
+    if total_ram_gb is None:
+        try:
+            import psutil
+            total_ram_gb = psutil.virtual_memory().total / 1e9
+        except Exception:
+            total_ram_gb = 0.0  # unknown -> estimate only, no hard refuse
+    est = estimate_day_cache_peak_gb(
+        day_cache_bytes=day_cache_bytes, n_workers=n_workers, shared=shared,
+    )
+    path = "shared static_obs memmap" if shared else "per-worker dict"
+    n_days = len(day_cache_bytes)
+    if total_ram_gb and est > refuse_frac * total_ram_gb:
+        raise MemoryError(
+            f"Projected day-cache RAM ~{est:.0f}GB ({path} path, "
+            f"{n_workers} workers x {n_days} days) exceeds {refuse_frac:.0%} "
+            f"of the {total_ram_gb:.0f}GB box -- this WILL OOM mid-run "
+            f"(this is the bug that wasted the overnight pbt_long campaign). "
+            f"Fix: reduce --parallel-agents or --days, or run predictors-ON "
+            f"so the static_obs memmap cache holds ONE shared copy per day "
+            f"instead of one per worker.",
+        )
+    if total_ram_gb and est > warn_frac * total_ram_gb:
+        logger.warning(
+            "Day-cache RAM estimate ~%.0fGB (%s path, %d workers x %d days) "
+            "is %.0f%% of the %.0fGB box -- watch memory.",
+            est, path, n_workers, n_days, 100 * est / total_ram_gb,
+            total_ram_gb,
+        )
+    else:
+        logger.info(
+            "Day-cache RAM estimate ~%.0fGB (%s path, %d workers x %d days) "
+            "-- fits the %.0fGB box.",
+            est, path, n_workers, n_days, total_ram_gb or 0,
+        )
+    return est
+
+
 def prebuild_static_obs_cache(
     days: list[str],
     *,
