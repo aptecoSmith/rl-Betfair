@@ -101,12 +101,22 @@ def _derive(r: dict, rank: int) -> dict:
     return d
 
 
-def build_leaderboard_text(hall_rows: list[dict], run_name: str,
-                           now_iso: str | None = None) -> str:
+def build_leaderboard_text(
+    rows: list[dict], run_name: str, now_iso: str | None = None,
+    *, frozen: bool = True, tier_label: str = "R3 HALL-OF-FAME",
+    empty_msg: str | None = None, top_n: int | None = None,
+) -> str:
+    """Render a fixed-width leaderboard ranked by ``locked_pnl``.
+
+    ``frozen=True`` (the R3 hall-of-fame): keep the ``frozen_at`` column.
+    ``frozen=False`` (R1 / R2 live tiers): drop it (those agents aren't
+    frozen) — the ``gen`` column carries the when. ``top_n`` caps the rows.
+    """
+    cols = _LB_COLS if frozen else [c for c in _LB_COLS if c[1] != "frozen_at"]
     # Sort by locked_pnl desc (the primary selection metric). Ties -> higher
     # locked_share, then total_reward.
     ordered = sorted(
-        hall_rows,
+        rows,
         key=lambda r: (
             float(r.get("locked_pnl", 0.0)),
             _locked_share(float(r.get("locked_pnl", 0.0)),
@@ -115,21 +125,22 @@ def build_leaderboard_text(hall_rows: list[dict], run_name: str,
         ),
         reverse=True,
     )
+    total = len(ordered)
+    if top_n is not None:
+        ordered = ordered[:top_n]
     derived = [_derive(r, i + 1) for i, r in enumerate(ordered)]
 
-    headers = [h for h, _, _ in _LB_COLS]
-    # Build rows as formatted strings.
+    headers = [h for h, _, _ in cols]
     body: list[list[str]] = []
     for d in derived:
         cells = []
-        for _h, key, fmt in _LB_COLS:
+        for _h, key, fmt in cols:
             v = d.get(key, "")
             try:
                 cells.append(fmt.format(v))
             except (ValueError, TypeError):
                 cells.append(str(v))
         body.append(cells)
-    # Column widths = max(header, cells).
     widths = [len(h) for h in headers]
     for row in body:
         for i, c in enumerate(row):
@@ -137,9 +148,12 @@ def build_leaderboard_text(hall_rows: list[dict], run_name: str,
     sep = "  "
     head_line = sep.join(h.ljust(widths[i]) for i, h in enumerate(headers))
     rule = sep.join("-" * widths[i] for i in range(len(headers)))
+    count_word = "frozen champions" if frozen else "agent-rows"
+    shown = f" (top {len(body)} of {total})" if top_n and total > len(body) \
+        else f": {total}"
     lines = [
-        f"PBT R3 HALL-OF-FAME -- {run_name}",
-        f"frozen champions: {len(derived)}"
+        f"PBT {tier_label} -- {run_name}",
+        f"{count_word}{shown}"
         + (f"   |   regenerated: {now_iso}" if now_iso else ""),
         "ranked by locked_pnl (primary deployment metric); lck_shr = "
         "|locked|/(|locked|+|naked|); naked_sd = std of per-eval-day naked.",
@@ -150,8 +164,7 @@ def build_leaderboard_text(hall_rows: list[dict], run_name: str,
     lines.extend(sep.join(c.ljust(widths[i]) for i, c in enumerate(row))
                  for row in body)
     if not body:
-        lines.append("(no R3 champions frozen yet -- the gauntlet reaches "
-                     "R3 around generation 3; champions freeze from then on.)")
+        lines.append(empty_msg or "(none yet)")
     lines.append("")
     return "\n".join(lines)
 
@@ -222,8 +235,30 @@ def regenerate(run_dir: Path, now_iso: str | None = None) -> tuple[int, int]:
     frozen_keys = {
         (h.get("model_id"), int(h.get("generation", -1))) for h in hall
     }
+    # R3 hall-of-fame (the frozen champions, with frozen_at).
     (run_dir / "leaderboard.txt").write_text(
-        build_leaderboard_text(hall, run_dir.name, now_iso), encoding="utf-8")
+        build_leaderboard_text(
+            hall, run_dir.name, now_iso, frozen=True,
+            tier_label="R3 HALL-OF-FAME",
+            empty_msg="(no R3 champions frozen yet -- the gauntlet reaches "
+                      "R3 around generation 3; champions freeze from then on.)",
+        ),
+        encoding="utf-8")
+    # R1 + R2 LIVE-tier leaderboards: the best performers seen at each tier
+    # across all generations (a tier filter on the same per-model rows). R1 =
+    # the rookie division (fresh blood's first rotation); R2 = the promoted +
+    # offspring mid-tier. Ranked by locked_pnl like R3; capped at top 60.
+    for tier, fname in ((1, "leaderboard_r1.txt"), (2, "leaderboard_r2.txt")):
+        tier_rows = [r for r in lineage if int(r.get("tier", 0)) == tier]
+        (run_dir / fname).write_text(
+            build_leaderboard_text(
+                tier_rows, run_dir.name, now_iso, frozen=False,
+                tier_label=f"R{tier} TIER (best across all gens)",
+                top_n=60,
+                empty_msg=f"(no R{tier} agents yet -- the pipeline fills R2 "
+                          f"by gen 2, R3 by gen 3.)",
+            ),
+            encoding="utf-8")
     write_csv(run_dir / "model_register.csv",
               build_register_rows(lineage, frozen_keys))
     return len(hall), len(lineage)

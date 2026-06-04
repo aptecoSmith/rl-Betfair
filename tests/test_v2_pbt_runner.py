@@ -135,3 +135,11 @@ def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
     assert "frozen_at(R3)" in lb and "locked" in lb
     # The frozen champion's short model id appears in the table.
     assert champs[0]["model_id"][:8] in lb
+
+    # R1 + R2 live-tier leaderboards are produced too (tier filter on the
+    # same per-model rows; no frozen_at column).
+    r1 = (out_dir / "leaderboard_r1.txt").read_text()
+    r2 = (out_dir / "leaderboard_r2.txt").read_text()
+    assert "R1 TIER" in r1 and "R2 TIER" in r2
+    assert "frozen_at(R3)" not in r1  # tiers aren't frozen
+    assert "locked" in r1 and "lineage" in r2
