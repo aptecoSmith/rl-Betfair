@@ -40,7 +40,7 @@ $run = 0
 while ((Get-Date) -lt $DEADLINE) {
   $run++
   $seed = 770 + $run
-  Log "campaign run $run (seed $seed) starting -- 16 agents, 25 gens, 3x4 rotation"
+  Log "campaign run $run (seed $seed) starting -- 16 agents, 25 gens, 3x(6 train/4 eval) rotation, predictors-ON, BC-on"
   # OOM FIX (2026-06-04): the overnight predictors-OFF run cached each ~1.45GB
   # full-obs engineered DAY in EVERY worker -> 16 workers x 12 days plateaued
   # at ~128GB by gen 2 -> MemoryError before R3 ever formed (zero champions).
