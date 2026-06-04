@@ -1249,10 +1249,16 @@ def run_cohort(
                     for s in pbt_specs
                 ]
                 _agent_init_weights = [s.init_weights_path for s in pbt_specs]
+                # Per-agent obs representation (a frozen fresh-blood gene):
+                # some lineages explore lean predictor obs, some full.
+                _agent_lean = [
+                    bool(s.genes.predictor_lean_obs) for s in pbt_specs
+                ]
             else:
                 _agent_train_days = [list(training_days) for _ in cohort]
                 _agent_eval_days = [list(eval_days) for _ in cohort]
                 _agent_init_weights = [None for _ in cohort]
+                _agent_lean = [bool(predictor_lean_obs) for _ in cohort]
             for idx, genes in enumerate(cohort):
                 assert_in_range(genes)
                 logger.info(
@@ -1329,17 +1335,31 @@ def run_cohort(
                     predictor_bundle is not None
                     and bool(use_race_outcome_predictor)
                 )
+                static_obs_paths_by_lean: dict | None = None
                 if use_static_obs_cache:
-                    static_obs_day_paths = prebuild_static_obs_cache(
-                        gen_days, data_dir=data_dir,
-                        cache_dir=output_dir / "mp_static_obs_cache",
-                        predictor_bundle=predictor_bundle,
-                        use_race_outcome_predictor=bool(
-                            use_race_outcome_predictor),
-                        use_direction_predictor=bool(use_direction_predictor),
-                        predictor_lean_obs=bool(predictor_lean_obs),
-                    )
+                    # Bake a static_obs variant for EACH obs representation the
+                    # cohort uses. ``predictor_lean_obs`` is a frozen fresh-
+                    # blood gene, so a PBT cohort typically mixes lean + full;
+                    # each variant is a shared memmap, so both together cost
+                    # only ~(lean+full) bytes/day across ALL workers.
+                    static_obs_paths_by_lean = {}
+                    for _lean in sorted(set(_agent_lean)):
+                        static_obs_paths_by_lean[bool(_lean)] = (
+                            prebuild_static_obs_cache(
+                                gen_days, data_dir=data_dir,
+                                cache_dir=output_dir / (
+                                    "mp_static_obs_cache_lean" if _lean
+                                    else "mp_static_obs_cache_full"),
+                                predictor_bundle=predictor_bundle,
+                                use_race_outcome_predictor=bool(
+                                    use_race_outcome_predictor),
+                                use_direction_predictor=bool(
+                                    use_direction_predictor),
+                                predictor_lean_obs=bool(_lean),
+                            )
+                        )
                     day_cache_paths = None
+                    static_obs_day_paths = None
                 else:
                     prebuild_feature_cache(
                         gen_days, data_dir=data_dir, into=mp_feature_cache)
@@ -1356,10 +1376,13 @@ def run_cohort(
                     from training_v2.cohort.multiproc_worker import (
                         assert_day_cache_fits,
                     )
-                    if static_obs_day_paths is not None:
+                    if static_obs_paths_by_lean:
+                        # All baked variants share via memmap -> sum their
+                        # .npy bytes (one shared copy each).
                         _dc_bytes = [
                             Path(npy).stat().st_size
-                            for (npy, _side) in static_obs_day_paths.values()
+                            for variant in static_obs_paths_by_lean.values()
+                            for (npy, _side) in variant.values()
                         ]
                         assert_day_cache_fits(
                             day_cache_bytes=_dc_bytes,
@@ -1376,6 +1399,21 @@ def run_cohort(
                 specs: list[dict] = []
                 for idx, genes in enumerate(cohort):
                     pa_id, pb_id = parent_ids[idx]
+                    # Per-agent static_obs paths: pick the obs-representation
+                    # variant this agent's (frozen) gene chose, restricted to
+                    # the days it actually trains/evals on.
+                    _sobs_agent = static_obs_day_paths
+                    if static_obs_paths_by_lean is not None:
+                        _variant = static_obs_paths_by_lean[
+                            bool(_agent_lean[idx])]
+                        _agent_days = (
+                            set(_agent_train_days[idx])
+                            | set(_agent_eval_days[idx])
+                        )
+                        _sobs_agent = {
+                            d: _variant[d] for d in _agent_days
+                            if d in _variant
+                        }
                     specs.append(dict(
                         agent_id=agent_ids_gen[idx],
                         genes=genes,
@@ -1409,7 +1447,7 @@ def run_cohort(
                         predictor_bundle=None,   # worker reloads from manifests
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
-                        predictor_lean_obs=predictor_lean_obs,
+                        predictor_lean_obs=bool(_agent_lean[idx]),
                         use_direction_predictor=use_direction_predictor,
                         predictor_p_win_back_threshold=(
                             predictor_p_win_back_threshold),
@@ -1425,7 +1463,7 @@ def run_cohort(
                         feature_cache=None,
                         frozen_direction_head_path=frozen_direction_head_path,
                         _feature_cache_day_paths=day_cache_paths,
-                        _static_obs_day_paths=static_obs_day_paths,
+                        _static_obs_day_paths=_sobs_agent,
                         _model_store_paths=store_paths,
                         _predictor_manifests=mp_predictor_manifests,
                     ))
@@ -1545,7 +1583,7 @@ def run_cohort(
                         predictor_bundle=predictor_bundle,
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
-                        predictor_lean_obs=predictor_lean_obs,
+                        predictor_lean_obs=bool(_agent_lean[idx]),
                         use_direction_predictor=use_direction_predictor,
                         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
         predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,

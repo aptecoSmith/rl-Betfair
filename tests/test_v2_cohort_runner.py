@@ -234,6 +234,8 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             # base sampler (only sample_fresh_blood_genes draws them).
             "architecture", "transformer_depth", "transformer_heads",
             "transformer_ctx_ticks",
+            # pbt-breeding (2026-06-04). Obs-representation structural gene.
+            "predictor_lean_obs",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2

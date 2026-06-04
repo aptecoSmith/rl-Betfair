@@ -44,6 +44,21 @@ class TestFreshBloodSamplesArchitecture:
             assert g.transformer_heads in TRANSFORMER_HEADS_CHOICES
             assert g.transformer_ctx_ticks in TRANSFORMER_CTX_TICKS_CHOICES
 
+    def test_draws_both_lean_and_full_obs(self):
+        """predictor_lean_obs is a fresh-blood OPTION — some lineages explore
+        lean predictor obs, some full (operator 2026-06-04)."""
+        rng = random.Random(4)
+        seen = {
+            sample_fresh_blood_genes(rng).predictor_lean_obs
+            for _ in range(200)
+        }
+        assert seen == {True, False}, seen
+
+    def test_predictor_lean_obs_is_structural_and_frozen(self):
+        # It must be in the structural set so make_offspring freezes it
+        # (lean<->full changes obs_dim -> weight shapes, breaks warm-start).
+        assert "predictor_lean_obs" in ARCHITECTURE_GENE_NAMES
+
     def test_transformer_d_model_divisible_by_heads(self):
         # Every (hidden_size, n_heads) combo the sampler can draw must
         # satisfy the transformer's d_model % n_heads == 0 constraint, so

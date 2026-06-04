@@ -50,16 +50,25 @@ while ((Get-Date) -lt $DEADLINE) {
   # holds ONE shared copy. ~36GB total at 16 workers (the foundation's OOM
   # fix), AND faster (workers skip engineer_day + per-tick predictor
   # inference). Bundle rebuilt per-worker from the 3 manifests.
-  # Rotation depth = the brief's settled design (6 train / 4 eval per
-  # rotation, 3 rotations = 30 non-sealed days). LEAN predictor obs (370-d,
-  # ~19MB/day baked) is the deployment path: well-scaled (no full-obs
-  # input-norm drown), tiny + shared via the static_obs memmap cache
-  # (~0.6GB for 30 days + ~40GB workers -> the runner's memory guard OKs it).
+  # Config (operator-directed 2026-06-04):
+  #  * Rotation depth = the brief's settled 6 train / 4 eval, 3 rotations
+  #    (30 non-sealed days) -- 2/2 was too shallow.
+  #  * predictors-ON (the intended/deployment config) -> the validated
+  #    static_obs memmap cache (one shared copy/day) keeps memory ~40GB and
+  #    the runner's memory guard OKs it.
+  #  * lean-vs-full obs is a FRESH-BLOOD GENE now (NOT a cohort flag): the
+  #    gauntlet explores BOTH; the runner bakes both static_obs variants and
+  #    maps each agent its frozen choice. So no --predictor-lean-obs here.
+  #  * BC ON (--bc-pretrain-steps): proven to help; runs for fresh blood
+  #    (warm-started agents skip it + inherit the founder's BC-set input-norm).
+  #    Full-obs agents BC against the full oracle cache; lean-obs agents skip
+  #    BC gracefully (oracle is full-obs only -- lean is well-scaled so it
+  #    trains fine via PPO; a lean oracle scan is a future add).
   & $py -m training_v2.cohort.runner `
     --breeding pbt --n-agents 16 --generations 25 --days 30 `
     --exclude-days $SEALED --seed $seed --parallel-agents 16 --device cpu `
     --composite-score-mode locked_weighted `
-    --use-race-outcome-predictor --predictor-lean-obs `
+    --use-race-outcome-predictor --bc-pretrain-steps 500 `
     --predictor-bundle-manifests $MANIFESTS[0] $MANIFESTS[1] $MANIFESTS[2] `
     --pbt-rotations 3 --pbt-train-per-rotation 6 --pbt-eval-per-rotation 4 `
     --pbt-r2-size 6 --pbt-r3-size 4 --pbt-promote-from-r1 3 `

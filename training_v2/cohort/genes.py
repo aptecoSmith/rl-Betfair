@@ -77,6 +77,10 @@ ARCHITECTURE_GENE_NAMES: frozenset[str] = frozenset({
     "transformer_depth",
     "transformer_heads",
     "transformer_ctx_ticks",
+    # Obs representation is structural too (different obs_dim/runner_dim ->
+    # different weight shapes -> warm-start can't cross it). Sampled at
+    # fresh-blood birth, frozen for the lineage, never perturbed in breeding.
+    "predictor_lean_obs",
 })
 
 
@@ -409,6 +413,12 @@ class CohortGenes:
     transformer_depth: int = 2
     transformer_heads: int = 4
     transformer_ctx_ticks: int = 32
+    # Predictor obs representation — STRUCTURAL (changes obs_dim + runner_dim
+    # -> weight shapes, so frozen within a lineage). A fresh-blood OPTION so
+    # the gauntlet explores BOTH the lean predictor obs (~370-d, well-scaled,
+    # fast) and the full obs (~2254-d, BC sets its input-norm). Default False
+    # (full) keeps the gene-only GA + existing launches unchanged.
+    predictor_lean_obs: bool = False
 
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
@@ -468,6 +478,7 @@ class CohortGenes:
             "transformer_depth": int(self.transformer_depth),
             "transformer_heads": int(self.transformer_heads),
             "transformer_ctx_ticks": int(self.transformer_ctx_ticks),
+            "predictor_lean_obs": bool(self.predictor_lean_obs),
         }
 
 
@@ -556,6 +567,8 @@ def _sample_field(rng: random.Random, field_name: str):
         return 4
     if field_name == "transformer_ctx_ticks":
         return 32
+    if field_name == "predictor_lean_obs":
+        return False
     raise KeyError(f"Unknown gene field: {field_name!r}")
 
 
@@ -589,6 +602,9 @@ def _sample_architecture_field(rng: random.Random, field_name: str):
         return int(rng.choice(TRANSFORMER_HEADS_CHOICES))
     if field_name == "transformer_ctx_ticks":
         return int(rng.choice(TRANSFORMER_CTX_TICKS_CHOICES))
+    if field_name == "predictor_lean_obs":
+        # ~50/50 lean vs full so the gauntlet explores both representations.
+        return bool(rng.random() < 0.5)
     raise KeyError(f"Not an architecture gene: {field_name!r}")
 
 
@@ -770,4 +786,9 @@ def assert_in_range(genes: CohortGenes) -> None:
         raise ValueError(
             f"transformer_ctx_ticks {genes.transformer_ctx_ticks} not in "
             f"{TRANSFORMER_CTX_TICKS_CHOICES}",
+        )
+    if not isinstance(genes.predictor_lean_obs, bool):
+        raise ValueError(
+            f"predictor_lean_obs must be bool, got "
+            f"{genes.predictor_lean_obs!r}",
         )
