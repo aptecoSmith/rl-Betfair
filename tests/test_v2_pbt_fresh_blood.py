@@ -89,23 +89,30 @@ class TestFreshBloodSamplesArchitecture:
         # (lean<->full changes obs_dim -> weight shapes, breaks warm-start).
         assert "predictor_lean_obs" in ARCHITECTURE_GENE_NAMES
 
-    def test_lstm_fresh_blood_large_transformer_to_512_on_gpu_lane(self):
-        """Fresh-blood LSTMs may draw large hidden sizes (512/1024); a
-        transformer's d_model (hidden_size) now reaches 512 (pbt-gpu-forward:
-        big-ctx transformers train on the GPU lane, so the prior CPU-bound
-        256 cap is lifted to 512). 1024 stays LSTM-only (d_model=1024
-        attention is heavy even on GPU). The gene-only GA is unchanged
-        (64/128/256 only) -> byte-identity."""
+    def test_fresh_blood_transformer_size_recapped_lstm_still_large(self):
+        """RE-CAP 2026-06-05: after the first campaign showed d512/ctx256
+        transformers are sequential-rollout stragglers, fresh-blood
+        transformers are capped to d_model<=256 AND ctx<=128. LSTMs keep
+        their full 512/1024 range (CPU, not the GPU-lane stragglers). The
+        VALID sets still allow d512/ctx256 (prior champions warm-load); only
+        SAMPLING is capped. Gene-only GA unchanged (byte-identity)."""
         from training_v2.cohort.genes import sample_genes
         rng = random.Random(13)
-        lstm_h, tf_h = set(), set()
+        lstm_h, tf_h, tf_ctx = set(), set(), set()
         for _ in range(400):
             g = sample_fresh_blood_genes(rng)
-            (lstm_h if g.architecture == "lstm" else tf_h).add(g.hidden_size)
-            assert_in_range(g)  # the widened _VALID set must accept it
+            if g.architecture == "lstm":
+                lstm_h.add(g.hidden_size)
+            else:
+                tf_h.add(g.hidden_size)
+                tf_ctx.add(g.transformer_ctx_ticks)
+            assert_in_range(g)  # VALID set still accepts the capped draws
         assert lstm_h & {512, 1024}, f"LSTM never went large: {lstm_h}"
-        assert 512 in tf_h, f"transformer never reached 512: {tf_h}"
-        assert tf_h <= {64, 128, 256, 512}, f"transformer d_model > 512: {tf_h}"
+        # Transformers re-capped: no d512, no ctx256 in fresh blood.
+        assert tf_h <= {64, 128, 256}, f"transformer d_model > 256: {tf_h}"
+        assert 512 not in tf_h, f"transformer d512 should be capped out: {tf_h}"
+        assert tf_ctx <= {32, 64, 128}, f"transformer ctx > 128: {tf_ctx}"
+        assert 256 not in tf_ctx, f"transformer ctx256 should be capped out: {tf_ctx}"
         # gene-only GA stays at the original sizes (byte-identity).
         ga = {sample_genes(random.Random(s)).hidden_size for s in range(80)}
         assert ga <= {64, 128, 256}, ga

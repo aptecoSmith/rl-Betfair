@@ -58,12 +58,12 @@ HIDDEN_SIZE_VALID: tuple[int, ...] = (64, 128, 256, 512, 1024)
 # Fresh-blood LSTM sampling: larger sizes allowed (LSTM is cheap per tick on
 # CPU vs the transformer's per-tick encoder). NB larger = slower gens.
 HIDDEN_SIZE_LSTM_SAMPLE: tuple[int, ...] = (64, 128, 256, 512, 1024)
-# Fresh-blood transformer d_model. Un-capped to 512 (2026-06-04) for the GPU
-# lane — a d512 transformer is affordable on GPU (the lane routes its
-# forward+update to CUDA). Every value divides the head counts {2,4,8} (512%8=0)
-# so d_model % n_heads == 0 always holds. d512 raises GPU memory (the semaphore
-# caps concurrency); 1024 left out (the activations balloon as O(mb*heads*ctx^2)).
-HIDDEN_SIZE_TRANSFORMER_SAMPLE: tuple[int, ...] = (64, 128, 256, 512)
+# Fresh-blood transformer d_model. RE-CAPPED to <=256 (2026-06-05) after the
+# campaign: d512 transformers were slow stragglers (a d512/ctx256 took ~1.4h and
+# gated gens; see TRANSFORMER_CTX_TICKS_SAMPLE above) and never out-championed
+# the d256/ctx<=64 ones. Every value divides head counts {2,4,8}. d512/1024 stay
+# in HIDDEN_SIZE_VALID so prior d512 champions warm-load; just not fresh-sampled.
+HIDDEN_SIZE_TRANSFORMER_SAMPLE: tuple[int, ...] = (64, 128, 256)
 
 
 # ── Architecture genes (pbt-breeding Step 1b, 2026-06-03) ─────────────────
@@ -91,16 +91,22 @@ TRANSFORMER_FFN_MULT_CHOICES: tuple[int, ...] = (2, 4)
 # where "N ticks ago" matters). STRUCTURAL (different params) -> frozen.
 TRANSFORMER_POS_ENCODING_CHOICES: tuple[str, ...] = ("learned", "rope")
 
-# Fresh-blood SAMPLING (2026-06-04, UN-CAPPED 2026-06-04 for the GPU lane).
-# History: a ctx256/depth3 transformer took ~74 min/agent ON CPU and gated the
-# whole generation, so sampling was capped to ctx{32,64}/depth{1,2}. The GPU
-# policy lane (plans/pbt-gpu-forward) removes that cap's reason: big-ctx
-# transformers (ctx>=128) route their forward+update to CUDA (measured 6.3x on
-# the ctx256 forward), collapsing their agent-day toward the env-sim floor —
-# LSTM-comparable. So fresh blood may again draw the full range; the lane keeps
-# the big ones affordable while small transformers + LSTMs stay on pure CPU.
+# Fresh-blood SAMPLING. RE-CAPPED 2026-06-05 after the first GPU-lane campaign.
+# History: a ctx256 transformer gated whole generations on CPU, so sampling was
+# capped to ctx{32,64}. The GPU lane (plans/pbt-gpu-forward) was expected to
+# remove that reason (it routes ctx>=128 forward+update to CUDA, 6.3x on the
+# ctx256 forward). The 2026-06-04→05 campaign DISPROVED the "LSTM-comparable"
+# claim: the lane makes big transformers TRAINABLE but the SEQUENTIAL batch=1
+# rollout is still the wall — a d512/ctx256 agent took ~1.4h, and in era-1 gen-5
+# TWO of them grinding pinned the GPU at 24GB/100% for >2h with zero completions
+# (force-killed). They never out-championed LSTMs either (the 2 transformer
+# champions were ctx32 + ctx64). So fresh-blood transformers are re-capped to
+# ctx<=128 / d_model<=256 — the configs that actually train fast and champion.
+# The CHOICES (valid) sets keep 256/512 so prior d512/ctx256 champions still
+# warm-load; only the SAMPLE (fresh-blood draw) is capped. LSTMs keep their full
+# 64..1024 range (they're CPU and not the GPU-lane stragglers).
 TRANSFORMER_DEPTH_SAMPLE: tuple[int, ...] = (1, 2, 3, 4, 6)
-TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64, 128, 256)
+TRANSFORMER_CTX_TICKS_SAMPLE: tuple[int, ...] = (32, 64, 128)
 TRANSFORMER_FFN_MULT_SAMPLE: tuple[int, ...] = (2, 4)
 # Both positional schemes are live (pbt-gpu-forward task #8): "learned" =
 # additive slot embedding; "rope" = rotary positions on Q/K inside attention
@@ -120,16 +126,17 @@ GPU_LANE_MIN_CTX: int = 128
 # GRADUATE TO GPU: architecture == transformer AND ctx_ticks >= GPU_LANE_MIN_CTX
 #   (128). Keyed on ctx — the dominant O(ctx^2) attention cost. ctx 32/64
 #   transformers + EVERY LSTM stay CPU (batch=1 forward is launch-bound on GPU).
-# CEILING on ctx = 256. Races are ~150-250 ticks, so ctx256 already spans the
-#   FULL race; ctx > 256 is just padding, no signal gain. Do not raise it.
-# ROOM TO GROW with the lane is d_model + depth (NOT ctx). MEASURED:
-#   ctx256/d256/depth3/heads8 = ~200s/agent-day on GPU, ~4GB (~= a full-obs
-#   LSTM). CONSERVATIVE MAX to explore next: ctx256, d_model 512, depth 4-6,
-#   heads 8-16 (est ~1.5-2x -> ~300-450s; beyond d512/depth6 ~600-800s starts
-#   to gate gens). Only ctx256/d256/depth3 is measured — smoke-bench a bigger
-#   build (plans/pbt-gpu-forward/_measure/bench_ctx256_threads.py) before a
-#   campaign. To enable: widen HIDDEN_SIZE_TRANSFORMER_SAMPLE (caps d_model at
-#   256 today) to add 512, and TRANSFORMER_DEPTH_SAMPLE/_CHOICES for depth > 3.
+# CEILING on ctx = 256 (lane CAPABILITY; not fresh-sampled — see below). Races
+#   are ~150-250 ticks, so ctx256 spans the full race; ctx>256 is just padding.
+# RE-CAP (2026-06-05): although the LANE *can* run ctx256/d512, the first
+#   campaign showed those sizes are SEQUENTIAL-ROLLOUT-bound stragglers (~1.4h+/
+#   agent; a gen-5 pair pinned the GPU >2h) that don't out-champion ctx<=64
+#   LSTMs/transformers. So fresh blood is now capped to ctx<=128 / d_model<=256
+#   (SAMPLE sets above) for generation throughput. The CHOICES/VALID sets still
+#   allow 256/512 so the lane handles a warm-loaded big champion. To re-open the
+#   big sizes you'd need a BATCHED rollout (kill the batch=1 wall), not just the
+#   lane — re-add 256 to TRANSFORMER_CTX_TICKS_SAMPLE + 512 to
+#   HIDDEN_SIZE_TRANSFORMER_SAMPLE then.
 #
 # NON-SIZE CONFIG LEVERS (operator 2026-06-04 — make these genes so the
 #   gauntlet explores them; both currently HARDCODED in DiscreteTransformerPolicy):
