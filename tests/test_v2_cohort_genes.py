@@ -357,21 +357,18 @@ class TestPhase5Genes:
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_42_fields(self):
+    def test_to_dict_serialises_all_45_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
-        # 7 legacy + 18 Phase 5 (12 prior + 5 predictor-integration +
-        # 1 scalping-tight-naked-variance Phase 2A
-        # naked_variance_penalty_beta) + 3 Phase 8 BC + 4 Phase-13
-        # direction + 1 Phase-13 S05 BC + 1 Phase-14 S03
-        # (direction_gate_enabled) + 1 Phase-14 S06
-        # (direction_gate_warmup_eps) + 4 pbt-breeding architecture
-        # (architecture + transformer depth/heads/ctx_ticks) + 1 pbt
-        # predictor_lean_obs structural gene + 2 pbt-gpu-forward
-        # transformer-config genes (transformer_ffn_mult +
-        # transformer_pos_encoding) = 42.
-        assert len(d) == 42
+        # ...42 prior fields + 3 direction-mechanism/safety-exit genes
+        # (use_direction_predictor + force_close_before_off_seconds +
+        # close_walk_ticks, 2026-06-05) = 45.
+        assert len(d) == 45
+        # The 3 new genes pin OFF under the base/GA sampler (byte-identity).
+        assert d["use_direction_predictor"] is False
+        assert d["force_close_before_off_seconds"] == 0.0
+        assert d["close_walk_ticks"] == 0
         # Architecture genes default to the LSTM schema under the base
         # sampler (byte-identity with the gene-only GA — only
         # sample_fresh_blood_genes draws across architectures).

@@ -115,6 +115,19 @@ TRANSFORMER_FFN_MULT_SAMPLE: tuple[int, ...] = (2, 4)
 # (transformer_encoder.* vs rope_layers.*) and distinct arch-hashes.
 TRANSFORMER_POS_ENCODING_SAMPLE: tuple[str, ...] = ("learned", "rope")
 
+# Direction mechanism + safety-exit gene sample sets (2026-06-05). Fresh blood
+# draws these so the gauntlet explores the bail-out / exit machinery instead of
+# leaving it dark. use_direction_predictor + direction_gate are sampled in
+# sample_fresh_blood_genes (coupled). force-close / close-walk / BC below.
+FORCE_CLOSE_BEFORE_OFF_SAMPLE: tuple[float, ...] = (0.0, 60.0, 120.0)
+CLOSE_WALK_TICKS_SAMPLE: tuple[int, ...] = (0, 5, 10)
+BC_PRETRAIN_STEPS_SAMPLE: tuple[int, ...] = (0, 500)
+# A moderately active gate when on. The gene range is [0.20, 0.50] and the gate
+# blocks an open where the direction confidence is BELOW the threshold (higher =
+# stricter). 0.35 = a middle setting that actually filters; gate-off agents keep
+# the 0.5 PHASE5 default (unread when the gate is off).
+DIRECTION_GATE_THRESHOLD_ON: float = 0.35
+
 # GPU policy lane (plans/pbt-gpu-forward, 2026-06-04). A transformer whose
 # context window is at least this routes its policy FORWARD + batched PPO
 # UPDATE to CUDA (the env always stays on CPU). Below this — and for every LSTM
@@ -178,6 +191,15 @@ ARCHITECTURE_GENE_NAMES: frozenset[str] = frozenset({
     # different weight shapes -> warm-start can't cross it). Sampled at
     # fresh-blood birth, frozen for the lineage, never perturbed in breeding.
     "predictor_lean_obs",
+    # Direction mechanism + safety exits (2026-06-05). use_direction_predictor
+    # changes obs_dim (structural); the rest are frozen-per-lineage for this
+    # exploration so each lineage keeps a stable config. direction_gate_enabled
+    # is COUPLED to use_direction_predictor in sample_fresh_blood_genes.
+    "use_direction_predictor",
+    "direction_gate_enabled",
+    "force_close_before_off_seconds",
+    "close_walk_ticks",
+    "bc_pretrain_steps",
 })
 
 
@@ -519,6 +541,21 @@ class CohortGenes:
     # (full) keeps the gene-only GA + existing launches unchanged.
     predictor_lean_obs: bool = False
 
+    # ── Direction mechanism + safety-exit genes (2026-06-05, operator:
+    # "make all knobs sampleable; turn the direction predictor on as a gene").
+    # use_direction_predictor is STRUCTURAL — it adds the live per-tick
+    # direction-predictor features to the obs (different obs_dim -> weight
+    # shapes), so it's frozen per lineage. direction_gate_enabled (already a
+    # field above) is promoted to a sampled STRUCTURAL gene, COUPLED: fresh
+    # blood only draws gate=True when use_direction_predictor=True (the env
+    # raises otherwise). force_close_before_off_seconds + close_walk_ticks are
+    # env-behaviour knobs (no weight-shape change) sampled at birth + frozen
+    # for this exploration. bc_pretrain_steps (field above) is promoted from
+    # the --bc-pretrain-steps cohort flag to a per-agent gene.
+    use_direction_predictor: bool = False
+    force_close_before_off_seconds: float = 0.0
+    close_walk_ticks: int = 0
+
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
         return {
@@ -580,6 +617,11 @@ class CohortGenes:
             "transformer_ffn_mult": int(self.transformer_ffn_mult),
             "transformer_pos_encoding": str(self.transformer_pos_encoding),
             "predictor_lean_obs": bool(self.predictor_lean_obs),
+            "use_direction_predictor": bool(self.use_direction_predictor),
+            "force_close_before_off_seconds": float(
+                self.force_close_before_off_seconds,
+            ),
+            "close_walk_ticks": int(self.close_walk_ticks),
         }
 
 
@@ -656,6 +698,15 @@ def _sample_field(rng: random.Random, field_name: str):
     # never sampled per-agent. Pin to default 5.
     if field_name == "direction_gate_warmup_eps":
         return 5
+    # Direction mechanism + safety exits (2026-06-05). The BASE/GA sampler pins
+    # these OFF (byte-identical to pre-gene); only sample_fresh_blood_genes
+    # draws them (and couples the gate to the predictor).
+    if field_name == "use_direction_predictor":
+        return False
+    if field_name == "force_close_before_off_seconds":
+        return 0.0
+    if field_name == "close_walk_ticks":
+        return 0
     # Architecture genes (pbt-breeding Step 1b). The BASE sampler (used by
     # the gene-only GA + every existing launch) PINS these to the LSTM
     # defaults so it stays byte-identical to the pre-pbt schema — only
@@ -714,6 +765,19 @@ def _sample_architecture_field(rng: random.Random, field_name: str):
     if field_name == "predictor_lean_obs":
         # ~50/50 lean vs full so the gauntlet explores both representations.
         return bool(rng.random() < 0.5)
+    if field_name == "use_direction_predictor":
+        # ~50/50 with/without the direction predictor's signal in obs.
+        return bool(rng.random() < 0.5)
+    if field_name == "direction_gate_enabled":
+        # Fallback draw; sample_fresh_blood_genes COUPLES the real value to
+        # use_direction_predictor (the env raises if the gate is on without it).
+        return bool(rng.random() < 0.5)
+    if field_name == "force_close_before_off_seconds":
+        return float(rng.choice(FORCE_CLOSE_BEFORE_OFF_SAMPLE))
+    if field_name == "close_walk_ticks":
+        return int(rng.choice(CLOSE_WALK_TICKS_SAMPLE))
+    if field_name == "bc_pretrain_steps":
+        return int(rng.choice(BC_PRETRAIN_STEPS_SAMPLE))
     raise KeyError(f"Not an architecture gene: {field_name!r}")
 
 
@@ -745,12 +809,26 @@ def sample_fresh_blood_genes(
         HIDDEN_SIZE_LSTM_SAMPLE if arch == "lstm"
         else HIDDEN_SIZE_TRANSFORMER_SAMPLE
     )
+    # Direction mechanism — COUPLED. The env raises if the gate is on without
+    # the predictor, so only draw gate=True when the predictor is on. When the
+    # gate is on, give it a meaningfully strict threshold (0.5 is the no-op
+    # floor); gate-off agents keep 0.5 (unread). Drawn here (not via the
+    # per-field _sample_architecture_field) so the coupling holds.
+    use_dir = bool(rng.random() < 0.5)
+    gate_on = bool(use_dir and rng.random() < 0.5)
+    gate_threshold = DIRECTION_GATE_THRESHOLD_ON if gate_on else 0.5
     kwargs: dict = {}
     for f in fields(CohortGenes):
         if f.name == "architecture":
             kwargs[f.name] = arch
         elif f.name == "hidden_size":
             kwargs[f.name] = int(rng.choice(hidden_choices))
+        elif f.name == "use_direction_predictor":
+            kwargs[f.name] = use_dir
+        elif f.name == "direction_gate_enabled":
+            kwargs[f.name] = gate_on
+        elif f.name == "direction_gate_threshold":
+            kwargs[f.name] = gate_threshold
         elif f.name in ARCHITECTURE_GENE_NAMES:
             kwargs[f.name] = _sample_architecture_field(rng, f.name)
         elif f.name in PHASE5_GENE_NAMES and f.name not in enabled_set:
@@ -923,4 +1001,26 @@ def assert_in_range(genes: CohortGenes) -> None:
         raise ValueError(
             f"predictor_lean_obs must be bool, got "
             f"{genes.predictor_lean_obs!r}",
+        )
+    # Direction mechanism + safety exits (2026-06-05).
+    if not isinstance(genes.use_direction_predictor, bool):
+        raise ValueError(
+            f"use_direction_predictor must be bool, got "
+            f"{genes.use_direction_predictor!r}",
+        )
+    # COUPLING INVARIANT: the env raises if the gate is on without the
+    # predictor. Fresh blood enforces this; assert it can never slip through.
+    if genes.direction_gate_enabled and not genes.use_direction_predictor:
+        raise ValueError(
+            "direction_gate_enabled=True requires use_direction_predictor=True "
+            "(the env refuses the gate without the predictor signal)",
+        )
+    if genes.force_close_before_off_seconds < 0:
+        raise ValueError(
+            f"force_close_before_off_seconds must be >= 0, got "
+            f"{genes.force_close_before_off_seconds}",
+        )
+    if genes.close_walk_ticks < 0:
+        raise ValueError(
+            f"close_walk_ticks must be >= 0, got {genes.close_walk_ticks}",
         )

@@ -159,3 +159,92 @@ def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
     assert "frozen_at(R3)" not in r1  # tiers aren't frozen
     assert "trained_at" in r1 and "trained_at" in r2  # when-trained datetime
     assert "locked" in r1 and "lineage" in r2
+
+
+def test_select_final_freeze_picks_top_r3_nonfrozen_deduped() -> None:
+    """Unit guard for the end-of-run freeze selector: tier-3 only, drops
+    already-frozen specs + already-frozen model_ids, ranks by score, caps
+    at freeze_top_r3."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Spec:
+        frozen: bool
+        tier: int
+
+    @dataclass
+    class _Res:
+        model_id: str
+        s: float
+
+    pairs = [
+        (_Spec(False, 3), _Res("a", 5.0)),    # eligible
+        (_Spec(False, 3), _Res("b", 9.0)),    # eligible by tier but already frozen
+        (_Spec(False, 3), _Res("c", 3.0)),    # eligible
+        (_Spec(False, 2), _Res("d", 100.0)),  # tier 2 -> excluded
+        (_Spec(True, 3), _Res("e", 100.0)),   # spec.frozen -> excluded
+    ]
+    out = runner_mod._select_final_freeze(
+        pairs, already_frozen_ids={"b"},
+        score_fn=lambda r: r.s, freeze_top_r3=2,
+    )
+    assert [r.model_id for _s, r in out] == ["a", "c"]  # top-2, b/d/e dropped
+
+    # Cap honoured + the cap value is respected.
+    one = runner_mod._select_final_freeze(
+        pairs, already_frozen_ids=set(),
+        score_fn=lambda r: r.s, freeze_top_r3=1,
+    )
+    assert [r.model_id for _s, r in one] == ["b"]  # highest eligible R3
+
+    # No tier-3 -> empty (short runs never form R3).
+    assert runner_mod._select_final_freeze(
+        [(_Spec(False, 1), _Res("x", 1.0))], already_frozen_ids=set(),
+        score_fn=lambda r: r.s, freeze_top_r3=3,
+    ) == []
+
+
+def test_pbt_runner_end_of_run_freezes_final_generation(tmp_path: Path) -> None:
+    """The FINAL generation's R3 winners must reach the hall-of-fame.
+
+    The in-loop breed-step freeze is gated ``generation < n_generations - 1``,
+    so without the end-of-run pass the last gen's R3 (the most-trained agents)
+    is silently dropped. R3 first forms at gen 2; in-loop freezes gen 2; the
+    end-of-run pass must additionally freeze the final gen (n_generations-1).
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _populate_data_dir(data_dir, [f"2026-04-{d:02d}" for d in range(6, 20)])
+    out_dir = tmp_path / "pbt_eor"
+
+    n_gens = 4
+    cfg = PbtConfig(
+        n_agents=6, n_rotations=3, train_per_rotation=1, eval_per_rotation=1,
+        r2_size=2, r3_size=2, promote_from_r1=1, promote_from_r2=1,
+        freeze_top_r3=1,
+    )
+    runner_mod.run_cohort(
+        n_agents=6, n_generations=n_gens, days=12, data_dir=data_dir,
+        device="cpu", seed=3, output_dir=out_dir, breeding="pbt",
+        pbt_config=cfg, parallel_agents=0,
+        train_one_agent_fn=_stub_train_one_agent,
+    )
+
+    champs = [
+        json.loads(line)
+        for line in (out_dir / "pbt_hall_of_fame.jsonl").read_text().splitlines()
+        if line
+    ]
+    gens_frozen = {c["generation"] for c in champs}
+    assert (n_gens - 1) in gens_frozen, (
+        f"final gen {n_gens - 1} not frozen (end-of-run pass missing); "
+        f"got gens {sorted(gens_frozen)}"
+    )
+    # In-loop gen-2 freeze is still present (no regression).
+    assert 2 in gens_frozen
+    # Idempotent: no duplicate (model_id, generation) rows.
+    keys = [(c["model_id"], c["generation"]) for c in champs]
+    assert len(keys) == len(set(keys)), "duplicate champion rows"
+    # The final-gen champion climbed all three rotations.
+    final_champ = next(c for c in champs if c["generation"] == n_gens - 1)
+    assert set(final_champ["rotations_seen"]) == {1, 2, 3}

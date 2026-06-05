@@ -1273,6 +1273,19 @@ def train_one_agent(
         genes=genes,
         enabled_set=enabled_set,
     )
+    # 2026-06-05: force_close_before_off_seconds + close_walk_ticks are now
+    # per-agent STRUCTURAL genes (not PHASE5/enabled-gene values, so the builder
+    # above doesn't cover them). The env reads both from reward_overrides, so
+    # thread the per-agent gene values in. setdefault => an explicit cohort
+    # --reward-overrides still wins (one source of truth per knob).
+    per_agent_reward_overrides = dict(per_agent_reward_overrides or {})
+    per_agent_reward_overrides.setdefault(
+        "force_close_before_off_seconds",
+        float(getattr(genes, "force_close_before_off_seconds", 0.0)),
+    )
+    per_agent_reward_overrides.setdefault(
+        "close_walk_ticks", int(getattr(genes, "close_walk_ticks", 0)),
+    )
     per_agent_scalping_overrides = _build_per_agent_scalping_overrides(
         genes=genes,
         enabled_set=enabled_set,

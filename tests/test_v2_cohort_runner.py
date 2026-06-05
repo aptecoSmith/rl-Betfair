@@ -236,6 +236,11 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             "transformer_ctx_ticks",
             # pbt-breeding (2026-06-04). Obs-representation structural gene.
             "predictor_lean_obs",
+            # pbt-gpu-forward (2026-06-04). Transformer-config genes.
+            "transformer_ffn_mult", "transformer_pos_encoding",
+            # 2026-06-05. Direction mechanism + safety-exit genes.
+            "use_direction_predictor", "force_close_before_off_seconds",
+            "close_walk_ticks",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2

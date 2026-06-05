@@ -1124,14 +1124,21 @@ def run_cohort(
             )
             _oracle_expected_dim = int(_shim_pf.obs_dim)
         except Exception as _exc:
-            # Defensive: if we can't build an env to derive obs_dim,
-            # surface the failure rather than silently skipping the
-            # check.
-            raise ValueError(
-                "Pre-flight cache schema check could not derive "
-                "expected obs_dim (failed to build env for "
-                f"{training_days[0]}): {_exc}"
-            ) from _exc
+            # Robustness (2026-06-05): if the obs_dim derivation fails here
+            # (e.g. a constrained env that can't build the launch day), WARN
+            # and SKIP the oracle pre-check rather than crash the whole
+            # cohort. The worker's per-agent _load_bc_oracle_or_skip handles a
+            # missing/mismatched oracle gracefully (BC skips, training
+            # continues). In the real run the env builds fine, so this never
+            # fires; it only saved cohorts from a strict early abort.
+            logger.warning(
+                "Pre-flight oracle obs_dim derivation failed for %s (%s); "
+                "skipping the oracle cache pre-check — BC falls back to the "
+                "worker's per-agent graceful skip.",
+                training_days[0], _exc,
+            )
+            _needs_oracle = False
+            _oracle_expected_dim = None
     _preflight_cache_schema_check(
         training_days=list(training_days),
         data_dir=Path(data_dir),
@@ -1151,6 +1158,11 @@ def run_cohort(
     )
 
     last_results: list[AgentResult] = []
+    # Last PBT generation's [(spec, result)] pairs — captured each gen so the
+    # END-OF-RUN freeze pass (after the loop) can freeze the FINAL generation's
+    # R3 winners, which the in-loop breed-step freeze necessarily skips
+    # (the breed step is gated ``if generation < n_generations - 1``).
+    _pbt_pairs_this_gen: "list | None" = None
     cohort_t0 = time.perf_counter()
     run_id = str(uuid.uuid4())
     total_agents_trained = 0
@@ -1478,14 +1490,23 @@ def run_cohort(
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
                         predictor_lean_obs=bool(_agent_lean[idx]),
-                        use_direction_predictor=use_direction_predictor,
+                        # 2026-06-05: use_direction_predictor is now a per-agent
+                        # STRUCTURAL gene (the predictor runs live, so no
+                        # static_obs variant needed). gene OR the cohort flag.
+                        use_direction_predictor=bool(
+                            getattr(genes, "use_direction_predictor", False)
+                        ) or bool(use_direction_predictor),
                         predictor_p_win_back_threshold=(
                             predictor_p_win_back_threshold),
                         predictor_p_win_back_max_threshold=(
                             predictor_p_win_back_max_threshold),
                         predictor_p_win_lay_threshold=(
                             predictor_p_win_lay_threshold),
-                        direction_gate_enabled=direction_gate_enabled,
+                        # 2026-06-05: per-agent gene (coupled to the predictor:
+                        # the gene is True only when use_direction_predictor is
+                        # True, so the env never sees gate-without-signal).
+                        direction_gate_enabled=bool(genes.direction_gate_enabled)
+                        or bool(direction_gate_enabled),
                         mature_prob_open_threshold=mature_prob_open_threshold,
                         race_confidence_threshold=race_confidence_threshold,
                         lay_price_max=lay_price_max,
@@ -1621,11 +1642,20 @@ def run_cohort(
                         strategy_mode=strategy_mode,
                         use_race_outcome_predictor=use_race_outcome_predictor,
                         predictor_lean_obs=bool(_agent_lean[idx]),
-                        use_direction_predictor=use_direction_predictor,
+                        # 2026-06-05: use_direction_predictor is now a per-agent
+                        # STRUCTURAL gene (the predictor runs live, so no
+                        # static_obs variant needed). gene OR the cohort flag.
+                        use_direction_predictor=bool(
+                            getattr(genes, "use_direction_predictor", False)
+                        ) or bool(use_direction_predictor),
                         predictor_p_win_back_threshold=predictor_p_win_back_threshold,
         predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
                         predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
-                        direction_gate_enabled=direction_gate_enabled,
+                        # 2026-06-05: per-agent gene (coupled to the predictor:
+                        # the gene is True only when use_direction_predictor is
+                        # True, so the env never sees gate-without-signal).
+                        direction_gate_enabled=bool(genes.direction_gate_enabled)
+                        or bool(direction_gate_enabled),
                         mature_prob_open_threshold=mature_prob_open_threshold,
                         race_confidence_threshold=race_confidence_threshold,
                         lay_price_max=lay_price_max,
@@ -1959,6 +1989,57 @@ def run_cohort(
                         enabled_set=enabled_set,
                     )
 
+    # ── End-of-run R3 freeze (pbt-gpu-forward, 2026-06-05) ──────────────
+    # The in-loop freeze lives in the breed step, gated
+    # ``if generation < n_generations - 1`` and also skipped on an early-stop
+    # ``break`` — so the FINAL completed generation's R3 winners (the most-
+    # trained agents in the run: they climbed R1→R2→R3 over the most
+    # rotations) were trained and then never frozen. Freeze them here so the
+    # hall-of-fame captures them too. Idempotent via the already-frozen dedup.
+    if breeding == "pbt" and _pbt_pairs_this_gen:
+        def _final_pbt_score(res):
+            return _composite_score(
+                res.eval, maturation_bonus_weight, composite_score_mode,
+            )
+        _already_frozen_ids = {
+            getattr(r, "model_id", None) for _s, r in pbt_hall_of_fame
+        }
+        _final_frozen = _select_final_freeze(
+            _pbt_pairs_this_gen,
+            already_frozen_ids=_already_frozen_ids,
+            score_fn=_final_pbt_score,
+            freeze_top_r3=pbt_config.freeze_top_r3,
+        )
+        if _final_frozen:
+            from datetime import datetime as _dt_f, timezone as _tz_f
+            _final_at = _dt_f.now(_tz_f.utc).isoformat(timespec="seconds")
+            pbt_hall_of_fame.extend(_final_frozen)
+            _write_pbt_hall_of_fame(
+                output_dir / "pbt_hall_of_fame.jsonl",
+                generation=generation, frozen=_final_frozen,
+                score_fn=_final_pbt_score, frozen_at=_final_at,
+            )
+            logger.info(
+                "PBT: %d R3 champion(s) FROZEN at END-OF-RUN (final gen %d) "
+                "at %s (total %d). Winning architectures: %s",
+                len(_final_frozen), generation + 1, _final_at,
+                len(pbt_hall_of_fame),
+                ", ".join(sorted({
+                    sp.genes.architecture for sp, _ in _final_frozen
+                })),
+            )
+            try:
+                from tools.pbt_leaderboard import regenerate as _regen_f
+                _nc_f, _nm_f = _regen_f(output_dir, now_iso=_final_at)
+                logger.info(
+                    "PBT leaderboard (end-of-run): %d R3 champions, "
+                    "%d model-rows -> %s",
+                    _nc_f, _nm_f, output_dir / "leaderboard.txt",
+                )
+            except Exception:
+                logger.exception(
+                    "PBT end-of-run leaderboard regenerate failed; continuing")
+
     cohort_wall = time.perf_counter() - cohort_t0
     logger.info(
         "Cohort complete in %.1fs. Wrote %s + %s",
@@ -2166,6 +2247,38 @@ def _write_pbt_lineage(
                 spec, res, generation=generation, score=float(score_fn(res)),
                 trained_at=trained_at)
             f.write(json.dumps(row) + "\n")
+
+
+def _select_final_freeze(
+    pairs: list,
+    *,
+    already_frozen_ids: set,
+    score_fn,
+    freeze_top_r3: int,
+) -> list:
+    """Pick the FINAL generation's R3 winners to freeze at end-of-run.
+
+    ``pairs`` is the last completed generation's ``[(spec, result), ...]``.
+    Returns the top ``freeze_top_r3`` tier-3, non-frozen results whose
+    ``model_id`` is not already in ``already_frozen_ids``, ranked by
+    ``score_fn(result)`` descending.
+
+    Pure (no I/O) so the end-of-run freeze logic is unit-testable in
+    isolation — mirrors the in-loop R3 freeze inside :func:`breed_pbt`,
+    which the breed step skips on the final generation (and on an
+    early-stop ``break``). The ``already_frozen_ids`` dedup makes the pass
+    idempotent: a model frozen in-loop can never be frozen again here.
+    """
+    ranked = sorted(
+        (
+            pr for pr in pairs
+            if not pr[0].frozen and int(pr[0].tier) == 3
+            and getattr(pr[1], "model_id", None) not in already_frozen_ids
+        ),
+        key=lambda pr: score_fn(pr[1]),
+        reverse=True,
+    )
+    return list(ranked[:int(freeze_top_r3)])
 
 
 def _write_pbt_hall_of_fame(
