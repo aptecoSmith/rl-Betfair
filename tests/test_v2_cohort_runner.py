@@ -453,27 +453,45 @@ class TestPhase5EnableGeneCli:
         args = runner_mod._parse_args(argv + ["--output-dir", "x"])
         es = runner_mod._parse_enabled_genes(args.enable_gene)
         if getattr(args, "enable_all_genes", False):
-            es = es | frozenset(PHASE5_GENE_NAMES)
+            # mirror main(): exclude the 3 direction-label-definition knobs
+            # (offline-cache stem, pinned 60/5/60).
+            _label_stem = frozenset({
+                "direction_horizon_ticks", "direction_threshold_ticks",
+                "direction_force_close_seconds",
+            })
+            es = es | (frozenset(PHASE5_GENE_NAMES) - _label_stem)
         return es
 
-    def test_enable_all_genes_flag_enables_full_phase5_set(self):
+    def test_enable_all_genes_enables_phase5_except_label_stem(self):
         from training_v2.cohort.genes import PHASE5_GENE_NAMES
         es = self._enabled_set_from_argv(["--enable-all-genes"])
-        assert es == frozenset(PHASE5_GENE_NAMES)
-        # Includes the 6 promoted 2026-06-06.
-        assert {
+        # The 3 direction-LABEL-definition knobs are EXCLUDED (offline-cache
+        # stem; pinned 60/5/60). Everything else in PHASE5 is enabled.
+        label_stem = {
             "direction_horizon_ticks", "direction_threshold_ticks",
-            "direction_force_close_seconds", "direction_gate_warmup_eps",
-            "bc_learning_rate", "bc_target_entropy_warmup_eps",
+            "direction_force_close_seconds",
+        }
+        assert es == frozenset(PHASE5_GENE_NAMES) - label_stem
+        assert not (label_stem & es)
+        # Still includes the OTHER promoted knobs + the direction-head training
+        # weights (they reuse the one pinned triple's label cache).
+        assert {
+            "direction_gate_warmup_eps", "bc_learning_rate",
+            "bc_target_entropy_warmup_eps", "direction_prob_loss_weight",
+            "bc_direction_target_weight",
         } <= es
 
     def test_enable_all_genes_unions_with_enable_gene(self):
         from training_v2.cohort.genes import PHASE5_GENE_NAMES
+        label_stem = {
+            "direction_horizon_ticks", "direction_threshold_ticks",
+            "direction_force_close_seconds",
+        }
         es = self._enabled_set_from_argv(
             ["--enable-all-genes", "--enable-gene", "open_cost"],
         )
-        # Union; open_cost already inside, so the size is unchanged.
-        assert es == frozenset(PHASE5_GENE_NAMES)
+        # Union; open_cost already inside the (PHASE5 - label_stem) set.
+        assert es == frozenset(PHASE5_GENE_NAMES) - label_stem
 
     def test_no_enable_all_genes_is_empty_by_default(self):
         es = self._enabled_set_from_argv([])
@@ -512,10 +530,27 @@ class TestPhase5EnableGeneCli:
     def test_enable_all_genes_collides_with_reward_override(
         self, tmp_path: Path,
     ) -> None:
-        """A --reward-overrides for any now-enabled PHASE5 gene (e.g. a
-        direction-label knob) collides under --enable-all-genes."""
+        """A --reward-overrides for any now-enabled PHASE5 gene (e.g.
+        open_cost) collides under --enable-all-genes."""
         import pytest
         with pytest.raises(ValueError, match="Cannot combine"):
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--enable-all-genes",
+                "--reward-overrides", "open_cost=1.0",
+            ])
+
+    def test_enable_all_genes_allows_reward_override_on_label_stem(
+        self, tmp_path: Path,
+    ) -> None:
+        """The 3 direction-label-definition knobs are EXCLUDED from
+        --enable-all-genes (pinned cache stem), so a --reward-overrides on one
+        does NOT collide — it sets the pinned triple. Proven by reaching
+        data-loading (no 'Cannot combine' raise)."""
+        import pytest
+        with pytest.raises(RuntimeError, match="parquet|day-files"):
             runner_mod.main([
                 "--n-agents", "2", "--generations", "1", "--days", "2",
                 "--data-dir", str(tmp_path),

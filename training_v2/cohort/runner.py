@@ -3339,7 +3339,25 @@ def main(argv: list[str] | None = None) -> int:
     # genes promoted the same day (direction-label horizon/threshold/
     # force_close, gate warmup, BC lr + warmup). Composes with --enable-gene.
     if getattr(args, "enable_all_genes", False):
-        enabled_set = enabled_set | frozenset(PHASE5_GENE_NAMES)
+        # EXCLUDE the 3 direction-LABEL-DEFINITION knobs (2026-06-06): they
+        # define the offline direction-label cache STEM
+        # (date|horizon|threshold|force_close|max_runners). Sampling them
+        # per-agent would need a pre-scanned label cache per distinct triple
+        # (combinatorial) and the trainer RAISES FileNotFoundError when
+        # direction_prob_loss_weight>0 and the triple's cache is missing. So
+        # --enable-all-genes PINS them to their PHASE5 defaults (60/5/60) — the
+        # ONE triple we pre-scan — while STILL sampling HOW MUCH to train the
+        # direction head (direction_prob_loss_weight / bc_direction_target_weight
+        # reuse that one cache) and the gate warmup. Enable a label-definition
+        # knob explicitly via --enable-gene only after pre-scanning its triples.
+        _LABEL_STEM_PINNED = frozenset({
+            "direction_horizon_ticks",
+            "direction_threshold_ticks",
+            "direction_force_close_seconds",
+        })
+        enabled_set = enabled_set | (
+            frozenset(PHASE5_GENE_NAMES) - _LABEL_STEM_PINNED
+        )
     # Mutual-exclusion guard. Operator must pick one source of truth
     # per knob per run: either evolve the gene per-agent
     # (``--enable-gene``) or fix it cohort-wide

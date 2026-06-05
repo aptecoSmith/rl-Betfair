@@ -42,7 +42,7 @@ function Log($m) {
     Tee-Object -Append "$DIR\wrapper.log"
 }
 
-Log "GENES-ERA1 START (seed $SEED) -- 16 agents, $GENS gens, 3x(6/4) rotation, predictors-ON, BC-on, GPU lane (cap 2); bail/exit genes auto-sampled (gate/predictor/force_close/close_walk) + 7 reward/aux/exit genes ENABLED (open_cost, matured_arb_bonus, stop_loss, fill_prob/mature_prob/risk loss weights, naked_variance_penalty); caps ctx<=128/d<=256; output $DIR"
+Log "GENES-ERA1 START (seed $SEED) -- 16 agents, $GENS gens, 3x(6/4) rotation, predictors-ON, BC-on (pinned 500), GPU lane (cap 2); --enable-all-genes = ALL PHASE5 sampled (reward/aux/exit/direction-head/BC knobs) + the 5 bail/exit structural genes; the 3 direction-LABEL-definition knobs pinned 60/5/60 (one pre-scanned triple); caps ctx<=128/d<=256; output $DIR"
 
 $argList = @(
   '-m','training_v2.cohort.runner',
@@ -53,10 +53,7 @@ $argList = @(
   '--gpu-policy-lane','--gpu-lane-max-concurrent','2',
   '--use-race-outcome-predictor','--bc-pretrain-steps','500',
   '--predictor-bundle-manifests',$MANIFESTS[0],$MANIFESTS[1],$MANIFESTS[2],
-  '--enable-gene','open_cost','--enable-gene','matured_arb_bonus_weight',
-  '--enable-gene','stop_loss_pnl_threshold','--enable-gene','fill_prob_loss_weight',
-  '--enable-gene','mature_prob_loss_weight','--enable-gene','risk_loss_weight',
-  '--enable-gene','naked_variance_penalty_beta',
+  '--enable-all-genes',
   '--pbt-rotations','3','--pbt-train-per-rotation','6','--pbt-eval-per-rotation','4',
   '--pbt-r2-size','6','--pbt-r3-size','4','--pbt-promote-from-r1','3',
   '--pbt-promote-from-r2','2','--pbt-freeze-top-r3','2',
