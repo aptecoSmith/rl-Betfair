@@ -19,9 +19,15 @@ from training_v2.cohort.genes import (
     ALPHA_LR_RANGE,
     ARB_SPREAD_TARGET_LOCK_PCT_RANGE,
     BC_DIRECTION_TARGET_WEIGHT_RANGE,
+    BC_LEARNING_RATE_RANGE,
+    BC_TARGET_ENTROPY_WARMUP_EPS_RANGE,
     CLIP_RANGE_RANGE,
+    DIRECTION_FORCE_CLOSE_SECONDS_RANGE,
     DIRECTION_GATE_THRESHOLD_RANGE,
+    DIRECTION_GATE_WARMUP_EPS_RANGE,
+    DIRECTION_HORIZON_TICKS_RANGE,
     DIRECTION_PROB_LOSS_WEIGHT_RANGE,
+    DIRECTION_THRESHOLD_TICKS_RANGE,
     ENTROPY_COEFF_RANGE,
     FILL_PROB_LOSS_WEIGHT_RANGE,
     GAE_LAMBDA_RANGE,
@@ -40,6 +46,7 @@ from training_v2.cohort.genes import (
     STOP_LOSS_PNL_THRESHOLD_RANGE,
     VALUE_COEFF_RANGE,
     CohortGenes,
+    _PHASE5_INT_GENES,
     assert_in_range,
     crossover,
     mutate,
@@ -59,6 +66,13 @@ _PHASE5_RANGE_TABLE: dict[str, tuple[float, float]] = {
     "risk_loss_weight": RISK_LOSS_WEIGHT_RANGE,
     "alpha_lr": ALPHA_LR_RANGE,
     "reward_clip": REWARD_CLIP_RANGE,
+    # Promoted-to-Phase-5 (2026-06-06).
+    "direction_horizon_ticks": DIRECTION_HORIZON_TICKS_RANGE,
+    "direction_threshold_ticks": DIRECTION_THRESHOLD_TICKS_RANGE,
+    "direction_force_close_seconds": DIRECTION_FORCE_CLOSE_SECONDS_RANGE,
+    "direction_gate_warmup_eps": DIRECTION_GATE_WARMUP_EPS_RANGE,
+    "bc_learning_rate": BC_LEARNING_RATE_RANGE,
+    "bc_target_entropy_warmup_eps": BC_TARGET_ENTROPY_WARMUP_EPS_RANGE,
 }
 
 
@@ -236,6 +250,17 @@ class TestPhase5Genes:
             # Default 0.0 = byte-identical to pre-plan (no shaped
             # variance penalty).
             "naked_variance_penalty_beta": 0.0,
+            # 2026-06-06 promotion. Each default MATCHES the value the
+            # ``_sample_field`` hard-pin returned before promotion (and the
+            # dataclass field default), so an empty enabled_set is
+            # byte-identical. This is the load-bearing byte-identity
+            # invariant for the promoted genes.
+            "direction_horizon_ticks": 60,
+            "direction_threshold_ticks": 5,
+            "direction_force_close_seconds": 60.0,
+            "direction_gate_warmup_eps": 5,
+            "bc_learning_rate": 3e-4,
+            "bc_target_entropy_warmup_eps": 5,
         }
         assert PHASE5_GENE_DEFAULTS == expected
 
@@ -381,25 +406,44 @@ class TestPhase5Genes:
         assert d["transformer_ffn_mult"] == 2
         assert d["transformer_pos_encoding"] == "learned"
         assert d["predictor_lean_obs"] is False
+        # Every PHASE5 gene is present and numeric. The 4 int-valued PHASE5
+        # genes (promoted 2026-06-06) serialise as int; the rest as float.
         for name in PHASE5_GENE_NAMES:
             assert name in d
-            assert isinstance(d[name], float)
-        # Phase 8 BC genes — pinned defaults at sample time, not
-        # GA-evolved (operator controls them via the runner's
-        # ``--bc-pretrain-steps`` flag instead).
+            if name in _PHASE5_INT_GENES:
+                assert isinstance(d[name], int), name
+            else:
+                assert isinstance(d[name], float), name
+        # Phase 8 ``bc_pretrain_steps`` — pinned default at sample time
+        # (operator controls it via ``--bc-pretrain-steps`` / fresh blood),
+        # NOT a PHASE5 gene, so still 0 even with enabled_set=PHASE5_GENE_NAMES.
         assert d["bc_pretrain_steps"] == 0
         assert isinstance(d["bc_pretrain_steps"], int)
-        assert d["bc_learning_rate"] == pytest.approx(3e-4)
-        assert d["bc_target_entropy_warmup_eps"] == 5
+        # 2026-06-06 promotion: bc_learning_rate + bc_target_entropy_warmup_eps
+        # are now PHASE5 genes, SAMPLED in-range under enabled_set=PHASE5.
+        assert (BC_LEARNING_RATE_RANGE[0]
+                <= d["bc_learning_rate"]
+                <= BC_LEARNING_RATE_RANGE[1])
+        assert (BC_TARGET_ENTROPY_WARMUP_EPS_RANGE[0]
+                <= d["bc_target_entropy_warmup_eps"]
+                <= BC_TARGET_ENTROPY_WARMUP_EPS_RANGE[1])
         # direction_prob_loss_weight was promoted to a GA gene in the
         # afed983 refactor, so with enabled_set=PHASE5_GENE_NAMES it is
         # SAMPLED in-range (not pinned at the 0.0 default).
         assert (DIRECTION_PROB_LOSS_WEIGHT_RANGE[0]
                 <= d["direction_prob_loss_weight"]
                 <= DIRECTION_PROB_LOSS_WEIGHT_RANGE[1])
-        assert d["direction_horizon_ticks"] == 60
-        assert d["direction_threshold_ticks"] == 5
-        assert d["direction_force_close_seconds"] == 60.0
+        # 2026-06-06 promotion: the three direction-LABEL knobs are now
+        # PHASE5 genes, SAMPLED in-range under enabled_set=PHASE5.
+        assert (DIRECTION_HORIZON_TICKS_RANGE[0]
+                <= d["direction_horizon_ticks"]
+                <= DIRECTION_HORIZON_TICKS_RANGE[1])
+        assert (DIRECTION_THRESHOLD_TICKS_RANGE[0]
+                <= d["direction_threshold_ticks"]
+                <= DIRECTION_THRESHOLD_TICKS_RANGE[1])
+        assert (DIRECTION_FORCE_CLOSE_SECONDS_RANGE[0]
+                <= d["direction_force_close_seconds"]
+                <= DIRECTION_FORCE_CLOSE_SECONDS_RANGE[1])
         # Phase-13 S05 — direction-targeted BC, also promoted to GA -> sampled.
         assert (BC_DIRECTION_TARGET_WEIGHT_RANGE[0]
                 <= d["bc_direction_target_weight"]
@@ -407,20 +451,119 @@ class TestPhase5Genes:
         # Phase-14 S03 — direction-confidence gate. The threshold
         # is sampled here because we passed enabled_set=
         # PHASE5_GENE_NAMES, so the random draw lands in the
-        # [0.5, 0.95] range rather than at the default 0.5.
+        # [0.20, 0.50] range rather than at the default 0.5.
         assert d["direction_gate_enabled"] is False
         assert (DIRECTION_GATE_THRESHOLD_RANGE[0]
                 <= d["direction_gate_threshold"]
                 <= DIRECTION_GATE_THRESHOLD_RANGE[1])
-        # Phase-14 S06 — threshold warmup window. Operator-controlled,
-        # not GA-evolved; pinned at default 5 even when enabled_set
-        # covers all PHASE5_GENE_NAMES.
-        assert d["direction_gate_warmup_eps"] == 5
+        # Phase-14 S06 — threshold warmup window, promoted to a PHASE5 gene
+        # 2026-06-06; SAMPLED in-range under enabled_set=PHASE5.
+        assert (DIRECTION_GATE_WARMUP_EPS_RANGE[0]
+                <= d["direction_gate_warmup_eps"]
+                <= DIRECTION_GATE_WARMUP_EPS_RANGE[1])
 
     def test_phase5_gene_names_set_size(self):
-        # 18 prior genes + 2 promoted to GA in the afed983 refactor
-        # (direction_prob_loss_weight, bc_direction_target_weight) = 20.
-        # (arb_spread_scale was retired and replaced by
-        # arb_spread_target_lock_pct — a swap, not a count change.)
-        assert len(PHASE5_GENE_NAMES) == 20
+        # 20 prior genes + 6 promoted 2026-06-06 (direction_horizon_ticks,
+        # direction_threshold_ticks, direction_force_close_seconds,
+        # direction_gate_warmup_eps, bc_learning_rate,
+        # bc_target_entropy_warmup_eps) = 26.
+        assert len(PHASE5_GENE_NAMES) == 26
         assert PHASE5_GENE_NAMES == frozenset(PHASE5_GENE_DEFAULTS)
+        # The 6 newly-promoted genes are now in the set.
+        assert {
+            "direction_horizon_ticks", "direction_threshold_ticks",
+            "direction_force_close_seconds", "direction_gate_warmup_eps",
+            "bc_learning_rate", "bc_target_entropy_warmup_eps",
+        } <= PHASE5_GENE_NAMES
+
+
+# ── 2026-06-06 promotion: 6 hard-pinned genes -> Phase 5 ───────────────────
+
+
+_NEWLY_PROMOTED_2026_06_06 = (
+    "direction_horizon_ticks",
+    "direction_threshold_ticks",
+    "direction_force_close_seconds",
+    "direction_gate_warmup_eps",
+    "bc_learning_rate",
+    "bc_target_entropy_warmup_eps",
+)
+
+
+class TestNewlyPromotedGenes:
+    """The 6 knobs promoted from a ``_sample_field`` hard-pin to Phase 5
+    (operator: "fresh blood must sample EVERY tunable gene"). Load-bearing
+    byte-identity: an EMPTY enabled_set must reproduce the pre-promotion
+    sampler output bit-for-bit (the 6 genes pin to their prior hard-pin
+    default)."""
+
+    def test_empty_enabled_set_pins_to_prior_hardpin_defaults(self):
+        """With no genes enabled, the 6 sample to exactly their old
+        hard-pin constants (60 / 5 / 60.0 / 5 / 3e-4 / 5)."""
+        prior = {
+            "direction_horizon_ticks": 60,
+            "direction_threshold_ticks": 5,
+            "direction_force_close_seconds": 60.0,
+            "direction_gate_warmup_eps": 5,
+            "bc_learning_rate": 3e-4,
+            "bc_target_entropy_warmup_eps": 5,
+        }
+        for seed in range(50):
+            g = sample_genes(random.Random(seed))
+            for name, val in prior.items():
+                assert getattr(g, name) == val, (name, getattr(g, name))
+                assert PHASE5_GENE_DEFAULTS[name] == val
+
+    def test_sample_genes_byte_identical_to_recorded_baseline(self):
+        """sample_genes(seed) with empty enabled_set is deterministic and
+        unchanged: the 6 promotions consume no RNG when disabled, so the
+        whole genome (not just the 6) is reproducible across calls."""
+        for seed in range(50):
+            assert sample_genes(random.Random(seed)).to_dict() == \
+                sample_genes(random.Random(seed)).to_dict()
+
+    def test_enabled_genes_sample_in_range_and_vary(self):
+        """Each newly-promoted gene, enabled alone, samples in-range and
+        varies across seeds (not stuck at its default)."""
+        for name in _NEWLY_PROMOTED_2026_06_06:
+            lo, hi = _PHASE5_RANGE_TABLE[name]
+            vals = set()
+            for seed in range(40):
+                g = sample_genes(random.Random(seed), enabled_set=frozenset({name}))
+                v = getattr(g, name)
+                assert lo <= v <= hi, (name, v, lo, hi)
+                vals.add(v)
+            # Int genes with a small range still produce several distinct
+            # values across 40 seeds; floats are essentially all-distinct.
+            assert len(vals) >= 3, (name, vals)
+
+    def test_int_genes_yield_ints_when_enabled(self):
+        """The 4 int-valued promotions serialise / sample as int."""
+        en = frozenset(_NEWLY_PROMOTED_2026_06_06)
+        for seed in range(40):
+            g = sample_genes(random.Random(seed), enabled_set=en)
+            for name in _PHASE5_INT_GENES:
+                if name in _NEWLY_PROMOTED_2026_06_06:
+                    assert isinstance(getattr(g, name), int), name
+            # Floats stay float.
+            assert isinstance(g.bc_learning_rate, float)
+            assert isinstance(g.direction_force_close_seconds, float)
+
+    def test_disabled_genes_stay_pinned_under_mutation(self):
+        """mutate(rate=1.0) with empty enabled_set leaves the 6 at default
+        (same invariant as the other PHASE5 genes)."""
+        g = sample_genes(random.Random(1))
+        m = mutate(g, random.Random(2), mutation_rate=1.0)
+        for name in _NEWLY_PROMOTED_2026_06_06:
+            assert getattr(m, name) == PHASE5_GENE_DEFAULTS[name]
+
+    def test_assert_in_range_rejects_out_of_range_promoted_gene(self):
+        """assert_in_range now validates the promoted genes."""
+        bad = CohortGenes(
+            learning_rate=1e-3, entropy_coeff=1e-3, clip_range=0.2,
+            gae_lambda=0.95, value_coeff=0.5, mini_batch_size=64,
+            hidden_size=128,
+            direction_horizon_ticks=5,  # < 20 lower bound
+        )
+        with pytest.raises(ValueError):
+            assert_in_range(bad)

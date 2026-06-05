@@ -2742,7 +2742,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "stop_loss_pnl_threshold, arb_spread_target_lock_pct, "
             "fill_prob_loss_weight, mature_prob_loss_weight, "
             "risk_loss_weight, alpha_lr, reward_clip, "
-            "direction_gate_threshold, direction_prob_loss_weight."
+            "direction_gate_threshold, direction_prob_loss_weight, "
+            "bc_direction_target_weight, naked_variance_penalty_beta, "
+            "predictor_feature_gain, value_edge_threshold, "
+            "value_kelly_fraction, each_way_edge_threshold, "
+            "each_way_kelly_fraction, direction_horizon_ticks, "
+            "direction_threshold_ticks, direction_force_close_seconds, "
+            "direction_gate_warmup_eps, bc_learning_rate, "
+            "bc_target_entropy_warmup_eps."
+        ),
+    )
+    p.add_argument(
+        "--enable-all-genes", action="store_true",
+        help=(
+            "Enable EVERY Phase 5 gene to evolve per-agent (the full "
+            "PHASE5_GENE_NAMES set — all reward/aux/exit/direction-label/BC "
+            "knobs). Composes with --enable-gene (union). Fresh blood then "
+            "samples the entire tunable gene space. The gate=>predictor "
+            "coupling and the value-betting genes (inert in arb mode) are "
+            "preserved. Mutually exclusive with --reward-overrides for any "
+            "enabled gene name (same one-source-of-truth rule as "
+            "--enable-gene)."
         ),
     )
     p.add_argument(
@@ -3313,6 +3333,13 @@ def main(argv: list[str] | None = None) -> int:
 
     reward_overrides = _parse_reward_overrides(args.reward_overrides)
     enabled_set = _parse_enabled_genes(args.enable_gene)
+    # --enable-all-genes: union the full Phase 5 set onto whatever
+    # --enable-gene named (2026-06-06, operator: "fresh blood must sample
+    # EVERY tunable gene"). frozenset(PHASE5_GENE_NAMES) now includes the 6
+    # genes promoted the same day (direction-label horizon/threshold/
+    # force_close, gate warmup, BC lr + warmup). Composes with --enable-gene.
+    if getattr(args, "enable_all_genes", False):
+        enabled_set = enabled_set | frozenset(PHASE5_GENE_NAMES)
     # Mutual-exclusion guard. Operator must pick one source of truth
     # per knob per run: either evolve the gene per-agent
     # (``--enable-gene``) or fix it cohort-wide
@@ -3396,11 +3423,30 @@ def main(argv: list[str] | None = None) -> int:
             "BC pretrain: cohort-wide pin learning_rate=%g",
             float(args.bc_learning_rate),
         )
+        # 2026-06-06: bc_learning_rate is now an enable-able Phase 5 gene.
+        # The cohort-wide pin (--bc-learning-rate) wins inside the worker,
+        # which would silently override a per-agent gene draw. Refuse the
+        # combination — one source of truth per knob (mirrors
+        # --arb-spread-target-lock-pct below). --enable-all-genes puts
+        # bc_learning_rate in enabled_set, so this guards that path too.
+        if "bc_learning_rate" in enabled_set:
+            raise ValueError(
+                "Cannot combine --bc-learning-rate with "
+                "--enable-gene bc_learning_rate (or --enable-all-genes): "
+                "one source of truth per knob per run.",
+            )
     if args.bc_target_entropy_warmup_eps is not None:
         logger.info(
             "BC pretrain: cohort-wide pin target_entropy_warmup_eps=%d",
             int(args.bc_target_entropy_warmup_eps),
         )
+        # 2026-06-06: same guard as --bc-learning-rate above.
+        if "bc_target_entropy_warmup_eps" in enabled_set:
+            raise ValueError(
+                "Cannot combine --bc-target-entropy-warmup-eps with "
+                "--enable-gene bc_target_entropy_warmup_eps (or "
+                "--enable-all-genes): one source of truth per knob per run.",
+            )
     if args.arb_spread_target_lock_pct is not None:
         logger.info(
             "Scalping: cohort-wide pin arb_spread_target_lock_pct=%g",

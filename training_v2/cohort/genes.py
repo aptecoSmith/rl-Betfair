@@ -30,6 +30,26 @@ risk_loss_weight                 [0.0, 0.30]  uniform         0.0
 alpha_lr                         [1e-2, 1e-1] log-uniform     1e-2
 reward_clip                      [1.0, 10.0]  uniform         10.0
 ================================ ============ =============== ====================
+
+2026-06-06 promotion ("fresh blood must sample EVERY tunable gene"): six
+knobs that were HARD-PINNED in ``_sample_field`` (the census's category C,
+minus ``direction_gate_enabled`` + ``bc_pretrain_steps`` which were already
+promoted) joined Phase 5. They sample when enabled and pin to their prior
+hard-pin default otherwise (so an empty ``enabled_set`` stays byte-identical):
+
+================================ ============== =============== ==============
+Gene                             Range          Distribution    Default
+================================ ============== =============== ==============
+direction_horizon_ticks          [20, 120]      uniform int     60
+direction_threshold_ticks        [2, 10]        uniform int     5
+direction_force_close_seconds    [30.0, 180.0]  uniform         60.0
+direction_gate_warmup_eps        [0, 20]        uniform int     5
+bc_learning_rate                 [1e-5, 1e-3]   log-uniform     3e-4
+bc_target_entropy_warmup_eps     [0, 20]        uniform int     5
+================================ ============== =============== ==============
+
+The cohort runner's ``--enable-all-genes`` flag enables EVERY
+``PHASE5_GENE_NAMES`` member (the original 20 + these 6 = 26) at once.
 """
 
 from __future__ import annotations
@@ -319,6 +339,28 @@ VALUE_KELLY_FRACTION_RANGE: tuple[float, float] = (0.0, 1.0)
 EACH_WAY_EDGE_THRESHOLD_RANGE: tuple[float, float] = (0.02, 0.10)
 EACH_WAY_KELLY_FRACTION_RANGE: tuple[float, float] = (0.0, 1.0)
 
+# ── Promoted-to-Phase-5 ranges (2026-06-06, operator: "fresh blood must be
+# able to sample EVERY tunable gene"). These six were previously HARD-PINNED
+# inside ``_sample_field`` (the census's category C, minus the two already
+# promoted: direction_gate_enabled + bc_pretrain_steps). They now sample from
+# the ranges below when their name is in the cohort's ``enabled_set``, and pin
+# to ``PHASE5_GENE_DEFAULTS`` (their pre-promotion default) otherwise — so an
+# empty enabled_set stays byte-identical.
+#
+# The three direction-label knobs (horizon / threshold / force_close) define
+# the OFFLINE direction-label cache stem the head/BC read; sampling them
+# per-agent means each distinct triple needs its own pre-scanned cache (see
+# training_v2.direction_label_cli). They are int / int / float respectively.
+DIRECTION_HORIZON_TICKS_RANGE: tuple[int, int] = (20, 120)
+DIRECTION_THRESHOLD_TICKS_RANGE: tuple[int, int] = (2, 10)
+DIRECTION_FORCE_CLOSE_SECONDS_RANGE: tuple[float, float] = (30.0, 180.0)
+# Direction-gate threshold-warmup window (episodes). int.
+DIRECTION_GATE_WARMUP_EPS_RANGE: tuple[int, int] = (0, 20)
+# BC optimiser knobs. ``bc_learning_rate`` is sampled LOG-uniform (like
+# learning_rate / alpha_lr — see _LOG_UNIFORM_FLOATS). warmup_eps is int.
+BC_LEARNING_RATE_RANGE: tuple[float, float] = (1e-5, 1e-3)
+BC_TARGET_ENTROPY_WARMUP_EPS_RANGE: tuple[int, int] = (0, 20)
+
 
 #: Default value applied to a Phase 5 gene whose name is NOT in the cohort's
 #: ``enabled_set``. Each value matches the pre-Phase-5 cohort-wide default
@@ -372,6 +414,18 @@ PHASE5_GENE_DEFAULTS: dict[str, float] = {
     "value_kelly_fraction": 0.25,
     "each_way_edge_threshold": 0.05,
     "each_way_kelly_fraction": 0.25,
+    # Promoted-to-Phase-5 (2026-06-06). Previously HARD-PINNED in
+    # ``_sample_field``; now sampleable via ``--enable-gene`` /
+    # ``--enable-all-genes``. Each default MATCHES the value the
+    # hard-pin returned (and the dataclass field default) so an empty
+    # enabled_set is byte-identical. The three direction-label knobs
+    # resolve the offline direction-label cache stem at trainer init.
+    "direction_horizon_ticks": 60,
+    "direction_threshold_ticks": 5,
+    "direction_force_close_seconds": 60.0,
+    "direction_gate_warmup_eps": 5,
+    "bc_learning_rate": 3e-4,
+    "bc_target_entropy_warmup_eps": 5,
 }
 
 
@@ -403,13 +457,33 @@ _PHASE5_RANGES: dict[str, tuple[float, float]] = {
     "value_kelly_fraction": VALUE_KELLY_FRACTION_RANGE,
     "each_way_edge_threshold": EACH_WAY_EDGE_THRESHOLD_RANGE,
     "each_way_kelly_fraction": EACH_WAY_KELLY_FRACTION_RANGE,
+    # Promoted-to-Phase-5 (2026-06-06). See the *_RANGE constants above.
+    "direction_horizon_ticks": DIRECTION_HORIZON_TICKS_RANGE,
+    "direction_threshold_ticks": DIRECTION_THRESHOLD_TICKS_RANGE,
+    "direction_force_close_seconds": DIRECTION_FORCE_CLOSE_SECONDS_RANGE,
+    "direction_gate_warmup_eps": DIRECTION_GATE_WARMUP_EPS_RANGE,
+    "bc_learning_rate": BC_LEARNING_RATE_RANGE,
+    "bc_target_entropy_warmup_eps": BC_TARGET_ENTROPY_WARMUP_EPS_RANGE,
 }
 
 
 # Floats sampled log-uniform on the [lo, hi] range. Floats absent from
-# this set are sampled uniform.
+# this set are sampled uniform. ``bc_learning_rate`` joins the LR family
+# (2026-06-06 promotion) — a learning rate spans an order of magnitude, so
+# log-uniform matches how ``learning_rate`` / ``alpha_lr`` are drawn.
 _LOG_UNIFORM_FLOATS: frozenset[str] = frozenset({
-    "learning_rate", "entropy_coeff", "alpha_lr",
+    "learning_rate", "entropy_coeff", "alpha_lr", "bc_learning_rate",
+})
+
+# Phase-5 genes whose value is an INTEGER. The ``_PHASE5_RANGES`` sampler
+# rounds the uniform draw to the nearest int for these so an int gene yields
+# an int (mirrors how ``mini_batch_size`` / ``hidden_size`` are categorical
+# ints). Promoted 2026-06-06; the float-valued PHASE5 genes are unaffected.
+_PHASE5_INT_GENES: frozenset[str] = frozenset({
+    "direction_horizon_ticks",
+    "direction_threshold_ticks",
+    "direction_gate_warmup_eps",
+    "bc_target_entropy_warmup_eps",
 })
 
 
@@ -658,33 +732,31 @@ def _sample_field(rng: random.Random, field_name: str):
         lo, hi = _PHASE5_RANGES[field_name]
         if field_name in _LOG_UNIFORM_FLOATS:
             return _sample_log_uniform(rng, lo, hi)
+        if field_name in _PHASE5_INT_GENES:
+            # Inclusive integer draw (rng.randint includes both ends),
+            # so an int-valued gene yields an int in [lo, hi].
+            return int(rng.randint(int(lo), int(hi)))
         return _sample_uniform(rng, lo, hi)
-    # Phase 8 (2026-05-05). BC pretrain knobs are operator-controlled
-    # (cohort runner ``--bc-pretrain-steps`` flag) rather than
-    # GA-evolved per-agent. Sampling pins them to their pre-S02 inert
-    # defaults so a fresh CohortGenes draw is byte-identical to a
-    # pre-S02 draw at the same seed. If a future plan wants the GA to
-    # explore BC settings, replace these returns with proper random
-    # samplers and add the genes to ``_PHASE5_RANGES``.
+    # Phase 8 (2026-05-05). ``bc_pretrain_steps`` is operator-controlled
+    # (cohort runner ``--bc-pretrain-steps`` flag) / drawn only by
+    # ``sample_fresh_blood_genes``; the BASE/GA sampler pins it to the
+    # inert default so a fresh CohortGenes draw is byte-identical to a
+    # pre-S02 draw at the same seed.
+    #
+    # ``bc_learning_rate`` + ``bc_target_entropy_warmup_eps`` were
+    # promoted to Phase 5 genes (2026-06-06) and now dispatch via the
+    # ``_PHASE5_RANGES`` branch above — when enabled they sample, when
+    # not they pin to their PHASE5 default (3e-4 / 5), identical to the
+    # old hard-pin.
     if field_name == "bc_pretrain_steps":
         return 0
-    if field_name == "bc_learning_rate":
-        return 3e-4
-    if field_name == "bc_target_entropy_warmup_eps":
-        return 5
     # Phase-13 (2026-05-06) / Phase-15 (2026-05-24).
     # `direction_prob_loss_weight` and `bc_direction_target_weight`
-    # are now Phase 5 genes and dispatched via the `_PHASE5_RANGES`
-    # branch above. The remaining direction_* knobs below stay
-    # operator-controlled (constants surfaced via reward-overrides /
-    # cohort-runner flags) and pin to inert defaults so an unsampled
-    # cohort is byte-identical to pre-S03 at the same seed.
-    if field_name == "direction_horizon_ticks":
-        return 60
-    if field_name == "direction_threshold_ticks":
-        return 5
-    if field_name == "direction_force_close_seconds":
-        return 60.0
+    # were Phase 5 genes already. The three direction-LABEL knobs
+    # (horizon / threshold / force_close) were promoted to Phase 5
+    # genes on 2026-06-06 and now dispatch via the `_PHASE5_RANGES`
+    # branch above (pin to 60 / 5 / 60.0 when not enabled — identical
+    # to the old hard-pin).
     # Phase-14 S03 (2026-05-07). ``direction_gate_enabled`` is a
     # cohort-wide bool, never sampled per-agent — operator turns it
     # on via ``--reward-overrides direction_gate_enabled=true``.
@@ -694,10 +766,10 @@ def _sample_field(rng: random.Random, field_name: str):
     # _PHASE5_RANGES).
     if field_name == "direction_gate_enabled":
         return False
-    # Phase-14 S06 (2026-05-07). Warmup eps is operator-controlled,
-    # never sampled per-agent. Pin to default 5.
-    if field_name == "direction_gate_warmup_eps":
-        return 5
+    # Phase-14 S06 (2026-05-07). ``direction_gate_warmup_eps`` was promoted
+    # to a Phase 5 gene on 2026-06-06; it now dispatches via the
+    # ``_PHASE5_RANGES`` branch above (pins to default 5 when not enabled —
+    # identical to the old hard-pin).
     # Direction mechanism + safety exits (2026-06-05). The BASE/GA sampler pins
     # these OFF (byte-identical to pre-gene); only sample_fresh_blood_genes
     # draws them (and couples the gate to the predictor).
@@ -809,14 +881,24 @@ def sample_fresh_blood_genes(
         HIDDEN_SIZE_LSTM_SAMPLE if arch == "lstm"
         else HIDDEN_SIZE_TRANSFORMER_SAMPLE
     )
-    # Direction mechanism — COUPLED. The env raises if the gate is on without
-    # the predictor, so only draw gate=True when the predictor is on. When the
-    # gate is on, give it a meaningfully strict threshold (0.5 is the no-op
-    # floor); gate-off agents keep 0.5 (unread). Drawn here (not via the
-    # per-field _sample_architecture_field) so the coupling holds.
+    # Direction mechanism — COUPLED (gate ⇒ predictor). The env raises if the
+    # gate is on without the predictor, so only draw gate=True when the
+    # predictor is on. This coupling is INDEPENDENT of the threshold's value.
+    #
+    # ``direction_gate_threshold`` value precedence (2026-06-06 reconciliation
+    # for --enable-all-genes):
+    #   * gene ENABLED (in enabled_set) → sample FREELY from its PHASE5 range
+    #     via the generic PHASE5 branch below (gate-off agents ignore it;
+    #     gate-on agents get a real in-range threshold). The hard-coded
+    #     0.35/0.5 coupling value is NOT applied.
+    #   * gene DISABLED → keep the coupling default: 0.35 (a meaningfully
+    #     strict, actually-filtering setting) when the gate is on, else 0.5
+    #     (the no-op floor, unread). This preserves byte-identity with
+    #     pre-promotion fresh blood.
     use_dir = bool(rng.random() < 0.5)
     gate_on = bool(use_dir and rng.random() < 0.5)
     gate_threshold = DIRECTION_GATE_THRESHOLD_ON if gate_on else 0.5
+    threshold_enabled = "direction_gate_threshold" in enabled_set
     kwargs: dict = {}
     for f in fields(CohortGenes):
         if f.name == "architecture":
@@ -827,7 +909,10 @@ def sample_fresh_blood_genes(
             kwargs[f.name] = use_dir
         elif f.name == "direction_gate_enabled":
             kwargs[f.name] = gate_on
-        elif f.name == "direction_gate_threshold":
+        elif f.name == "direction_gate_threshold" and not threshold_enabled:
+            # Disabled → coupling default (byte-identical to pre-promotion).
+            # When enabled, fall through to the PHASE5 branch below so the
+            # free in-range draw wins.
             kwargs[f.name] = gate_threshold
         elif f.name in ARCHITECTURE_GENE_NAMES:
             kwargs[f.name] = _sample_architecture_field(rng, f.name)

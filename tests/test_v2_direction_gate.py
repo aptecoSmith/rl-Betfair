@@ -45,8 +45,10 @@ from agents_v2.action_space import ActionType, DiscreteActionSpace
 from agents_v2.discrete_policy import DiscreteLSTMPolicy
 from training_v2.cohort.genes import (
     DIRECTION_GATE_THRESHOLD_RANGE,
+    DIRECTION_GATE_WARMUP_EPS_RANGE,
     PHASE5_GENE_DEFAULTS,
     PHASE5_GENE_NAMES,
+    sample_fresh_blood_genes,
     sample_genes,
 )
 
@@ -320,6 +322,57 @@ class TestGateGeneIsPhase5Evolved:
         # Independent draws should differ on at least one agent
         # most of the time. With seeds 123 / 456 they will.
         assert a.direction_gate_threshold != b.direction_gate_threshold
+
+    def test_warmup_eps_promoted_to_phase5_2026_06_06(self):
+        # direction_gate_warmup_eps joined PHASE5 on 2026-06-06 (so
+        # --enable-gene / --enable-all-genes can evolve it). Default 5.
+        assert "direction_gate_warmup_eps" in PHASE5_GENE_NAMES
+        assert PHASE5_GENE_DEFAULTS["direction_gate_warmup_eps"] == 5
+        lo, hi = DIRECTION_GATE_WARMUP_EPS_RANGE
+        vals = set()
+        for seed in range(40):
+            g = sample_genes(
+                random.Random(seed),
+                enabled_set=frozenset({"direction_gate_warmup_eps"}),
+            )
+            assert lo <= g.direction_gate_warmup_eps <= hi
+            assert isinstance(g.direction_gate_warmup_eps, int)
+            vals.add(g.direction_gate_warmup_eps)
+        assert len(vals) >= 3
+
+
+class TestFreshBloodGateThresholdCoupling:
+    """Fresh-blood reconciliation (2026-06-06): when
+    ``direction_gate_threshold`` is enable-sampled, it draws FREELY from its
+    range; the gate=>predictor coupling is independent of (and survives) that
+    free draw. When NOT enabled, the threshold keeps the 0.35/0.5 coupling
+    default (byte-identical)."""
+
+    def test_threshold_free_but_coupling_intact_when_enabled(self):
+        en = frozenset({"direction_gate_threshold"})
+        lo, hi = DIRECTION_GATE_THRESHOLD_RANGE
+        seen = set()
+        for seed in range(400):
+            g = sample_fresh_blood_genes(random.Random(seed), enabled_set=en)
+            assert lo <= g.direction_gate_threshold <= hi
+            seen.add(round(g.direction_gate_threshold, 6))
+            # gate on => predictor on, regardless of the threshold value.
+            if g.direction_gate_enabled:
+                assert g.use_direction_predictor
+        # Free draw => far more than the 2 coupling constants.
+        assert len(seen) >= 50
+        assert not (seen <= {0.35, 0.5})
+
+    def test_threshold_pins_to_coupling_default_when_disabled(self):
+        # Empty enabled_set: gate-on agents get the strict 0.35 coupling
+        # value, gate-off agents get the 0.5 no-op floor. Byte-identical to
+        # pre-promotion fresh blood.
+        for seed in range(200):
+            g = sample_fresh_blood_genes(random.Random(seed))
+            if g.direction_gate_enabled:
+                assert g.direction_gate_threshold == 0.35
+            else:
+                assert g.direction_gate_threshold == 0.5
 
 
 # ── 9. apply_direction_gate kwarg + captured-mask path (S05) ──────────────

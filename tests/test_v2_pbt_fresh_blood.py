@@ -15,10 +15,14 @@ from dataclasses import fields
 from training_v2.cohort.genes import (
     ARCHITECTURE_CHOICES,
     ARCHITECTURE_GENE_NAMES,
+    PHASE5_GENE_DEFAULTS,
+    PHASE5_GENE_NAMES,
     TRANSFORMER_CTX_TICKS_CHOICES,
     TRANSFORMER_DEPTH_CHOICES,
     TRANSFORMER_HEADS_CHOICES,
     CohortGenes,
+    _PHASE5_INT_GENES,
+    _PHASE5_RANGES,
     assert_in_range,
     crossover,
     mutate,
@@ -233,3 +237,104 @@ class TestStructuralGenesFreezeUnderBreeding:
             if f.name in ARCHITECTURE_GENE_NAMES:
                 continue
             assert getattr(c_lstm, f.name) == getattr(c_tr, f.name), f.name
+
+
+class TestFreshBloodEnableAllGenes:
+    """--enable-all-genes path (2026-06-06): fresh blood draws with
+    ``enabled_set = frozenset(PHASE5_GENE_NAMES)`` must explore the ENTIRE
+    tunable gene space while preserving the gate=>predictor coupling and
+    the (no-)coupling decision for the direction-training weights."""
+
+    _ENABLE_ALL = frozenset(PHASE5_GENE_NAMES)
+    _NEW6 = (
+        "direction_horizon_ticks",
+        "direction_threshold_ticks",
+        "direction_force_close_seconds",
+        "direction_gate_warmup_eps",
+        "bc_learning_rate",
+        "bc_target_entropy_warmup_eps",
+    )
+
+    def _draws(self, n=400, seed0=0):
+        return [
+            sample_fresh_blood_genes(
+                random.Random(seed0 + s), enabled_set=self._ENABLE_ALL,
+            )
+            for s in range(n)
+        ]
+
+    def test_every_phase5_gene_varies_including_the_new_six(self):
+        """(a) Every PHASE5 gene — the original 20 + the 6 newly-promoted —
+        takes more than one distinct value across the batch."""
+        draws = self._draws()
+        for name in PHASE5_GENE_NAMES:
+            vals = {getattr(g, name) for g in draws}
+            assert len(vals) >= 2, (name, vals)
+        # Spotlight the 6 newly-promoted explicitly so a regression that
+        # silently re-pins one is loud.
+        for name in self._NEW6:
+            vals = {getattr(g, name) for g in draws}
+            assert len(vals) >= 3, (name, sorted(vals)[:5])
+
+    def test_promoted_genes_sample_in_range_and_right_dtype(self):
+        draws = self._draws()
+        for g in draws:
+            assert_in_range(g)  # validates the promoted ranges too
+            for name in self._NEW6:
+                lo, hi = _PHASE5_RANGES[name]
+                v = getattr(g, name)
+                assert lo <= v <= hi, (name, v, lo, hi)
+                if name in _PHASE5_INT_GENES:
+                    assert isinstance(v, int), name
+
+    def test_gate_implies_predictor_never_violated(self):
+        """(b) The env raises if direction_gate_enabled and NOT
+        use_direction_predictor — fresh blood must never produce that."""
+        for g in self._draws(n=600):
+            if g.direction_gate_enabled:
+                assert g.use_direction_predictor, (
+                    "gate on without predictor — coupling violated"
+                )
+
+    def test_direction_training_weights_sample_freely_without_predictor(self):
+        """(c) Direction-training coupling decision: the direction-head BCE
+        weight (``direction_prob_loss_weight``) and the direction-targeted
+        BC weight (``bc_direction_target_weight``) are DATA-derived (labels
+        come from the offline price-movement scan, NOT the direction
+        predictor), so they are sampled FREELY — they may be > 0 even when
+        ``use_direction_predictor`` is False. Assert that this actually
+        happens (no hidden coupling pins them to 0 without the predictor)."""
+        draws = self._draws(n=600)
+        # There exist agents with the predictor OFF yet a positive
+        # direction-training weight — proving no predictor-coupling.
+        assert any(
+            (not g.use_direction_predictor)
+            and g.direction_prob_loss_weight > 0.0
+            for g in draws
+        ), "direction_prob_loss_weight never >0 without predictor"
+        assert any(
+            (not g.use_direction_predictor)
+            and g.bc_direction_target_weight > 0.0
+            for g in draws
+        ), "bc_direction_target_weight never >0 without predictor"
+
+    def test_gate_threshold_samples_freely_when_enabled(self):
+        """``direction_gate_threshold`` (in enabled_set here) samples across
+        its full [0.20, 0.50] range, NOT pinned to the 0.35/0.5 coupling
+        constants — even though gate-on agents still need a real threshold."""
+        draws = self._draws(n=400)
+        vals = {round(g.direction_gate_threshold, 6) for g in draws}
+        assert len(vals) >= 50, len(vals)
+        assert not (vals <= {0.35, 0.5}), "threshold stuck at coupling consts"
+
+    def test_empty_enabled_set_is_byte_identical_to_pre_promotion(self):
+        """The contract: with NO genes enabled, fresh blood pins the 6
+        promotions to their prior hard-pin defaults and consumes no RNG for
+        them — so the full genome is reproducible and the 6 sit at default."""
+        for seed in range(40):
+            g = sample_fresh_blood_genes(random.Random(seed))
+            for name in self._NEW6:
+                assert getattr(g, name) == PHASE5_GENE_DEFAULTS[name], name
+            # Determinism (no hidden RNG drift across calls).
+            assert sample_fresh_blood_genes(random.Random(seed)).to_dict() == \
+                g.to_dict()

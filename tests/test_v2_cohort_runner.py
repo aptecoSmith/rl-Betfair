@@ -445,6 +445,85 @@ class TestPhase5EnableGeneCli:
         with pytest.raises(ValueError, match="unknown gene name"):
             runner_mod._parse_enabled_genes(["learning_rate"])
 
+    # ── --enable-all-genes (2026-06-06) ─────────────────────────────────
+    def _enabled_set_from_argv(self, argv: list[str]) -> frozenset[str]:
+        """Replicate main()'s enabled_set build for the parsed args, so the
+        flag's effect is tested without spinning a whole cohort."""
+        from training_v2.cohort.genes import PHASE5_GENE_NAMES
+        args = runner_mod._parse_args(argv + ["--output-dir", "x"])
+        es = runner_mod._parse_enabled_genes(args.enable_gene)
+        if getattr(args, "enable_all_genes", False):
+            es = es | frozenset(PHASE5_GENE_NAMES)
+        return es
+
+    def test_enable_all_genes_flag_enables_full_phase5_set(self):
+        from training_v2.cohort.genes import PHASE5_GENE_NAMES
+        es = self._enabled_set_from_argv(["--enable-all-genes"])
+        assert es == frozenset(PHASE5_GENE_NAMES)
+        # Includes the 6 promoted 2026-06-06.
+        assert {
+            "direction_horizon_ticks", "direction_threshold_ticks",
+            "direction_force_close_seconds", "direction_gate_warmup_eps",
+            "bc_learning_rate", "bc_target_entropy_warmup_eps",
+        } <= es
+
+    def test_enable_all_genes_unions_with_enable_gene(self):
+        from training_v2.cohort.genes import PHASE5_GENE_NAMES
+        es = self._enabled_set_from_argv(
+            ["--enable-all-genes", "--enable-gene", "open_cost"],
+        )
+        # Union; open_cost already inside, so the size is unchanged.
+        assert es == frozenset(PHASE5_GENE_NAMES)
+
+    def test_no_enable_all_genes_is_empty_by_default(self):
+        es = self._enabled_set_from_argv([])
+        assert es == frozenset()
+
+    def test_enable_all_genes_collides_with_bc_learning_rate_flag(
+        self, tmp_path: Path,
+    ) -> None:
+        """``--enable-all-genes`` puts bc_learning_rate in enabled_set, so a
+        cohort-wide ``--bc-learning-rate`` pin is a double source of truth —
+        main() must refuse it (mirrors the --arb-spread-target-lock-pct
+        guard)."""
+        import pytest
+        with pytest.raises(ValueError, match="bc_learning_rate"):
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--enable-all-genes",
+                "--bc-learning-rate", "1e-4",
+            ])
+
+    def test_enable_all_genes_collides_with_bc_warmup_flag(
+        self, tmp_path: Path,
+    ) -> None:
+        import pytest
+        with pytest.raises(ValueError, match="bc_target_entropy_warmup_eps"):
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--enable-all-genes",
+                "--bc-target-entropy-warmup-eps", "7",
+            ])
+
+    def test_enable_all_genes_collides_with_reward_override(
+        self, tmp_path: Path,
+    ) -> None:
+        """A --reward-overrides for any now-enabled PHASE5 gene (e.g. a
+        direction-label knob) collides under --enable-all-genes."""
+        import pytest
+        with pytest.raises(ValueError, match="Cannot combine"):
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--enable-all-genes",
+                "--reward-overrides", "direction_horizon_ticks=80",
+            ])
+
     def test_main_errors_on_reward_overrides_enable_gene_collision(
         self, tmp_path: Path,
     ) -> None:
