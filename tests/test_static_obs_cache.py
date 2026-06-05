@@ -146,7 +146,7 @@ def test_validate_passes_for_matching_env():
 
 
 @pytest.mark.parametrize("mutate", [
-    "max_runners", "active_runner_dim", "lean", "race_pred", "dir_pred",
+    "max_runners", "active_runner_dim", "lean", "race_pred",
     "day", "n_races",
 ])
 def test_validate_raises_on_contract_mismatch(mutate):
@@ -161,14 +161,28 @@ def test_validate_raises_on_contract_mismatch(mutate):
         env._predictor_lean_obs = True
     elif mutate == "race_pred":
         env._use_race_outcome_predictor = False
-    elif mutate == "dir_pred":
-        env._use_direction_predictor = False
     elif mutate == "day":
         env.day = _FakeDay(date="2026-04-16", races=env.day.races)
     elif mutate == "n_races":
         env.day = _FakeDay(date="2026-04-15", races=list(range(2)))
     with pytest.raises(StaticObsCacheMismatch):
         art.validate_against_env(env)
+
+
+def test_validate_tolerates_direction_predictor_mismatch():
+    """use_direction_predictor is NOT part of the cache reuse contract
+    (2026-06-05). The per-tick direction predictor runs LIVE in env.step — it
+    feeds the direction GATE and adds ZERO obs dims, so it never touches the
+    baked static_obs. A cohort that samples use_direction_predictor per-agent
+    must share ONE baked day cache across dir-on and dir-off workers, so
+    validate_against_env must NOT raise on a direction-predictor diff (it would
+    otherwise crash the multiprocess pool with a false mismatch). The
+    race-outcome predictor IS baked and stays a validated contract field.
+    """
+    env = _make_env(n_races=3)
+    art = DayStaticObs.from_env(env)
+    env._use_direction_predictor = not bool(env._use_direction_predictor)
+    art.validate_against_env(env)  # must NOT raise
 
 
 def test_load_rejects_schema_version_mismatch(tmp_path, monkeypatch):

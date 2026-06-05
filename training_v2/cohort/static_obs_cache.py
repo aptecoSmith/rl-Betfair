@@ -257,9 +257,16 @@ class DayStaticObs:
         if (bool(self.use_race_outcome_predictor)
                 != bool(env._use_race_outcome_predictor)):
             mismatches.append("use_race_outcome_predictor")
-        if (bool(self.use_direction_predictor)
-                != bool(env._use_direction_predictor)):
-            mismatches.append("use_direction_predictor")
+        # use_direction_predictor is INTENTIONALLY NOT part of the cache reuse
+        # contract (2026-06-05). The per-tick direction predictor runs LIVE in
+        # env.step — it feeds the direction GATE and adds ZERO obs dims
+        # (obs_dim is invariant across dir on/off; smoke-verified), so it never
+        # touches the baked static_obs. The race-outcome predictor (above) IS
+        # baked, so it stays in the contract. Excluding direction lets a cohort
+        # that samples use_direction_predictor PER-AGENT share ONE baked day
+        # cache across dir-on and dir-off workers instead of crashing the
+        # multiprocess pool with a false StaticObsCacheMismatch. The metadata
+        # field is still recorded (diagnostic) but not validated.
         if len(self.race_tick_counts) != len(env.day.races):
             mismatches.append(
                 f"n_races {len(self.race_tick_counts)}!={len(env.day.races)}"
