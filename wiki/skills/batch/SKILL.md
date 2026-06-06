@@ -23,8 +23,11 @@ touched.
    (reference-not-copy) and queues it. Re-running is safe; finished sources are never re-queued.
 2. **Take the next source:** `python scripts/batch.py next` - prints one source and marks it
    in-progress. Add `--name <n>` to run several migrations side by side.
-3. **Ingest it properly:** run the `ingest` skill on that source; for large/dense docs use `extract`
-   (segment -> per-segment enumeration -> clear the >=1-note/page floor). Cross-link into a hub.
+3. **Ingest it properly:** follow the `ingest` skill (read its SKILL.md) on that source; for large/dense
+   docs use `extract` (segment -> per-segment enumeration). **The source is the file path `next`
+   printed — `Read` that file directly; `query`/`sources` return metadata, not content.** Ground each
+   claim with `python scripts/wiki_tool.py claim-add --note <note> --source <sid> --quote "<verbatim
+   span>" --text "<claim>" --asserted-by model:<name>`. Cross-link into a hub.
 4. **Finalize:** `python scripts/wiki_tool.py finalize-ingest`. This is the gate.
 5. **Confirm + repeat:** `python scripts/batch.py done <src-id>` (it refuses if no note cites the
    source yet), then back to step 2. `python scripts/batch.py status` shows % accounted and the next
