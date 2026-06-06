@@ -6,7 +6,7 @@ It is self-contained: the knowledge versions with the code, no cross-repo depend
 
 | | |
 |---|---|
-| **Source repo** | `C:\Users\jsmit\source\repos\llm-wiki-v3` |
+| **Source repo** | `../llm-wiki-v3` (operator's repo, sibling checkout) |
 | **Source commit** | `08145d5ead5646cf3da255914b61cba125a916b6` |
 | **Copied on** | 2026-06-06 |
 | **Design / decision** | `plans/memory-improvements/{purpose,current_state,design}.md`, `_kickoff.md` |
