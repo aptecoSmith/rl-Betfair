@@ -864,6 +864,9 @@ def run_cohort(
     reward_overrides: dict | None = None,
     enabled_set: frozenset[str] = frozenset(),
     seed_bands: "dict[str, tuple] | None" = None,
+    era_id: str | None = None,
+    era_type: str | None = None,
+    hypothesis_id: str | None = None,
     batched: bool = False,
     parallel_agents: int = 0,
     maturation_bonus_weight: float = 0.0,
@@ -952,6 +955,25 @@ def run_cohort(
         raise ValueError(
             f"days must be >= 2 (training + eval), got {days}",
         )
+
+    # Tick-Tock row tags (piece B). Build a dict of ONLY the tags actually
+    # set, so an untagged (full-width / legacy) launch writes byte-identical
+    # rows (no era_* keys) and a tagged era stamps every scoreboard /
+    # model_register / hall-of-fame row. Tolerant readers .get() → None.
+    era_tags: dict = {
+        k: v for k, v in (
+            ("era_id", era_id),
+            ("era_type", era_type),
+            ("hypothesis_id", hypothesis_id),
+        ) if v is not None
+    }
+    if era_tags:
+        logger.info("Tick-Tock era tags: %s", era_tags)
+        if era_type == "tock" and hypothesis_id is None:
+            logger.warning(
+                "era_type=tock without --hypothesis-id: a tock should name "
+                "the hypothesis it tests (the held-out compare selects by it)",
+            )
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1753,6 +1775,7 @@ def run_cohort(
                         maturation_bonus_weight=maturation_bonus_weight,
                         argmax_eval=argmax_eval,
                         composite_score_mode=composite_score_mode,
+                        era_tags=era_tags,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
@@ -1774,6 +1797,7 @@ def run_cohort(
                         maturation_bonus_weight=maturation_bonus_weight,
                         argmax_eval=argmax_eval,
                         composite_score_mode=composite_score_mode,
+                        era_tags=era_tags,
                     )
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
@@ -1795,6 +1819,7 @@ def run_cohort(
                         res.eval, maturation_bonus_weight,
                         composite_score_mode,
                     ),
+                    era_tags=era_tags,
                 )
             # pre-2026-05-04). When > 0 the GA also rewards matured + agent-
             # closed pairs at the operator-specified £-scale. Ties are
@@ -2016,6 +2041,7 @@ def run_cohort(
                             output_dir / "pbt_hall_of_fame.jsonl",
                             generation=generation, frozen=_frozen,
                             score_fn=_pbt_score, frozen_at=_frozen_at,
+                            era_tags=era_tags,
                         )
                         logger.info(
                             "PBT: %d R3 champion(s) FROZEN to the "
@@ -2086,6 +2112,7 @@ def run_cohort(
                 output_dir / "pbt_hall_of_fame.jsonl",
                 generation=generation, frozen=_final_frozen,
                 score_fn=_final_pbt_score, frozen_at=_final_at,
+                era_tags=era_tags,
             )
             logger.info(
                 "PBT: %d R3 champion(s) FROZEN at END-OF-RUN (final gen %d) "
@@ -2238,12 +2265,17 @@ def _pbt_naked_std(res) -> float:
 
 
 def _pbt_model_row(spec, res, *, generation: int, score: float,
-                   trained_at: str | None = None) -> dict:
+                   trained_at: str | None = None,
+                   era_tags: dict | None = None) -> dict:
     """Full per-model record: lineage + architecture + FULL genes + every
     eval metric we rank on. The shared schema for the per-gen register
     (``pbt_lineage.jsonl``) and the R3 hall-of-fame
     (``pbt_hall_of_fame.jsonl``) — one source of truth so the leaderboard +
-    register never drift."""
+    register never drift.
+
+    ``era_tags`` (Tick-Tock piece B) merges era_id/era_type/hypothesis_id (only
+    those set) so model_register.csv + the hall-of-fame carry the tag; absent
+    on an untagged era (byte-identical row)."""
     ev = res.eval
     g = spec.genes
     return {
@@ -2294,6 +2326,8 @@ def _pbt_model_row(spec, res, *, generation: int, score: float,
         # (operator 2026-06-04).
         "trained_at": trained_at,
         "genes": g.to_dict(),
+        # Tick-Tock era tags (piece B) — only present on a tagged era.
+        **(era_tags or {}),
     }
 
 
@@ -2303,17 +2337,19 @@ def _write_pbt_lineage(
     generation: int,
     pairs: list,
     score_fn,
+    era_tags: dict | None = None,
 ) -> None:
     """Append one rich JSONL row per agent this generation — the per-model
     parameter register + Step 4's heritability/diversity source. Carries the
-    lineage/tier/role the scoreboard lacks PLUS the full genes + metrics."""
+    lineage/tier/role the scoreboard lacks PLUS the full genes + metrics.
+    ``era_tags`` (piece B) stamps each row so model_register.csv is era-aware."""
     from datetime import datetime, timezone
     trained_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with open(path, "a", encoding="utf-8") as f:
         for spec, res in pairs:
             row = _pbt_model_row(
                 spec, res, generation=generation, score=float(score_fn(res)),
-                trained_at=trained_at)
+                trained_at=trained_at, era_tags=era_tags)
             f.write(json.dumps(row) + "\n")
 
 
@@ -2356,14 +2392,17 @@ def _write_pbt_hall_of_fame(
     frozen: list,
     score_fn,
     frozen_at: str,
+    era_tags: dict | None = None,
 ) -> None:
     """Append the R3 champions that froze this generation, stamped with the
-    ``frozen_at`` datetime they SCORED in R3 — the leaderboard.txt source."""
+    ``frozen_at`` datetime they SCORED in R3 — the leaderboard.txt source.
+    ``era_tags`` (piece B) stamps each champion so the held-out compare can
+    select tick-vs-tock champions by era_id / hypothesis_id."""
     with open(path, "a", encoding="utf-8") as f:
         for spec, res in frozen:
             row = _pbt_model_row(
                 spec, res, generation=generation, score=float(score_fn(res)),
-                trained_at=frozen_at)
+                trained_at=frozen_at, era_tags=era_tags)
             row["frozen_at"] = frozen_at
             f.write(json.dumps(row) + "\n")
 
@@ -2516,12 +2555,18 @@ def _agent_result_to_scoreboard_row(
     maturation_bonus_weight: float = 0.0,
     argmax_eval: bool = False,
     composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
+    era_tags: dict | None = None,
 ) -> dict:
     """Flatten an :class:`AgentResult` into a v1-shape scoreboard row.
 
     The shape mirrors v1's ``scoreboard.jsonl`` rows: flat primitives,
     one row per agent, gene dict embedded under ``hyperparameters``.
     The UI reads both v1 and v2 rows during the comparison window.
+
+    ``era_tags`` (Tick-Tock piece B) is a ``{era_id/era_type/hypothesis_id}``
+    dict of ONLY the tags actually set — merged in at the end so an untagged
+    launch writes a byte-identical row (no era_* keys) and tolerant readers
+    ``.get()`` → None for legacy/untagged rows.
     """
     return {
         "schema": "v2_cohort_scoreboard",
@@ -2624,6 +2669,8 @@ def _agent_result_to_scoreboard_row(
         "composite_score_mode": str(composite_score_mode),
         "maturation_bonus_weight": float(maturation_bonus_weight),
         "eval_mode": "argmax" if argmax_eval else "stochastic",
+        # Tick-Tock era tags (piece B) — only present on a tagged era.
+        **(era_tags or {}),
     }
 
 
@@ -2913,6 +2960,32 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "cannot also --reward-overrides the same gene. Requires "
             "--breeding pbt. No --seed-gene = a full-width 'Tick' "
             "(byte-identical to before)."
+        ),
+    )
+    p.add_argument(
+        "--era-id", default=None, metavar="ID",
+        help=(
+            "Tick-Tock era tag (piece B). Stamps every scoreboard / "
+            "model_register / hall-of-fame row of this era with this id so "
+            "the shared leaderboard stays sortable by era. Default None = "
+            "untagged (legacy rows read as untagged too)."
+        ),
+    )
+    p.add_argument(
+        "--era-type", choices=["tick", "tock"], default=None,
+        help=(
+            "Tick-Tock era type tag (piece B): 'tick' (full-width explore) "
+            "or 'tock' (band-seeded exploit). The phenotype tool's "
+            "--tick-only filters discovery correlations to tick rows. "
+            "Default None = untagged."
+        ),
+    )
+    p.add_argument(
+        "--hypothesis-id", default=None, metavar="ID",
+        help=(
+            "Tick-Tock hypothesis tag (piece B): which hypothesis a 'tock' "
+            "era tests (e.g. hypothesis_001). Stamped on every row so the "
+            "held-out compare can select this tock's champions. Default None."
         ),
     )
     p.add_argument(
@@ -3769,6 +3842,9 @@ def main(argv: list[str] | None = None) -> int:
             reward_overrides=reward_overrides or None,
             enabled_set=enabled_set,
             seed_bands=seed_bands or None,
+            era_id=args.era_id,
+            era_type=args.era_type,
+            hypothesis_id=args.hypothesis_id,
             batched=bool(args.batched),
             parallel_agents=parallel_agents,
             maturation_bonus_weight=float(args.maturation_bonus_weight),

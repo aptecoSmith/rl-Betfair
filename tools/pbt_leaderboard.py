@@ -193,6 +193,10 @@ def build_leaderboard_text(
 _REGISTER_LEAD = [
     "generation", "model_id", "agent_id", "lineage_id", "tier", "role",
     "rotations_seen", "frozen", "frozen_at", "trained_at",
+    # Tick-Tock era tags (piece B). Present only on tagged-era rows;
+    # build_register_rows hoists them iff the lineage row carries them, so
+    # legacy/untagged registers simply omit these columns (tolerant reader).
+    "era_id", "era_type", "hypothesis_id",
     "arch_name", "architecture",
     "hidden_size", "transformer_depth", "transformer_heads",
     "transformer_ctx_ticks",
