@@ -21,6 +21,7 @@ RESOLVED section).
 | **Brain** | **Multi-candidate + self-critique.** Claude drafts several candidate recipes, critiques them against prior falsified hypotheses, the compositional-rate trap, and gene-dependency consistency, then picks one and records the rejected ones + why. |
 | **Schedule** | Strict alternation tick → tock. |
 | **Build order** | Phase 1 = A–D + one manual cycle (operator reviews analysis+hypothesis before the first tock). Phase 2 = E–F (autonomy). |
+| **Repo layout** | Design docs stay in `plans/tick-tock/`. The **built system** (orchestrator scripts, the `work/` handshake folder, the start/stop bats, the Claude brain) lives at **top-level `tick-tock/`** — a standing operating loop like `wiki/`, NOT buried in `plans/`. Convention: `plans/` = time-bounded design; top-level dirs = standing systems. |
 
 ---
 
@@ -46,17 +47,29 @@ Claude worker  (scheduled routine, wakes ~20–30 min, idempotent, autonomous):
 - **Watchdog:** if `TOCK_READY` doesn't appear within a timeout, the engine runs another *tick* instead of wedging — a stalled/absent worker degrades to "keep exploring," never to a hang.
 - **Durable state:** everything lives on disk → any fresh Claude reconstructs the loop position from `loop_state.json` + the work folder. This is what makes "start from a bat and walk away" safe.
 
-### Work-folder layout (`plans/tick-tock/work/`)
+### The built system lives at top-level `tick-tock/` (NOT `plans/`)
+
+`plans/tick-tock/` holds the *design* (this folder). The *running system* is a
+standing operating loop — like `wiki/` — so it lives at the **repo top level**:
+
 ```
-loop_state.json            # cycle #, last era_id, era_type, pending marker
-markers/                   # NEEDS_ANALYSIS | TOCK_READY | NEEDS_SUMMARY | STOP (touch-files)
-analysis/                  # phenotype_analysis_*.md + corr csv per cycle
-hypotheses/hypothesis_NNN.md          # chosen recipe: target, seeded genes+bands, rationale, prediction
-hypotheses/hypothesis_NNN_summary.md  # did it hold out? locked/σ_naked deltas, verdict
-hypotheses/candidates_NNN.md          # the N drafts + critique + why this one won (transparency)
-seeds/seed_args_NNN.txt    # the exact --seed-gene args the tock consumes
-peek_ledger.jsonl          # one row per held-out evaluation (erosion audit trail)
+tick-tock/
+  run_tick_tock.ps1                       # the python era-loop wrapper (piece E)
+  start_tick_tock.bat / stop_tick_tock.bat
+  worker/                                  # the Claude science-worker skill/prompt (piece F)
+  work/                                    # the file-handshake state (durable, on disk):
+    loop_state.json                        #   cycle #, last era_id, era_type, pending marker
+    markers/                               #   NEEDS_ANALYSIS | TOCK_READY | NEEDS_SUMMARY | STOP
+    analysis/                              #   phenotype_analysis_*.md + corr csv per cycle
+    hypotheses/hypothesis_NNN.md           #   chosen recipe: target, genes+bands, rationale, prediction
+    hypotheses/hypothesis_NNN_summary.md   #   did it hold out? locked/σ_naked deltas, verdict
+    hypotheses/candidates_NNN.md           #   the N drafts + critique + why this one won
+    seeds/seed_args_NNN.txt                #   the exact --seed-gene args the tock consumes
+    peek_ledger.jsonl                      #   one row per held-out eval (erosion audit trail)
 ```
+
+(The `markers/`, `seeds/`, `hypotheses/` paths in the loop diagram above are
+relative to `tick-tock/work/`.)
 
 Campaign registry: a **new** dir (e.g. `registry/tick_tock_v1`) so tagging is clean from row 1. The existing `registry/pbt_genes_v2` register is a full-width tick — pool it in as bonus tick data for the first analysis.
 
@@ -80,10 +93,16 @@ Campaign registry: a **new** dir (e.g. `registry/tick_tock_v1`) so tagging is cl
 - New thin wrapper over `tools/reevaluate_cohort.py`: given the shared cohort dir + two era selectors (tick vs tock champions, by `era_id`/`hypothesis_id`), reeval both on sealed-7 with identical flags at **fc=0 and fc=120**, report **locked_pnl + σ_naked_leg + paired delta** side-by-side, and append a `peek_ledger.jsonl` row (which sealed days, which eras, when). Output is what the hypothesis summary reads.
 
 ### E. File-handshake era-loop
-- Modified `run_*_campaign.ps1`: alternate tick/tock; tag eras (pass `--era-type`/`--hypothesis-id`); before a tock, **block on `TOCK_READY`** and load `seeds/seed_args_NNN.txt`; drop `NEEDS_ANALYSIS` / `NEEDS_SUMMARY` between eras; watchdog timeout → run a tick. Maintain `loop_state.json`. `start_tick_tock.bat` / `stop_tick_tock.bat` (stop = today's killer + a `STOP` touch-file the worker checks).
+- **Lives in top-level `tick-tock/`.** A `run_tick_tock.ps1` (adapted from the
+  proven `run_genes_campaign.ps1`): alternate tick/tock; tag eras (pass
+  `--era-type`/`--hypothesis-id`); before a tock, **block on `TOCK_READY`** and
+  load `tick-tock/work/seeds/seed_args_NNN.txt`; drop `NEEDS_ANALYSIS` /
+  `NEEDS_SUMMARY` between eras; watchdog timeout → run a tick. Maintain
+  `tick-tock/work/loop_state.json`. `tick-tock/start_tick_tock.bat` /
+  `stop_tick_tock.bat` (stop = today's killer + a `STOP` touch-file the worker checks).
 
 ### F. Hypothesis brain + scheduled worker
-- The Claude routine (scheduled wake) + its prompt/skill. **Multi-candidate + self-critique** spec:
+- The Claude routine (scheduled wake) + its prompt/skill, in `tick-tock/worker/`. **Multi-candidate + self-critique** spec:
   1. Run phenotype (tick-only), read all `hypothesis_*` + `*_summary` mds.
   2. Draft **N candidate recipes**, each: target behaviour as a **locked-P&L / naked-variance OUTCOME** (rates are diagnostics only), genes + **bands** (not points), rationale citing correlations.
   3. **Self-critique** each against: prior **falsified** hypotheses (don't re-propose), the **compositional-rate trap**, **marginal≠joint**, and **gene-dependency consistency** (is every seeded gene active given the others? — the bc_learning_rate/bc_pretrain_steps catch below).
