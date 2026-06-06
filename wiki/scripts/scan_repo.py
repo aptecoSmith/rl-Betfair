@@ -6,11 +6,15 @@ the `batch` skill to compile ONE source at a time (anti-shortcut: a note per
 concept / finding / decision, not per file). This is rl-betfair's own front door for
 the operator's "point it at the whole folder and ingest" requirement.
 
-Scope v1: markdown knowledge only (NOT .py code - that's a later option). What it sweeps:
-  - plans/**/*.md, docs/**/*.md  (recursive)
-  - root knowledge docs: CLAUDE.md, genes_census.md
-  (plans/EXPERIMENTS.md and plans/EXPLORATIONS.md live under plans/, so the sweep
-   already covers them.)
+Scope v1: markdown KNOWLEDGE only (NOT .py code; NOT process scaffolding). What it sweeps:
+  - plans/**/{purpose,lessons_learnt,findings,design,design_decisions}.md — the
+    knowledge-bearing files. master_todo / progress / session_prompt(s) /
+    hard_constraints are per-plan process scaffolding (task lists, changelogs,
+    build prompts) and are deliberately NOT queued — they'd cost compile tokens for
+    little knowledge. Widen PLANS_KNOWLEDGE_NAMES if that judgement changes.
+  - docs/**/*.md — curated reference, all of it.
+  - cross-cutting logs + root knowledge docs: plans/EXPERIMENTS.md,
+    plans/EXPLORATIONS.md, CLAUDE.md, genes_census.md.
 The wiki's own notes/machinery (wiki/**) are never ingested as sources.
 
 Registration uses the engine's `intake.register_folder` / `wiki_tool.register_source`
@@ -40,23 +44,34 @@ import batch             # noqa: E402
 
 REPO = wt.ROOT.parent            # wiki/ is vendored inside the rl-betfair repo
 MD_EXTS = {".md", ".markdown"}
-SCAN_DIRS = ["plans", "docs"]                  # swept recursively for markdown
-ROOT_DOCS = ["CLAUDE.md", "genes_census.md"]   # individual root knowledge docs
+# plans/ is swept for KNOWLEDGE-BEARING files only; the rest is process scaffolding.
+PLANS_KNOWLEDGE_NAMES = {"purpose.md", "lessons_learnt.md", "findings.md",
+                         "design.md", "design_decisions.md"}
+SWEEP_ALL_DIRS = ["docs"]            # curated reference — every *.md
+SWEEP_KNOWLEDGE_DIRS = ["plans"]     # only PLANS_KNOWLEDGE_NAMES basenames
+# cross-cutting logs (under plans/) + root knowledge docs, referenced individually
+NAMED_DOCS = ["plans/EXPERIMENTS.md", "plans/EXPLORATIONS.md", "CLAUDE.md", "genes_census.md"]
 # never descend into these (the wiki's own notes/machinery, vcs/venv/caches)
 SKIP_DIRS = {"wiki", ".git", ".venv", "venv", "node_modules", "__pycache__", ".obsidian"}
 
 
 def _md_files():
-    """Yield every markdown knowledge file under the scan dirs + the named root docs."""
-    for d in SCAN_DIRS:
+    """Yield knowledge markdown: all of docs/, knowledge-named files under plans/, + named docs."""
+    for d in SWEEP_ALL_DIRS:
         base = REPO / d
-        if not base.exists():
-            continue
-        for p in sorted(base.rglob("*")):
-            if (p.is_file() and p.suffix.lower() in MD_EXTS
-                    and not any(part in SKIP_DIRS for part in p.parts)):
-                yield p
-    for f in ROOT_DOCS:
+        if base.exists():
+            for p in sorted(base.rglob("*")):
+                if (p.is_file() and p.suffix.lower() in MD_EXTS
+                        and not any(part in SKIP_DIRS for part in p.parts)):
+                    yield p
+    for d in SWEEP_KNOWLEDGE_DIRS:
+        base = REPO / d
+        if base.exists():
+            for p in sorted(base.rglob("*")):
+                if (p.is_file() and p.name in PLANS_KNOWLEDGE_NAMES
+                        and not any(part in SKIP_DIRS for part in p.parts)):
+                    yield p
+    for f in NAMED_DOCS:
         p = REPO / f
         if p.is_file():
             yield p
@@ -90,8 +105,8 @@ def main(argv=None):
 
     items = collect(dry_run=args.dry_run)
     verb = "would register" if args.dry_run else "registered"
-    print(f"{verb} {len(items)} markdown source(s) from {', '.join(SCAN_DIRS)}/ + "
-          f"{len(ROOT_DOCS)} root doc(s)")
+    print(f"{verb} {len(items)} markdown KNOWLEDGE source(s) "
+          f"(plans/ {'|'.join(sorted(n[:-3] for n in PLANS_KNOWLEDGE_NAMES))} + docs/ + named logs)")
     if args.dry_run:
         for path, _ in items[:20]:
             print(f"  {path}")
