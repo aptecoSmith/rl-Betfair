@@ -140,3 +140,5 @@ wiki/inbox/static/*
 !wiki/inbox/static/.gitkeep
 wiki/Clippings/*
 !wiki/Clippings/.gitkeep
+# Obsidian vault config — editor-only, machine-local (the wiki is queried via MCP/CLI, not Obsidian)
+wiki/.obsidian/
