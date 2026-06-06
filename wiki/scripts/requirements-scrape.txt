@@ -1,0 +1,7 @@
+# Optional power-up: browser rendering for JavaScript-heavy docs sites.
+# Only needed when scrape.py meets a SPA-style site that ships little static HTML
+# (scrape.py --fetch-mode playwright, or auto-escalation). The core scraper is stdlib-only.
+#
+#   pip install -r scripts/requirements-scrape.txt
+#   python -m playwright install chromium
+playwright>=1.40

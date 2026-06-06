@@ -1,0 +1,6 @@
+# llm-wiki-v2 core — STDLIB ONLY.
+# The base tool (scripts/wiki_tool.py, audit_public.py) needs nothing installed.
+# Optional capabilities declare their own deps in per-folder requirements.txt:
+#   extractors/requirements.txt   PDF / DOCX / PPTX / XLSX extraction
+#   automation/requirements.txt   background watcher / scheduled runners
+# Install only what you need.

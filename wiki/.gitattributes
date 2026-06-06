@@ -1,0 +1,14 @@
+# Normalize line endings across home/work machines
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.npy binary
+*.docx binary
+*.pptx binary
+*.xlsx binary
+*.zip binary

@@ -1,0 +1,4 @@
+# Optional power-up: expose the wiki read-only over MCP to other agents.
+#   pip install -r mcp_server/requirements.txt
+# The core access layer (core.py) is stdlib-only and works without this; only the server needs it.
+mcp[cli]>=1.27

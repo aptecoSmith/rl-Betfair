@@ -1,0 +1,11 @@
+# Core CLI engine — stdlib only, nothing to install.
+#
+# Optional semantic-search tier (vectorstore.py) — feature-detected, never required:
+#   pip install numpy                 # enables the vector store + hybrid rerank (HashingEmbedder)
+#   pip install numpy model2vec       # adds true static-embedding semantic recall
+# Without these, `search` runs BM25 and `--semantic` silently falls back to BM25.
+#
+# Optional browser-rendering tier (scrape.py) — for JavaScript-rendered docs sites:
+#   pip install -r scripts/requirements-scrape.txt   # installs playwright
+#   python -m playwright install chromium
+# Without it, scrape runs in stdlib http mode and flags pages that need a browser.

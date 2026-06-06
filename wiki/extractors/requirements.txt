@@ -1,0 +1,11 @@
+# Optional format-extraction dependencies. Install if you want native extraction:
+#   pip install -r extractors/requirements.txt
+# Without these, the agent falls back to its own file skills (D18).
+pypdf>=4.0.0          # PDF text + outline (structure-aware segmentation)
+python-docx>=1.1.0    # .docx
+python-pptx>=0.6.23   # .pptx
+openpyxl>=3.1.0       # .xlsx
+# Legacy .doc / .ppt / .xls (old binary formats) have no clean pure-Python reader.
+# Optional bridge (extractors/legacy.py): install LibreOffice — a SYSTEM package, not pip; it
+# provides the `soffice`/`libreoffice` binary — and extractors auto-convert these to
+# .docx/.pptx/.xlsx before extracting. Without LibreOffice, the agent's file skills handle them.
