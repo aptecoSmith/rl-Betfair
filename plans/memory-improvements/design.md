@@ -43,20 +43,34 @@ CLAUDE.md, a session pulls what it needs:
 This is the payoff: the always-loaded surface stays thin, and the depth is one
 MCP call away — addressable by topic, with provenance, with the LLM off.
 
-## Ingestion approach
+## Ingestion — two entry points
 
-- **Source = the `plans/` folders + the slimmed-out CLAUDE.md history.** Register
-  them as v3 sources (referenced, not copied — `wiki_tool.py register`), then run
-  the **`ingest`** / **`extract`** skills (anti-shortcut: one note per *concept /
-  finding / decision*, not per file; cross-link into hubs; lift key numbers into
-  the notes so they survive even if a plan is archived).
-- Likely note shape: a `concept` note per mechanism (the matcher, equal-profit
-  sizing, naked variance, the held-out protocol), a `synthesis` note per
-  cross-cohort lesson, a `project` note per campaign, `claims` carrying the
-  numbers + their source run, `dialog` entries for the decisions.
-- Start with the **densest, highest-supersession cluster** as the proof: the
-  reward-shaping history (it's the bulk of what we cut from CLAUDE.md and the best
-  supersession-timeline demo).
+**1. Repo-scan (bulk — the rl-betfair corpus).** A `scan-repo` step walks the
+rl-betfair tree (e.g. `plans/**/*.md`, `docs/**/*.md`, and root knowledge docs:
+`CLAUDE.md`, `genes_census.md`, `plans/EXPERIMENTS.md`, `plans/EXPLORATIONS.md`),
+**registers each as a v3 source** (referenced, not copied — the files stay in the
+repo), and queues them for the **`batch`** skill to ingest resumably (one source
+at a time; anti-shortcut: a note per *concept / finding / decision*, not per
+file). This is the operator's "point it at the whole folder and ingest"
+requirement — a thin **rl-betfair-specific wrapper over v3's existing `register` +
+`batch`**, added to the copied wiki (the copy is rl-betfair's own, so a
+repo-aware scanner belongs in it). Scope v1 to the knowledge *markdown*;
+ingesting code is a later option.
+
+**2. Inbox drop (external docs you find).** Keep v3's native inbox: drop an ML
+paper / doc / URL into `wiki/inbox/pending/` (or `wiki/Clippings/` for
+web-clips), and the wiki ingests it via the **`ingest`** skill, then moves it to
+`processed/`. This is v3-as-shipped — **preserved by the copy, no new work**.
+
+**Note shapes (both paths):** a `concept` note per mechanism (the matcher,
+equal-profit sizing, naked variance, the held-out protocol), a `synthesis` note
+per cross-cohort lesson, a `project` note per campaign, `claims` carrying the
+numbers + their source run, `dialog` entries for the decisions.
+
+**Proof-first sequence:** before turning the repo-scan loose on everything,
+hand-ingest the **reward-shaping supersession cluster** to validate the fit (it's
+the bulk of what we cut from CLAUDE.md and the best `supersession-timeline` demo),
+then bulk-scan the rest.
 
 ## Architecture — SETTLED (2026-06-06)
 
@@ -73,11 +87,14 @@ dependency, and it matches v3's own portable / unzip-and-go design (the core is
 stdlib-only; only the MCP layer needs the `mcp` package).
 
 The build (deferred — see Non-goals) will:
-- Copy v3 → `rl-betfair/wiki/`; **strip the other-domain content** (FEWS / ISTQB
-  notes) and the v3-*development* machinery (`benchmarking/`, `comparison/`,
-  `ci/`, `docs/build_docs/`). Keep the *system*: `scripts/wiki_tool.py`,
-  `mcp_server/`, `Schema/` (reset to empty templates), `templates/`, `skills/`,
-  and an `AGENTS.md` adapted for rl-betfair.
+- **Copy the machine, not the knowledge → an EMPTY vault.** Copy v3 →
+  `rl-betfair/wiki/`, then remove ALL content notes (`shared/`, `personal/`) and
+  reset `Schema/*.jsonl` (sources, dialog, catalog) to empty, and drop the
+  v3-*development* machinery (`benchmarking/`, `comparison/`, `ci/`,
+  `docs/build_docs/`). Keep the *system*: `scripts/wiki_tool.py`, `mcp_server/`,
+  `Schema/` templates, `templates/`, `skills/`, **`inbox/` + `Clippings/`**, and
+  an `AGENTS.md` adapted for rl-betfair. Result: a clean, working v3 with zero
+  notes, ready to ingest rl-betfair's own knowledge.
 - Single `shared/` cloud (rl-betfair is all "work"; `personal/` unused).
 - Gitignore the derived `.runtime/` + `out/`; commit the markdown + `Schema/*.jsonl`.
 - Wire `wiki/`'s MCP server into rl-betfair's `.claude/settings.json` (read-only)
@@ -86,8 +103,6 @@ The build (deferred — see Non-goals) will:
   engine improvement is ever wanted (low priority — the engine is stable).
 
 ## Remaining minor calls (decide at build time)
-- **Ingestion:** manual-first via the `ingest` skill (seed + prove the fit),
-  automate later (a routine that files new findings/hypotheses as claims).
 - **memory/ ↔ wiki boundary:** `memory/` stays the thin *always-loaded*
   user/feedback layer; technical domain depth goes to the wiki — a memory entry
   may *point* at a wiki note, not restate it.
