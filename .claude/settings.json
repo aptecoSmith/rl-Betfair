@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__rl-betfair-wiki"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "rl-betfair-wiki"
+  ]
+}

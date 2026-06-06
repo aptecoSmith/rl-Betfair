@@ -9,7 +9,7 @@ what was copied/dropped from upstream: [`VENDORED_FROM.md`](VENDORED_FROM.md).
 > **What this wiki is for.** It is the **deep, pull-on-demand layer** for rl-betfair's accreted
 > knowledge — the topic-keyed synthesis (claims + provenance, supersession chains, the decision/dialog
 > record) deliberately *kept out* of the always-loaded `CLAUDE.md` + `memory/`. A session pulls what it
-> needs (the CLI here, or the read-only MCP server wired into `.claude/settings.json`) instead of
+> needs (the CLI here, or the read-only MCP server registered in `../.mcp.json`) instead of
 > carrying it all in resident context. Design rationale: `../plans/memory-improvements/`. The **binding
 > invariants** at the bottom of this file govern the engine — do not violate them.
 

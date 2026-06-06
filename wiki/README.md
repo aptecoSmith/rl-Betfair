@@ -18,9 +18,9 @@ python scripts/wiki_tool.py project         # build the SQLite projection from t
 python scripts/wiki_tool.py query --list    # structured queries (claims, provenance, supersedes, …) — LLM off
 python scripts/wiki_tool.py view --list     # generated views (supersession-timeline, dialog-trail, …)
 
-# 2. MCP server (read-only; the same engine, exposed as tools — wired into ../.claude/settings.json):
+# 2. MCP server (read-only; the same engine, exposed as tools — registered in ../.mcp.json):
 python -m mcp_server                         # stdio
-#   needs the `mcp` package:  pip install -r requirements.txt   (the core CLI needs nothing installed)
+#   needs the `mcp` package:  pip install -r mcp_server/requirements.txt   (the core CLI needs nothing installed)
 ```
 The projection (`.runtime/projection.db`) and views (`out/`) are **derived and gitignored** — delete
 and rebuild from the files anytime. The same query returns identical results from CLI and MCP.

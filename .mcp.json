@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "rl-betfair-wiki": {
+      "type": "stdio",
+      "command": "C:\\Users\\jsmit\\source\\repos\\rl-betfair\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "mcp_server"],
+      "env": {
+        "PYTHONPATH": "C:\\Users\\jsmit\\source\\repos\\rl-betfair\\wiki"
+      }
+    }
+  }
+}
