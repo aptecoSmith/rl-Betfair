@@ -88,6 +88,7 @@ __all__ = [
     "_build_per_agent_reward_overrides",
     "_build_per_agent_scalping_overrides",
     "_build_trainer_hp",
+    "_resolve_gate_genes",
 ]
 
 
@@ -712,6 +713,97 @@ def _build_per_agent_scalping_overrides(
     return out or None
 
 
+#: The four selectivity gates promoted to per-agent PHASE5 genes
+#: (2026-06-06, spray-and-bail redesign). ``mature_prob_open_threshold`` is
+#: POLICY-side (the agent's own mature_prob_head) → no predictor required.
+#: The other four NAMES are ENV-side and the env RAISES if active without
+#: use_race_outcome_predictor + a predictor_bundle, so the worker pins them to
+#: their disabled default when the predictor is absent. The pwin gate is two
+#: names, hence "four gates" = five entries. Each disabled default matches the
+#: env / policy ctor default (byte-identical when the gene is disabled).
+_GATE_GENE_PREDICTOR_REQUIRED: frozenset[str] = frozenset({
+    "race_confidence_threshold",
+    "lay_price_max",
+    "predictor_p_win_back_threshold",
+    "predictor_p_win_lay_threshold",
+})
+_GATE_GENE_DISABLED_DEFAULT: dict[str, float] = {
+    "mature_prob_open_threshold": 0.0,
+    "race_confidence_threshold": 0.0,
+    "lay_price_max": 0.0,
+    "predictor_p_win_back_threshold": 0.0,
+    "predictor_p_win_lay_threshold": 1.0,
+}
+
+
+def _resolve_gate_genes(
+    *,
+    genes: CohortGenes,
+    enabled_set: frozenset[str],
+    predictor_active: bool,
+    cohort_mature_prob_open_threshold: float,
+    cohort_race_confidence_threshold: float,
+    cohort_lay_price_max: float,
+    cohort_predictor_p_win_back_threshold: float,
+    cohort_predictor_p_win_lay_threshold: float,
+) -> tuple[float, float, float, float, float]:
+    """Resolve the four selectivity gates (five values) for one agent.
+
+    Precedence per gate:
+
+    1. Gene name in ``enabled_set`` ⇒ the PER-AGENT GENE VALUE wins. (The
+       runner's CLI guard refuses ``--<flag>`` + ``--enable-gene <name>``, so
+       the cohort flag is guaranteed at its disabled default in this case —
+       one source of truth per knob per run.)
+    2. Otherwise ⇒ the cohort-wide FLOAT ARG (the runner's CLI flag value, or
+       its disabled default) passes through unchanged.
+
+    Predictor coupling: the four ENV-side gates
+    (``_GATE_GENE_PREDICTOR_REQUIRED``) are pinned to their disabled default
+    when ``predictor_active`` is False — the env RAISES if they are active
+    without use_race_outcome_predictor + a predictor_bundle, so a predictor-
+    less ``--enable-all-genes`` cohort that draws a non-disabled value must
+    not crash the worker. ``mature_prob_open_threshold`` is POLICY-side and
+    always honours the gene.
+
+    Returns the resolved 5-tuple in the order:
+    ``(mature_prob_open_threshold, race_confidence_threshold, lay_price_max,
+    predictor_p_win_back_threshold, predictor_p_win_lay_threshold)``.
+
+    Regression-guarded in
+    ``tests/test_v2_cohort_worker.py::TestGateGeneResolution``.
+    """
+    cohort_vals = {
+        "mature_prob_open_threshold": cohort_mature_prob_open_threshold,
+        "race_confidence_threshold": cohort_race_confidence_threshold,
+        "lay_price_max": cohort_lay_price_max,
+        "predictor_p_win_back_threshold": (
+            cohort_predictor_p_win_back_threshold
+        ),
+        "predictor_p_win_lay_threshold": (
+            cohort_predictor_p_win_lay_threshold
+        ),
+    }
+    resolved: dict[str, float] = {}
+    for name, cohort_val in cohort_vals.items():
+        if name in enabled_set:
+            value = float(getattr(genes, name, _GATE_GENE_DISABLED_DEFAULT[name]))
+            # Pin the env-side gates off without the predictor (the env
+            # raises otherwise — mirror its coupling here).
+            if name in _GATE_GENE_PREDICTOR_REQUIRED and not predictor_active:
+                value = _GATE_GENE_DISABLED_DEFAULT[name]
+        else:
+            value = float(cohort_val)
+        resolved[name] = value
+    return (
+        resolved["mature_prob_open_threshold"],
+        resolved["race_confidence_threshold"],
+        resolved["lay_price_max"],
+        resolved["predictor_p_win_back_threshold"],
+        resolved["predictor_p_win_lay_threshold"],
+    )
+
+
 def _rebind_trainer(
     trainer: DiscretePPOTrainer,
     shim: DiscreteActionShim,
@@ -1314,6 +1406,47 @@ def train_one_agent(
     # picks it up. The default ``False`` keeps Phase 7 byte-identity
     # for runs that don't pass the flag (hard_constraints.md §1, §6).
     trainer_hp["per_transition_credit"] = bool(per_transition_credit)
+
+    # ── Promoted-to-Phase-5 gate genes (2026-06-06, spray-and-bail redesign)
+    # ─────────────────────────────────────────────────────────────────────
+    # Resolve the four selectivity gates from per-agent genes (when enabled)
+    # vs the cohort-wide flag args. We REASSIGN the local arg names so all
+    # three downstream env builds + the policy ctor pick up the resolved
+    # values. See ``_resolve_gate_genes`` for the full precedence + predictor-
+    # coupling contract.
+    _predictor_active = bool(use_race_outcome_predictor) and (
+        predictor_bundle is not None
+    )
+    (
+        mature_prob_open_threshold,
+        race_confidence_threshold,
+        lay_price_max,
+        predictor_p_win_back_threshold,
+        predictor_p_win_lay_threshold,
+    ) = _resolve_gate_genes(
+        genes=genes,
+        enabled_set=enabled_set,
+        predictor_active=_predictor_active,
+        cohort_mature_prob_open_threshold=mature_prob_open_threshold,
+        cohort_race_confidence_threshold=race_confidence_threshold,
+        cohort_lay_price_max=lay_price_max,
+        cohort_predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        cohort_predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+    )
+    if enabled_set & {
+        "mature_prob_open_threshold", "race_confidence_threshold",
+        "lay_price_max", "predictor_p_win_back_threshold",
+        "predictor_p_win_lay_threshold",
+    }:
+        logger.info(
+            "Agent %s: gate genes resolved — mature_open=%.4f race_conf=%.4f "
+            "lay_max=%.2f pwin_back=%.4f pwin_lay=%.4f (predictor %s)",
+            agent_id, float(mature_prob_open_threshold),
+            float(race_confidence_threshold), float(lay_price_max),
+            float(predictor_p_win_back_threshold),
+            float(predictor_p_win_lay_threshold),
+            "ON" if _predictor_active else "OFF (env gates pinned disabled)",
+        )
 
     # ── Build first-day env + shim to size the policy ────────────────
     first_day = days_to_train[0]

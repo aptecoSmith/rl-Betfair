@@ -1715,15 +1715,28 @@ class BetfairEnv(gymnasium.Env):
         # 2.0 (above which agents collapse to bet_count=0; see
         # plans/selective-open-shaping/purpose.md §Risks). See
         # hard_constraints.md §1, §4, §6.
+        #
+        # 2026-06-06 (spray-and-bail redesign): hard bound WIDENED to 4.0.
+        # The full-gene campaign's composite score was blind to the 74 %
+        # force-close bail, so the GA had no reason to push open_cost past
+        # ~0.35 — the toll never bit. With the new force-close-rate penalty
+        # on the composite (training_v2/cohort/runner.py) deselecting
+        # spray-and-bail, open_cost needs HEADROOM to actually bite once the
+        # selection pressure is on. The "collapse above 2.0" risk in the note
+        # was observed for agents under UNRELATED penalty genes with no
+        # offsetting positive shaping; the matured-arb bonus + MTM provide
+        # that offset here. 4.0 keeps a finite ceiling (the gene range biases
+        # toward high but the env still guards a runaway override). 0.0 stays
+        # reachable (gene-disabled = byte-identical).
         self._open_cost: float = float(
             reward_cfg.get("open_cost", 0.0)
         )
-        if self._open_cost < 0.0 or self._open_cost > 2.0:
+        if self._open_cost < 0.0 or self._open_cost > 4.0:
             logger.warning(
-                "open_cost=%s out of [0.0, 2.0]; clamping",
+                "open_cost=%s out of [0.0, 4.0]; clamping",
                 self._open_cost,
             )
-            self._open_cost = float(np.clip(self._open_cost, 0.0, 2.0))
+            self._open_cost = float(np.clip(self._open_cost, 0.0, 4.0))
         # Force-close-architecture Session 01 (2026-05-01). Plan-level
         # flag: when True, ``_maybe_place_paired`` reinterprets the
         # agent's per-runner ``arb_spread`` action as a £-target and

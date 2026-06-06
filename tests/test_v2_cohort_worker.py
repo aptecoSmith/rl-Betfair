@@ -184,6 +184,97 @@ class TestPerAgentOverrideHelpers:
             assert out[name] == float(getattr(g, name))
 
 
+# ── Promoted-to-Phase-5 gate-gene resolution (spray-and-bail, 2026-06-06) ─
+
+
+class TestGateGeneResolution:
+    """``_resolve_gate_genes`` resolves the four selectivity gates (five
+    values) from per-agent genes (when enabled) vs cohort-wide flag args,
+    with the env-side gates pinned disabled when the predictor is absent."""
+
+    def _genes(self, **overrides):
+        from training_v2.cohort.genes import CohortGenes
+        base = dict(
+            learning_rate=1e-4, entropy_coeff=1e-3, clip_range=0.2,
+            gae_lambda=0.95, value_coeff=0.5, mini_batch_size=64,
+            hidden_size=128,
+        )
+        base.update(overrides)
+        return CohortGenes(**base)
+
+    _ALL_GATES = frozenset({
+        "mature_prob_open_threshold", "race_confidence_threshold",
+        "lay_price_max", "predictor_p_win_back_threshold",
+        "predictor_p_win_lay_threshold",
+    })
+
+    def _resolve(self, *, genes, enabled_set, predictor_active,
+                 cohort=(0.0, 0.0, 0.0, 0.0, 1.0)):
+        from training_v2.cohort.worker import _resolve_gate_genes
+        return _resolve_gate_genes(
+            genes=genes, enabled_set=enabled_set,
+            predictor_active=predictor_active,
+            cohort_mature_prob_open_threshold=cohort[0],
+            cohort_race_confidence_threshold=cohort[1],
+            cohort_lay_price_max=cohort[2],
+            cohort_predictor_p_win_back_threshold=cohort[3],
+            cohort_predictor_p_win_lay_threshold=cohort[4],
+        )
+
+    def test_disabled_genes_pass_cohort_flag_through(self):
+        """No gene enabled ⇒ the cohort-wide flag args pass through verbatim
+        (the legacy cohort-flag path is unchanged)."""
+        g = self._genes(
+            mature_prob_open_threshold=0.3, race_confidence_threshold=0.25,
+            lay_price_max=20.0, predictor_p_win_back_threshold=0.3,
+            predictor_p_win_lay_threshold=0.2,
+        )
+        out = self._resolve(
+            genes=g, enabled_set=frozenset(), predictor_active=True,
+            cohort=(0.15, 0.4, 30.0, 0.25, 0.3),
+        )
+        assert out == (0.15, 0.4, 30.0, 0.25, 0.3)
+
+    def test_enabled_genes_win_with_predictor(self):
+        """Genes in enabled_set + predictor ON ⇒ per-agent gene values win
+        over the (disabled-default) cohort flags."""
+        g = self._genes(
+            mature_prob_open_threshold=0.3, race_confidence_threshold=0.25,
+            lay_price_max=20.0, predictor_p_win_back_threshold=0.3,
+            predictor_p_win_lay_threshold=0.2,
+        )
+        out = self._resolve(
+            genes=g, enabled_set=self._ALL_GATES, predictor_active=True,
+        )
+        assert out == (0.3, 0.25, 20.0, 0.3, 0.2)
+
+    def test_predictor_off_pins_env_gates_but_keeps_policy_gate(self):
+        """Predictor OFF ⇒ the four ENV-side gates pin to their disabled
+        default (the env would raise otherwise); the POLICY-side
+        mature_prob_open_threshold still honours its gene."""
+        g = self._genes(
+            mature_prob_open_threshold=0.3, race_confidence_threshold=0.25,
+            lay_price_max=20.0, predictor_p_win_back_threshold=0.3,
+            predictor_p_win_lay_threshold=0.2,
+        )
+        out = self._resolve(
+            genes=g, enabled_set=self._ALL_GATES, predictor_active=False,
+        )
+        # mature kept; race_conf/lay/pwin pinned to disabled (0/0/0/1).
+        assert out == (0.3, 0.0, 0.0, 0.0, 1.0)
+
+    def test_per_gate_independence(self):
+        """Only the enabled gate is taken from the gene; the rest stay on
+        their cohort flag."""
+        g = self._genes(mature_prob_open_threshold=0.4)
+        out = self._resolve(
+            genes=g, enabled_set=frozenset({"mature_prob_open_threshold"}),
+            predictor_active=True, cohort=(0.0, 0.1, 15.0, 0.2, 0.3),
+        )
+        # mature from gene (0.4); others from cohort flags.
+        assert out == (0.4, 0.1, 15.0, 0.2, 0.3)
+
+
 # ── End-to-end worker (real env + scorer) ───────────────────────────────
 
 

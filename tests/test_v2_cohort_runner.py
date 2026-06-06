@@ -241,6 +241,11 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             # 2026-06-05. Direction mechanism + safety-exit genes.
             "use_direction_predictor", "force_close_before_off_seconds",
             "close_walk_ticks",
+            # 2026-06-06 (spray-and-bail redesign). Promoted-to-Phase-5 gate
+            # genes — at disabled defaults unless --enable-gene/-all-genes.
+            "mature_prob_open_threshold", "race_confidence_threshold",
+            "lay_price_max", "predictor_p_win_back_threshold",
+            "predictor_p_win_lay_threshold",
         }
         assert row["eval_day"] == "2026-04-23"
         assert len(row["training_days"]) == 2
@@ -559,6 +564,56 @@ class TestPhase5EnableGeneCli:
                 "--reward-overrides", "direction_horizon_ticks=80",
             ])
 
+    # ── Promoted-to-Phase-5 gate-gene override guards (2026-06-06) ──────
+    def test_gate_flag_collides_with_enable_gene(
+        self, tmp_path: Path,
+    ) -> None:
+        """A non-disabled gate flag (e.g. --lay-price-max 20) combined with
+        --enable-gene lay_price_max is a double source of truth — main()
+        refuses it (mirrors the --arb-spread-target-lock-pct guard)."""
+        import pytest
+        with pytest.raises(ValueError, match="lay_price_max"):
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--lay-price-max", "20",
+                "--enable-gene", "lay_price_max",
+            ])
+
+    def test_gate_flag_collides_with_enable_all_genes(
+        self, tmp_path: Path,
+    ) -> None:
+        """--enable-all-genes puts every gate gene in enabled_set, so a
+        non-disabled gate flag collides."""
+        import pytest
+        with pytest.raises(ValueError, match="predictor_p_win_back_threshold"):
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--enable-all-genes",
+                "--predictor-p-win-back-threshold", "0.3",
+            ])
+
+    def test_default_gate_flags_do_not_collide_with_enable_all(
+        self, tmp_path: Path,
+    ) -> None:
+        """Gate flags left at their DISABLED defaults do NOT collide with
+        --enable-all-genes (the operator wants the genes to evolve them).
+        Proven by reaching data-loading (no 'one source of truth' raise)."""
+        import pytest
+        # Reaches the day-file load (no parquet present) rather than the
+        # gate-collision guard — confirms the default flags pass the guard.
+        with pytest.raises((RuntimeError, ValueError)) as exc:
+            runner_mod.main([
+                "--n-agents", "2", "--generations", "1", "--days", "2",
+                "--data-dir", str(tmp_path),
+                "--output-dir", str(tmp_path / "out"),
+                "--enable-all-genes",
+            ])
+        assert "one source of truth" not in str(exc.value)
+
     def test_main_errors_on_reward_overrides_enable_gene_collision(
         self, tmp_path: Path,
     ) -> None:
@@ -771,6 +826,92 @@ def test_composite_score_excludes_force_closed_pairs() -> None:
     )
     # Only 10 completed should count; weight 5 ⇒ +50.
     assert runner_mod._composite_score(e, 5.0) == -450.0
+
+
+# ── composite force-close-rate penalty (spray-and-bail redesign, 2026-06-06) ─
+
+
+def _make_eval_summary_fc(
+    *, total_reward: float, pairs_opened: int, arbs_force_closed: int,
+    locked_pnl: float = 0.0, naked_pnl: float = 0.0, day_pnl: float = 0.0,
+) -> EvalSummary:
+    """EvalSummary builder exercising the force-close-rate penalty inputs."""
+    return EvalSummary(
+        eval_day="2026-06-06", total_reward=float(total_reward),
+        day_pnl=float(day_pnl), n_steps=1, bet_count=0, winning_bets=0,
+        bet_precision=0.0, pnl_per_bet=0.0, early_picks=0, profitable=False,
+        action_histogram={}, arbs_completed=0, arbs_closed=0,
+        arbs_force_closed=int(arbs_force_closed),
+        pairs_opened=int(pairs_opened),
+        locked_pnl=float(locked_pnl), naked_pnl=float(naked_pnl),
+    )
+
+
+def test_fc_penalty_default_weight_is_byte_identical() -> None:
+    """Weight 0.0 (the default) ⇒ no penalty ⇒ composite unchanged."""
+    e = _make_eval_summary_fc(
+        total_reward=-100.0, pairs_opened=200, arbs_force_closed=150,
+    )
+    # Default module weight is 0.0; explicit 0.0 too.
+    assert runner_mod._composite_score(e, 0.0) == -100.0
+    assert runner_mod._force_close_rate_penalty(e, 0.0) == 0.0
+
+
+def test_fc_penalty_subtracts_weight_times_rate() -> None:
+    """Penalty == weight × (force_closed / pairs_opened); subtracted from comp."""
+    e = _make_eval_summary_fc(
+        total_reward=-100.0, pairs_opened=200, arbs_force_closed=150,
+    )
+    # rate = 150/200 = 0.75; weight 100 ⇒ penalty 75.
+    assert runner_mod._force_close_rate_penalty(e, 100.0) == pytest.approx(75.0)
+    # total_reward mode: -100 - 75 = -175.
+    assert runner_mod._composite_score(
+        e, 0.0, force_close_rate_penalty_weight=100.0,
+    ) == pytest.approx(-175.0)
+
+
+def test_fc_penalty_applies_under_locked_weighted_mode() -> None:
+    """The penalty rides on top of ANY mode (here locked_weighted)."""
+    e = _make_eval_summary_fc(
+        total_reward=0.0, pairs_opened=100, arbs_force_closed=80,
+        locked_pnl=40.0, naked_pnl=8.0,
+    )
+    # locked_weighted base = locked + 0.25*naked = 40 + 2 = 42.
+    base = runner_mod._composite_score(
+        e, 0.0, runner_mod.COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
+        force_close_rate_penalty_weight=0.0,
+    )
+    assert base == pytest.approx(42.0)
+    # rate 0.8, weight 10 ⇒ -8; 42 - 8 = 34.
+    penalised = runner_mod._composite_score(
+        e, 0.0, runner_mod.COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
+        force_close_rate_penalty_weight=10.0,
+    )
+    assert penalised == pytest.approx(34.0)
+
+
+def test_fc_penalty_zero_opens_guard() -> None:
+    """A zero-open eval doesn't divide by zero (max(1, opened) floor)."""
+    e = _make_eval_summary_fc(
+        total_reward=-5.0, pairs_opened=0, arbs_force_closed=0,
+    )
+    assert runner_mod._force_close_rate_penalty(e, 100.0) == 0.0
+
+
+def test_fc_penalty_reads_module_level_weight() -> None:
+    """``_composite_score`` reads the module-level weight (set by the CLI)
+    when no explicit weight is passed — the mechanism every sort/scoreboard
+    call site relies on."""
+    e = _make_eval_summary_fc(
+        total_reward=-100.0, pairs_opened=100, arbs_force_closed=50,
+    )
+    saved = runner_mod._FORCE_CLOSE_RATE_PENALTY_WEIGHT
+    try:
+        runner_mod._FORCE_CLOSE_RATE_PENALTY_WEIGHT = 20.0
+        # rate 0.5 × 20 = 10; -100 - 10 = -110.
+        assert runner_mod._composite_score(e, 0.0) == pytest.approx(-110.0)
+    finally:
+        runner_mod._FORCE_CLOSE_RATE_PENALTY_WEIGHT = saved
 
 
 def test_run_cohort_sort_uses_composite_score(tmp_path: Path) -> None:

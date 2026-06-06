@@ -173,6 +173,20 @@ SORTINO_DEFAULT_LAMBDA = 1.0
 # through every _composite_score call site. Set by the CLI handler
 # (search for ``_SORTINO_LAMBDA = ``) before run_cohort() is invoked.
 _SORTINO_LAMBDA: float = SORTINO_DEFAULT_LAMBDA
+# spray-and-bail redesign (2026-06-06). Composite force-close-rate penalty.
+# Subtracts ``weight × (arbs_force_closed / max(1, pairs_opened))`` from EVERY
+# composite-score mode so spray-and-bail (open ~249/race, bail 74 %) is
+# DESELECTED at the GA step — the existing modes were all blind to the bail
+# rate (force-closed pairs are excluded from the maturation bonus and net
+# ~zero raw P&L via the env's relaxed-matcher flatten, so a high-volume
+# sprayer scored as well as a selective scalper). Default 0.0 = byte-identical
+# (no penalty). Module-level mutable set by the CLI handler from
+# ``--force-close-rate-penalty-weight`` (mirrors ``_SORTINO_LAMBDA``) so every
+# _composite_score call site picks it up without a signature change; tests +
+# direct callers can still pass the weight explicitly. The penalty rides ON
+# TOP of whichever mode is active (additive, mode-agnostic).
+FORCE_CLOSE_RATE_PENALTY_DEFAULT_WEIGHT: float = 0.0
+_FORCE_CLOSE_RATE_PENALTY_WEIGHT: float = FORCE_CLOSE_RATE_PENALTY_DEFAULT_WEIGHT
 # scalping-tight-naked-variance hard_constraints.md §5 — module-level
 # constants for grep-ability. Mirror values from the report tool
 # (``tools/build_naked_variance_report.py``).
@@ -180,7 +194,55 @@ TIGHT_VARIANCE_VOL_COEF = 0.5
 TIGHT_VARIANCE_NAKED_COEF = 0.25
 
 
+def _force_close_rate_penalty(
+    eval_stats, force_close_rate_penalty_weight: float | None = None,
+) -> float:
+    """The composite force-close-rate penalty term (>= 0; subtracted).
+
+    ``weight × (arbs_force_closed / max(1, pairs_opened))``. ``weight`` is
+    read from the module-level ``_FORCE_CLOSE_RATE_PENALTY_WEIGHT`` (set by
+    the ``--force-close-rate-penalty-weight`` CLI flag) unless an explicit
+    value is passed (tests / direct callers). ``weight == 0.0`` (the default)
+    ⇒ 0.0, so the composite is byte-identical to pre-plan. The rate is
+    bounded [0, 1] in normal operation (force-closes ≤ opens); the
+    ``max(1, …)`` floor guards a zero-open eval. Per-eval means (n_eval_days
+    > 1) carry through because ``EvalSummary`` aggregation already meaned
+    both counters.
+    """
+    if force_close_rate_penalty_weight is None:
+        force_close_rate_penalty_weight = _FORCE_CLOSE_RATE_PENALTY_WEIGHT
+    w = float(force_close_rate_penalty_weight)
+    if w == 0.0:
+        return 0.0
+    opened = max(1.0, float(getattr(eval_stats, "pairs_opened", 0) or 0))
+    fc = float(getattr(eval_stats, "arbs_force_closed", 0) or 0)
+    return w * (fc / opened)
+
+
 def _composite_score(
+    eval_stats, maturation_bonus_weight: float,
+    composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
+    sortino_lambda: float | None = None,
+    force_close_rate_penalty_weight: float | None = None,
+) -> float:
+    """GA selection score, minus the force-close-rate penalty.
+
+    Thin wrapper: ``_composite_score_base(...) − _force_close_rate_penalty(
+    ...)``. The base is the mode-specific score (unchanged); the penalty
+    (default weight 0.0 ⇒ 0.0) rides on top of EVERY mode so spray-and-bail
+    is deselected regardless of which selector is active. Default weight
+    keeps the score byte-identical to pre-2026-06-06.
+    """
+    base = _composite_score_base(
+        eval_stats, maturation_bonus_weight, composite_score_mode,
+        sortino_lambda,
+    )
+    return base - _force_close_rate_penalty(
+        eval_stats, force_close_rate_penalty_weight,
+    )
+
+
+def _composite_score_base(
     eval_stats, maturation_bonus_weight: float,
     composite_score_mode: str = COMPOSITE_SCORE_MODE_TOTAL_REWARD,
     sortino_lambda: float | None = None,
@@ -2908,6 +2970,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--force-close-rate-penalty-weight", type=float,
+        default=FORCE_CLOSE_RATE_PENALTY_DEFAULT_WEIGHT, metavar="FLOAT",
+        help=(
+            "Spray-and-bail penalty (2026-06-06): subtract "
+            "weight × (arbs_force_closed / max(1, pairs_opened)) from the "
+            "composite score of EVERY mode, so high-bail lineages are "
+            "DESELECTED. Default %(default)s = OFF (byte-identical "
+            "selection). The rate is in [0, 1]; a weight on the same "
+            "GBP-scale as the composite (e.g. 100-500 for total_reward, "
+            "or 10-50 for locked_weighted) makes a 74%% bail cost "
+            "~0.74×weight. Composes additively with any "
+            "--composite-score-mode and --maturation-bonus-weight."
+        ),
+    )
+    p.add_argument(
         "--maturation-bonus-weight", type=float, default=0.0,
         metavar="FLOAT",
         help=(
@@ -3324,6 +3401,21 @@ def main(argv: list[str] | None = None) -> int:
     global _SORTINO_LAMBDA
     _SORTINO_LAMBDA = float(args.sortino_lambda)
 
+    # spray-and-bail redesign (2026-06-06). Set the module-level
+    # force-close-rate penalty weight from the CLI before any
+    # _composite_score call (same pattern as _SORTINO_LAMBDA). Default 0.0
+    # keeps the composite byte-identical when the flag is unset.
+    global _FORCE_CLOSE_RATE_PENALTY_WEIGHT
+    _FORCE_CLOSE_RATE_PENALTY_WEIGHT = float(
+        args.force_close_rate_penalty_weight,
+    )
+    if _FORCE_CLOSE_RATE_PENALTY_WEIGHT != 0.0:
+        logger.info(
+            "GA selection: force-close-rate penalty ACTIVE — "
+            "composite -= %g × (arbs_force_closed / max(1, pairs_opened))",
+            _FORCE_CLOSE_RATE_PENALTY_WEIGHT,
+        )
+
     server: WebSocketBroadcastServer | None = None
     emitter: Callable[[dict], None] | None = None
     if args.emit_websocket:
@@ -3475,6 +3567,35 @@ def main(argv: list[str] | None = None) -> int:
                 "Cannot combine --arb-spread-target-lock-pct with "
                 "--enable-gene arb_spread_target_lock_pct (one source "
                 "of truth per knob per run).",
+            )
+
+    # ── Promoted-to-Phase-5 gate-gene override guards (2026-06-06) ───────
+    # Each of the four selectivity gates is now a per-agent PHASE5 gene AND
+    # keeps its cohort-wide CLI flag as a one-source-of-truth override. These
+    # flags have non-None disabled defaults (unlike --arb-spread-...), so the
+    # guard fires when the operator BOTH sets a non-disabled flag value AND
+    # enables the gene (directly via --enable-gene or via --enable-all-genes).
+    # Mirrors the arb_spread guard: one source of truth per knob per run.
+    _GATE_FLAG_GUARDS = (
+        # (CLI flag attr, gene name, disabled default, flag spelling)
+        ("mature_prob_open_threshold", "mature_prob_open_threshold", 0.0,
+         "--mature-prob-open-threshold"),
+        ("race_confidence_threshold", "race_confidence_threshold", 0.0,
+         "--race-confidence-threshold"),
+        ("lay_price_max", "lay_price_max", 0.0, "--lay-price-max"),
+        ("predictor_p_win_back_threshold", "predictor_p_win_back_threshold",
+         0.0, "--predictor-p-win-back-threshold"),
+        ("predictor_p_win_lay_threshold", "predictor_p_win_lay_threshold",
+         1.0, "--predictor-p-win-lay-threshold"),
+    )
+    for _attr, _gene, _disabled_default, _flag in _GATE_FLAG_GUARDS:
+        _flag_val = float(getattr(args, _attr))
+        if _flag_val != _disabled_default and _gene in enabled_set:
+            raise ValueError(
+                f"Cannot combine {_flag}={_flag_val:g} with "
+                f"--enable-gene {_gene} (or --enable-all-genes): one source "
+                "of truth per knob per run. Either pin the gate cohort-wide "
+                "via the flag OR evolve it per-agent via the gene, not both.",
             )
 
     # Predictor bundle (predictor-integration data-bridging).

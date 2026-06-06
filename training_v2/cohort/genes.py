@@ -139,7 +139,19 @@ TRANSFORMER_POS_ENCODING_SAMPLE: tuple[str, ...] = ("learned", "rope")
 # draws these so the gauntlet explores the bail-out / exit machinery instead of
 # leaving it dark. use_direction_predictor + direction_gate are sampled in
 # sample_fresh_blood_genes (coupled). force-close / close-walk / BC below.
-FORCE_CLOSE_BEFORE_OFF_SAMPLE: tuple[float, ...] = (0.0, 60.0, 120.0)
+#
+# force_close_before_off_seconds PINNED to 0 IN TRAINING (2026-06-06,
+# spray-and-bail redesign). Train NAKED so the agent FEELS the full naked-
+# variance cost and learns SELECTIVITY (mature_prob gate, open_cost,
+# close_signal) — per project_force_close_train_vs_deploy. A force-close
+# safety net during training is exactly what let the full-gene campaign reach
+# the spray-and-bail equilibrium: the env flattened the bail for free, so the
+# policy never paid for opening pairs it couldn't mature. force_close=120 is a
+# DEPLOY-eval safety only: tools/reevaluate_cohort.py sets it via
+# ``--reward-overrides force_close_before_off_seconds=120``, which the worker
+# threads through cohort_overrides (NOT the gene) and ``setdefault`` keeps —
+# so the reeval path is UNAFFECTED by this pin. Was (0.0, 60.0, 120.0).
+FORCE_CLOSE_BEFORE_OFF_SAMPLE: tuple[float, ...] = (0.0,)
 CLOSE_WALK_TICKS_SAMPLE: tuple[int, ...] = (0, 5, 10)
 BC_PRETRAIN_STEPS_SAMPLE: tuple[int, ...] = (0, 500)
 # A moderately active gate when on. The gene range is [0.20, 0.50] and the gate
@@ -226,9 +238,42 @@ ARCHITECTURE_GENE_NAMES: frozenset[str] = frozenset({
 # ── Phase 5 range constants (2026-05-03) ──────────────────────────────────
 
 
-OPEN_COST_RANGE: tuple[float, float] = (0.0, 2.0)
+# open_cost (selective-open shaping). Range WIDENED 0.0→2.0 ⇒ 0.0→4.0
+# (2026-06-06, spray-and-bail redesign) AND sampling biased toward the high
+# end (see _OPEN_COST_HIGH_BIAS_POWER / _sample_field). Rationale: the
+# full-gene campaign's composite score was blind to the 74 % force-close
+# bail, so the GA settled open_cost at ~0.35 — the per-open toll never bit
+# hard enough to discourage spray. With the new force-close-rate penalty on
+# the composite (runner.py) deselecting spray-and-bail, open_cost needs both
+# HEADROOM (4.0 ceiling) and a high-biased prior so the gauntlet actually
+# explores the strong-toll region. 0.0 stays reachable (gene-disabled =
+# byte-identical). The env hard-bound is widened to 4.0 to match (the
+# pre-2026-06-06 [0, 2] clamp would have silently capped any high draw —
+# see env/betfair_env.py). Justification: plans/selective-open-shaping/
+# {purpose,hard_constraints}.md — the "collapse above 2.0" risk was under
+# UNRELATED penalty genes with no offsetting positive shaping; matured-arb +
+# MTM provide that offset here.
+OPEN_COST_RANGE: tuple[float, float] = (0.0, 4.0)
 MATURED_ARB_BONUS_WEIGHT_RANGE: tuple[float, float] = (0.0, 5.0)
-MARK_TO_MARKET_WEIGHT_RANGE: tuple[float, float] = (0.0, 0.10)
+# mark_to_market_weight (per-tick reward densification). Range + default
+# RAISED (2026-06-06, spray-and-bail redesign): default 0.05 → 0.2, range
+# 0.0→0.10 ⇒ 0.05→0.5. Rationale (plans/reward-densification/purpose.md):
+# settle P&L lands hundreds of ticks after the open decision and MTM
+# telescopes to zero at settle, so MTM only REDISTRIBUTES existing reward to
+# the ticks that caused it — at 0.05 the per-tick gradient at the open
+# decision is too weak for PPO to credit "this open will go bad" against
+# value-function noise (the same GAE-smearing failure the per-tick open_cost
+# delivery fixed). 0.2 default puts the per-tick MTM signal an
+# order-of-magnitude-comparable with the per-race raw P&L; the [0.05, 0.5]
+# range lets the gauntlet find the magnitude (too large ⇒ the policy
+# optimises per-tick flicker over settle P&L). NB this is NO LONGER
+# byte-identical: the default moved 0.05→0.2 (a plan-level reward-scale
+# change; raw P&L unchanged, shaped_bonus magnitude shifts).
+MARK_TO_MARKET_WEIGHT_RANGE: tuple[float, float] = (0.05, 0.5)
+# Exponent for the high-biased open_cost draw: value = lo + (hi-lo) * u**(1/p)
+# with u ~ Uniform(0,1). p>1 skews the draw toward `hi`; p=2 puts the median
+# at ~0.75 of the range (so ~3.0 on [0,4]). 0.0 stays reachable (u=0 ⇒ lo).
+_OPEN_COST_HIGH_BIAS_POWER: float = 2.0
 NAKED_LOSS_SCALE_RANGE: tuple[float, float] = (0.0, 1.0)
 STOP_LOSS_PNL_THRESHOLD_RANGE: tuple[float, float] = (0.0, 0.30)
 # Price-adaptive arb_spread, redesigned 2026-05-23 (plans/force_close_and_arb_spread/).
@@ -361,6 +406,53 @@ DIRECTION_GATE_WARMUP_EPS_RANGE: tuple[int, int] = (0, 20)
 BC_LEARNING_RATE_RANGE: tuple[float, float] = (1e-5, 1e-3)
 BC_TARGET_ENTROPY_WARMUP_EPS_RANGE: tuple[int, int] = (0, 20)
 
+# ── Promoted-to-Phase-5 gate genes (2026-06-06, spray-and-bail redesign).
+# These four knobs (five names — the pwin gate is back+lay) were CATEGORY-D
+# cohort flags in plans/feature-gene-census.md: the same for every agent, not
+# genes at all, so ``--enable-all-genes`` could never reach them. Promoting
+# them lets the gauntlet evolve a per-agent SELECTIVITY phenotype — the
+# mechanical cut on the 74 % force-close bail the full-gene campaign produced.
+# Each default below MATCHES the pre-promotion cohort-flag default (and the
+# env / policy ctor default) so a disabled gene is byte-identical.
+#
+# IMPORTANT coupling: race_confidence_threshold, lay_price_max, and the two
+# pwin thresholds are ENV-side gates that REQUIRE use_race_outcome_predictor +
+# a predictor_bundle (the env raises otherwise — see env/betfair_env.py
+# __init__). The worker therefore pins these three* to their disabled default
+# when the predictor is off, so a predictor-less ``--enable-all-genes`` cohort
+# can't crash a worker on a non-disabled draw. ``mature_prob_open_threshold``
+# is POLICY-side (reads the agent's own mature_prob_head) and has NO predictor
+# requirement, so it is always free to sample. (*lay_price_max + both pwin
+# thresholds = the predictor-coupled three; race_confidence is the fourth
+# predictor-coupled name but the same rule applies.)
+#
+# Ranges (sourced from the memory, not invented):
+#   mature_prob_open_threshold ∈ [0.0, 0.5] — 0=no gate; the keystone cut. The
+#     policy refuses opens where its trained mature_prob_head predicts
+#     maturation < threshold. 0.5 upper = "refuse opens the head thinks are
+#     coin-flips-or-worse"; higher starves PPO (cf. the direction-gate
+#     [0.20, 0.50] precedent + recipe-expansion notes).
+#   race_confidence_threshold ∈ [0.0, 0.5] — project_race_confidence_gate:
+#     0=disabled; example live threshold 0.30 ("skip races with no favourite");
+#     a p_win=0.55 favourite still passes at 0.5. Higher = unreachable on
+#     evenly-matched fields.
+#   lay_price_max ∈ [10.0, 50.0] OR 0.0 — project_lay_ev_calibration_findings:
+#     lay_price_max=20 landed (dropped the 20-50 −£0.39/£ leverage trap). The
+#     [10, 50] bracket centres on 20; 0.0 (disabled = NO CAP) is preserved as a
+#     special reachable value (see _GATE_GENE_DISABLED_REACHABLE).
+#   predictor_p_win_lay_threshold ∈ [0.15, 0.45] — same findings moved it
+#     0.40→0.20 (removes the p_win 0.20-0.30 calibration hole). The bracket
+#     spans the moved-from (0.40) and moved-to (0.20) values. Disabled = 1.0
+#     (no lay gate) preserved as reachable.
+#   predictor_p_win_back_threshold ∈ [0.15, 0.40] — same findings: back p_win
+#     0.30-0.35 peaks at +£9.49/pair while 0.40-0.50 is −£0.19/pair, so a
+#     threshold in [0.15, 0.40] admits the +EV back region. Disabled = 0.0.
+MATURE_PROB_OPEN_THRESHOLD_RANGE: tuple[float, float] = (0.0, 0.5)
+RACE_CONFIDENCE_THRESHOLD_RANGE: tuple[float, float] = (0.0, 0.5)
+LAY_PRICE_MAX_RANGE: tuple[float, float] = (10.0, 50.0)
+PREDICTOR_P_WIN_BACK_THRESHOLD_RANGE: tuple[float, float] = (0.15, 0.40)
+PREDICTOR_P_WIN_LAY_THRESHOLD_RANGE: tuple[float, float] = (0.15, 0.45)
+
 
 #: Default value applied to a Phase 5 gene whose name is NOT in the cohort's
 #: ``enabled_set``. Each value matches the pre-Phase-5 cohort-wide default
@@ -369,7 +461,16 @@ BC_TARGET_ENTROPY_WARMUP_EPS_RANGE: tuple[int, int] = (0, 20)
 PHASE5_GENE_DEFAULTS: dict[str, float] = {
     "open_cost": 0.0,
     "matured_arb_bonus_weight": 0.0,
-    "mark_to_market_weight": 0.05,
+    # mark_to_market_weight default RAISED 0.05 → 0.2 (2026-06-06,
+    # spray-and-bail redesign). The per-tick MTM gradient at 0.05 was too
+    # weak for PPO to credit the open decision against value-function noise;
+    # 0.2 makes it order-of-magnitude-comparable with per-race raw P&L. NB
+    # the LIVE cohort default is still 0.0 (worker.scalping_train_config sets
+    # reward.mark_to_market_weight=0.0; this gene default only surfaces when
+    # the gene is enabled, at which point it SAMPLES [0.05, 0.5]). Reward-
+    # scale change when active; raw P&L unchanged. See
+    # plans/reward-densification/purpose.md.
+    "mark_to_market_weight": 0.2,
     "naked_loss_scale": 1.0,
     "stop_loss_pnl_threshold": 0.0,
     # Price-adaptive arb_spread, redesigned 2026-05-23. Default 0.02 =
@@ -426,6 +527,20 @@ PHASE5_GENE_DEFAULTS: dict[str, float] = {
     "direction_gate_warmup_eps": 5,
     "bc_learning_rate": 3e-4,
     "bc_target_entropy_warmup_eps": 5,
+    # Promoted-to-Phase-5 gate genes (2026-06-06, spray-and-bail redesign).
+    # Each default == the pre-promotion cohort-flag default == the env /
+    # policy ctor default, so a disabled gene is byte-identical:
+    #   mature_prob_open_threshold 0.0 = no policy-side open gate
+    #   race_confidence_threshold  0.0 = no per-race gate
+    #   lay_price_max              0.0 = NO CAP (special "disabled" value;
+    #                                    the sample range is [10, 50])
+    #   predictor_p_win_back_threshold 0.0 = no back gate
+    #   predictor_p_win_lay_threshold  1.0 = no lay gate
+    "mature_prob_open_threshold": 0.0,
+    "race_confidence_threshold": 0.0,
+    "lay_price_max": 0.0,
+    "predictor_p_win_back_threshold": 0.0,
+    "predictor_p_win_lay_threshold": 1.0,
 }
 
 
@@ -464,6 +579,13 @@ _PHASE5_RANGES: dict[str, tuple[float, float]] = {
     "direction_gate_warmup_eps": DIRECTION_GATE_WARMUP_EPS_RANGE,
     "bc_learning_rate": BC_LEARNING_RATE_RANGE,
     "bc_target_entropy_warmup_eps": BC_TARGET_ENTROPY_WARMUP_EPS_RANGE,
+    # Promoted-to-Phase-5 gate genes (2026-06-06). See the *_RANGE constants
+    # above for the memory-sourced bracketing rationale.
+    "mature_prob_open_threshold": MATURE_PROB_OPEN_THRESHOLD_RANGE,
+    "race_confidence_threshold": RACE_CONFIDENCE_THRESHOLD_RANGE,
+    "lay_price_max": LAY_PRICE_MAX_RANGE,
+    "predictor_p_win_back_threshold": PREDICTOR_P_WIN_BACK_THRESHOLD_RANGE,
+    "predictor_p_win_lay_threshold": PREDICTOR_P_WIN_LAY_THRESHOLD_RANGE,
 }
 
 
@@ -517,7 +639,7 @@ class CohortGenes:
     # pre-plan defaults so unused genes stay neutral.
     open_cost: float = 0.0
     matured_arb_bonus_weight: float = 0.0
-    mark_to_market_weight: float = 0.05
+    mark_to_market_weight: float = 0.2  # raised 0.05→0.2 (2026-06-06); see RANGE
     naked_loss_scale: float = 1.0
     stop_loss_pnl_threshold: float = 0.0
     # Price-adaptive arb_spread, redesigned 2026-05-23
@@ -630,6 +752,22 @@ class CohortGenes:
     force_close_before_off_seconds: float = 0.0
     close_walk_ticks: int = 0
 
+    # ── Promoted-to-Phase-5 gate genes (2026-06-06, spray-and-bail redesign).
+    # Four selectivity gates that were CATEGORY-D cohort flags (same for every
+    # agent, not genes) — see plans/feature-gene-census.md §D. Promoting them
+    # to per-agent PHASE5 genes lets the gauntlet evolve a selectivity
+    # phenotype (the mechanical cut on the full-gene campaign's 74 % bail).
+    # Defaults == the env / policy ctor defaults == disabled (byte-identical).
+    # mature_prob_open_threshold is POLICY-side (no predictor needed); the
+    # other four are ENV-side and require use_direction_predictor — the worker
+    # pins them off when the predictor is absent (see worker.py). NB the pwin
+    # gate is two names (back + lay), so "four gates" = five fields.
+    mature_prob_open_threshold: float = 0.0
+    race_confidence_threshold: float = 0.0
+    lay_price_max: float = 0.0
+    predictor_p_win_back_threshold: float = 0.0
+    predictor_p_win_lay_threshold: float = 1.0
+
     def to_dict(self) -> dict:
         """Plain-dict form for registry persistence + scoreboard rows."""
         return {
@@ -696,6 +834,20 @@ class CohortGenes:
                 self.force_close_before_off_seconds,
             ),
             "close_walk_ticks": int(self.close_walk_ticks),
+            # Promoted-to-Phase-5 gate genes (2026-06-06).
+            "mature_prob_open_threshold": float(
+                self.mature_prob_open_threshold,
+            ),
+            "race_confidence_threshold": float(
+                self.race_confidence_threshold,
+            ),
+            "lay_price_max": float(self.lay_price_max),
+            "predictor_p_win_back_threshold": float(
+                self.predictor_p_win_back_threshold,
+            ),
+            "predictor_p_win_lay_threshold": float(
+                self.predictor_p_win_lay_threshold,
+            ),
         }
 
 
@@ -710,6 +862,22 @@ def _sample_log_uniform(rng: random.Random, lo: float, hi: float) -> float:
 
 def _sample_uniform(rng: random.Random, lo: float, hi: float) -> float:
     return float(rng.uniform(lo, hi))
+
+
+def _sample_high_biased(
+    rng: random.Random, lo: float, hi: float, power: float,
+) -> float:
+    """Draw skewed toward ``hi``: ``lo + (hi-lo) * u**(1/power)``, ``u ~ U(0,1)``.
+
+    ``power == 1`` reduces to uniform; ``power > 1`` pushes mass toward the
+    top of the range (``power == 2`` ⇒ median ≈ 0.75 of the span). Uses a
+    SINGLE ``rng.random()`` so it consumes exactly as much of the RNG stream
+    as :func:`_sample_uniform` (one draw) — swapping the two does not shift
+    the stream for any other gene. ``u == 0`` ⇒ ``lo`` so the low end stays
+    reachable.
+    """
+    u = rng.random()
+    return float(lo + (hi - lo) * (u ** (1.0 / float(power))))
 
 
 def _sample_field(rng: random.Random, field_name: str):
@@ -736,6 +904,16 @@ def _sample_field(rng: random.Random, field_name: str):
             # Inclusive integer draw (rng.randint includes both ends),
             # so an int-valued gene yields an int in [lo, hi].
             return int(rng.randint(int(lo), int(hi)))
+        if field_name == "open_cost":
+            # High-biased draw (2026-06-06, spray-and-bail redesign). Once
+            # the composite penalises the force-close bail, open_cost must
+            # bite — so skew the prior toward the strong-toll region instead
+            # of a flat uniform that mostly samples weak tolls. ONE rng.random
+            # draw (same RNG-consumption count as _sample_uniform → does not
+            # shift the stream for other genes). u=0 ⇒ lo (0.0 reachable).
+            return _sample_high_biased(
+                rng, lo, hi, _OPEN_COST_HIGH_BIAS_POWER,
+            )
         return _sample_uniform(rng, lo, hi)
     # Phase 8 (2026-05-05). ``bc_pretrain_steps`` is operator-controlled
     # (cohort runner ``--bc-pretrain-steps`` flag) / drawn only by

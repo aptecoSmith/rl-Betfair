@@ -32,13 +32,18 @@ from training_v2.cohort.genes import (
     FILL_PROB_LOSS_WEIGHT_RANGE,
     GAE_LAMBDA_RANGE,
     HIDDEN_SIZE_CHOICES,
+    LAY_PRICE_MAX_RANGE,
     LEARNING_RATE_RANGE,
     MARK_TO_MARKET_WEIGHT_RANGE,
     MATURE_PROB_LOSS_WEIGHT_RANGE,
+    MATURE_PROB_OPEN_THRESHOLD_RANGE,
     MATURED_ARB_BONUS_WEIGHT_RANGE,
     MINI_BATCH_SIZE_CHOICES,
     NAKED_LOSS_SCALE_RANGE,
     OPEN_COST_RANGE,
+    PREDICTOR_P_WIN_BACK_THRESHOLD_RANGE,
+    PREDICTOR_P_WIN_LAY_THRESHOLD_RANGE,
+    RACE_CONFIDENCE_THRESHOLD_RANGE,
     PHASE5_GENE_DEFAULTS,
     PHASE5_GENE_NAMES,
     REWARD_CLIP_RANGE,
@@ -73,6 +78,12 @@ _PHASE5_RANGE_TABLE: dict[str, tuple[float, float]] = {
     "direction_gate_warmup_eps": DIRECTION_GATE_WARMUP_EPS_RANGE,
     "bc_learning_rate": BC_LEARNING_RATE_RANGE,
     "bc_target_entropy_warmup_eps": BC_TARGET_ENTROPY_WARMUP_EPS_RANGE,
+    # Promoted-to-Phase-5 gate genes (2026-06-06, spray-and-bail redesign).
+    "mature_prob_open_threshold": MATURE_PROB_OPEN_THRESHOLD_RANGE,
+    "race_confidence_threshold": RACE_CONFIDENCE_THRESHOLD_RANGE,
+    "lay_price_max": LAY_PRICE_MAX_RANGE,
+    "predictor_p_win_back_threshold": PREDICTOR_P_WIN_BACK_THRESHOLD_RANGE,
+    "predictor_p_win_lay_threshold": PREDICTOR_P_WIN_LAY_THRESHOLD_RANGE,
 }
 
 
@@ -216,7 +227,12 @@ class TestPhase5Genes:
         expected = {
             "open_cost": 0.0,
             "matured_arb_bonus_weight": 0.0,
-            "mark_to_market_weight": 0.05,
+            # mark_to_market_weight default RAISED 0.05→0.2 (2026-06-06,
+            # spray-and-bail redesign). This gene default only surfaces when
+            # the gene is ENABLED (then it samples [0.05, 0.5]); the live
+            # cohort default is still 0.0 via scalping_train_config, so a
+            # disabled cohort is unaffected. Reward-scale change when active.
+            "mark_to_market_weight": 0.2,
             "naked_loss_scale": 1.0,
             "stop_loss_pnl_threshold": 0.0,
             # arb_spread_scale retired 2026-05-23 -> arb_spread_target_lock_pct.
@@ -261,6 +277,15 @@ class TestPhase5Genes:
             "direction_gate_warmup_eps": 5,
             "bc_learning_rate": 3e-4,
             "bc_target_entropy_warmup_eps": 5,
+            # Promoted-to-Phase-5 gate genes (2026-06-06, spray-and-bail
+            # redesign). Each default == the pre-promotion cohort-flag /
+            # env / policy ctor default = disabled, so a disabled gene is
+            # byte-identical. (pwin gate is back+lay = two names.)
+            "mature_prob_open_threshold": 0.0,
+            "race_confidence_threshold": 0.0,
+            "lay_price_max": 0.0,
+            "predictor_p_win_back_threshold": 0.0,
+            "predictor_p_win_lay_threshold": 1.0,
         }
         assert PHASE5_GENE_DEFAULTS == expected
 
@@ -332,7 +357,8 @@ class TestPhase5Genes:
         rng = random.Random(42)
         child = crossover(parent_a, parent_b, rng)
         assert child.open_cost == 0.0
-        assert child.mark_to_market_weight == 0.05
+        # mark_to_market_weight disabled-default raised 0.05→0.2 (2026-06-06).
+        assert child.mark_to_market_weight == 0.2
 
     def test_enabled_gene_in_crossover_inherits_from_parent(self):
         """An enabled gene in the child must come from one of the
@@ -377,19 +403,20 @@ class TestPhase5Genes:
             learning_rate=1e-3, entropy_coeff=1e-3, clip_range=0.2,
             gae_lambda=0.95, value_coeff=0.5, mini_batch_size=64,
             hidden_size=128,
-            open_cost=3.0,  # > OPEN_COST_RANGE upper of 2.0
+            open_cost=5.0,  # > OPEN_COST_RANGE upper of 4.0 (widened 2026-06-06)
         )
         with pytest.raises(ValueError):
             assert_in_range(bad)
 
-    def test_to_dict_serialises_all_45_fields(self):
+    def test_to_dict_serialises_all_50_fields(self):
         rng = random.Random(0)
         genes = sample_genes(rng, enabled_set=PHASE5_GENE_NAMES)
         d = genes.to_dict()
-        # ...42 prior fields + 3 direction-mechanism/safety-exit genes
-        # (use_direction_predictor + force_close_before_off_seconds +
-        # close_walk_ticks, 2026-06-05) = 45.
-        assert len(d) == 45
+        # ...45 prior fields + 5 promoted-to-Phase-5 gate genes
+        # (mature_prob_open_threshold, race_confidence_threshold,
+        # lay_price_max, predictor_p_win_back_threshold,
+        # predictor_p_win_lay_threshold; 2026-06-06) = 50.
+        assert len(d) == 50
         # The 3 new genes pin OFF under the base/GA sampler (byte-identity).
         assert d["use_direction_predictor"] is False
         assert d["force_close_before_off_seconds"] == 0.0
@@ -461,19 +488,43 @@ class TestPhase5Genes:
         assert (DIRECTION_GATE_WARMUP_EPS_RANGE[0]
                 <= d["direction_gate_warmup_eps"]
                 <= DIRECTION_GATE_WARMUP_EPS_RANGE[1])
+        # Promoted-to-Phase-5 gate genes (2026-06-06, spray-and-bail
+        # redesign). Enabled here (enabled_set=PHASE5_GENE_NAMES) so they
+        # SAMPLE in-range rather than sit at their disabled defaults.
+        assert (MATURE_PROB_OPEN_THRESHOLD_RANGE[0]
+                <= d["mature_prob_open_threshold"]
+                <= MATURE_PROB_OPEN_THRESHOLD_RANGE[1])
+        assert (RACE_CONFIDENCE_THRESHOLD_RANGE[0]
+                <= d["race_confidence_threshold"]
+                <= RACE_CONFIDENCE_THRESHOLD_RANGE[1])
+        assert (LAY_PRICE_MAX_RANGE[0]
+                <= d["lay_price_max"]
+                <= LAY_PRICE_MAX_RANGE[1])
+        assert (PREDICTOR_P_WIN_BACK_THRESHOLD_RANGE[0]
+                <= d["predictor_p_win_back_threshold"]
+                <= PREDICTOR_P_WIN_BACK_THRESHOLD_RANGE[1])
+        assert (PREDICTOR_P_WIN_LAY_THRESHOLD_RANGE[0]
+                <= d["predictor_p_win_lay_threshold"]
+                <= PREDICTOR_P_WIN_LAY_THRESHOLD_RANGE[1])
 
     def test_phase5_gene_names_set_size(self):
-        # 20 prior genes + 6 promoted 2026-06-06 (direction_horizon_ticks,
-        # direction_threshold_ticks, direction_force_close_seconds,
-        # direction_gate_warmup_eps, bc_learning_rate,
-        # bc_target_entropy_warmup_eps) = 26.
-        assert len(PHASE5_GENE_NAMES) == 26
+        # 26 prior genes + 5 promoted gate genes 2026-06-06
+        # (mature_prob_open_threshold, race_confidence_threshold,
+        # lay_price_max, predictor_p_win_back_threshold,
+        # predictor_p_win_lay_threshold) = 31.
+        assert len(PHASE5_GENE_NAMES) == 31
         assert PHASE5_GENE_NAMES == frozenset(PHASE5_GENE_DEFAULTS)
-        # The 6 newly-promoted genes are now in the set.
+        # The 6 direction/BC-promoted genes are in the set.
         assert {
             "direction_horizon_ticks", "direction_threshold_ticks",
             "direction_force_close_seconds", "direction_gate_warmup_eps",
             "bc_learning_rate", "bc_target_entropy_warmup_eps",
+        } <= PHASE5_GENE_NAMES
+        # The 5 newly-promoted gate genes are in the set.
+        assert {
+            "mature_prob_open_threshold", "race_confidence_threshold",
+            "lay_price_max", "predictor_p_win_back_threshold",
+            "predictor_p_win_lay_threshold",
         } <= PHASE5_GENE_NAMES
 
 
