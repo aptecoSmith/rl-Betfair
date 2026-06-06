@@ -12,6 +12,11 @@ It is self-contained: the knowledge versions with the code, no cross-repo depend
 | **Design / decision** | `plans/memory-improvements/{purpose,current_state,design}.md`, `_kickoff.md` |
 
 ## Sync history
+- **2026-06-07 — checked `5ad25e4`, no port.** Upstream `11cf011..5ad25e4` was vault *content*
+  only (an ingest + relocating their source docs into `inbox/pending/Files`); the engine, skills,
+  schema contracts, templates, MCP and extractors are byte-identical to `11cf011`. The inbox-drop
+  workflow fix doesn't apply to rl-betfair's repo-scan (references-in-place) model. Engine verified
+  current through `5ad25e4`.
 - **2026-06-06 → `11cf011`** (anti-light-note enforcement). Ported `scripts/wiki_tool.py`
   (new `coverage` ERRORs — **under-extraction** vs the source's real size, and **claimless**
   substantive notes — now counted in the finalize error gate; `finalize-ingest` **strict by
