@@ -20,6 +20,7 @@
 # GPU lane cap 2.
 #
 # Kill to stop: taskkill /IM python.exe /F   (then kill this wrapper's powershell)
+param([int]$Eras = 0)   # how many eras to run; 0 = loop until stopped (stop_pbt_loop.bat)
 $env:PYTHONWARNINGS = "ignore"
 $py = ".\.venv\Scripts\python.exe"
 $DIR = "registry\pbt_genes_full"
@@ -40,9 +41,9 @@ function Log($m) {
     Tee-Object -Append "$DIR\wrapper.log"
 }
 
-Log "GENES-FULL campaign START -- NO deadline, runs until interrupted; --enable-all-genes (all PHASE5 sampled, label triple pinned 60/5/60); direction-predictor PINNED ON (obs is dir-dependent: +141 live features, so one dir-ON oracle covers all agents + BC is correct -- the direction GATE stays the per-agent gene); BC-on(500), predictors-ON, GPU lane cap 2, caps ctx<=128/d<=256; output $DIR"
+Log "GENES-FULL campaign START -- $(if ($Eras -le 0) { 'loop until stopped' } else { [string]$Eras + ' era(s) then stop' }); --enable-all-genes (all PHASE5 sampled, label triple pinned 60/5/60); direction-predictor PINNED ON (obs is dir-dependent: +141 live features, so one dir-ON oracle covers all agents + BC is correct -- the direction GATE stays the per-agent gene); BC-on(500), predictors-ON, GPU lane cap 2, caps ctx<=128/d<=256; output $DIR"
 $run = 0
-while ($true) {
+while ($Eras -le 0 -or $run -lt $Eras) {
   $run++
   $seedFile = "$DIR\seed_counter.txt"
   if (Test-Path $seedFile) { $seed = [int]((Get-Content $seedFile -Raw).Trim()) } else { $seed = 900 }
@@ -63,8 +64,8 @@ while ($true) {
     '--pbt-promote-from-r2','2','--pbt-freeze-top-r3','2',
     '--output-dir',$DIR
   )
-  $outLog = "$DIR\train_era$run.out.log"
-  $errLog = "$DIR\train_era$run.err.log"
+  $outLog = "$DIR\train_seed${seed}.out.log"
+  $errLog = "$DIR\train_seed${seed}.err.log"
   $proc = Start-Process -FilePath $py -ArgumentList $argList -NoNewWindow -PassThru `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog
   $proc.Id | Out-File -Encoding ascii -NoNewline "$DIR\train.pid"
