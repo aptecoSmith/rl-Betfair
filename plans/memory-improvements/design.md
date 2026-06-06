@@ -58,29 +58,44 @@ MCP call away — addressable by topic, with provenance, with the LLM off.
   reward-shaping history (it's the bulk of what we cut from CLAUDE.md and the best
   supersession-timeline demo).
 
-## Open decisions (the operator's calls)
+## Architecture — SETTLED (2026-06-06)
 
-1. **One shared vault vs a dedicated rl-betfair vault.** Lean **shared** —
-   rl-betfair becomes a `work`-tagged domain in the existing v3 shared cloud
-   (v3-native: one vault, many domains, tags+search partition; reuses all infra).
-   A dedicated vault gives cleaner separation but is a second vault to maintain.
-2. **Manual vs automated ingestion.** Lean **manual-first** (the `ingest` skill,
-   operator-driven) to seed and prove the loop; automate later (a script or a
-   tick-tock-style routine that files new findings/hypotheses as claims).
-3. **memory/ ↔ wiki boundary.** Keep `memory/` as the thin *always-loaded*
-   user/feedback/orientation layer; push *technical domain depth* to the wiki.
-   Don't duplicate — a memory entry may *point* at a wiki note, not restate it.
-4. **MCP wiring.** Add the v3 MCP server (`python -m mcp_server` in
-   `llm-wiki-v3`) to the rl-betfair session's MCP config (read-only). Confirm the
-   shared-cloud-only default is what we want from a rl-betfair session.
-5. **Maintenance cadence — the load-bearing one.** CLAUDE.md bloated because
-   nothing pruned. The wiki re-bloats the same way without a recurring pass: v3's
-   **`audit`** (contradictions / stale claims / gaps), **`maintain`** (health),
-   and **`dream`** (reflect + propose questions) skills are the tools; pick a
-   cadence (manual, or a scheduled routine). The artifact is easy; the discipline
-   is the point.
-6. **First ingest target** to validate the fit: the reward-shaping supersession
-   cluster (per "Ingestion approach").
+**Take a copy of the existing `llm-wiki-v3` and make it rl-betfair's own, in the
+repo as `rl-betfair/wiki/`** — a real, working v3 (engine + MCP server + skills +
+schema), started fresh for rl-betfair's knowledge. Operator decision: *"take a
+copy of the existing v3."*
+
+Why a copy (not the shared vault): the engine resolves its vault relative to its
+own location (`ROOT = scripts/`'s parent — confirmed in `wiki_tool.py`), so "v3
+in the repo" means co-locating engine + vault. A copy keeps rl-betfair
+**self-contained** — the knowledge versions with the code, there's no cross-repo
+dependency, and it matches v3's own portable / unzip-and-go design (the core is
+stdlib-only; only the MCP layer needs the `mcp` package).
+
+The build (deferred — see Non-goals) will:
+- Copy v3 → `rl-betfair/wiki/`; **strip the other-domain content** (FEWS / ISTQB
+  notes) and the v3-*development* machinery (`benchmarking/`, `comparison/`,
+  `ci/`, `docs/build_docs/`). Keep the *system*: `scripts/wiki_tool.py`,
+  `mcp_server/`, `Schema/` (reset to empty templates), `templates/`, `skills/`,
+  and an `AGENTS.md` adapted for rl-betfair.
+- Single `shared/` cloud (rl-betfair is all "work"; `personal/` unused).
+- Gitignore the derived `.runtime/` + `out/`; commit the markdown + `Schema/*.jsonl`.
+- Wire `wiki/`'s MCP server into rl-betfair's `.claude/settings.json` (read-only)
+  so a session queries its own in-repo wiki.
+- Record the source v3 commit in `wiki/VENDORED_FROM.md`; re-copy only if a v3
+  engine improvement is ever wanted (low priority — the engine is stable).
+
+## Remaining minor calls (decide at build time)
+- **Ingestion:** manual-first via the `ingest` skill (seed + prove the fit),
+  automate later (a routine that files new findings/hypotheses as claims).
+- **memory/ ↔ wiki boundary:** `memory/` stays the thin *always-loaded*
+  user/feedback layer; technical domain depth goes to the wiki — a memory entry
+  may *point* at a wiki note, not restate it.
+- **Maintenance cadence (load-bearing):** run v3's `audit` / `maintain` / `dream`
+  skills on a cadence so the wiki doesn't re-bloat the way CLAUDE.md did. The
+  artifact is easy; the discipline is the point.
+- **First ingest target:** the reward-shaping supersession cluster (best
+  provenance + `supersession-timeline` demo).
 
 ## Non-goals / deferred
 - Building any of this now — **tick-tock first.** This is design only.
