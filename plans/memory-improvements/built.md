@@ -8,7 +8,8 @@ executed end to end. Four revertible commits on `pbt-gpu-forward`:
 | `3ff8f5b` | Vendored `llm-wiki-v3` → `wiki/` (empty vault), adapted AGENTS/CLAUDE/README, gitignore, provenance, subdir patch |
 | `23691ec` | Wired the read-only MCP server (`.mcp.json` + `.claude/settings.json`) |
 | `c8ae3e7` | Proof-first ingest: the reward-shaping supersession cluster |
-| `2d06ded` | `scan_repo.py` repo-scan ingester + registered/queued the 704-file markdown corpus |
+| `2d06ded` | `scan_repo.py` repo-scan ingester + registered/queued the markdown corpus |
+| `c5de08b` | Refiltered the scan to **knowledge-core** (185 files; process scaffolding dropped) |
 
 ## What exists now
 - **`wiki/`** — a self-contained, working v3 (engine + MCP + skills + schema), zero
@@ -23,8 +24,11 @@ executed end to end. Four revertible commits on `pbt-gpu-forward`:
   naked penalty + the raw/shaped anchor + synthesis hub. Demonstrated working:
   `query unverified-claims`, `query supersedes`, `view supersession-timeline`,
   `view dialog-trail`; 1 claim cross-source-verified.
-- **Repo-scan:** `python wiki/scripts/scan_repo.py` registered + queued all 704 markdown
-  knowledge files; `batch status` shows 3 done / 701 pending.
+- **Repo-scan:** `python wiki/scripts/scan_repo.py` registered + queued **185 knowledge files**
+  (`purpose`/`lessons_learnt`/`findings`/`design` under `plans/` + all of `docs/` + the named logs
+  EXPERIMENTS/EXPLORATIONS/CLAUDE/genes_census; process scaffolding —
+  master_todo/progress/session_prompt(s)/hard_constraints — deliberately excluded).
+  `python wiki/scripts/batch.py --name repo-md status` shows 3 done / 182 pending.
 
 ## Decisions taken at build time (deviations worth knowing)
 - **MCP lives in `.mcp.json`, not `settings.json`.** Current Claude Code reads MCP
@@ -41,9 +45,10 @@ executed end to end. Four revertible commits on `pbt-gpu-forward`:
   `git rev-parse --show-prefix`). No-op when wiki == repo root. Re-apply on any re-copy.
 
 ## What's deferred (not this session)
-- **Compiling the 701 pending sources** into notes — the resumable `batch` skill's job,
-  one source at a time (anti-shortcut: a note per concept/finding/decision). Big
-  multi-session effort; the proof-first cluster validated the quality bar.
+- **Compiling the 182 pending sources** into notes — the resumable `batch` skill's job
+  (`python wiki/scripts/batch.py --name repo-md next` → ingest → finalize → done), one source
+  at a time (anti-shortcut: a note per concept/finding/decision). Multi-session effort; the
+  proof-first cluster validated the quality bar.
 - **Ingesting `.py` code** (markdown knowledge first).
 - **A maintenance cadence** (`audit`/`maintain`/`dream`) once the corpus lands.
 - The `.runtime/batch/repo-md.json` ledger is gitignored (machine-local progress).
