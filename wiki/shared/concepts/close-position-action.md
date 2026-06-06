@@ -5,9 +5,9 @@ cloud: shared
 status: draft
 created: 2026-06-06
 updated: 2026-06-06
-tags: [research, action-space]
+tags: [research]
 sources: [src-009382]
-links: [{to: equal-profit-sizing, type: uses}, {to: locked-pnl-per-pair-definition, type: enables}]
+links: [{to: equal-profit-sizing, type: derived-from}, {to: locked-pnl-per-pair-definition, type: supports}]
 aliases: [close_signal action, close position on runner]
 ---
 

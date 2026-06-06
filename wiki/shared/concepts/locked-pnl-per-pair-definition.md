@@ -5,9 +5,9 @@ cloud: shared
 status: draft
 created: 2026-06-06
 updated: 2026-06-06
-tags: [research, reward]
+tags: [research]
 sources: [src-009382]
-links: [{to: equal-profit-sizing, type: motivates}, {to: raw-vs-shaped-reward, type: refines}, {to: reward-shaping-supersessions, type: part-of}]
+links: [{to: equal-profit-sizing, type: supports}, {to: raw-vs-shaped-reward, type: refines}, {to: reward-shaping-supersessions, type: part-of}]
 aliases: [scalping_locked_pnl per-pair, locked floor per pair]
 ---
 

@@ -5,9 +5,9 @@ cloud: shared
 status: draft
 created: 2026-06-06
 updated: 2026-06-06
-tags: [research, reward, shaped]
+tags: [research]
 sources: [src-009382]
-links: [{to: locked-pnl-per-pair-definition, type: builds-on}, {to: raw-vs-shaped-reward, type: refines}]
+links: [{to: locked-pnl-per-pair-definition, type: derived-from}, {to: raw-vs-shaped-reward, type: refines}, {to: close-signal-bonus-legacy, type: supersedes}]
 aliases: [worst-case-improvement term, Δ worst_case shaping]
 ---
 

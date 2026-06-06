@@ -188,3 +188,4 @@
 {"content_type": "md", "event": "register", "id": "src-3f548f", "location": "C:/Users/jsmit/source/repos/rl-betfair/CLAUDE.md", "machine": "js_desktop", "present": true, "sha256": "46baa0285bdab6d433cf187eaaa8f1fb85d6b5afe98bb351307ce7bef851fa53", "title": "rl-betfair CLAUDE.md (current invariants)", "ts": "2026-06-06T21:48:03"}
 {"content_type": "md", "event": "register", "id": "src-cc721a", "location": "C:/Users/jsmit/source/repos/rl-betfair/genes_census.md", "machine": "js_desktop", "present": true, "sha256": "d26a5d7144a85db4f4bb0423f06cf55871b550141c97986b8a60860b68eb439e", "title": "genes_census.md", "ts": "2026-06-06T21:48:03"}
 {"event": "finalize", "message": "ingest 2026-06-06", "notes": 12, "ts": "2026-06-06T21:55:54"}
+{"event": "finalize", "message": "ingest 2026-06-06", "notes": 12, "ts": "2026-06-06T21:56:28"}
