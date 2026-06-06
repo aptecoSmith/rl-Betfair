@@ -1,0 +1,7 @@
+--seed-gene use_direction_predictor=true
+--seed-gene direction_gate_enabled=true
+--seed-gene direction_gate_threshold=0.25:0.40
+--seed-gene direction_gate_warmup_eps=8:16
+--seed-gene stop_loss_pnl_threshold=0.18:0.26
+--seed-gene bc_pretrain_steps=500
+--seed-gene bc_learning_rate=5e-4:1e-3

@@ -1,0 +1,12 @@
+# Tick-Tock work folder — what to keep vs treat as transient.
+#
+# KEEP (committed, the durable proof + audit trail):
+#   hypotheses/*.md   — the chosen recipe + candidates + summaries
+#   seeds/*.txt       — the exact --seed-gene args a tock consumed
+#   analysis/*.md     — the phenotype report that drove each hypothesis
+#   peek_ledger.jsonl — every held-out peek (erosion audit trail)
+#   loop_state.json   — the loop position (so any fresh Claude reconstructs it)
+#
+# IGNORE (transient handshake state / bulky data, recreated on demand):
+markers/
+analysis/*.csv
