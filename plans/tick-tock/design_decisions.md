@@ -67,3 +67,36 @@ currently reads ONE cohort dir; cross-dir pooling (split by tag) is an extension
   σ_leg ≲ £30). A Tock that "matures more" but still has σ_leg of £150 has not won.
 - `force_close` stays **0 in training** (keep the naked signal); apply
   `force_close=120` only at deploy/held-out eval.
+
+---
+
+## RESOLVED — 2026-06-06 design session
+
+Every open question above was settled. The actionable spec is `build_plan.md`;
+this is the index of what was decided and the one new finding.
+
+- **Held-out (cardinal):** sealed-7 judge (only 7 of the 10 named sealed dates
+  exist on disk); score **locked_pnl + σ_naked_leg**, never day_pnl; report
+  **fc=0 AND fc=120**; log every peek; hold a clean final-test set back for the
+  eventual deploy candidate. *Erosion handled by "reuse sealed-7 + peek-ledger".*
+- **How hard to pin → band-seed + drift.** A new fresh-blood **`seed_bands`**
+  mechanism (`--seed-gene NAME=LO:HI`) enables the driver, seeds R1 fresh blood
+  within the band, and lets breeding drift from there. This is the keystone code
+  change. Subsumes the "narrow-range sampling" idea — point-seed + drift ≈ a
+  band. The pin must land in `sample_fresh_blood_genes` (the R1 funnel:
+  `init_pbt_population`/`breed_pbt` → `_fresh` → it), **not** `reward_overrides`
+  (which never reaches the spec, isn't recorded in `hyperparameters`, and can't
+  drift). `make_offspring` already resets *disabled* genes to default, so a seed
+  must **enable** the gene to survive breeding.
+- **Era tagging → one shared leaderboard** stamped `era_id`/`era_type`/
+  `hypothesis_id`; work folder holds the mds. Phenotype discovery runs
+  **tick-only** (tock-pinned genes have ~0 variance and would corrupt it).
+- **Engine → two file-coupled loops** (python era-loop + scheduled Claude
+  worker, marker-file handshake). **Fully autonomous** steady state; the operator
+  reviews only the *first* analysis+hypothesis. **Multi-candidate + self-critique**
+  brain. Strict alternation. Build order: A–D + one manual cycle, then E–F.
+- **Pitfall caught at design time:** the first recipe (`current_state.md §2`)
+  pins `bc_learning_rate` high **and** `bc_pretrain_steps→0`, but BC never runs at
+  0 steps, so the LR is inert — the +0.52 maturation correlation is a
+  co-inheritance confound. Resolve at the first-hypothesis review; it motivates
+  the brain's **gene-dependency consistency** self-critique check.
