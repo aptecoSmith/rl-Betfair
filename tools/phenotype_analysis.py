@@ -174,6 +174,11 @@ def load_from_scoreboard(path: Path) -> pd.DataFrame:
         # naked_std is not always present on scoreboard rows; tolerate.
         if "eval_naked_std" in r:
             out["naked_std"] = r["eval_naked_std"]
+        # Tick-Tock era tags (piece B/C). Present only on tagged-era rows;
+        # passed through so --tick-only can filter the scoreboard source too.
+        for tag in ("era_id", "era_type", "hypothesis_id"):
+            if tag in r:
+                out[tag] = r[tag]
         hp = r.get("hyperparameters", {}) or {}
         for k, v in hp.items():
             out[f"gene_{k}"] = v
@@ -202,6 +207,46 @@ def resolve_source(cohort_dir: Path, explicit: Path | None) -> tuple[pd.DataFram
         f"No metrics source found in {cohort_dir} "
         f"(looked for model_register.csv and scoreboard.jsonl)."
     )
+
+
+# ── Tick-Tock tick-only filter (piece C) ─────────────────────────────
+
+
+def filter_tick_only(
+    df: pd.DataFrame, warnings: list[str],
+) -> tuple[pd.DataFrame, dict]:
+    """Keep only TICK (discovery) rows: drop rows with ``era_type == 'tock'``.
+
+    A tock band-seeds (pins) its driver genes, so those genes have ~0
+    variance across the tock's agents — including them would CORRUPT the
+    gene→behaviour correlations the analysis exists to find. Rows with NO
+    ``era_type`` (legacy / untagged full-width campaigns like
+    ``pbt_genes_v2``) ARE ticks by construction, so they are KEPT — the
+    build plan pools them in as bonus tick data for the first analysis.
+
+    Returns ``(filtered_df, info)`` with row counts for the report header.
+    """
+    n_total = len(df)
+    if "era_type" not in df.columns:
+        warnings.append(
+            f"--tick-only: no 'era_type' column — treating all {n_total} "
+            "rows as tick (legacy full-width campaign).",
+        )
+        return df, {"has_col": False, "n_total": n_total, "n_tock": 0,
+                    "n_tick": 0, "n_untagged": n_total, "n_kept": n_total}
+    et = df["era_type"].astype("string").str.lower()
+    is_tock = (et == "tock").fillna(False)
+    n_tick = int((et == "tick").fillna(False).sum())
+    n_untagged = int(et.isna().sum())
+    kept = df[~is_tock].copy()
+    info = {"has_col": True, "n_total": n_total, "n_tock": int(is_tock.sum()),
+            "n_tick": n_tick, "n_untagged": n_untagged, "n_kept": len(kept)}
+    warnings.append(
+        f"--tick-only: kept {len(kept)} tick rows (explicit tick={n_tick}, "
+        f"untagged-as-tick={n_untagged}), dropped {info['n_tock']} tock "
+        "rows from discovery.",
+    )
+    return kept, info
 
 
 # ── Behaviour derivation ─────────────────────────────────────────────
@@ -568,6 +613,8 @@ def render_report(
     recipe: list[dict],
     top_k: int,
     timestamp: str,
+    tick_only: bool = False,
+    tick_info: dict | None = None,
 ) -> str:
     L: list[str] = []
     A = L.append
@@ -576,6 +623,17 @@ def render_report(
     A(f"_Generated {timestamp} by `tools/phenotype_analysis.py`._")
     A("")
     A(f"- **Source:** `{source_path}` ({source_kind})")
+    if tick_only:
+        ti = tick_info or {}
+        if ti.get("has_col"):
+            A(f"- **Discovery scope:** `--tick-only` — {ti.get('n_kept')} "
+              f"tick rows kept (explicit tick={ti.get('n_tick')}, "
+              f"untagged-as-tick={ti.get('n_untagged')}); "
+              f"{ti.get('n_tock')} tock rows EXCLUDED (their pinned drivers "
+              "would corrupt the correlations).")
+        else:
+            A("- **Discovery scope:** `--tick-only` — no `era_type` column; "
+              "all rows treated as tick (legacy full-width campaign).")
     A(f"- **Agents (n):** {n_agents}")
     gens = ", ".join(f"gen{int(k)}={int(v)}" for k, v in gen_counts.items())
     A(f"- **Generations:** {gens}")
@@ -780,7 +838,7 @@ def _interp_line(gene: str, behaviour: str, sr: float, sp: float) -> str:
 
 
 def run(cohort_dir: Path, out: Path | None, source: Path | None,
-        top_k: int) -> int:
+        top_k: int, tick_only: bool = False) -> int:
     warnings: list[str] = []
     try:
         df, source_path, source_kind = resolve_source(cohort_dir, source)
@@ -791,6 +849,14 @@ def run(cohort_dir: Path, out: Path | None, source: Path | None,
         print("ERROR: metrics source is empty (no completed agents yet).",
               file=sys.stderr)
         return 2
+
+    tick_info: dict | None = None
+    if tick_only:
+        df, tick_info = filter_tick_only(df, warnings)
+        if len(df) == 0:
+            print("ERROR: --tick-only left no rows (every row is a tock). "
+                  "Discovery needs tick (or untagged) rows.", file=sys.stderr)
+            return 2
 
     n_agents = len(df)
     gen_counts = (
@@ -841,6 +907,8 @@ def run(cohort_dir: Path, out: Path | None, source: Path | None,
         recipe=recipe,
         top_k=top_k,
         timestamp=timestamp_human,
+        tick_only=tick_only,
+        tick_info=tick_info,
     )
 
     # Resolve output paths.
@@ -941,8 +1009,20 @@ def main() -> int:
         "--top-k", type=int, default=6,
         help="How many gene drivers to list per behaviour (default 6).",
     )
+    p.add_argument(
+        "--tick-only", action="store_true",
+        help=(
+            "Tick-Tock (piece C): restrict discovery to TICK rows — drop "
+            "rows tagged era_type=tock (a tock band-seeds/pins its drivers, "
+            "so their ~0 variance would corrupt the gene→behaviour "
+            "correlations). Untagged/legacy rows (e.g. the full-width "
+            "pbt_genes_v2 campaign) are kept as tick by construction. Use "
+            "when a cohort dir pools tick + tock eras."
+        ),
+    )
     args = p.parse_args()
-    return run(args.cohort_dir, args.out, args.source, args.top_k)
+    return run(args.cohort_dir, args.out, args.source, args.top_k,
+               tick_only=args.tick_only)
 
 
 if __name__ == "__main__":
