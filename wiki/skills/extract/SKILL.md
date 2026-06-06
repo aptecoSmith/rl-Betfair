@@ -28,7 +28,9 @@ content is the whole job.
      `FL-1.2.1 (K2)` and every keyword in the chapter keyword list).
    **Name notes by the concept/objective/keyword, never by page** (`boundary-value-analysis`, not
    `p12`). Create or update a note for each. Do not read the whole doc then summarize.
-3. **Record claims with provenance (v3 Phase B).** A note is a *composition of claims*. For each
+3. **Record claims with provenance (v3 Phase B) — MANDATORY.** A note is a *composition of claims*; a
+   substantive concept/entity note with **zero claims is incomplete** and the `coverage` gate now blocks
+   it (`claimless` ERROR). For each
    assertion a note makes, record a **claim** to the note's sidecar `<note>.claims.jsonl`, carrying the
    `source_id`, a **locator** (the segment's page/section + the exact supporting **quote** you lifted),
    `asserted_by: model:<name>`, and a confidence. The fastest, safe way:

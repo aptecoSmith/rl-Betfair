@@ -33,7 +33,12 @@ Whenever ingesting a source — *before* the `extract`/`ingest` skills. It choos
      **missing learning objectives / keywords** (the doc's own enumerated targets). Fill the gaps;
      don't page-pad.
    - everything else → `coverage` (substance gate: flags page-padding and thin stubs).
-5. **Finalize.** `python scripts/wiki_tool.py finalize-ingest` (runs the substance coverage gate).
+5. **Finalize.** `python scripts/wiki_tool.py finalize-ingest` (**strict by default** — `--no-strict` is
+   the deliberate opt-out for a genuine exception). The `coverage` gate **blocks** the commit on
+   **under-extraction** (notes+claims below the source's real size:
+   pages/slides/rows/words) and on **claimless** substantive notes, as well as page-padding. Dense
+   reference docs (specs, **requirements spreadsheets**, handbooks, job specs) MUST go through the
+   `extract` skill (per item + a claim each) — never meeting-notes restraint.
 
 ## Anti-patterns
 Extracting every doc the same way. Page-padding a syllabus (a note per page incl. cover/ToC) to hit

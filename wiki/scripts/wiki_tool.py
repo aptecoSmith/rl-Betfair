@@ -1794,7 +1794,7 @@ def cmd_finalize(args):
     print("== audit_public ==")
     af = _run_audit()
     _print_findings(af)
-    errors = [f for f in vf + cf + clf + af if f[0] == ERROR]
+    errors = [f for f in vf + cf + clf + covf + af if f[0] == ERROR]
     if errors and args.strict:
         print(f"FAIL (strict): {len(errors)} error(s); not committing.")
         return 1
@@ -1895,39 +1895,108 @@ def _note_substance(note) -> int:
     return len(re.sub(r"\s+", " ", body).strip())
 
 
-def coverage(notes, reg, min_chars=200):
-    """Substance-aware per-source extraction quality. Returns (findings, stats).
+def _source_size_units(source_id, reg):
+    """Deterministic 'expected knowledge items' floor for a source, by its real size:
+    pdf -> pages, pptx -> slides, xlsx -> rows//10, else words//200. None when the size can't be
+    measured here (a source missing on this machine never produces a false under-extraction flag)."""
+    entry = reg.get(source_id)
+    if not entry:
+        return None
+    loc = entry.get("locations", {}).get(machine_id()) or {}
+    path = loc.get("path")
+    if not path:
+        return None
+    p = Path(path) if Path(path).is_absolute() else (ROOT / path)
+    if not p.exists():
+        return None
+    suf = p.suffix.lower()
+    try:
+        if suf == ".pdf":
+            import pypdf
+            return max(1, len(pypdf.PdfReader(str(p)).pages))
+        if suf == ".pptx":
+            from pptx import Presentation
+            return max(1, len(Presentation(str(p)).slides))
+        if suf == ".xlsx":
+            import openpyxl
+            wb = openpyxl.load_workbook(str(p), read_only=True)
+            rows = sum(1 for ws in wb.worksheets for r in ws.iter_rows(values_only=True)
+                       if any(c not in (None, "") for c in r))
+            return max(1, rows // 10)
+    except Exception:
+        return None
+    txt = get_source_text(source_id, reg)
+    if not txt:
+        return None
+    return max(1, len(txt.split()) // 200)
 
-    `notes/page` is gameable: page-padding (a note per page, even cover/ToC/index) hits it without
-    capturing knowledge, and it can't tell 69 concept notes from 78 page-dumps. This flags the two real
-    failure modes deterministically (no LLM): **padding** (page-named notes, or a high share of thin
-    stubs) — and, advisory, thin substance. The cure for under-extraction is concept/objective/keyword
-    extraction (see skills/extract); this gate makes the gaming visible so it can't pass silently.
+
+# concept/entity notes carry knowledge and must be grounded in claims; organisational types are exempt.
+_CLAIM_REQUIRED_TYPES = {"concept", "entity"}
+
+
+def coverage(notes, reg, min_chars=200):
+    """Substance- and provenance-aware per-source extraction quality. Returns (findings, stats).
+
+    Catches BOTH failure directions deterministically (no LLM):
+      * page-padding (page-named notes) / thin-stub padding [WARN] - the over-counting direction;
+      * under-extraction [ERROR] - (substantive notes + grounded claims) far below the source's real
+        size (pdf pages / pptx slides / xlsx rows / words) - the under-counting direction; and
+      * claimless [ERROR] - a substantive concept/entity note with zero grounded claims (v3 notes are
+        compositions of claims).
+    ERROR findings block `finalize-ingest` (strict by default; `--no-strict` overrides). The cure is the
+    extract skill: enumerate every item and record a claim per assertion.
     """
+    import claims as _claims
     by_src = {}
+    claims_per_src = {}
+    note_nclaims = {}
     for n in notes:
         if n.name in HUB_NAMES:
             continue
+        cl = _claims.load_claims(n.path)
+        note_nclaims[n.path] = len(cl)
+        for c in cl:
+            k = str(c.get("source_id", ""))
+            claims_per_src[k] = claims_per_src.get(k, 0) + 1
         for sid in n.as_list("sources"):
             by_src.setdefault(str(sid), []).append(n)
     findings, stats = [], []
     for sid, ns in sorted(by_src.items()):
         total = len(ns)
         thin = sum(1 for n in ns if _note_substance(n) < min_chars)
+        substantive = total - thin
         paged = sum(1 for n in ns
                     if PAGE_NAME_RE.search(n.name) or PAGE_NAME_RE.search(str(n.title)))
+        nclaims = claims_per_src.get(sid, 0)
+        units = _source_size_units(sid, reg)
+        items = substantive + nclaims
         title = (reg.get(sid) or {}).get("title", sid)
-        stats.append({"source": sid, "title": title, "notes": total,
-                      "substantive": total - thin, "thin": thin, "page_named": paged})
+        stats.append({"source": sid, "title": title, "notes": total, "substantive": substantive,
+                      "thin": thin, "page_named": paged, "claims": nclaims,
+                      "size_units": units, "items": items})
         where = f"source:{sid}"
         if paged:
             findings.append((WARN, where,
-                             f"{paged}/{total} notes citing '{title}' are page-named (e.g. p12) — "
+                             f"{paged}/{total} notes citing '{title}' are page-named (e.g. p12) - "
                              f"looks like page-padding, not concept/objective extraction"))
         if total >= 3 and thin / total > 0.3:
             findings.append((WARN, where,
-                             f"{thin}/{total} notes citing '{title}' are thin (<{min_chars} chars) — "
+                             f"{thin}/{total} notes citing '{title}' are thin (<{min_chars} chars) - "
                              f"possible stub-padding"))
+        if units and items < units:
+            findings.append((ERROR, where,
+                             f"under-extracted: '{title}' is ~{units} units (pages/slides/rows/words) "
+                             f"but yielded only {items} knowledge items ({substantive} substantive notes "
+                             f"+ {nclaims} claims) - run the extract skill (per item + a claim each)"))
+    for n in notes:
+        if n.name in HUB_NAMES:
+            continue
+        typ = str(n.meta.get("type", ""))
+        if typ in _CLAIM_REQUIRED_TYPES and _note_substance(n) >= min_chars and not note_nclaims.get(n.path):
+            findings.append((ERROR, _rel(n.path),
+                             f"claimless: substantive {typ} note has 0 grounded claims - record a claim "
+                             f"per assertion (claim-add)"))
     return findings, stats
 
 
@@ -2288,7 +2357,11 @@ def build_parser():
     s = sub.add_parser("scan"); s.add_argument("--personal", action="store_true"); s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("finalize-ingest")
-    s.add_argument("--message"); s.add_argument("--strict", action="store_true")
+    s.add_argument("--message")
+    # strict is the DEFAULT: an ERROR finding (under-extraction, claimless, broken link, fabricated
+    # quote) blocks the commit. --no-strict is the deliberate, visible opt-out for genuine exceptions.
+    s.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True,
+                   help="block the commit on any ERROR finding (default on; use --no-strict to override)")
     s.add_argument("--push", action="store_true"); s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_finalize)
     return p

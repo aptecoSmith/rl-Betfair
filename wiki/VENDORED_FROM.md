@@ -7,9 +7,19 @@ It is self-contained: the knowledge versions with the code, no cross-repo depend
 | | |
 |---|---|
 | **Source repo** | `../llm-wiki-v3` (operator's repo, sibling checkout) |
-| **Source commit** | `08145d5ead5646cf3da255914b61cba125a916b6` |
-| **Copied on** | 2026-06-06 |
+| **Source commit** | `11cf011ce60225a6036ce90626980444dcf375de` |
+| **Copied on** | 2026-06-06 (initial copy `08145d5`); synced to `11cf011` 2026-06-06 |
 | **Design / decision** | `plans/memory-improvements/{purpose,current_state,design}.md`, `_kickoff.md` |
+
+## Sync history
+- **2026-06-06 → `11cf011`** (anti-light-note enforcement). Ported `scripts/wiki_tool.py`
+  (new `coverage` ERRORs — **under-extraction** vs the source's real size, and **claimless**
+  substantive notes — now counted in the finalize error gate; `finalize-ingest` **strict by
+  default**, `--no-strict` to override) + the `batch`/`curate`/`extract` skill updates. Skipped the
+  upstream *content* reset (their `Schema/*.jsonl` corpus). Re-applied the local `git_changes`/
+  `_repo_prefix` subdir patch on the new `wiki_tool.py`. Local-only files (`scan_repo.py`,
+  `tag_superseded.py`, the rl-betfair AGENTS/skills edits, the `superseded` tag) preserved.
+- **2026-06-06 → `08145d5`** initial vendor (empty vault).
 
 ## What was copied (the machine)
 - `scripts/` — the deterministic engine (`wiki_tool.py` + siblings: `projection`,

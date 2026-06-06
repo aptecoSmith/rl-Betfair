@@ -28,7 +28,10 @@ touched.
    printed — `Read` that file directly; `query`/`sources` return metadata, not content.** Ground each
    claim with `python scripts/wiki_tool.py claim-add --note <note> --source <sid> --quote "<verbatim
    span>" --text "<claim>" --asserted-by model:<name>`. Cross-link into a hub.
-4. **Finalize:** `python scripts/wiki_tool.py finalize-ingest`. This is the gate.
+4. **Finalize:** `python scripts/wiki_tool.py finalize-ingest`. This is the gate — **strict by default**,
+   so it blocks the commit on any ERROR (including the **under-extraction** and **claimless** gates), and
+   a source can't be marked done while it's summarised or ungrounded. (`--no-strict` is a deliberate
+   override for genuine exceptions only.)
 5. **Confirm + repeat:** `python scripts/batch.py done <src-id>` (it refuses if no note cites the
    source yet), then back to step 2. `python scripts/batch.py status` shows % accounted and the next
    item.

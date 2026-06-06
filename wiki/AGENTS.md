@@ -164,8 +164,12 @@ say where. Append-only — never rewrite it.
 `init · doctor · register · build · validate · connectivity · search · source-check · ingest-log · log ·
 scan · finalize-ingest · stamp-ids · claim-add · claims-lint · relations · project · query · dialog ·
 verify · view · coverage · rollback`. Run `python scripts/wiki_tool.py <cmd> --help`.
-- **`coverage`** — substance-aware extraction-quality gate (flags page-padding / thin stubs; the floor
-  is a *floor, never a target* — extract per concept/finding, never per page).
+- **`coverage`** — substance/provenance extraction-quality gate. **Blocks** `finalize-ingest`
+  (strict-by-default; `--no-strict` to override) on two ERRORs: **under-extraction** (substantive
+  notes + grounded claims below the source's real size — words/200 for markdown, pages/slides/rows
+  for binaries) and **claimless** (a substantive `concept`/`entity` note with 0 claims). Also WARNs
+  on page-padding / thin stubs. The cure is the `extract` skill — a note per concept/finding and a
+  claim per assertion; the floor is a *floor, never a target*.
 - **`rollback`** — undo an ingestion (revert/reset the finalize commit; `--list` to choose,
   `--last`/`--to <hash>`). Note: this wiki shares rl-betfair's git, so each `finalize-ingest` is a real
   rl-betfair commit; `rollback --last` only undoes a commit whose tip is that ingest.
