@@ -14,6 +14,10 @@ The ledger lives in `.runtime/batch/<name>.json` (machine-local). A source is on
 once real notes cite it (`wiki_tool.coverage_map`), so progress reflects compiled knowledge, not files
 touched.
 
+> **rl-betfair:** the repo's markdown corpus is already planned into the ledger named **`repo-md`**
+> (by `scripts/scan_repo.py`). Always pass `--name repo-md` to the commands below — without it they use
+> the empty `default` ledger and report "nothing pending". You do **not** re-run `plan` for it.
+
 ## Loop
 1. **Plan once:** `python scripts/batch.py plan "<folder>"` - registers every doc under the folder
    (reference-not-copy) and queues it. Re-running is safe; finished sources are never re-queued.

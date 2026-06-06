@@ -47,10 +47,17 @@ rl-betfair knowledge enters the wiki two ways:
 1. **Repo-scan (bulk — the rl-betfair corpus).** `python scripts/scan_repo.py` walks the rl-betfair
    tree (`plans/**/*.md`, `docs/**/*.md`, and root knowledge docs: `CLAUDE.md`, `genes_census.md`,
    `plans/EXPERIMENTS.md`, `plans/EXPLORATIONS.md`), **registers each as a source** (referenced in
-   place — the files stay in the repo, never copied), and queues them for the **`batch`** skill. Then
-   work the queue one source at a time. Scope is markdown knowledge; ingesting `.py` code is a later
-   option. `scan_repo.py` is rl-betfair's own thin wrapper over the engine's `register` + `batch` —
-   see `python scripts/scan_repo.py --help`.
+   place — the files stay in the repo, never copied), and queues them into a `batch` ledger named
+   **`repo-md`**. Work that queue with the **batch script** — which is `scripts/batch.py`, **NOT** a
+   `wiki_tool` subcommand — one source at a time:
+   ```
+   python scripts/batch.py --name repo-md status        # progress + the next source
+   python scripts/batch.py --name repo-md next          # claim one → ingest (extract/ingest skill)
+   python scripts/wiki_tool.py finalize-ingest          # the gate (commits the chunk)
+   python scripts/batch.py --name repo-md done <src-id> # after a note cites it
+   ```
+   Scope is markdown knowledge; ingesting `.py` code is a later option. `scan_repo.py` is rl-betfair's
+   own thin wrapper over the engine's `register` + `batch` — see `python scripts/scan_repo.py --help`.
 2. **Inbox drop (external ML docs you find).** The inbox is for **outside** material — an ML paper, a
    blog post, a vendor doc. Drop a file into `inbox/pending/Files/`, a URL into `inbox/pending/urls.md`,
    or a web-clip into `Clippings/`, then ingest via the `ingest` skill; `finalize-ingest` moves it to

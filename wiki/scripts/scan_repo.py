@@ -107,8 +107,10 @@ def main(argv=None):
           f"(.runtime/batch/{args.name}.json, gitignored)")
     print(f"batch '{args.name}': {s['total']} total, {s['pending']} pending, "
           f"{s['done']} done, {s['skipped']} skipped")
-    print("next: compile the queue via the `batch` skill - "
-          "`batch status` (reconcile) / `batch next` (claim one) -> ingest -> finalize-ingest.")
+    print("next: compile the queue (the `batch` skill - it is scripts/batch.py, NOT a wiki_tool subcommand):")
+    print(f"  python scripts/batch.py --name {args.name} status        # progress + the next source")
+    print(f"  python scripts/batch.py --name {args.name} next          # claim one -> ingest -> finalize-ingest")
+    print(f"  python scripts/batch.py --name {args.name} done <src-id> # after a note cites it")
     return 0
 
 
