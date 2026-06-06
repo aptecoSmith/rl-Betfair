@@ -119,6 +119,12 @@ registry/smdc_*.log
 registry/smdc_*.txt
 registry/pbt_*/
 registry/pbt_*.log
+# Tick-Tock era run dirs (GB-scale cohort output) + logs. The tick|tock eras
+# write here (tt_tock_NNN per the manual cycle; tick_tock_* for the shared
+# autonomous-loop dir). Same convention as pbt_*: artifacts, never source.
+registry/tt_tock_*/
+registry/tick_tock_*/
+registry/tt_*.log
 
 # Stray top-level archive dirs (registry/archive_* is already covered above)
 registry_archive_*/
