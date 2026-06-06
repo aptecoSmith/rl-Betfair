@@ -497,6 +497,7 @@ def _evaluate_agents_on_monitor_days(
     use_direction_predictor: bool,
     predictor_lean_obs: bool,
     predictor_p_win_back_threshold: float,
+    predictor_p_win_back_max_threshold: float = 1.0,
     predictor_p_win_lay_threshold: float,
     direction_gate_enabled: bool,
     race_confidence_threshold: float,
