@@ -7,11 +7,19 @@ It is self-contained: the knowledge versions with the code, no cross-repo depend
 | | |
 |---|---|
 | **Source repo** | `../llm-wiki-v3` (operator's repo, sibling checkout) |
-| **Source commit** | `11cf011ce60225a6036ce90626980444dcf375de` |
+| **Source commit** | `7873a29feb2582a9afeb34087be9fddac986aadc` |
 | **Copied on** | 2026-06-06 (initial copy `08145d5`); synced to `11cf011` 2026-06-06 |
 | **Design / decision** | `plans/memory-improvements/{purpose,current_state,design}.md`, `_kickoff.md` |
 
 ## Sync history
+- **2026-06-07 → `7873a29`** (pre-commit quality-gate hook + `gate` command). Ported the read-only
+  **`gate`** command into `wiki/scripts/wiki_tool.py` (validate + connectivity + claims-lint + coverage;
+  exit 1 on any ERROR — the gates even outside `finalize-ingest`). Installed an **adapted repo-root
+  `.githooks/pre-commit`** (rl-betfair, not `wiki/.githooks`): it greps `wiki/(shared|personal)/` +
+  `wiki/**/*.claims.jsonl` so only wiki-note commits run the gate (code/training commits are
+  untouched), and calls `wiki/scripts/wiki_tool.py gate`. Activated with `git config core.hooksPath
+  .githooks` (local, per-clone). Did NOT port upstream's `cmd_init` hook auto-install (it assumes
+  wiki == repo root); skipped the upstream test. Override a flagged commit with `git commit --no-verify`.
 - **2026-06-07 — checked `5ad25e4`, no port.** Upstream `11cf011..5ad25e4` was vault *content*
   only (an ingest + relocating their source docs into `inbox/pending/Files`); the engine, skills,
   schema contracts, templates, MCP and extractors are byte-identical to `11cf011`. The inbox-drop

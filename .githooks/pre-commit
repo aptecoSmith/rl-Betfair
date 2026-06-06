@@ -1,0 +1,13 @@
+#!/bin/sh
+# Wiki quality gate — vendored from llm-wiki-v3 @7873a29, adapted for the wiki-as-subdir layout.
+# Blocks a commit that would introduce under-extracted, claimless, or invalid wiki notes. Runs ONLY
+# when the commit touches wiki notes (wiki/shared/, wiki/personal/, or a wiki .claims.jsonl sidecar),
+# so rl-betfair code/training commits are unaffected. Override a genuine exception: git commit --no-verify
+if git diff --cached --name-only | grep -qE '^wiki/(shared|personal)/|^wiki/.*\.claims\.jsonl$'; then
+    PY=".venv/Scripts/python.exe"
+    [ -x "$PY" ] || PY=".venv/bin/python"
+    [ -x "$PY" ] || PY="python"
+    "$PY" wiki/scripts/wiki_tool.py gate
+    exit $?
+fi
+exit 0

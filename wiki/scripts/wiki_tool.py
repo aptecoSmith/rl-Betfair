@@ -2206,6 +2206,25 @@ def cmd_rollback(args):
     return 0
 
 
+def cmd_gate(args):
+    """Read-only quality gate: validate + connectivity + claims-lint + coverage; exit non-zero on any
+    ERROR. The pre-commit hook calls this so a bad ingest can't be committed even outside
+    finalize-ingest. No side effects. Override a genuine exception with `git commit --no-verify`."""
+    notes = find_notes()
+    reg = load_registry()
+    findings = (validate(notes, load_vocab(), reg)
+                + connectivity(notes)
+                + lint_claims(notes, reg)
+                + coverage(notes, reg)[0])
+    _print_findings(findings)
+    errors = [f for f in findings if f[0] == ERROR]
+    if errors:
+        print(f"gate FAILED: {len(errors)} error(s) - fix them, or `git commit --no-verify` to override.")
+        return 1
+    print("gate: clean")
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -2364,6 +2383,10 @@ def build_parser():
                    help="block the commit on any ERROR finding (default on; use --no-strict to override)")
     s.add_argument("--push", action="store_true"); s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_finalize)
+
+    s = sub.add_parser("gate",
+                       help="read-only quality gate (validate+connectivity+claims-lint+coverage); exits 1 on ERROR")
+    s.set_defaults(func=cmd_gate)
     return p
 
 
