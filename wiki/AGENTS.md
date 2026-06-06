@@ -69,7 +69,10 @@ note per campaign, `claims` carrying the numbers + their source run, `dialog` en
 
 ## Skills (repeatable workflows)
 Each skill is a short playbook in `skills/<name>/SKILL.md`. **When a request matches one, open that
-file and follow it** — don't improvise the workflow.
+file and follow it** — don't improvise the workflow. These are **playbooks to READ** (`Read` the
+SKILL.md, then run the `wiki_tool.py` / `batch.py` commands it lists) — **NOT** Claude Code skills to
+invoke. Do **not** call the Skill tool on them (Claude Code may surface them from `skills/` but blocks
+invocation; that's expected — just read and follow).
 
 | Skill | Use it when… |
 |---|---|
