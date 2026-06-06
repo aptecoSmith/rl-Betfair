@@ -83,6 +83,7 @@ tests/_evaluate_tmp_data/
 
 # Claude Code runtime / per-machine settings
 .claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
 .claude/settings.local.json
 .claude/worktrees/
 frontend/.claude/
