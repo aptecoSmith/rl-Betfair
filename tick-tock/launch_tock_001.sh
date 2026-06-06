@@ -9,6 +9,12 @@
 #     5-gen era, not a continuation of the Tick),
 #   * --bc-pretrain-steps is DROPPED on purpose: the seed bc_pretrain_steps=500
 #     carries it, so the tock's rows PROVE the structural seed landed era-wide.
+#   * predictor_lean_obs=false is seeded (structural, era-wide) so EVERY agent
+#     uses the full-obs layout. BC clones a layout-specific oracle and only the
+#     FULL-obs oracle is scanned (obs_dim 2254); a lean-obs agent (574) finds no
+#     matching oracle and SKIPS BC. Pinning full obs makes "BC on era-wide"
+#     actually true. (Lean-vs-full WITH BC on both is deferred until the
+#     per-layout oracle cache lands — see the spawned task.)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=.venv/Scripts/python.exe
@@ -35,6 +41,7 @@ mkdir -p "$DIR"
   --era-type tock --hypothesis-id hypothesis_001 --era-id tt_tock_001 \
   --seed-gene use_direction_predictor=true \
   --seed-gene direction_gate_enabled=true \
+  --seed-gene predictor_lean_obs=false \
   --seed-gene direction_gate_threshold=0.25:0.40 \
   --seed-gene direction_gate_warmup_eps=8:16 \
   --seed-gene stop_loss_pnl_threshold=0.18:0.26 \

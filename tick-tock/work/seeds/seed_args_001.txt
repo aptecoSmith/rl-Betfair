@@ -1,5 +1,6 @@
 --seed-gene use_direction_predictor=true
 --seed-gene direction_gate_enabled=true
+--seed-gene predictor_lean_obs=false
 --seed-gene direction_gate_threshold=0.25:0.40
 --seed-gene direction_gate_warmup_eps=8:16
 --seed-gene stop_loss_pnl_threshold=0.18:0.26

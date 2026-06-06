@@ -65,6 +65,7 @@ drift, rather than pushing it to the recipe-synth's ~0.28.
 | `direction_gate_warmup_eps` | non-struct int | `8:16` | ✓ | TOP locked driver +0.31 (range [0,20]) |
 | `stop_loss_pnl_threshold` | non-struct float | `0.18:0.26` | ✓ | moderate bail (range [0,0.30]) |
 | `bc_pretrain_steps` | structural int | `=500` | era-wide pin | turns BC ON — see contradiction below |
+| `predictor_lean_obs` | structural bool | `=false` | era-wide pin | full obs — the only layout with a BC oracle (see below) |
 | `bc_learning_rate` | non-struct log-float | `5e-4:1e-3` | ✓ | top maturation driver +0.41 (range [1e-5,1e-3]) |
 
 Everything else: `--enable-all-genes` full-sample (the 4 non-structural seeds
@@ -91,6 +92,25 @@ BC step actually runs on fresh blood, and seed `bc_learning_rate=5e-4:1e-3`
   elites/offspring skip it — `project_pbt_breeding`), so the seeded high-LR BC
   trains each fresh-blood lineage's maturation behaviour, and PBT carries the
   trained weights forward. The R1 refill re-seeds BC fresh blood every gen.
+
+## Why predictor_lean_obs is pinned full (BC ⇄ obs-layout coupling)
+
+Caught during the first launch (gen-0 log): with `predictor_lean_obs` left free,
+~half the fresh blood drew the LEAN obs layout (obs_dim ≈ 574) and **skipped BC**
+— "BC oracle obs_dim mismatch (cache 2254 vs caller 574)". BC clones a
+**layout-specific** oracle, and only the FULL-obs oracle (obs_dim 2254) has been
+scanned. So "BC on era-wide" is only true if every agent uses the full-obs
+layout. `bc_pretrain_steps=500` makes BC *requested* era-wide; pinning
+`predictor_lean_obs=false` makes it *runnable* era-wide. This isn't hiding a bug
+— BC is inherently coupled to an obs layout, so a BC-on hypothesis is implicitly
+a full-obs hypothesis.
+
+Note the analysis's "full obs > lean" (locked ρ=−0.30, maturation ρ=−0.26) is
+itself **confounded** by exactly this: in the Tick only full-obs agents ever ran
+BC. So pinning full loses no clean signal. The genuine lean-vs-full question
+(BC on BOTH layouts) is deferred to a future hypothesis once the **per-layout
+oracle cache** lands (queued as a spawned task: key `oracle_cache_v2` by obs
+layout so lean + full coexist).
 
 ## Prediction (falsifiable, judged on held-out sealed-7)
 
