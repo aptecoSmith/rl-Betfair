@@ -55,6 +55,7 @@ from training_v2.cohort.genes import (
     assert_in_range,
     crossover,
     mutate,
+    parse_seed_gene,
     sample_genes,
 )
 from training_v2.cohort.pbt import (
@@ -862,6 +863,7 @@ def run_cohort(
     event_emitter: Callable[[dict], None] | None = None,
     reward_overrides: dict | None = None,
     enabled_set: frozenset[str] = frozenset(),
+    seed_bands: "dict[str, tuple] | None" = None,
     batched: bool = False,
     parallel_agents: int = 0,
     maturation_bonus_weight: float = 0.0,
@@ -1118,7 +1120,9 @@ def run_cohort(
         # Generation 0: n_agents fresh-blood lineages, all in tier 1 (the
         # rookie division). The pipeline fills on later gens as winners
         # promote to unseen rotations.
-        pbt_specs = init_pbt_population(rng, pbt_config, enabled_set=enabled_set)
+        pbt_specs = init_pbt_population(
+            rng, pbt_config, enabled_set=enabled_set, seed_bands=seed_bands,
+        )
         cohort = [s.genes for s in pbt_specs]
         parent_ids = [(s.parent_model_id, None) for s in pbt_specs]
     else:
@@ -1997,6 +2001,7 @@ def run_cohort(
                     pbt_specs, _frozen = breed_pbt(
                         _pbt_pairs_this_gen, rng, pbt_config,
                         score_fn=_pbt_score, enabled_set=enabled_set,
+                        seed_bands=seed_bands,
                     )
                     pbt_hall_of_fame.extend(_frozen)
                     cohort = [s.genes for s in pbt_specs]
@@ -2646,6 +2651,69 @@ def _parse_enabled_genes(items: list[str]) -> frozenset[str]:
     return frozenset(enabled)
 
 
+def _resolve_seed_bands(
+    seed_gene_args: list[str],
+    *,
+    breeding: str,
+    reward_overrides: dict | None,
+    enabled_set: frozenset[str],
+) -> "tuple[dict, frozenset[str]]":
+    """Tick-Tock piece A: resolve ``--seed-gene`` into a band map + wiring.
+
+    Parse each ``--seed-gene NAME=LO:HI`` (via
+    :func:`training_v2.cohort.genes.parse_seed_gene`) into a
+    ``{name: (lo, hi)}`` map, then return ``(seed_bands, enabled_set')`` where
+    ``enabled_set'`` has every non-structural seeded gene (a ``PHASE5_GENE_NAMES``
+    member) AUTO-ENABLED — so the breed step drifts it from the seed instead
+    of resetting a disabled gene to its default. Structural + legacy genes
+    need no enabling (frozen-inherited / always-evolved).
+
+    Raises on the three foot-guns:
+      * ``--seed-gene`` without ``--breeding pbt`` (the GA path ignores it);
+      * a seed that also appears in ``--reward-overrides`` (one source of
+        truth — covers structural/legacy seeds the ``enabled_set ∩ RO`` guard
+        in :func:`main` would miss);
+      * seeding ``direction_gate_enabled=true`` without
+        ``use_direction_predictor=true`` (the env's gate⇄predictor coupling).
+
+    No ``--seed-gene`` ⇒ ``({}, enabled_set)`` unchanged (a full-width Tick).
+    Extracted (vs inlined in :func:`main`) so the auto-enable + guards are
+    unit-tested without launching ``run_cohort`` — the canonical
+    ``_resolve_<knob>`` + both-sources-test pattern from CLAUDE.md.
+    """
+    seed_bands: dict = {}
+    for spec in (seed_gene_args or []):
+        name, band = parse_seed_gene(spec)
+        if name in seed_bands:
+            raise ValueError(f"--seed-gene {name} specified more than once")
+        seed_bands[name] = band
+    if not seed_bands:
+        return {}, enabled_set
+    if breeding != "pbt":
+        raise SystemExit(
+            "--seed-gene requires --breeding pbt (the band-seed enters via "
+            "the PBT fresh-blood funnel; the gene-only GA path ignores it).",
+        )
+    collision = set(seed_bands) & set(reward_overrides or {})
+    if collision:
+        raise ValueError(
+            "Cannot combine --seed-gene with --reward-overrides for the same "
+            f"gene name(s): {sorted(collision)}. One source of truth per knob "
+            "per run.",
+        )
+    gate = seed_bands.get("direction_gate_enabled")
+    if gate is not None and bool(gate[0]):
+        pred = seed_bands.get("use_direction_predictor")
+        if pred is None or not bool(pred[0]):
+            raise ValueError(
+                "--seed-gene direction_gate_enabled=true requires --seed-gene "
+                "use_direction_predictor=true (the env refuses the direction "
+                "gate without the predictor signal in obs).",
+            )
+    auto_enable = {n for n in seed_bands if n in PHASE5_GENE_NAMES}
+    return seed_bands, (enabled_set | frozenset(auto_enable))
+
+
 def _parse_reward_overrides(items: list[str]) -> dict:
     """Parse a list of ``key=value`` strings into a dict.
 
@@ -2826,6 +2894,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "preserved. Mutually exclusive with --reward-overrides for any "
             "enabled gene name (same one-source-of-truth rule as "
             "--enable-gene)."
+        ),
+    )
+    p.add_argument(
+        "--seed-gene", action="append", default=[], metavar="NAME=LO:HI",
+        help=(
+            "Tick-Tock band-seed (repeatable). Seeds a 'Tock' exploit era's "
+            "fresh blood near a hypothesised recipe: NAME=LO:HI draws the gene "
+            "uniformly inside [LO,HI] for every fresh-blood agent (NAME=VALUE "
+            "is a point pin). Bool/categorical genes take a single value "
+            "(use_direction_predictor=true, architecture=transformer). "
+            "Non-structural seeded genes are AUTO-ENABLED (added to the "
+            "enabled set) so breeding drifts them ±perturb-frac from the seed; "
+            "structural genes (architecture, use_direction_predictor, "
+            "direction_gate_enabled, bc_pretrain_steps, ...) are frozen "
+            "era-wide. Seeding direction_gate_enabled=true requires "
+            "use_direction_predictor=true (env coupling). One source of truth: "
+            "cannot also --reward-overrides the same gene. Requires "
+            "--breeding pbt. No --seed-gene = a full-width 'Tick' "
+            "(byte-identical to before)."
         ),
     )
     p.add_argument(
@@ -3451,6 +3538,27 @@ def main(argv: list[str] | None = None) -> int:
         enabled_set = enabled_set | (
             frozenset(PHASE5_GENE_NAMES) - _LABEL_STEM_PINNED
         )
+
+    # ── Tick-Tock band-seed (piece A) ───────────────────────────────────
+    # Parse --seed-gene into a {name:(lo,hi)} map + AUTO-ENABLE non-structural
+    # seeds, collision-guard vs --reward-overrides, enforce the gate⇄predictor
+    # coupling, require --breeding pbt. Extracted as a `_resolve_<knob>` helper
+    # (CLAUDE.md Path-A foot-gun) so the wiring is unit-tested in isolation.
+    seed_bands, enabled_set = _resolve_seed_bands(
+        args.seed_gene, breeding=args.breeding,
+        reward_overrides=reward_overrides, enabled_set=enabled_set,
+    )
+    if seed_bands:
+        _auto = sorted(n for n in seed_bands if n in PHASE5_GENE_NAMES)
+        if _auto:
+            logger.info(
+                "Tick-Tock: auto-enabled seeded non-structural genes %s "
+                "(so breeding drifts them from the seed)", _auto,
+            )
+        logger.info(
+            "Tick-Tock band-seed: %s", dict(sorted(seed_bands.items())),
+        )
+
     # Mutual-exclusion guard. Operator must pick one source of truth
     # per knob per run: either evolve the gene per-agent
     # (``--enable-gene``) or fix it cohort-wide
@@ -3660,6 +3768,7 @@ def main(argv: list[str] | None = None) -> int:
             event_emitter=emitter,
             reward_overrides=reward_overrides or None,
             enabled_set=enabled_set,
+            seed_bands=seed_bands or None,
             batched=bool(args.batched),
             parallel_agents=parallel_agents,
             maturation_bonus_weight=float(args.maturation_bonus_weight),

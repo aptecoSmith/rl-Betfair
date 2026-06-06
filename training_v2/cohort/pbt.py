@@ -262,8 +262,11 @@ def make_offspring(
 
 def _fresh(
     rng: random.Random, enabled_set: frozenset[str], tier: int = 1,
+    *, seed_bands: "dict[str, tuple] | None" = None,
 ) -> PbtAgentSpec:
-    genes = sample_fresh_blood_genes(rng, enabled_set=enabled_set)
+    genes = sample_fresh_blood_genes(
+        rng, enabled_set=enabled_set, seed_bands=seed_bands,
+    )
     return PbtAgentSpec(
         genes=genes,
         tier=tier,
@@ -280,14 +283,21 @@ def init_pbt_population(
     config: PbtConfig,
     *,
     enabled_set: frozenset[str] = frozenset(),
+    seed_bands: "dict[str, tuple] | None" = None,
 ) -> list[PbtAgentSpec]:
     """Generation 0: ``n_agents`` fresh-blood lineages, all in tier 1.
 
     (The trace's "Gen 1: 30 fresh, all rotation 1" — the pipeline fills on
     subsequent generations as winners promote.)
+
+    ``seed_bands`` (Tick-Tock piece A) band-seeds the fresh blood — a "Tock"
+    exploit era. ``None`` ⇒ a full-width "Tick" (byte-identical to before).
     """
     config.validate()
-    return [_fresh(rng, enabled_set) for _ in range(config.n_agents)]
+    return [
+        _fresh(rng, enabled_set, seed_bands=seed_bands)
+        for _ in range(config.n_agents)
+    ]
 
 
 def _rank(
@@ -305,6 +315,7 @@ def breed_pbt(
     *,
     score_fn: Callable[[object], float],
     enabled_set: frozenset[str] = frozenset(),
+    seed_bands: "dict[str, tuple] | None" = None,
 ) -> tuple[list[PbtAgentSpec], list[tuple[PbtAgentSpec, object]]]:
     """Promote / breed / refill one generation of the ladder.
 
@@ -401,9 +412,13 @@ def breed_pbt(
         next_specs.extend(_promote(r1_winners, config.r2_size, next_tier=2))
 
     # R1 ← fresh blood for every remaining slot (absorbs pipeline slack).
+    # In a Tock era ``seed_bands`` band-seeds this rookie injection so the
+    # hypothesis keeps entering the population every generation (offspring of
+    # earlier-gen seeded R1 then drift it via make_offspring — see the docstring
+    # in :func:`sample_fresh_blood_genes`). ``None`` ⇒ a full-width Tick.
     n_fresh = config.n_agents - len(next_specs)
     for _ in range(max(0, n_fresh)):
-        next_specs.append(_fresh(rng, enabled_set))
+        next_specs.append(_fresh(rng, enabled_set, seed_bands=seed_bands))
 
     # If we somehow over-filled (promote counts too large for n_agents),
     # truncate the lowest tier's tail — defensive; validate() guards the

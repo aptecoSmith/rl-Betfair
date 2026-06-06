@@ -1034,6 +1034,7 @@ def _sample_architecture_field(rng: random.Random, field_name: str):
 def sample_fresh_blood_genes(
     rng: random.Random,
     enabled_set: frozenset[str] = frozenset(),
+    seed_bands: "dict[str, tuple] | None" = None,
 ) -> CohortGenes:
     """PBT fresh blood (pbt-breeding Step 1b/2, HC#9).
 
@@ -1049,12 +1050,32 @@ def sample_fresh_blood_genes(
     the breed step (:func:`make_offspring`) perturbs only non-structural
     genes, because warm-start weight inheritance needs matching weight
     shapes (HC#10).
+
+    **Tick-Tock band-seed (piece A).** ``seed_bands`` is a
+    ``{gene_name: (lo, hi)}`` map (from the runner's ``--seed-gene
+    NAME=LO:HI``) that seeds a "Tock" exploit era's fresh blood near a
+    hypothesised recipe. Each seeded gene is drawn INSIDE its band by
+    :func:`draw_seeded_gene` (point pin when ``lo == hi``), respecting
+    type (bool / categorical / int / log-uniform / uniform). A seeded
+    NON-structural gene must ALSO be in ``enabled_set`` (the runner
+    auto-adds it) so the breed step perturbs it instead of resetting it to
+    default — that is the *drift* the warm-start relies on. A seeded
+    STRUCTURAL gene is inherited verbatim by breeding ⇒ pinned era-wide.
+    Seeding the gate ON requires the predictor ON (env coupling; raised
+    here as a backstop to the runner's parser check). ``seed_bands=None``
+    (or empty) is **BYTE-IDENTICAL** to the pre-Tick-Tock sampler at the
+    same seed — the unseeded branches below run the identical statements
+    and consume the identical RNG draws.
     """
+    seed_bands = seed_bands or {}
     # Sample the architecture FIRST so hidden_size can be conditioned on it:
     # an LSTM may go large (cheap per tick on CPU); a transformer's d_model
     # is capped at 256 (its per-tick encoder makes a big d_model gate whole
-    # generations on the CPU-only multiprocess path).
-    arch = _sample_architecture_field(rng, "architecture")
+    # generations on the CPU-only multiprocess path). A seed point-pins it.
+    if "architecture" in seed_bands:
+        arch = draw_seeded_gene(rng, "architecture", seed_bands["architecture"])
+    else:
+        arch = _sample_architecture_field(rng, "architecture")
     hidden_choices = (
         HIDDEN_SIZE_LSTM_SAMPLE if arch == "lstm"
         else HIDDEN_SIZE_TRANSFORMER_SAMPLE
@@ -1062,9 +1083,12 @@ def sample_fresh_blood_genes(
     # Direction mechanism — COUPLED (gate ⇒ predictor). The env raises if the
     # gate is on without the predictor, so only draw gate=True when the
     # predictor is on. This coupling is INDEPENDENT of the threshold's value.
+    # A seed overrides the random draw (and must keep the coupling — a tock
+    # seeding gate=True must also seed predictor=True).
     #
     # ``direction_gate_threshold`` value precedence (2026-06-06 reconciliation
     # for --enable-all-genes):
+    #   * gene SEEDED → in-band draw via the generic ``seed_bands`` branch.
     #   * gene ENABLED (in enabled_set) → sample FREELY from its PHASE5 range
     #     via the generic PHASE5 branch below (gate-off agents ignore it;
     #     gate-on agents get a real in-range threshold). The hard-coded
@@ -1073,8 +1097,26 @@ def sample_fresh_blood_genes(
     #     strict, actually-filtering setting) when the gate is on, else 0.5
     #     (the no-op floor, unread). This preserves byte-identity with
     #     pre-promotion fresh blood.
-    use_dir = bool(rng.random() < 0.5)
-    gate_on = bool(use_dir and rng.random() < 0.5)
+    if "use_direction_predictor" in seed_bands:
+        use_dir = draw_seeded_gene(
+            rng, "use_direction_predictor",
+            seed_bands["use_direction_predictor"],
+        )
+    else:
+        use_dir = bool(rng.random() < 0.5)
+    if "direction_gate_enabled" in seed_bands:
+        gate_on = draw_seeded_gene(
+            rng, "direction_gate_enabled",
+            seed_bands["direction_gate_enabled"],
+        )
+        if gate_on and not use_dir:
+            raise ValueError(
+                "seeding direction_gate_enabled=True requires "
+                "use_direction_predictor=True (the env refuses the gate "
+                "without the predictor signal)",
+            )
+    else:
+        gate_on = bool(use_dir and rng.random() < 0.5)
     gate_threshold = DIRECTION_GATE_THRESHOLD_ON if gate_on else 0.5
     threshold_enabled = "direction_gate_threshold" in enabled_set
     kwargs: dict = {}
@@ -1082,11 +1124,24 @@ def sample_fresh_blood_genes(
         if f.name == "architecture":
             kwargs[f.name] = arch
         elif f.name == "hidden_size":
-            kwargs[f.name] = int(rng.choice(hidden_choices))
+            if "hidden_size" in seed_bands:
+                kwargs[f.name] = draw_seeded_gene(
+                    rng, "hidden_size", seed_bands["hidden_size"],
+                )
+            else:
+                kwargs[f.name] = int(rng.choice(hidden_choices))
         elif f.name == "use_direction_predictor":
             kwargs[f.name] = use_dir
         elif f.name == "direction_gate_enabled":
             kwargs[f.name] = gate_on
+        elif f.name in seed_bands:
+            # Generic seeded draw — wins over the coupling default and the
+            # PHASE5-disabled default below. Covers direction_gate_threshold
+            # and every other PHASE5 / structural / legacy gene a tock pins.
+            # (architecture / hidden_size / use_direction_predictor /
+            # direction_gate_enabled are handled by their dedicated branches
+            # above so arch-conditioned sizing + the coupling stay correct.)
+            kwargs[f.name] = draw_seeded_gene(rng, f.name, seed_bands[f.name])
         elif f.name == "direction_gate_threshold" and not threshold_enabled:
             # Disabled → coupling default (byte-identical to pre-promotion).
             # When enabled, fall through to the PHASE5 branch below so the
@@ -1099,6 +1154,186 @@ def sample_fresh_blood_genes(
         else:
             kwargs[f.name] = _sample_field(rng, f.name)
     return CohortGenes(**kwargs)
+
+
+# ── Tick-Tock band-seed (piece A): parse + draw ────────────────────────────
+# The keystone of a "Tock" exploit era. The runner's ``--seed-gene NAME=SPEC``
+# parses (here) into a ``{name: (lo, hi)}`` band map that
+# :func:`sample_fresh_blood_genes` draws from. Gene-type knowledge lives HERE
+# (the single source of truth) so the runner stays a thin wiring layer.
+
+#: Bool-valued genes — a seed must be a point pin (``true`` / ``false``).
+_BOOL_GENE_NAMES: frozenset[str] = frozenset({
+    "use_direction_predictor", "direction_gate_enabled", "predictor_lean_obs",
+})
+#: String-categorical genes → their valid choice tuple (seed = point pin).
+_STR_CHOICE_GENES: dict[str, tuple] = {
+    "architecture": ARCHITECTURE_CHOICES,
+    "transformer_pos_encoding": TRANSFORMER_POS_ENCODING_CHOICES,
+}
+#: Integer-categorical genes → valid choice tuple. A band keeps every choice
+#: inside ``[lo, hi]``; a point pin keeps the one matching choice. The VALID
+#: (not SAMPLE) set is used so a seed can reach a value fresh blood wouldn't
+#: normally draw (e.g. a warm-loadable big transformer), mirroring how
+#: ``assert_in_range`` validates against the wider VALID sets.
+_INT_CHOICE_GENES: dict[str, tuple] = {
+    "mini_batch_size": MINI_BATCH_SIZE_CHOICES,
+    "hidden_size": HIDDEN_SIZE_VALID,
+    "transformer_depth": TRANSFORMER_DEPTH_CHOICES,
+    "transformer_heads": TRANSFORMER_HEADS_CHOICES,
+    "transformer_ctx_ticks": TRANSFORMER_CTX_TICKS_CHOICES,
+    "transformer_ffn_mult": TRANSFORMER_FFN_MULT_CHOICES,
+    "bc_pretrain_steps": BC_PRETRAIN_STEPS_SAMPLE,
+    "close_walk_ticks": CLOSE_WALK_TICKS_SAMPLE,
+}
+#: Continuous-range genes (the 5 legacy uniform/log floats). The PHASE5
+#: floats/ints come from ``_PHASE5_RANGES``; see :func:`gene_seed_range`.
+_LEGACY_FLOAT_RANGES: dict[str, tuple] = {
+    "learning_rate": LEARNING_RATE_RANGE,
+    "entropy_coeff": ENTROPY_COEFF_RANGE,
+    "clip_range": CLIP_RANGE_RANGE,
+    "gae_lambda": GAE_LAMBDA_RANGE,
+    "value_coeff": VALUE_COEFF_RANGE,
+}
+
+
+def gene_seed_range(name: str) -> "tuple[float, float] | None":
+    """Declared ``(lo, hi)`` range for a continuous / int-range gene, else
+    ``None`` (the gene is bool / categorical, or has no declared range — e.g.
+    ``force_close_before_off_seconds``, validated only for non-negativity)."""
+    if name in _LEGACY_FLOAT_RANGES:
+        return _LEGACY_FLOAT_RANGES[name]
+    if name in _PHASE5_RANGES:
+        return _PHASE5_RANGES[name]
+    return None
+
+
+def draw_seeded_gene(rng: random.Random, name: str, band: tuple):
+    """Draw one fresh-blood value for a seeded gene within ``band = (lo, hi)``.
+
+    Point pin when ``lo == hi``. Type-aware, matching how the gene is
+    normally sampled: bool / str-categorical → the pinned value (parser
+    guarantees a point); int-categorical → a uniform choice inside the band;
+    log-uniform float → log-uniform inside the band; PHASE5 int → inclusive
+    ``randint``; everything else → uniform float. A point pin still produces
+    the pinned value (uniform/log/randint all collapse to ``lo`` when
+    ``lo == hi``).
+    """
+    lo, hi = band
+    if name in _BOOL_GENE_NAMES:
+        return bool(lo)
+    if name in _STR_CHOICE_GENES:
+        return str(lo)
+    if name in _INT_CHOICE_GENES:
+        choices = tuple(
+            c for c in _INT_CHOICE_GENES[name] if int(lo) <= c <= int(hi)
+        )
+        return int(rng.choice(choices))
+    if name in _LOG_UNIFORM_FLOATS:
+        return _sample_log_uniform(rng, float(lo), float(hi))
+    if name in _PHASE5_INT_GENES:
+        return int(rng.randint(int(lo), int(hi)))
+    return _sample_uniform(rng, float(lo), float(hi))
+
+
+def _parse_bool_token(name: str, token: str) -> bool:
+    t = token.strip().lower()
+    if t in ("true", "1"):
+        return True
+    if t in ("false", "0"):
+        return False
+    raise ValueError(
+        f"--seed-gene {name}: bool gene expects true/false, got {token!r}",
+    )
+
+
+def parse_seed_gene(arg: str) -> "tuple[str, tuple]":
+    """Parse one ``--seed-gene NAME=SPEC`` into ``(name, band)``.
+
+    ``SPEC`` is either ``LO:HI`` (a band) or a single ``VALUE`` (point pin,
+    ``lo == hi``). Type-aware + validated against the gene's declared range /
+    choices. Raises ``ValueError`` on a malformed spec, unknown gene name, a
+    band outside the declared range, an inverted band, or a bool / categorical
+    gene given a non-point spec — so a typo never silently mis-seeds an era.
+    """
+    if "=" not in arg:
+        raise ValueError(f"--seed-gene expects NAME=SPEC, got {arg!r}")
+    name, _, spec = arg.partition("=")
+    name = name.strip()
+    spec = spec.strip()
+    all_names = {f.name for f in fields(CohortGenes)}
+    if name not in all_names:
+        raise ValueError(
+            f"--seed-gene: unknown gene {name!r}. "
+            f"Valid: {sorted(all_names)}",
+        )
+    is_band = ":" in spec
+    # Bool gene → point pin only.
+    if name in _BOOL_GENE_NAMES:
+        if is_band:
+            raise ValueError(
+                f"--seed-gene {name}: a bool gene takes a single value "
+                f"(true/false), not a band {spec!r}",
+            )
+        b = _parse_bool_token(name, spec)
+        return name, (b, b)
+    # String-categorical gene → point pin to a valid choice.
+    if name in _STR_CHOICE_GENES:
+        if is_band:
+            raise ValueError(
+                f"--seed-gene {name}: a categorical gene takes a single "
+                f"value, not a band {spec!r}",
+            )
+        if spec not in _STR_CHOICE_GENES[name]:
+            raise ValueError(
+                f"--seed-gene {name}={spec!r} is not a valid choice "
+                f"{tuple(_STR_CHOICE_GENES[name])}",
+            )
+        return name, (spec, spec)
+    # Numeric gene (int-categorical / int-range / float).
+    if is_band:
+        lo_s, _, hi_s = spec.partition(":")
+        lo, hi = _parse_seed_num(name, lo_s), _parse_seed_num(name, hi_s)
+    else:
+        lo = hi = _parse_seed_num(name, spec)
+    if lo > hi:
+        raise ValueError(
+            f"--seed-gene {name}: band lo {lo} > hi {hi}",
+        )
+    if name in _INT_CHOICE_GENES:
+        choices = _INT_CHOICE_GENES[name]
+        in_band = [c for c in choices if lo <= c <= hi]
+        if not in_band:
+            raise ValueError(
+                f"--seed-gene {name}=[{lo}, {hi}] contains no valid choice "
+                f"from {tuple(choices)}",
+            )
+        return name, (lo, hi)
+    declared = gene_seed_range(name)
+    if declared is not None:
+        dlo, dhi = declared
+        if lo < dlo or hi > dhi:
+            raise ValueError(
+                f"--seed-gene {name}=[{lo}, {hi}] outside the gene's "
+                f"declared range [{dlo}, {dhi}]",
+            )
+    elif lo < 0:
+        # No declared range (e.g. force_close_before_off_seconds): the only
+        # invariant is non-negativity (assert_in_range backstops it).
+        raise ValueError(
+            f"--seed-gene {name}=[{lo}, {hi}] must be non-negative",
+        )
+    return name, (lo, hi)
+
+
+def _parse_seed_num(name: str, token: str) -> float:
+    token = token.strip()
+    try:
+        return float(token)
+    except ValueError:
+        raise ValueError(
+            f"--seed-gene {name}: cannot parse number {token!r}",
+        ) from None
 
 
 # ── Crossover / mutation ──────────────────────────────────────────────────
