@@ -5,7 +5,7 @@ cloud: shared
 status: draft
 created: 2026-06-06
 updated: 2026-06-06
-tags: [research]
+tags: [research, superseded]
 sources: [src-3f548f]
 aliases: [close signal bonus legacy]
 ---

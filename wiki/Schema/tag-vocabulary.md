@@ -35,7 +35,13 @@ Extend by adding to the lists here — the tool reads the fenced lists below as 
 - meetings
 - lessons
 - dream
+- superseded
 <!-- /context-tags -->
+
+`superseded` is a **lifecycle marker**, not a context: it tags a note that a `supersedes` edge has
+made stale, so the graph can colour stale knowledge distinctly. It is applied deterministically by
+`scripts/tag_superseded.py` (run after ingest) — don't hand-add it; the script derives it from the
+supersedes edges. The note stays readable as the pre-change reference.
 
 ## Privacy
 
