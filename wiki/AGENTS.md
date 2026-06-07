@@ -187,9 +187,12 @@ project · query · dialog · verify · view · coverage · gate · rollback`. R
   --source <id> --term "a,b,c" --reason "…"` records that named candidates are deliberately NOT
   node-worthy (committed to `Schema/entity-skips.jsonl`) so the entity-coverage gate stops flagging
   them. **rl-betfair note:** on dense technical docs `discover` is noisy — it flags acronyms (PPO, EW,
-  WIN, LTP), code refs (`L313`, `DiscreteActionShim`), and sentence-initial words. Node/alias the real
-  entities; batch-`entity-skip` the rest with one reason. (Engine bug? It's vendored — fix upstream, not
-  here.)
+  WIN, LTP), code refs (`L313`, `DiscreteActionShim`), and sentence-initial words. Acronyms are NOT noise
+  — they're connective tissue, so they live in the **glossary** (`shared/glossary/`, hub `[[glossary]]`):
+  when `discover` shows one as EXISTING, **link it** from a citing note (`[[ppo]]`) — that satisfies the
+  gate AND draws the doc↔acronym↔doc edge; for a new acronym, drop a thin stub in `shared/glossary/`
+  first, then link it. `entity-skip` is only for genuine non-entities (code refs, section headers,
+  sentence-initial words). (Filter too noisy? It's vendored — fix upstream, not here.)
 - **`gate`** — runs validate + connectivity + claims-lint + coverage and exits 1 on any ERROR, the same
   gate `finalize-ingest` enforces. Also wired as the repo-root `.githooks/pre-commit` so a light or
   entity-incomplete note can't be committed.
