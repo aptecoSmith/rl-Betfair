@@ -15,6 +15,14 @@
 #     matching oracle and SKIPS BC. Pinning full obs makes "BC on era-wide"
 #     actually true. (Lean-vs-full WITH BC on both is deferred until the
 #     per-layout oracle cache lands — see the spawned task.)
+#   * --exclude-days also drops 2026-05-30..06-05 (the 6 non-sealed parquets
+#     added AFTER the first Tick ran). select_days takes the LAST n_days, so
+#     those newer days shifted the window into dates with NO direction-label
+#     cache (cache stops at 05-19) — the first launch CRASHED at gen-1 on a
+#     missing label cache. Excluding them pins the tock to the Tick's EXACT
+#     pool (ending 05-19): all label+oracle caches present AND a fair same-pool
+#     warm-start comparison. (Using the newer pool would need scanning labels +
+#     oracle for those 6 days AND re-running the Tick on it — a bigger job.)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=.venv/Scripts/python.exe
@@ -26,6 +34,7 @@ mkdir -p "$DIR"
   --breeding pbt --n-agents 16 --generations 5 --days 30 \
   --exclude-days 2026-05-20 2026-05-21 2026-05-22 2026-05-23 2026-05-24 \
                  2026-05-25 2026-05-26 2026-05-27 2026-05-28 2026-05-29 \
+                 2026-05-30 2026-05-31 2026-06-02 2026-06-03 2026-06-04 2026-06-05 \
   --seed 2001 --parallel-agents 16 --device cpu \
   --composite-score-mode locked_weighted --force-close-rate-penalty-weight 20 \
   --big-model-threads 1 --gpu-policy-lane --gpu-lane-max-concurrent 2 \

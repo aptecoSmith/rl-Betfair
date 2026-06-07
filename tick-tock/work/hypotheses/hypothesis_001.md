@@ -112,6 +112,18 @@ BC. So pinning full loses no clean signal. The genuine lean-vs-full question
 oracle cache** lands (queued as a spawned task: key `oracle_cache_v2` by obs
 layout so lean + full coexist).
 
+## Day pool — pinned to the Tick's (same-pool comparison)
+
+The first launch also crashed at gen-1 on a missing direction-label cache: 6
+non-sealed parquets (2026-05-30..06-05) were added to `data/processed` AFTER
+the Tick ran, and `select_days` takes the LAST n_days — so the window shifted
+forward into days with no label cache (the cache stops at 05-19). The tock now
+`--exclude-days` those 6 (plus the sealed-10), pinning it to the Tick's EXACT
+30-day pool (ending 05-19) — which is fully cached AND makes tock-vs-tick a
+fair *same-pool* warm-start comparison (a different pool would confound the
+held-out delta). Using the newer pool would require scanning labels+oracle for
+the 6 days AND re-running the Tick on it — out of scope for this test.
+
 ## Prediction (falsifiable, judged on held-out sealed-7)
 
 At **fc=0** (deploy default), the tock's R3 champions will show:
