@@ -69,6 +69,20 @@ def existing_sealed_days(
     return [d for d in named if (Path(data_dir) / f"{d}.parquet").exists()]
 
 
+def newest_holdout_days(data_dir: Path, n: int) -> list[str]:
+    """The newest ``n`` racing-day parquets in ``data_dir`` — the **sliding**
+    held-out judge (rotation-rework). Must match the runner's
+    ``--holdout-recent`` (both take the newest-N racing days), so the eras and
+    the compare hold out the SAME days. Ignores ``*_runners.parquet``.
+    """
+    import re
+    days = sorted(
+        p.stem for p in Path(data_dir).glob("*.parquet")
+        if "_runners" not in p.stem and re.match(r"\d{4}-\d{2}-\d{2}$", p.stem)
+    )
+    return days[-int(n):] if n > 0 else []
+
+
 # ── Champion selection ─────────────────────────────────────────────────────
 
 
@@ -467,8 +481,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="Champions per era (rank by eval_locked_pnl). Def 5.")
     p.add_argument("--sealed-days", nargs="+", default=None,
                    metavar="YYYY-MM-DD",
-                   help="Override the sealed set (default: the named sealed "
-                        "dates that exist on disk = sealed-7).")
+                   help="Explicit held-out set (overrides --holdout-recent). "
+                        "Default: the sliding newest --holdout-recent days.")
+    p.add_argument("--holdout-recent", type=int, default=7, metavar="N",
+                   help="Sliding holdout: judge on the NEWEST N racing days in "
+                        "--data-dir (default 7) — must match the eras' "
+                        "--holdout-recent. Set 0 to fall back to the legacy "
+                        "named sealed set.")
     p.add_argument("--data-dir", type=Path, default=Path("data/processed"))
     p.add_argument("--device", default="cuda")
     p.add_argument("--no-argmax-eval", action="store_true",
@@ -495,12 +514,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "provide --cohort-dir (shared) or both --tick-cohort-dir and "
             "--tock-cohort-dir")
-    sealed = (list(args.sealed_days) if args.sealed_days
-              else existing_sealed_days(SEALED_DAYS_NAMED, args.data_dir))
+    if args.sealed_days:
+        sealed = list(args.sealed_days)
+    elif int(args.holdout_recent) > 0:
+        sealed = newest_holdout_days(args.data_dir, int(args.holdout_recent))
+    else:
+        sealed = existing_sealed_days(SEALED_DAYS_NAMED, args.data_dir)
     if not sealed:
         raise SystemExit(
-            f"no sealed-day parquets found under {args.data_dir} "
-            f"(looked for {list(SEALED_DAYS_NAMED)})")
+            f"no held-out day parquets found under {args.data_dir}")
     missing = [d for d in sealed
                if not (args.data_dir / f"{d}.parquet").exists()]
     if missing:

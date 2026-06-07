@@ -112,17 +112,32 @@ BC. So pinning full loses no clean signal. The genuine lean-vs-full question
 oracle cache** lands (queued as a spawned task: key `oracle_cache_v2` by obs
 layout so lean + full coexist).
 
-## Day pool — pinned to the Tick's (same-pool comparison)
+## Day structure — chronological 4-tier folds + sliding holdout (revised)
 
-The first launch also crashed at gen-1 on a missing direction-label cache: 6
-non-sealed parquets (2026-05-30..06-05) were added to `data/processed` AFTER
-the Tick ran, and `select_days` takes the LAST n_days — so the window shifted
-forward into days with no label cache (the cache stops at 05-19). The tock now
-`--exclude-days` those 6 (plus the sealed-10), pinning it to the Tick's EXACT
-30-day pool (ending 05-19) — which is fully cached AND makes tock-vs-tick a
-fair *same-pool* warm-start comparison (a different pool would confound the
-held-out delta). Using the newer pool would require scanning labels+oracle for
-the 6 days AND re-running the Tick on it — out of scope for this test.
+After two false starts (full-obs, then a stale-window crash), the operator
+re-architected the day structure (rotation-rework) — so **this tock is an
+intentional "oranges" one-off**: the first era on the new structure, a valid
+comparison ANCHOR for future eras (the old Tick used random folds on the
+05-19 pool and is not comparable).
+
+- **Sliding holdout = newest 7 racing days** (`--holdout-recent 7`; currently
+  2026-05-29..06-05). All older cached days are training (currently 48,
+  2026-04-06..05-28). As data lands the holdout slides forward.
+- **Chronological, old-anchored folds** (`--pbt-rotation-mode chronological`):
+  R1..R(n-1) are FIXED as data accumulates; the top tier trains on the
+  freshest data. Cross-era comparability comes from the fixed folds; the
+  sliding holdout is the un-overfittable judge.
+- **4-tier ladder (R4 live)**: `--pbt-tier-sizes 6,4,3` +
+  `--pbt-promote-counts 3,2,2` + `--pbt-freeze-top 2` (R1 absorbs slack = 3).
+  48 training days = 4 × 12-day rotations.
+- **12-day rotations, 6 train / 6 eval** (was 6/4) — more held-out per tier
+  for a lower-variance, less-overfit-prone selection signal under fixed folds.
+- All 48 training days are direction-label + oracle cached (scanned
+  2026-06-07); the newest-7 holdout needs no caches (eval uses the live
+  predictor bundle).
+
+The held-out compare judges on the SAME sliding newest-7
+(`tools/tick_tock_compare --holdout-recent 7`).
 
 ## Prediction (falsifiable, judged on held-out sealed-7)
 

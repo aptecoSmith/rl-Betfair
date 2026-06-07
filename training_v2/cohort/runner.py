@@ -867,6 +867,7 @@ def run_cohort(
     era_id: str | None = None,
     era_type: str | None = None,
     hypothesis_id: str | None = None,
+    rotation_mode: str = "random",
     batched: bool = False,
     parallel_agents: int = 0,
     maturation_bonus_weight: float = 0.0,
@@ -1097,17 +1098,21 @@ def run_cohort(
             n_rotations=pbt_config.n_rotations,
             train_per_rotation=pbt_config.train_per_rotation,
             eval_per_rotation=pbt_config.eval_per_rotation,
+            mode=str(rotation_mode),
+        )
+        # N-tier-aware ladder summary (R2..RN sizes + promote counts).
+        _tier_desc = ", ".join(
+            f"R{t}={pbt_config.tier_size(t)}({pbt_config.promote_from(t - 1)}↑)"
+            for t in range(2, pbt_config.n_tiers + 1)
         )
         logger.info(
-            "── PBT ladder: %d agents, %d rotations of %d/%d (train/eval) "
-            "from %d non-sealed days. R2=%d (%d elite), R3=%d (%d elite), "
-            "freeze top-%d of R3, offspring perturb ±%.0f%%. ──",
-            n_agents, pbt_config.n_rotations,
+            "── PBT ladder (%s folds): %d agents, %d rotations of %d/%d "
+            "(train/eval) from %d non-sealed days. %s, freeze top-%d of R%d, "
+            "offspring perturb ±%.0f%%. ──",
+            rotation_mode, n_agents, pbt_config.n_rotations,
             pbt_config.train_per_rotation, pbt_config.eval_per_rotation,
-            len(nonsealed_pool), pbt_config.r2_size,
-            pbt_config.promote_from_r1, pbt_config.r3_size,
-            pbt_config.promote_from_r2, pbt_config.freeze_top_r3,
-            pbt_config.perturb_frac * 100.0,
+            len(nonsealed_pool), _tier_desc, pbt_config.freeze_count(),
+            pbt_config.n_tiers, pbt_config.perturb_frac * 100.0,
         )
         for rot in pbt_rotations:
             logger.info(
@@ -2102,7 +2107,8 @@ def run_cohort(
             _pbt_pairs_this_gen,
             already_frozen_ids=_already_frozen_ids,
             score_fn=_final_pbt_score,
-            freeze_top_r3=pbt_config.freeze_top_r3,
+            freeze_top_r3=pbt_config.freeze_count(),
+            top_tier=pbt_config.n_tiers,
         )
         if _final_frozen:
             from datetime import datetime as _dt_f, timezone as _tz_f
@@ -2359,16 +2365,18 @@ def _select_final_freeze(
     already_frozen_ids: set,
     score_fn,
     freeze_top_r3: int,
+    top_tier: int = 3,
 ) -> list:
-    """Pick the FINAL generation's R3 winners to freeze at end-of-run.
+    """Pick the FINAL generation's TOP-tier winners to freeze at end-of-run.
 
     ``pairs`` is the last completed generation's ``[(spec, result), ...]``.
-    Returns the top ``freeze_top_r3`` tier-3, non-frozen results whose
-    ``model_id`` is not already in ``already_frozen_ids``, ranked by
-    ``score_fn(result)`` descending.
+    Returns the top ``freeze_top_r3`` non-frozen results in tier ``top_tier``
+    (the ladder's top — 3 by default; ``config.n_tiers`` for an N-tier
+    ladder, e.g. 4) whose ``model_id`` is not already in
+    ``already_frozen_ids``, ranked by ``score_fn(result)`` descending.
 
     Pure (no I/O) so the end-of-run freeze logic is unit-testable in
-    isolation — mirrors the in-loop R3 freeze inside :func:`breed_pbt`,
+    isolation — mirrors the in-loop top-tier freeze inside :func:`breed_pbt`,
     which the breed step skips on the final generation (and on an
     early-stop ``break``). The ``already_frozen_ids`` dedup makes the pass
     idempotent: a model frozen in-loop can never be frozen again here.
@@ -2376,7 +2384,7 @@ def _select_final_freeze(
     ranked = sorted(
         (
             pr for pr in pairs
-            if not pr[0].frozen and int(pr[0].tier) == 3
+            if not pr[0].frozen and int(pr[0].tier) == int(top_tier)
             and getattr(pr[1], "model_id", None) not in already_frozen_ids
         ),
         key=lambda pr: score_fn(pr[1]),
@@ -2881,6 +2889,50 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="PBT: top-K of R3 frozen to hall-of-fame/gen. Default 3.")
     p.add_argument("--pbt-perturb-frac", type=float, default=0.20,
                    help="PBT: offspring recipe perturbation ±frac. Default 0.20.")
+    # ── Tick-Tock rotation-rework ────────────────────────────────────
+    p.add_argument(
+        "--pbt-rotation-mode", choices=["random", "chronological"],
+        default="random",
+        help=(
+            "PBT day-fold mode. 'random' (default) = i.i.d. shuffled folds "
+            "(byte-identical to before). 'chronological' = old-anchored "
+            "date-blocks so R1..R(n-1) stay FIXED as data accumulates and the "
+            "top tier trains on the freshest data (Tick-Tock). Pair with "
+            "--holdout-recent + --pbt-tier-sizes."
+        ),
+    )
+    p.add_argument(
+        "--holdout-recent", type=int, default=0, metavar="N",
+        help=(
+            "Tick-Tock sliding holdout: hold out the NEWEST N racing days in "
+            "--data-dir (added to --exclude-days; the rest become the "
+            "training pool). 0 (default) = off (use --days/--exclude-days as "
+            "before). The held-out judge (tools/tick_tock_compare) uses the "
+            "same newest-N."
+        ),
+    )
+    p.add_argument(
+        "--pbt-tier-sizes", default=None, metavar="N2,N3,...",
+        help=(
+            "PBT N-tier ladder: comma-separated sizes for tiers 2..N (R1 "
+            "absorbs slack). e.g. '6,4,3' = a 4-tier ladder (R2=6,R3=4,R4=3). "
+            "Sets --pbt-rotations = len+1. None (default) = the 3-tier scalar "
+            "path (--pbt-r2-size/--pbt-r3-size; byte-identical)."
+        ),
+    )
+    p.add_argument(
+        "--pbt-promote-counts", default=None, metavar="P1,P2,...",
+        help=(
+            "PBT N-tier: comma-separated promote-from counts for tiers 1..N-1 "
+            "(how many of each tier promote up as elites). e.g. '3,2,2'. "
+            "Required with --pbt-tier-sizes."
+        ),
+    )
+    p.add_argument(
+        "--pbt-freeze-top", type=int, default=None, metavar="K",
+        help="PBT N-tier: top-tier (RN) champions frozen per gen. "
+             "Required with --pbt-tier-sizes.",
+    )
     p.add_argument(
         "--emit-websocket", action="store_true",
         help=(
@@ -3813,31 +3865,82 @@ def main(argv: list[str] | None = None) -> int:
         args.parallel_agents, batched=bool(args.batched),
     )
 
+    # ── Tick-Tock sliding holdout (rotation-rework) ──────────────────────
+    # --holdout-recent N: hold out the NEWEST N racing days (fold into
+    # --exclude-days) and take ALL the rest as the training pool, so the
+    # chronological folds + preflight + scoreboard all use the same set.
+    _days_arg = int(args.days)
+    _exclude = list(args.exclude_days) if args.exclude_days else []
+    if int(args.holdout_recent) > 0:
+        import re as _re
+        _all_racing = sorted(
+            p.stem for p in Path(args.data_dir).glob("*.parquet")
+            if "_runners" not in p.stem
+            and _re.match(r"\d{4}-\d{2}-\d{2}$", p.stem)
+        )
+        _n = int(args.holdout_recent)
+        if len(_all_racing) <= _n:
+            raise SystemExit(
+                f"--holdout-recent {_n} >= available racing days "
+                f"{len(_all_racing)}",
+            )
+        _holdout = _all_racing[-_n:]
+        _exclude = sorted(set(_exclude) | set(_holdout))
+        _days_arg = len(_all_racing)  # take all; exclude removes the holdout
+        logger.info(
+            "Tick-Tock holdout-recent=%d: holding out %s; training pool = "
+            "%d non-holdout days", _n, _holdout, len(_all_racing) - _n,
+        )
+
+    # ── Tick-Tock N-tier ladder (rotation-rework) ────────────────────────
+    _pbt_config = None
+    if args.breeding == "pbt":
+        _tier_sizes = _promote_counts = _freeze_top = None
+        _n_rotations = int(args.pbt_rotations)
+        if args.pbt_tier_sizes is not None:
+            _tier_sizes = tuple(
+                int(x) for x in str(args.pbt_tier_sizes).split(",") if x != ""
+            )
+            if args.pbt_promote_counts is None or args.pbt_freeze_top is None:
+                raise SystemExit(
+                    "--pbt-tier-sizes requires --pbt-promote-counts and "
+                    "--pbt-freeze-top",
+                )
+            _promote_counts = tuple(
+                int(x) for x in str(args.pbt_promote_counts).split(",")
+                if x != ""
+            )
+            _freeze_top = int(args.pbt_freeze_top)
+            _n_rotations = len(_tier_sizes) + 1
+        _pbt_config = PbtConfig(
+            n_agents=int(args.n_agents),
+            n_rotations=_n_rotations,
+            train_per_rotation=int(args.pbt_train_per_rotation),
+            eval_per_rotation=int(args.pbt_eval_per_rotation),
+            r2_size=int(args.pbt_r2_size),
+            r3_size=int(args.pbt_r3_size),
+            promote_from_r1=int(args.pbt_promote_from_r1),
+            promote_from_r2=int(args.pbt_promote_from_r2),
+            freeze_top_r3=int(args.pbt_freeze_top_r3),
+            perturb_frac=float(args.pbt_perturb_frac),
+            tier_sizes=_tier_sizes,
+            promote_counts=_promote_counts,
+            freeze_top=_freeze_top,
+        )
+
     try:
         run_cohort(
             n_agents=args.n_agents,
             n_generations=args.generations,
-            days=args.days,
+            days=_days_arg,
             data_dir=Path(args.data_dir),
             device=args.device,
             seed=args.seed,
             output_dir=Path(args.output_dir),
             mutation_rate=args.mutation_rate,
             breeding=args.breeding,
-            pbt_config=(
-                PbtConfig(
-                    n_agents=int(args.n_agents),
-                    n_rotations=int(args.pbt_rotations),
-                    train_per_rotation=int(args.pbt_train_per_rotation),
-                    eval_per_rotation=int(args.pbt_eval_per_rotation),
-                    r2_size=int(args.pbt_r2_size),
-                    r3_size=int(args.pbt_r3_size),
-                    promote_from_r1=int(args.pbt_promote_from_r1),
-                    promote_from_r2=int(args.pbt_promote_from_r2),
-                    freeze_top_r3=int(args.pbt_freeze_top_r3),
-                    perturb_frac=float(args.pbt_perturb_frac),
-                ) if args.breeding == "pbt" else None
-            ),
+            pbt_config=_pbt_config,
+            rotation_mode=str(args.pbt_rotation_mode),
             event_emitter=emitter,
             reward_overrides=reward_overrides or None,
             enabled_set=enabled_set,
@@ -3887,7 +3990,7 @@ def main(argv: list[str] | None = None) -> int:
             mature_prob_open_threshold=float(args.mature_prob_open_threshold),
             race_confidence_threshold=float(args.race_confidence_threshold),
             lay_price_max=float(args.lay_price_max),
-            exclude_days=list(args.exclude_days) if args.exclude_days else None,
+            exclude_days=_exclude or None,
             composite_score_mode=str(args.composite_score_mode),
             early_stop_patience=int(args.early_stop_patience),
             early_stop_min_gens=int(args.early_stop_min_gens),

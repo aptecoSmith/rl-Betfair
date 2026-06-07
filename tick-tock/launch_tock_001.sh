@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 # Tick-Tock — MANUAL first tock (hypothesis_001: direction machinery + BC-on
-# maturation). One-shot launcher for the Phase-1 de-risk cycle (operator
-# signed off 2026-06-06). Mirrors the first Tick's exact flags
-# (plans/pbt-gpu-forward/_scripts/run_genes_campaign.ps1) PLUS:
-#   * the 7 --seed-gene band/point seeds (seeds/seed_args_001.txt),
-#   * era tags --era-type tock --hypothesis-id hypothesis_001 --era-id tt_tock_001,
-#   * a NEW output dir (clean tagging + a fresh hall-of-fame; a tock is its own
-#     5-gen era, not a continuation of the Tick),
-#   * --bc-pretrain-steps is DROPPED on purpose: the seed bc_pretrain_steps=500
-#     carries it, so the tock's rows PROVE the structural seed landed era-wide.
-#   * predictor_lean_obs=false is seeded (structural, era-wide) so EVERY agent
-#     uses the full-obs layout. BC clones a layout-specific oracle and only the
-#     FULL-obs oracle is scanned (obs_dim 2254); a lean-obs agent (574) finds no
-#     matching oracle and SKIPS BC. Pinning full obs makes "BC on era-wide"
-#     actually true. (Lean-vs-full WITH BC on both is deferred until the
-#     per-layout oracle cache lands — see the spawned task.)
-#   * --exclude-days also drops 2026-05-30..06-05 (the 6 non-sealed parquets
-#     added AFTER the first Tick ran). select_days takes the LAST n_days, so
-#     those newer days shifted the window into dates with NO direction-label
-#     cache (cache stops at 05-19) — the first launch CRASHED at gen-1 on a
-#     missing label cache. Excluding them pins the tock to the Tick's EXACT
-#     pool (ending 05-19): all label+oracle caches present AND a fair same-pool
-#     warm-start comparison. (Using the newer pool would need scanning labels +
-#     oracle for those 6 days AND re-running the Tick on it — a bigger job.)
+# maturation), on the NEW rotation structure (operator-revised 2026-06-07).
+#
+# Mirrors the first Tick's predictor/BC/gene flags PLUS the rotation-rework:
+#   * --pbt-rotation-mode chronological — old-anchored date-folds; R1..R(n-1)
+#     stay FIXED as data accumulates; the top tier trains on the freshest data.
+#   * --holdout-recent 7 — slide the held-out judge to the NEWEST 7 racing days
+#     (currently 2026-05-29..06-05); all older cached days become the training
+#     pool (currently 48 days, 2026-04-06..05-28). Replaces the old fixed
+#     sealed list + --days/--exclude-days.
+#   * 4-tier ladder (R4 live): --pbt-tier-sizes 6,4,3 (R2,R3,R4) +
+#     --pbt-promote-counts 3,2,2 (R1->R2,R2->R3,R3->R4) + --pbt-freeze-top 2
+#     => --pbt-rotations 4 derived; R1 absorbs slack (3 fresh).
+#   * 12-day rotations split 6 train / 6 eval (was 6/4) — more held-out per
+#     tier for a lower-variance, less-overfit-prone selection signal under
+#     fixed folds. 48 training days = 4 x 12 exactly.
+#   * the 8 --seed-gene seeds (seeds/seed_args_001.txt), incl.
+#     predictor_lean_obs=false so BC (full-obs oracle) runs era-wide, and
+#     bc_pretrain_steps=500 carried by the SEED (no --bc-pretrain-steps flag).
+#   * era tags --era-type tock --hypothesis-id hypothesis_001 --era-id tt_tock_001.
+#
+# This tock is intentionally an "oranges" one-off: it is the first era on the
+# new structure, so it is a valid comparison ANCHOR for future eras (the old
+# Tick used random folds on the 05-19 pool and is not comparable).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=.venv/Scripts/python.exe
@@ -31,10 +31,8 @@ PRED=../betfair-predictors/production
 mkdir -p "$DIR"
 
 "$PY" -m training_v2.cohort.runner \
-  --breeding pbt --n-agents 16 --generations 5 --days 30 \
-  --exclude-days 2026-05-20 2026-05-21 2026-05-22 2026-05-23 2026-05-24 \
-                 2026-05-25 2026-05-26 2026-05-27 2026-05-28 2026-05-29 \
-                 2026-05-30 2026-05-31 2026-06-02 2026-06-03 2026-06-04 2026-06-05 \
+  --breeding pbt --n-agents 16 --generations 5 \
+  --holdout-recent 7 --pbt-rotation-mode chronological \
   --seed 2001 --parallel-agents 16 --device cpu \
   --composite-score-mode locked_weighted --force-close-rate-penalty-weight 20 \
   --big-model-threads 1 --gpu-policy-lane --gpu-lane-max-concurrent 2 \
@@ -44,9 +42,8 @@ mkdir -p "$DIR"
       "$PRED/race-outcome-ranker/manifest.json" \
       "$PRED/direction-predictor/manifest.json" \
   --enable-all-genes \
-  --pbt-rotations 3 --pbt-train-per-rotation 6 --pbt-eval-per-rotation 4 \
-  --pbt-r2-size 6 --pbt-r3-size 4 --pbt-promote-from-r1 3 \
-  --pbt-promote-from-r2 2 --pbt-freeze-top-r3 2 \
+  --pbt-train-per-rotation 6 --pbt-eval-per-rotation 6 \
+  --pbt-tier-sizes 6,4,3 --pbt-promote-counts 3,2,2 --pbt-freeze-top 2 \
   --era-type tock --hypothesis-id hypothesis_001 --era-id tt_tock_001 \
   --seed-gene use_direction_predictor=true \
   --seed-gene direction_gate_enabled=true \

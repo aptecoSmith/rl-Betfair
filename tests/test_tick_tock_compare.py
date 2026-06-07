@@ -28,6 +28,16 @@ def test_existing_sealed_days_filters_to_on_disk(tmp_path: Path):
     assert got == ["2026-05-20", "2026-05-22", "2026-05-29"]
 
 
+def test_newest_holdout_days_is_sliding_newest_n(tmp_path: Path):
+    for d in ("2026-05-28", "2026-05-29", "2026-05-30", "2026-06-02",
+              "2026-06-05"):
+        (tmp_path / f"{d}.parquet").write_bytes(b"")
+        (tmp_path / f"{d}_runners.parquet").write_bytes(b"")  # must be ignored
+    assert ttc.newest_holdout_days(tmp_path, 3) == [
+        "2026-05-30", "2026-06-02", "2026-06-05"]
+    assert ttc.newest_holdout_days(tmp_path, 0) == []
+
+
 # ── champion selection ──────────────────────────────────────────────────────
 
 

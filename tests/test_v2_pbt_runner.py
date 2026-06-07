@@ -161,6 +161,62 @@ def test_pbt_runner_freezes_r3_to_hall_of_fame_and_leaderboard(
     assert "locked" in r1 and "lineage" in r2
 
 
+def test_pbt_runner_chronological_four_tier(tmp_path: Path) -> None:
+    """Rotation-rework end-to-end: run_cohort threads rotation_mode through to
+    make_rotations AND drives a 4-tier (R4) ladder. Asserts the folds are
+    chronological (R1 = oldest days, ordered old→new) and the gauntlet reaches
+    R4 with a champion that climbed all four rotations."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    # 16 consecutive days → 4 rotations × (2 train + 2 eval).
+    dates = [f"2026-04-{d:02d}" for d in range(6, 22)]
+    _populate_data_dir(data_dir, dates)
+    out_dir = tmp_path / "pbt_chrono"
+
+    calls: list[dict] = []
+
+    def capturing_stub(**kw):
+        calls.append({
+            "generation": kw["generation"],
+            "days_to_train": tuple(kw["days_to_train"]),
+            "eval_days": tuple(kw["eval_days"]),
+        })
+        return _stub_train_one_agent(**kw)
+
+    cfg = PbtConfig(
+        n_agents=8, n_rotations=4, train_per_rotation=2, eval_per_rotation=2,
+        tier_sizes=(2, 1, 1), promote_counts=(1, 1, 1), freeze_top=1,
+    )
+    runner_mod.run_cohort(
+        n_agents=8, n_generations=4, days=16, data_dir=data_dir,
+        device="cpu", seed=5, output_dir=out_dir, breeding="pbt",
+        pbt_config=cfg, parallel_agents=0, rotation_mode="chronological",
+        train_one_agent_fn=capturing_stub,
+    )
+
+    # Gen 0: all agents on R1 = the OLDEST block's train days (chronological).
+    gen0_days = {c["days_to_train"] for c in calls if c["generation"] == 0}
+    assert gen0_days == {("2026-04-06", "2026-04-07")}, gen0_days
+
+    # Four distinct rotations, chronologically ordered (R1 oldest → R4 newest).
+    rot_train = sorted({c["days_to_train"] for c in calls}, key=lambda t: t[0])
+    assert len(rot_train) == 4, rot_train
+    mins = [t[0] for t in rot_train]
+    assert mins == sorted(mins)  # strictly old→new
+    assert rot_train[0] == ("2026-04-06", "2026-04-07")   # R1 oldest
+    assert rot_train[-1] == ("2026-04-18", "2026-04-19")  # R4 newest
+
+    # The gauntlet reached R4 and froze a champion that climbed all 4 tiers.
+    champs = [
+        json.loads(line)
+        for line in (out_dir / "pbt_hall_of_fame.jsonl").read_text().splitlines()
+        if line
+    ]
+    assert champs, "no champion frozen"
+    assert any(set(c["rotations_seen"]) == {1, 2, 3, 4} for c in champs)
+    assert all(c["tier"] == 4 for c in champs)  # only the top tier (R4) freezes
+
+
 def test_select_final_freeze_picks_top_r3_nonfrozen_deduped() -> None:
     """Unit guard for the end-of-run freeze selector: tier-3 only, drops
     already-frozen specs + already-frozen model_ids, ranks by score, caps
