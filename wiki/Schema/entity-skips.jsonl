@@ -39,3 +39,15 @@
 {"reason": "code-symbol/lowercase variants of existing glossary nodes [[exchange-matcher]], [[pnl]], [[gae]] which ARE linked from citing notes", "source_id": "src-032073", "surface": "ExchangeMatcher", "term": "exchangematcher", "ts": "2026-06-07"}
 {"reason": "code-symbol/lowercase variants of existing glossary nodes [[exchange-matcher]], [[pnl]], [[gae]] which ARE linked from citing notes", "source_id": "src-032073", "surface": "pnl", "term": "pnl", "ts": "2026-06-07"}
 {"reason": "code-symbol/lowercase variants of existing glossary nodes [[exchange-matcher]], [[pnl]], [[gae]] which ARE linked from citing notes", "source_id": "src-032073", "surface": "gae", "term": "gae", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "BOTH", "term": "both", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "YAML", "term": "yaml", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Adding", "term": "adding", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Append", "term": "append", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Date", "term": "date", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Initial", "term": "initial", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Lessons Learnt", "term": "lessons learnt", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Market", "term": "market", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Market Type Filter", "term": "market type filter", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Python", "term": "python", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "version", "term": "version", "ts": "2026-06-07"}
+{"reason": "covered by [[populationmanager]] glossary node which is linked from dead-gene-problem.md citing this source", "source_id": "src-032073", "surface": "population manager", "term": "population manager", "ts": "2026-06-07"}

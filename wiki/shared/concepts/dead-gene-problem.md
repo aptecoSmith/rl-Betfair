@@ -18,7 +18,7 @@ A gene that the GA samples and stores on each agent but **no downstream object r
 
 Six concrete instances flagged in the [[arch-exploration]] design review:
 
-1. `reward_early_pick_bonus`, `reward_efficiency_penalty`, `reward_precision_bonus` sampled per-agent in `population_manager.py:220`, but the env reads from `config.yaml`. **All agents train with identical reward shaping** regardless of genome.
+1. `reward_early_pick_bonus`, `reward_efficiency_penalty`, `reward_precision_bonus` sampled per-agent in [[populationmanager]] (`population_manager.py:220`), but the env reads from `config.yaml`. **All agents train with identical reward shaping** regardless of genome.
 2. Only 3 [[ppo]] knobs vary (`learning_rate`, `ppo_clip_epsilon`, `entropy_coefficient`). `gamma`, `gae_lambda`, `value_loss_coeff` are hardcoded though the trainer would read them from `hp`.
 3. [[lstm]] structural params hardcoded: `num_layers=1`, no dropout, no layer norm. Both `ppo_lstm_v1` and `ppo_time_lstm_v1` share the same encoder/head shapes.
 4. `observation_window_ticks` sampled but never read — pure dead gene.
