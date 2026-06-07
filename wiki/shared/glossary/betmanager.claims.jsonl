@@ -1,0 +1,1 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0K7NQZQHVP9HRC06S35WP", "locator": {"char_range": [2277, 2300], "quote": "get_naked_per_pair_pnls"}, "source_id": "src-04294a", "text": "BetManager.get_naked_per_pair_pnls(market_id) is the accessor added by this plan.", "verified_by": "none"}

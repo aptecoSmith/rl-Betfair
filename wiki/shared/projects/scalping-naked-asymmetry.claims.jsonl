@@ -1,0 +1,1 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0K7BYFPK5QWD06ZHC253P", "locator": {"char_range": [4125, 4144], "quote": "reward-scale change"}, "source_id": "src-04294a", "text": "The fix is a reward-scale change; pre-fix and post-fix scoreboards are not magnitude-comparable on raw reward.", "verified_by": "none"}

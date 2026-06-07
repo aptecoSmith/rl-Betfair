@@ -160,3 +160,41 @@
 {"reason": "sentence-initial words / table-cell tokens / section headings — not entities", "source_id": "src-042412", "surface": "TL", "term": "tl", "ts": "2026-06-07"}
 {"reason": "sentence-initial words / table-cell tokens / section headings — not entities", "source_id": "src-042412", "surface": "COHORT", "term": "cohort", "ts": "2026-06-07"}
 {"reason": "sentence-initial words / table-cell tokens / section headings — not entities", "source_id": "src-042412", "surface": "DR", "term": "dr", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Session", "term": "session", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "CLAUDE", "term": "claude", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Reward", "term": "reward", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Best", "term": "best", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Builds", "term": "builds", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "IS", "term": "is", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Single", "term": "single", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Adding", "term": "adding", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Agent's", "term": "agent's", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Aggregate", "term": "aggregate", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Document", "term": "document", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Especially", "term": "especially", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Every", "term": "every", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Failure", "term": "failure", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Folder", "term": "folder", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "GA's", "term": "ga's", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Implication", "term": "implication", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Locked", "term": "locked", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Naked", "term": "naked", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Operators", "term": "operators", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Pre", "term": "pre", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Purpose", "term": "purpose", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Relationship", "term": "relationship", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Replace", "term": "replace", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Same", "term": "same", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Scalping Naked Asymmetry", "term": "scalping naked asymmetry", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Specifically", "term": "specifically", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Standard", "term": "standard", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Step", "term": "step", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Tests", "term": "tests", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "That'd", "term": "that'd", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Top", "term": "top", "ts": "2026-06-07"}
+{"reason": "sentence-initial words / section headings / project-name alias — not entities", "source_id": "src-04294a", "surface": "Unchanged", "term": "unchanged", "ts": "2026-06-07"}
+{"reason": "lowercase/variant of existing glossary nodes (scalping, pnl, ev, win) linked via [[scalping]]/[[pnl]]/[[ev]]/[[win]] in citing notes", "source_id": "src-04294a", "surface": "scalping", "term": "scalping", "ts": "2026-06-07"}
+{"reason": "lowercase/variant of existing glossary nodes (scalping, pnl, ev, win) linked via [[scalping]]/[[pnl]]/[[ev]]/[[win]] in citing notes", "source_id": "src-04294a", "surface": "PnL", "term": "pnl", "ts": "2026-06-07"}
+{"reason": "lowercase/variant of existing glossary nodes (scalping, pnl, ev, win) linked via [[scalping]]/[[pnl]]/[[ev]]/[[win]] in citing notes", "source_id": "src-04294a", "surface": "EV", "term": "ev", "ts": "2026-06-07"}
+{"reason": "lowercase/variant of existing glossary nodes (scalping, pnl, ev, win) linked via [[scalping]]/[[pnl]]/[[ev]]/[[win]] in citing notes", "source_id": "src-04294a", "surface": "scalping mode", "term": "scalping mode", "ts": "2026-06-07"}
+{"reason": "lowercase/variant of existing glossary nodes (scalping, pnl, ev, win) linked via [[scalping]]/[[pnl]]/[[ev]]/[[win]] in citing notes", "source_id": "src-04294a", "surface": "win", "term": "win", "ts": "2026-06-07"}
