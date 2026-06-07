@@ -1,0 +1,1 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ098XB2YFDC74HEX7C65MJ", "locator": {"char_range": [370, 403], "quote": "When the user manually scrolls up"}, "source_id": "src-03dabf", "text": "Manual user scroll up pauses auto-scroll so they aren't yanked back to bottom.", "verified_by": "none"}

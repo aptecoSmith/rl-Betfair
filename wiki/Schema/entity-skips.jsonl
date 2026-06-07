@@ -51,3 +51,14 @@
 {"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "Python", "term": "python", "ts": "2026-06-07"}
 {"reason": "sentence-initial words / file-format / section headings / project-name alias — not entities", "source_id": "src-039ca3", "surface": "version", "term": "version", "ts": "2026-06-07"}
 {"reason": "covered by [[populationmanager]] glossary node which is linked from dead-gene-problem.md citing this source", "source_id": "src-032073", "surface": "population manager", "term": "population manager", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "AfterViewChecked", "term": "afterviewchecked", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Checkbox", "term": "checkbox", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "WebSocket", "term": "websocket", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Default", "term": "default", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "File", "term": "file", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Files", "term": "files", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Problem", "term": "problem", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Re", "term": "re", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Scroll Checkbox", "term": "scroll checkbox", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Solution", "term": "solution", "ts": "2026-06-07"}
+{"reason": "framework hooks / section headings / generic UI tokens / project-name fragments — not entities", "source_id": "src-03dabf", "surface": "Training Log Auto", "term": "training log auto", "ts": "2026-06-07"}
