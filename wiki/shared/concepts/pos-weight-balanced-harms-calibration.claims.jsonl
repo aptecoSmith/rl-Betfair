@@ -1,0 +1,2 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0EJ9PX91ZM5ZE9A6M5WWG", "locator": {"quote": "pulls the output mean to ~0.46"}, "source_id": "src-042412", "text": "pos_weight=balanced training pulls output mean to ~0.46 when empirical positive rate is ~0.18.", "verified_by": "none"}
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0EJHQKJKHE5GSEBNW1C78", "locator": {"char_range": [8774, 8800], "quote": "Cuts mean Brier by 35-37 %"}, "source_id": "src-042412", "text": "Switching to unweighted BCE cuts mean Brier by 35-37%.", "verified_by": "none"}

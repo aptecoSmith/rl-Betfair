@@ -1,0 +1,2 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0EH6Z8GBJR74NVWAKPH6V", "locator": {"char_range": [618, 629], "quote": "Winner: C11"}, "source_id": "src-042412", "text": "C11 won the sweep across 20 variants on held-out Pearson and Brier.", "verified_by": "none"}
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0EHE1JSFNGEBSMZTBT83B", "locator": {"char_range": [1217, 1227], "quote": "mean Brier"}, "source_id": "src-042412", "text": "C11 reduces mean Brier from 0.2282 to 0.1433 (-37.2%) vs C0 baseline.", "verified_by": "none"}

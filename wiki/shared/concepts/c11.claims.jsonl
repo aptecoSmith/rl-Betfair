@@ -1,0 +1,2 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0EHRGMG97XYK7D20JPN8V", "locator": {"char_range": [163, 172], "quote": "LayerNorm"}, "source_id": "src-042412", "text": "C11 architecture: LayerNorm -> Linear(23,256) -> ReLU -> Linear(256,128) -> ReLU -> Linear(128,2).", "verified_by": "none"}
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0EJ1HVMV5N4MA892Y82W3", "locator": {"char_range": [733, 745], "quote": "pos_weight=1"}, "source_id": "src-042412", "text": "C11 is trained with unweighted BCE (pos_weight=1).", "verified_by": "none"}

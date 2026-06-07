@@ -1,0 +1,1 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0EJTZHDY5CFGD3DRQBWHK", "locator": {"char_range": [10408, 10455], "quote": "best in-sample val_loss of any balanced variant"}, "source_id": "src-042412", "text": "C15 has the best in-sample val_loss but worst held-out Pearson (+0.2614).", "verified_by": "none"}
