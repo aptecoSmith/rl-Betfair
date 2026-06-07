@@ -1,0 +1,29 @@
+session: S04_neural
+seed: 1
+dataset:
+  feature_variant: V4
+  train_corpus: tvl_required_10d
+  horizons:
+  - 3m
+  - 7m
+  - 15m
+architecture:
+  family: lstm
+  variant_label: tw32
+  kwargs:
+    time_window: 32
+    hidden: 64
+    layers: 2
+    dropout: 0.1
+output:
+  formulation: pinball3
+  quantiles:
+  - 0.1
+  - 0.5
+  - 0.9
+training:
+  batch_size: 1024
+  learning_rate: 0.001
+  max_epochs: 20
+  early_stopping_patience: 3
+device: cuda

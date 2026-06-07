@@ -1,0 +1,39 @@
+{
+  "model_name": "price_mover_v1",
+  "description": "Price mover model v1 — predicts Betfair price direction (shorten/drift) at 1m/3m/7m horizons from ladder microstructure data.",
+  "experiment_id": "conv1d_k3_s1_9659e9e9c3fb",
+  "weights_path": "registry/predictor/conv1d_k3_s1_9659e9e9c3fb.pt",
+  "architecture": {
+    "family": "conv1d",
+    "variant_label": "k3",
+    "kwargs": {"kernel": 3, "layers": 4, "channels": 64, "dropout": 0.1},
+    "param_count": 46857
+  },
+  "training": {
+    "feature_variant": "V2",
+    "train_corpus": "tvl_mask_29d",
+    "horizons": ["1m", "3m", "7m"],
+    "output_formulation": "pinball3",
+    "quantiles": [0.1, 0.5, 0.9],
+    "seed": 1,
+    "session": "S06_neural",
+    "train_dates": "2026-04-06 to 2026-04-30 (25 days, 1,647,901 rows)",
+    "val_dates": "2026-05-01 to 2026-05-03 (3 days, 223,036 rows)"
+  },
+  "val_metrics": {
+    "dir_acc_k5_7m": 0.8009,
+    "dir_fires_k5_7m": 648,
+    "backtest_pnl_k5_7m": 651.73,
+    "mae_7m": 2.838364
+  },
+  "test_metrics": {
+    "split": "2026-05-04 to 2026-05-06 (3 days, 214,836 rows)",
+    "dir_acc_k5_7m": 0.7875,
+    "dir_fires_k5_7m": 753,
+    "backtest_pnl_k5_7m": 675.82
+  },
+  "signal_description": "Fires a directional signal when q50 >= +5 ticks AND q10 >= 0 (predict drift) or q50 <= -5 ticks AND q90 <= 0 (predict shorten). Fire rate ~0.4% of ticks. On fired rows, 78.8% directional accuracy on unseen test data.",
+  "crowned": "2026-05-09",
+  "scoreboard": "registry/predictor_scoreboard_neural.csv",
+  "s09_results": "registry/s09_test_results.csv"
+}
