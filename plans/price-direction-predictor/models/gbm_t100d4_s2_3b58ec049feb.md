@@ -1,0 +1,64 @@
+# Predictor model card: gbm_t100d4_s2_3b58ec049feb
+
+- session: S04
+- seed: 2
+- architecture: gbm (t100d4)
+- arch_kwargs: `{"n_trees": 100, "max_depth": 4, "learning_rate": 0.05}`
+- feature variant: V2
+- train corpus: tvl_mask_29d
+- horizons: ['3m', '7m', '15m']
+- output: pinball3 (quantiles [0.1, 0.5, 0.9])
+- training: lr=0.05, batch=1024, max_epochs=1
+
+## Run extras
+```json
+{
+  "param_count": 656,
+  "train_seconds": 13.3,
+  "infer_us_per_row": 2.752058207988739,
+  "device": "cpu",
+  "weights_path": "C:\\Users\\jsmit\\source\\repos\\rl-betfair\\.claude\\worktrees\\affectionate-proskuriakova-108942\\registry\\predictor\\gbm_t100d4_s2_3b58ec049feb.joblib"
+}
+```
+
+## Val metrics
+```json
+{
+  "pinball_3m_q10": 0.53224,
+  "pinball_3m_q50": 0.916985,
+  "pinball_3m_q90": 0.535547,
+  "mae_3m": 1.83397,
+  "coverage_3m": 0.7897,
+  "calibration_gap_3m": 0.0103,
+  "dir_acc_k5_3m": null,
+  "dir_fires_k5_3m": 0,
+  "dir_fire_rate_k5_3m": 0.0,
+  "backtest_pnl_k5_3m": 0.0,
+  "backtest_winrate_k5_3m": null,
+  "lag1_autocorr_q50_3m": 1.0,
+  "pinball_7m_q10": 0.788351,
+  "pinball_7m_q50": 1.44768,
+  "pinball_7m_q90": 0.742281,
+  "mae_7m": 2.89536,
+  "coverage_7m": 0.7778,
+  "calibration_gap_7m": 0.0222,
+  "dir_acc_k5_7m": null,
+  "dir_fires_k5_7m": 0,
+  "dir_fire_rate_k5_7m": 0.0,
+  "backtest_pnl_k5_7m": 0.0,
+  "backtest_winrate_k5_7m": null,
+  "lag1_autocorr_q50_7m": 1.0,
+  "pinball_15m_q10": 1.177279,
+  "pinball_15m_q50": 2.192036,
+  "pinball_15m_q90": 1.047955,
+  "mae_15m": 4.384072,
+  "coverage_15m": 0.7661,
+  "calibration_gap_15m": 0.0339,
+  "dir_acc_k5_15m": null,
+  "dir_fires_k5_15m": 0,
+  "dir_fire_rate_k5_15m": 0.0,
+  "backtest_pnl_k5_15m": 0.0,
+  "backtest_winrate_k5_15m": null,
+  "lag1_autocorr_q50_15m": 1.0
+}
+```

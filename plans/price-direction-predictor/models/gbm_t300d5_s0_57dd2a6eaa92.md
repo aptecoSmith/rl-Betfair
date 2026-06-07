@@ -1,0 +1,40 @@
+# Predictor model card: gbm_t300d5_s0_57dd2a6eaa92
+
+- session: S06
+- seed: 0
+- architecture: gbm (t300d5)
+- arch_kwargs: `{"n_trees": 300, "max_depth": 5, "learning_rate": 0.05}`
+- feature variant: V4
+- train corpus: tvl_mask_29d
+- horizons: ['7m']
+- output: pinball3 (quantiles [0.1, 0.5, 0.9])
+- training: lr=0.05, batch=1024, max_epochs=1
+
+## Run extras
+```json
+{
+  "param_count": 565,
+  "train_seconds": 14.2,
+  "infer_us_per_row": 2.498738467693329,
+  "device": "cpu",
+  "weights_path": "C:\\Users\\jsmit\\source\\repos\\rl-betfair\\.claude\\worktrees\\affectionate-proskuriakova-108942\\registry\\predictor\\gbm_t300d5_s0_57dd2a6eaa92.joblib"
+}
+```
+
+## Val metrics
+```json
+{
+  "pinball_7m_q10": 0.777534,
+  "pinball_7m_q50": 1.447457,
+  "pinball_7m_q90": 0.715326,
+  "mae_7m": 2.894914,
+  "coverage_7m": 0.7683,
+  "calibration_gap_7m": 0.0317,
+  "dir_acc_k5_7m": 0.5,
+  "dir_fires_k5_7m": 2,
+  "dir_fire_rate_k5_7m": 0.0,
+  "backtest_pnl_k5_7m": 3.4103,
+  "backtest_winrate_k5_7m": 0.5,
+  "lag1_autocorr_q50_7m": 1.0
+}
+```
