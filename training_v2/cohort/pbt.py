@@ -91,7 +91,19 @@ class Rotation:
 
 @dataclass(frozen=True)
 class PbtConfig:
-    """Ladder shape. Defaults = the design.md strawman for ~30 agents."""
+    """Ladder shape. Defaults = the design.md strawman for ~30 agents.
+
+    Two ways to specify the tier ladder:
+
+    * **3-tier scalar path (default, byte-identical):** ``r2_size`` /
+      ``r3_size`` / ``promote_from_r1`` / ``promote_from_r2`` /
+      ``freeze_top_r3``. Used whenever ``tier_sizes is None``.
+    * **N-tier path (rotation-rework):** pass ``tier_sizes`` (sizes for
+      tiers 2..N, length N-1; R1 absorbs slack), ``promote_counts``
+      (promote-from counts for tiers 1..N-1, length N-1) and ``freeze_top``
+      (top-tier RN champions frozen per gen). ``n_tiers`` becomes
+      ``len(tier_sizes)+1`` and ``n_rotations`` must equal it.
+    """
 
     n_agents: int = 30
     n_rotations: int = 3
@@ -108,16 +120,70 @@ class PbtConfig:
     # R3 winners that freeze to the hall-of-fame each generation.
     freeze_top_r3: int = 3
     perturb_frac: float = 0.20
+    # N-tier generalization (rotation-rework). When ``tier_sizes`` is set it
+    # OVERRIDES the 3-tier scalars and defines an N-tier ladder. ``None`` ⇒
+    # the legacy 3-tier path (byte-identical).
+    tier_sizes: tuple[int, ...] | None = None      # sizes for tiers 2..N
+    promote_counts: tuple[int, ...] | None = None  # promote-from tiers 1..N-1
+    freeze_top: int | None = None                  # top-tier (RN) freeze count
+
+    @property
+    def n_tiers(self) -> int:
+        if self.tier_sizes is not None:
+            return len(self.tier_sizes) + 1
+        return self.n_rotations
+
+    def tier_size(self, t: int) -> int:
+        """Size of tier ``t`` (t in 2..N). R1 has no fixed size (slack)."""
+        if self.tier_sizes is not None:
+            return int(self.tier_sizes[t - 2])
+        return {2: self.r2_size, 3: self.r3_size}[t]
+
+    def promote_from(self, t: int) -> int:
+        """How many of tier ``t`` promote to tier ``t+1`` (t in 1..N-1)."""
+        if self.promote_counts is not None:
+            return int(self.promote_counts[t - 1])
+        return {1: self.promote_from_r1, 2: self.promote_from_r2}[t]
+
+    def freeze_count(self) -> int:
+        if self.freeze_top is not None:
+            return int(self.freeze_top)
+        return self.freeze_top_r3
 
     def validate(self) -> None:
-        if self.promote_from_r1 > self.r2_size:
-            raise ValueError("promote_from_r1 must be <= r2_size")
-        if self.promote_from_r2 > self.r3_size:
-            raise ValueError("promote_from_r2 must be <= r3_size")
-        if self.r2_size + self.r3_size > self.n_agents:
-            raise ValueError("r2_size + r3_size must be <= n_agents")
-        if self.n_rotations < 1:
-            raise ValueError("n_rotations must be >= 1")
+        if self.tier_sizes is None:
+            # Legacy 3-tier scalar path — UNCHANGED (byte-identical).
+            if self.promote_from_r1 > self.r2_size:
+                raise ValueError("promote_from_r1 must be <= r2_size")
+            if self.promote_from_r2 > self.r3_size:
+                raise ValueError("promote_from_r2 must be <= r3_size")
+            if self.r2_size + self.r3_size > self.n_agents:
+                raise ValueError("r2_size + r3_size must be <= n_agents")
+            if self.n_rotations < 1:
+                raise ValueError("n_rotations must be >= 1")
+            return
+        # N-tier path.
+        n = self.n_tiers
+        if n < 1:
+            raise ValueError("n_tiers must be >= 1")
+        if self.n_rotations != n:
+            raise ValueError(
+                f"n_rotations ({self.n_rotations}) must equal n_tiers ({n}) "
+                "when tier_sizes is set",
+            )
+        if self.promote_counts is None or len(self.promote_counts) != n - 1:
+            raise ValueError(
+                f"promote_counts must have {n - 1} entries for {n} tiers",
+            )
+        for t in range(1, n):
+            if self.promote_from(t) > self.tier_size(t + 1):
+                raise ValueError(
+                    f"promote_from({t}) must be <= tier_size({t + 1})",
+                )
+        if sum(self.tier_size(t) for t in range(2, n + 1)) > self.n_agents:
+            raise ValueError("sum of tier_sizes must be <= n_agents")
+        if self.freeze_count() > self.tier_size(n):
+            raise ValueError("freeze_top must be <= top-tier size")
 
 
 @dataclass(frozen=True)
@@ -151,18 +217,32 @@ def make_rotations(
     n_rotations: int = 3,
     train_per_rotation: int = 6,
     eval_per_rotation: int = 4,
+    mode: str = "random",
 ) -> list[Rotation]:
-    """Shuffle ``pool`` and cut it into ``n_rotations`` equal i.i.d. folds.
+    """Cut ``pool`` into ``n_rotations`` day-folds (train + eval per fold).
 
-    Each fold takes ``train_per_rotation + eval_per_rotation`` days, split
-    into disjoint train + eval. RANDOM, not difficulty-ordered (load-
-    bearing — i.i.d. folds make a rotation-1 score comparable to a
-    rotation-3 score). Deterministic in ``cohort_seed`` so the PBT and
-    gene-only arms see the SAME folds (paired A/B).
+    ``mode="random"`` (default, UNCHANGED): shuffle deterministically in
+    ``cohort_seed`` and cut into equal i.i.d. folds. RANDOM, not difficulty-
+    ordered (load-bearing — i.i.d. folds make a rotation-1 score comparable
+    to a rotation-3 score). Deterministic so the PBT and gene-only arms see
+    the SAME folds (paired A/B). Byte-identical to before.
 
-    ``pool`` MUST exclude the sealed final-test days — the caller passes
-    the non-sealed pool. Raises if the pool is too small for the requested
-    folds (no silent truncation that would shrink coverage).
+    ``mode="chronological"`` (Tick-Tock rotation-rework): sort the pool by
+    DATE (no shuffle) and cut into **old-anchored** blocks — R1 = oldest
+    block, …, R_last = newest. R1..R(n-1) are therefore FIXED across eras as
+    data accumulates (new data extends the high end), giving the shared
+    leaderboard cross-era comparability. The **last** rotation absorbs any
+    remainder (so no recent data is wasted), and within every block the
+    **newest ``eval_per_rotation`` days are the eval set** (train on older,
+    eval on newer — a temporal-generalization mini-test), so the eval count
+    is constant and only the top rotation's TRAIN count grows. The top tier
+    therefore trains on the freshest data (deploy-aligned). The cross-era
+    held-out judge (the sliding newest-K sealed set) is the real overfit
+    backstop, so fixed folds are safe here.
+
+    ``pool`` MUST exclude the sealed/held-out days — the caller passes the
+    non-sealed pool. Raises if the pool is too small for the requested folds
+    (no silent truncation that would shrink coverage).
     """
     per = train_per_rotation + eval_per_rotation
     need = per * n_rotations
@@ -172,17 +252,36 @@ def make_rotations(
             f"make_rotations: need {need} days "
             f"({n_rotations}×{per}) but pool has {len(days)}",
         )
-    shuffled = list(days)
-    random.Random(int(cohort_seed) ^ 0x5052_4F54).shuffle(shuffled)
-    rotations: list[Rotation] = []
-    for r in range(n_rotations):
-        chunk = shuffled[r * per:(r + 1) * per]
-        rotations.append(Rotation(
-            index=r + 1,
-            train_days=tuple(sorted(chunk[:train_per_rotation])),
-            eval_days=tuple(sorted(chunk[train_per_rotation:per])),
-        ))
-    return rotations
+    if mode == "random":
+        shuffled = list(days)
+        random.Random(int(cohort_seed) ^ 0x5052_4F54).shuffle(shuffled)
+        rotations: list[Rotation] = []
+        for r in range(n_rotations):
+            chunk = shuffled[r * per:(r + 1) * per]
+            rotations.append(Rotation(
+                index=r + 1,
+                train_days=tuple(sorted(chunk[:train_per_rotation])),
+                eval_days=tuple(sorted(chunk[train_per_rotation:per])),
+            ))
+        return rotations
+    if mode == "chronological":
+        # Old-anchored chronological blocks; the LAST absorbs the remainder.
+        rotations = []
+        for r in range(n_rotations):
+            start = r * per
+            end = (r + 1) * per if r < n_rotations - 1 else len(days)
+            chunk = days[start:end]  # already date-sorted ascending
+            eval_days = chunk[-eval_per_rotation:]   # newest of the block
+            train_days = chunk[:-eval_per_rotation]  # older remainder
+            rotations.append(Rotation(
+                index=r + 1,
+                train_days=tuple(sorted(train_days)),
+                eval_days=tuple(sorted(eval_days)),
+            ))
+        return rotations
+    raise ValueError(
+        f"make_rotations: unknown mode {mode!r} (want 'random'|'chronological')",
+    )
 
 
 # ── Offspring (design-(a): copy-one + perturb non-structural ±20%) ─────────
@@ -324,18 +423,21 @@ def breed_pbt(
     ``.weights_path``, ``.model_id``, used by ``score_fn``). Returns
     ``(next_specs, frozen_champions)`` where ``next_specs`` is exactly
     ``config.n_agents`` agents for the next generation and
-    ``frozen_champions`` are the R3 winners that graduate to the
+    ``frozen_champions`` are the top-tier (RN) winners that graduate to the
     hall-of-fame this generation (``[(spec, result), ...]``).
 
-    Composition of the next generation (R1 absorbs the transient slack so
-    the total is always ``n_agents``):
+    Composition of the next generation, for an ``N``-tier ladder
+    (``N = config.n_tiers``; R1 absorbs the transient slack so the total is
+    always ``n_agents``):
 
-    * **R3** = top ``promote_from_r2`` of this gen's R2 (promoted as
-      elites, weights intact) + offspring bred from them, up to
-      ``r3_size`` — only if an R2 existed this gen.
-    * **R2** = top ``promote_from_r1`` of this gen's R1 (elites) +
-      offspring bred from them, up to ``r2_size``.
+    * For each tier ``t`` from ``N`` down to ``2``: **R_t** = top
+      ``promote_from(t-1)`` of this gen's tier ``t-1`` (promoted as elites,
+      weights intact) + offspring bred from them, up to ``tier_size(t)`` —
+      only if tier ``t-1`` trained this gen.
     * **R1** = the remaining slots, all fresh blood.
+
+    The default 3-tier ladder (``tier_sizes is None``) is byte-identical to
+    before; ``N>3`` (R4+) just extends the same loop.
 
     An ELITE inherits its own weights (``init_weights_path =
     result.weights_path``) and continues on the NEXT rotation
@@ -393,23 +495,25 @@ def breed_pbt(
             ))
         return out
 
-    # R3 ← R2 winners (only if R2 trained this gen).
-    r2 = _rank(by_tier.get(2, []), score_fn)
-    if r2:
-        r2_winners = r2[:config.promote_from_r2]
-        next_specs.extend(_promote(r2_winners, config.r3_size, next_tier=3))
+    # Build tiers TOP-DOWN (RN from R(N-1) winners, …, R2 from R1 winners).
+    # This order preserves the legacy 3-tier RNG-consumption sequence
+    # (R3-offspring draws, then R2-offspring draws, then fresh draws), so the
+    # 3-tier path stays byte-identical; it just generalizes to N tiers (R4+).
+    n_tiers = config.n_tiers
+    for t in range(n_tiers, 1, -1):
+        src = _rank(by_tier.get(t - 1, []), score_fn)
+        if src:
+            winners = src[:config.promote_from(t - 1)]
+            next_specs.extend(
+                _promote(winners, config.tier_size(t), next_tier=t),
+            )
 
-    # Hall-of-fame: this gen's R3 winners FREEZE (further training on
-    # rotation 3 would re-overfit it).
-    r3 = _rank(by_tier.get(3, []), score_fn)
-    if r3:
-        frozen_champions = r3[:config.freeze_top_r3]
-
-    # R2 ← R1 winners.
-    r1 = _rank(by_tier.get(1, []), score_fn)
-    if r1:
-        r1_winners = r1[:config.promote_from_r1]
-        next_specs.extend(_promote(r1_winners, config.r2_size, next_tier=2))
+    # Hall-of-fame: this gen's TOP-tier (RN) winners FREEZE (further training
+    # on the top rotation would re-overfit it). No RNG — order vs the build
+    # loop is immaterial.
+    top = _rank(by_tier.get(n_tiers, []), score_fn)
+    if top:
+        frozen_champions = top[:config.freeze_count()]
 
     # R1 ← fresh blood for every remaining slot (absorbs pipeline slack).
     # In a Tock era ``seed_bands`` band-seeds this rookie injection so the
