@@ -1,0 +1,2 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTHZQW6J631JN8RFMST7T363", "locator": {"char_range": [1601, 1660], "quote": "locked_pnl per pair = max(0, min over outcomes of pair P&L)"}, "source_id": "src-009382", "text": "scalping_locked_pnl per pair is redefined as max(0, min(win_pnl, lose_pnl)).", "verified_by": "none"}
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTHZREMBGG96A5QCMTKAHJC3", "locator": {"quote": "locks nothing"}, "source_id": "src-009382", "text": "An equal-stake pair locks nothing.", "verified_by": "none"}

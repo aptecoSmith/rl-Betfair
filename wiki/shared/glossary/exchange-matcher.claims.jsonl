@@ -1,0 +1,1 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTHZWQN1RYC2K58EQT9EY7RZ", "locator": {"char_range": [4061, 4076], "quote": "ExchangeMatcher"}, "source_id": "src-009382", "text": "ExchangeMatcher is the env's order-matching engine; its behaviour is unchanged by this plan.", "verified_by": "none"}
