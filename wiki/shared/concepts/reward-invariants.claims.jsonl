@@ -1,0 +1,2 @@
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ032ZXCDSA8KTAMGHCFVQ7", "locator": {"char_range": [2699, 2711], "quote": "raw + shaped"}, "source_id": "src-032073", "text": "raw + shaped approximately equals total_reward is a test invariant.", "verified_by": "none"}
+{"asserted_by": "human", "created": "2026-06-07", "id": "01KTJ0392RDDKJT3DRZ57X6V7F", "locator": {"char_range": [2885, 2892], "quote": "day_pnl"}, "source_id": "src-032073", "text": "day_pnl is the authoritative day P&L; realised_pnl is last-race-only.", "verified_by": "none"}
