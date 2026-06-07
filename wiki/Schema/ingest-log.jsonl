@@ -191,3 +191,4 @@
 {"event": "finalize", "message": "wiki: ingest direction-head sweep findings (C11, calibration, data ceiling, recipe ablations, scaling)", "notes": 21, "ts": "2026-06-07T02:17:10"}
 {"event": "finalize", "message": "wiki: ingest bet-explorer-redesign (grouped EW-aware explorer)", "notes": 22, "ts": "2026-06-07T02:18:08"}
 {"event": "finalize", "message": "wiki: ingest trajectory-retrieval lessons (value-domain checks, z-score bug signal, lock the rule)", "notes": 25, "ts": "2026-06-07T02:19:41"}
+{"event": "finalize", "message": "wiki: ingest ppo-stability investigation (KL stateful/stateless mismatch, starved PPO, refutations, force-close cost)", "notes": 29, "ts": "2026-06-07T03:16:19"}
