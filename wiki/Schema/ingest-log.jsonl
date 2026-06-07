@@ -195,3 +195,4 @@
 {"event": "finalize", "message": "wiki: ingest training-speedup-v2 lessons (batched drops, GPU parity, library-update, golden harness)", "notes": 33, "ts": "2026-06-07T03:18:22"}
 {"event": "finalize", "message": "wiki: ingest phase-15 direction-head feature-slice (LSTM-compression bottleneck, the fix, BCE diagnostic)", "notes": 36, "ts": "2026-06-07T04:15:47"}
 {"event": "finalize", "message": "wiki: ingest phase-10 argmax-eval (eval-sampling variance, argmax-eval, selection-vs-measurement, validation gate)", "notes": 40, "ts": "2026-06-07T04:18:36"}
+{"event": "finalize", "message": "wiki: ingest forced-arbitrage scalping-mode origin (arb_spread, forced pairing, commission breakeven)", "notes": 41, "ts": "2026-06-07T05:14:57"}
