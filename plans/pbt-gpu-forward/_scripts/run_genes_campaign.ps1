@@ -23,7 +23,7 @@
 param([int]$Eras = 0)   # how many eras to run; 0 = loop until stopped (stop_pbt_loop.bat)
 $env:PYTHONWARNINGS = "ignore"
 $py = ".\.venv\Scripts\python.exe"
-$DIR = "registry\pbt_genes_full"
+$DIR = "registry\pbt_genes_v2"   # NEW-REWARD campaign (kept separate from the old spray-and-bail pbt_genes_full)
 $SEALED = @(
   "2026-05-20","2026-05-21","2026-05-22","2026-05-23","2026-05-24",
   "2026-05-25","2026-05-26","2026-05-27","2026-05-28","2026-05-29"
@@ -54,7 +54,8 @@ while ($Eras -le 0 -or $run -lt $Eras) {
     '--breeding','pbt','--n-agents','16','--generations',"$GENS",'--days','30',
     '--exclude-days') + $SEALED + @(
     '--seed',"$seed",'--parallel-agents','16','--device','cpu',
-    '--composite-score-mode','locked_weighted','--big-model-threads','1',
+    '--composite-score-mode','locked_weighted','--force-close-rate-penalty-weight','20',
+    '--big-model-threads','1',
     '--gpu-policy-lane','--gpu-lane-max-concurrent','2',
     '--use-race-outcome-predictor','--use-direction-predictor','--bc-pretrain-steps','500',
     '--predictor-bundle-manifests',$MANIFESTS[0],$MANIFESTS[1],$MANIFESTS[2],
