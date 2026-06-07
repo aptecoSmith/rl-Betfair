@@ -190,3 +190,4 @@
 {"event": "finalize", "message": "wiki: ingest training-monitor autoscroll (UX design decision)", "notes": 16, "ts": "2026-06-07T01:20:04"}
 {"event": "finalize", "message": "wiki: ingest direction-head sweep findings (C11, calibration, data ceiling, recipe ablations, scaling)", "notes": 21, "ts": "2026-06-07T02:17:10"}
 {"event": "finalize", "message": "wiki: ingest bet-explorer-redesign (grouped EW-aware explorer)", "notes": 22, "ts": "2026-06-07T02:18:08"}
+{"event": "finalize", "message": "wiki: ingest trajectory-retrieval lessons (value-domain checks, z-score bug signal, lock the rule)", "notes": 25, "ts": "2026-06-07T02:19:41"}
