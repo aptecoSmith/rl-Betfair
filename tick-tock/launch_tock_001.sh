@@ -15,6 +15,9 @@
 #   * 12-day rotations split 6 train / 6 eval (was 6/4) — more held-out per
 #     tier for a lower-variance, less-overfit-prone selection signal under
 #     fixed folds. 48 training days = 4 x 12 exactly.
+#   * --maturation-gens 2 (self-healing budget): generations = n_tiers + 2, so
+#     the top tier always matures K+1=3 gens no matter how deep the ladder
+#     grows (now 4 tiers => 6 gens). No fixed --generations to remember to bump.
 #   * the 8 --seed-gene seeds (seeds/seed_args_001.txt), incl.
 #     predictor_lean_obs=false so BC (full-obs oracle) runs era-wide, and
 #     bc_pretrain_steps=500 carried by the SEED (no --bc-pretrain-steps flag).
@@ -31,7 +34,7 @@ PRED=../betfair-predictors/production
 mkdir -p "$DIR"
 
 "$PY" -m training_v2.cohort.runner \
-  --breeding pbt --n-agents 16 --generations 5 \
+  --breeding pbt --n-agents 16 --maturation-gens 2 \
   --holdout-recent 7 --pbt-rotation-mode chronological \
   --seed 2001 --parallel-agents 16 --device cpu \
   --composite-score-mode locked_weighted --force-close-rate-penalty-weight 20 \

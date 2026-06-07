@@ -132,6 +132,11 @@ comparison ANCHOR for future eras (the old Tick used random folds on the
   48 training days = 4 × 12-day rotations.
 - **12-day rotations, 6 train / 6 eval** (was 6/4) — more held-out per tier
   for a lower-variance, less-overfit-prone selection signal under fixed folds.
+- **Self-healing generation budget** (`--maturation-gens 2`): generations =
+  `n_tiers + K`, so the top tier always matures K+1 = 3 gens regardless of
+  ladder depth (4 tiers ⇒ 6 gens now; auto-scales to 7 at R5, etc.). The
+  pipeline needs `n_tiers−1` gens just to fill, so a fixed `--generations`
+  would starve the top tier as tiers are added — this removes that footgun.
 - All 48 training days are direction-label + oracle cached (scanned
   2026-06-07); the newest-7 holdout needs no caches (eval uses the live
   predictor bundle).

@@ -2769,6 +2769,24 @@ def _resolve_seed_bands(
     return seed_bands, (enabled_set | frozenset(auto_enable))
 
 
+def _resolve_generations(
+    *, maturation_gens: "int | None", n_tiers: int, explicit_generations: int,
+) -> int:
+    """Self-healing generation budget (Tick-Tock rotation-rework).
+
+    When ``maturation_gens`` (K) is set, ``G = n_tiers + K`` so the top tier
+    always gets a constant maturation window (K+1 gens) regardless of ladder
+    depth — the PBT pipeline needs ``n_tiers-1`` gens just to fill, so a fixed
+    ``--generations`` starves the top tier as tiers are added. ``None`` ⇒ the
+    explicit ``--generations`` (byte-identical to before). Extracted + unit-
+    tested (the ``_resolve_<knob>`` pattern) so the rule is verified in
+    isolation and the autonomous loop never has to remember to bump generations.
+    """
+    if maturation_gens is None:
+        return int(explicit_generations)
+    return int(n_tiers) + int(maturation_gens)
+
+
 def _parse_reward_overrides(items: list[str]) -> dict:
     """Parse a list of ``key=value`` strings into a dict.
 
@@ -2932,6 +2950,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--pbt-freeze-top", type=int, default=None, metavar="K",
         help="PBT N-tier: top-tier (RN) champions frozen per gen. "
              "Required with --pbt-tier-sizes.",
+    )
+    p.add_argument(
+        "--maturation-gens", type=int, default=None, metavar="K",
+        help=(
+            "Self-healing generation budget (PBT): set --generations = "
+            "n_tiers + K instead of a fixed number, so the top tier always "
+            "gets the SAME maturation window (K+1 gens) no matter how deep the "
+            "ladder grows. The pipeline needs n_tiers-1 gens just to fill, so "
+            "a fixed --generations starves the top tier as tiers are added; "
+            "this scales with the ladder automatically. K=2 reproduces the "
+            "3-tier/5-gen baseline's 3-gen top tier. Overrides --generations "
+            "when set. Requires --breeding pbt."
+        ),
     )
     p.add_argument(
         "--emit-websocket", action="store_true",
@@ -3928,10 +3959,29 @@ def main(argv: list[str] | None = None) -> int:
             freeze_top=_freeze_top,
         )
 
+    # Self-healing generation budget: G = n_tiers + K when --maturation-gens
+    # is set, so the top tier's maturation window is constant as the ladder
+    # deepens (no fixed --generations to remember to bump).
+    if args.maturation_gens is not None and args.breeding != "pbt":
+        raise SystemExit("--maturation-gens requires --breeding pbt")
+    _generations = _resolve_generations(
+        maturation_gens=args.maturation_gens,
+        n_tiers=(_pbt_config.n_tiers if _pbt_config is not None
+                 else int(args.pbt_rotations)),
+        explicit_generations=int(args.generations),
+    )
+    if args.maturation_gens is not None:
+        logger.info(
+            "Tick-Tock self-healing generations: n_tiers=%d + K=%d => %d gens "
+            "(top tier matures %d gens)",
+            _pbt_config.n_tiers, int(args.maturation_gens), _generations,
+            int(args.maturation_gens) + 1,
+        )
+
     try:
         run_cohort(
             n_agents=args.n_agents,
-            n_generations=args.generations,
+            n_generations=_generations,
             days=_days_arg,
             data_dir=Path(args.data_dir),
             device=args.device,

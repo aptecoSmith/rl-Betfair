@@ -217,6 +217,22 @@ def test_pbt_runner_chronological_four_tier(tmp_path: Path) -> None:
     assert all(c["tier"] == 4 for c in champs)  # only the top tier (R4) freezes
 
 
+def test_resolve_generations_self_heals_with_tiers() -> None:
+    """G = n_tiers + K when --maturation-gens set (constant top-tier window as
+    the ladder deepens); explicit --generations when not."""
+    r = runner_mod._resolve_generations
+    # None ⇒ explicit (byte-identical).
+    assert r(maturation_gens=None, n_tiers=3, explicit_generations=5) == 5
+    # K=2 reproduces the 3-tier/5-gen baseline AND auto-scales with depth.
+    assert r(maturation_gens=2, n_tiers=3, explicit_generations=99) == 5
+    assert r(maturation_gens=2, n_tiers=4, explicit_generations=99) == 6
+    assert r(maturation_gens=2, n_tiers=5, explicit_generations=99) == 7
+    # Top-tier maturation window (G - N + 1) is constant = K+1 for every depth.
+    for n in (3, 4, 5, 6):
+        g = r(maturation_gens=2, n_tiers=n, explicit_generations=0)
+        assert g - n + 1 == 3
+
+
 def test_select_final_freeze_picks_top_r3_nonfrozen_deduped() -> None:
     """Unit guard for the end-of-run freeze selector: tier-3 only, drops
     already-frozen specs + already-frozen model_ids, ranks by score, caps
