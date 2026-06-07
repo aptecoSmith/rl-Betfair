@@ -7,11 +7,26 @@ It is self-contained: the knowledge versions with the code, no cross-repo depend
 | | |
 |---|---|
 | **Source repo** | `../llm-wiki-v3` (operator's repo, sibling checkout) |
-| **Source commit** | `7873a29feb2582a9afeb34087be9fddac986aadc` |
-| **Copied on** | 2026-06-06 (initial copy `08145d5`); synced to `11cf011` 2026-06-06 |
+| **Source commit** | `ab10a380da81a6a21a4db2be38373a99cbb0aff7` |
+| **Copied on** | 2026-06-06 (initial copy `08145d5`); synced to `11cf011` 2026-06-06, `7873a29` + `ab10a38` 2026-06-07 |
 | **Design / decision** | `plans/memory-improvements/{purpose,current_state,design}.md`, `_kickoff.md` |
 
 ## Sync history
+- **2026-06-07 → `ab10a38`** (entity-coverage gate + per-document discovery). Ported the new
+  **`scripts/entities.py`** (stdlib-only entity candidate + classify engine), the **`discover`** +
+  **`entity-skip`** commands, the **`unrepresented-entity`** coverage ERROR (now in the
+  finalize/`gate` error set — a named person/org/tool/place/term with no citing node/link/alias blocks
+  finalize), the per-document one-at-a-time **batch lock** (`batch next` resumes an in-flight source;
+  `--force` to parallelise), `claims.py` `_fold`, and the `extract`/`ingest`/`batch` skill updates. New
+  committed ledger **`Schema/entity-skips.jsonl`**. Copied `wiki_tool.py` wholesale and **re-applied the
+  two local deltas** (drop `cmd_init`'s `.githooks` auto-install; `_repo_prefix`/`git_changes` subdir
+  patch). `skills/batch/SKILL.md` was merged (rl-betfair `--name repo-md` + Read-the-file-directly
+  adaptations on top of ab10a38's discover/lock); the other two skills copied clean. Skipped upstream's
+  vault-content reset (their `Schema/*.jsonl` + `shared/` corpus). **Caveat:** `discover` is noisy on
+  rl-betfair's dense technical prose (flags acronyms like PPO/EW/LTP, code refs like `L313`/
+  `DiscreteActionShim`, sentence-initial words) — node the real entities and batch-`entity-skip` the rest;
+  if the noise is structural, refine the candidate filter **upstream** in `llm-wiki-v3` (invariant 9), not
+  here. Re-applied + verified via `doctor` + `discover --path` + a `project`/`query` round-trip.
 - **2026-06-07 → `7873a29`** (pre-commit quality-gate hook + `gate` command). Ported the read-only
   **`gate`** command into `wiki/scripts/wiki_tool.py` (validate + connectivity + claims-lint + coverage;
   exit 1 on any ERROR — the gates even outside `finalize-ingest`). Installed an **adapted repo-root

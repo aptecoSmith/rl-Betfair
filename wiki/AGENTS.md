@@ -92,12 +92,19 @@ If the user names a skill or uses one of these triggers, read the matching `SKIL
 ## Ingesting a source (one source at a time)
 1. **Register** the source (`wiki_tool.py register …`) → get a `src-id`.
 2. **Read it fully.** Never skim or sample. For large/dense docs, use the extraction engine below.
-3. **Search first:** `wiki_tool.py search "…"` across the active cloud before creating notes.
-4. **Write breadth.** A new Entity for every named cohort/campaign/mechanism/tool; a new Concept for
-   every distinct idea; Topics/Projects where warranted. Typical ingest touches many notes.
-5. **Lift key quotes into the notes** so citations survive even if the source later moves.
-6. **Cross-link** every new note to at least one hub and to related notes via `[[wiki-links]]`.
-7. **Finalize:** `wiki_tool.py finalize-ingest`. The ingest is not done until this passes.
+3. **Discover the entities** the source names: `wiki_tool.py discover --source <src-id>` — the
+   per-document worklist of people/orgs/tools/places/terms, split into "already in the wiki (link
+   these)" vs "not represented (create a node, link one, or skip)". This is the *search the document*
+   step; run it before writing notes so nothing named slips through.
+4. **Search first:** `wiki_tool.py search "…"` across the active cloud before creating notes.
+5. **Write breadth.** A new Entity for every named cohort/campaign/mechanism/tool; a new Concept for
+   every distinct idea; Topics/Projects where warranted. Typical ingest touches many notes. Every named
+   entity from `discover` must become a node, a `[[link]]`/alias in a citing note, OR an explicit
+   `wiki_tool.py entity-skip --source <id> --term "…" --reason "…"` (the auditable "not node-worthy").
+6. **Lift key quotes into the notes** so citations survive even if the source later moves.
+7. **Cross-link** every new note to at least one hub and to related notes via `[[wiki-links]]`.
+8. **Finalize:** `wiki_tool.py finalize-ingest`. The ingest is not done until this passes — it blocks on
+   the **under-extraction**, **claimless**, AND **unrepresented-entity** coverage ERRORs.
 
 ## Static (append-only) sources
 A note you keep reopening and appending to lives in `inbox/static/`. Unlike a `pending/` drop, a static
@@ -150,7 +157,9 @@ plus controlled **context tags** (`work, home, research, meetings, lessons`). Un
 Every `register` and `finalize-ingest` is recorded append-only in `Schema/ingest-log.jsonl` (the
 replication manifest: location + hash + order). Never hand-edit or rewrite it. Because the rl-betfair
 sources are *in this repo*, the log doubles as a map of which repo docs have been ingested. View:
-`wiki_tool.py ingest-log`.
+`wiki_tool.py ingest-log`. Entity-coverage skips are likewise committed source-of-truth — append-only in
+`Schema/entity-skips.jsonl` (one `{source_id, term, reason}` per deliberate "not node-worthy" call, via
+`entity-skip`); they record a decision, so they version with the notes.
 
 ## Dialog record (CoDIAK)
 The *semantic* counterpart to the mechanical ingest-log: `Schema/dialog.jsonl` is the append-only
@@ -162,14 +171,28 @@ say where. Append-only — never rewrite it.
 
 ## Commands you'll use
 `init · doctor · register · build · validate · connectivity · search · source-check · ingest-log · log ·
-scan · finalize-ingest · stamp-ids · claim-add · claims-lint · relations · project · query · dialog ·
-verify · view · coverage · rollback`. Run `python scripts/wiki_tool.py <cmd> --help`.
+scan · discover · entity-skip · finalize-ingest · stamp-ids · claim-add · claims-lint · relations ·
+project · query · dialog · verify · view · coverage · gate · rollback`. Run
+`python scripts/wiki_tool.py <cmd> --help`.
 - **`coverage`** — substance/provenance extraction-quality gate. **Blocks** `finalize-ingest`
-  (strict-by-default; `--no-strict` to override) on two ERRORs: **under-extraction** (substantive
+  (strict-by-default; `--no-strict` to override) on three ERRORs: **under-extraction** (substantive
   notes + grounded claims below the source's real size — words/200 for markdown, pages/slides/rows
-  for binaries) and **claimless** (a substantive `concept`/`entity` note with 0 claims). Also WARNs
-  on page-padding / thin stubs. The cure is the `extract` skill — a note per concept/finding and a
-  claim per assertion; the floor is a *floor, never a target*.
+  for binaries), **claimless** (a substantive `concept`/`entity` note with 0 claims), and
+  **unrepresented-entity** (the source NAMES a person/org/tool/place/term that no citing note turns
+  into a node/link/alias — the under-extraction size can't see). Also WARNs on page-padding / thin
+  stubs. The cure is the `extract` skill — a note per concept/finding, a claim per assertion, a node
+  (or `entity-skip`) per named entity; the floor is a *floor, never a target*.
+- **`discover` / `entity-skip`** — `discover --source <id>` (or `--path <file>`) prints the
+  per-document entity worklist (EXISTING / MISSING / skipped); run it before writing notes. `entity-skip
+  --source <id> --term "a,b,c" --reason "…"` records that named candidates are deliberately NOT
+  node-worthy (committed to `Schema/entity-skips.jsonl`) so the entity-coverage gate stops flagging
+  them. **rl-betfair note:** on dense technical docs `discover` is noisy — it flags acronyms (PPO, EW,
+  WIN, LTP), code refs (`L313`, `DiscreteActionShim`), and sentence-initial words. Node/alias the real
+  entities; batch-`entity-skip` the rest with one reason. (Engine bug? It's vendored — fix upstream, not
+  here.)
+- **`gate`** — runs validate + connectivity + claims-lint + coverage and exits 1 on any ERROR, the same
+  gate `finalize-ingest` enforces. Also wired as the repo-root `.githooks/pre-commit` so a light or
+  entity-incomplete note can't be committed.
 - **`rollback`** — undo an ingestion (revert/reset the finalize commit; `--list` to choose,
   `--last`/`--to <hash>`). Note: this wiki shares rl-betfair's git, so each `finalize-ingest` is a real
   rl-betfair commit; `rollback --last` only undoes a commit whose tip is that ingest.

@@ -21,17 +21,21 @@ touched.
 ## Loop
 1. **Plan once:** `python scripts/batch.py plan "<folder>"` - registers every doc under the folder
    (reference-not-copy) and queues it. Re-running is safe; finished sources are never re-queued.
-2. **Take the next source:** `python scripts/batch.py next` - prints one source and marks it
-   in-progress. Add `--name <n>` to run several migrations side by side.
-3. **Ingest it properly:** follow the `ingest` skill (read its SKILL.md) on that source; for large/dense
-   docs use `extract` (segment -> per-segment enumeration). **The source is the file path `next`
-   printed — `Read` that file directly; `query`/`sources` return metadata, not content.** Ground each
-   claim with `python scripts/wiki_tool.py claim-add --note <note> --source <sid> --quote "<verbatim
-   span>" --text "<claim>" --asserted-by model:<name>`. Cross-link into a hub.
+2. **Take the next source:** `python scripts/batch.py next` - prints **one** source and marks it
+   in-progress. The lock is **one-at-a-time**: `next` hands the same in-flight source back until you
+   finish it (finalize + `batch done`), so you can't read a pile of sources together and summarise them.
+   `--force` only to deliberately parallelise; `--name <n>` to run separate migrations side by side.
+3. **Discover, then ingest properly:** run `python scripts/wiki_tool.py discover --source <id>` first —
+   the per-document entity/concept worklist (for each: node / `[[link]]` / `entity-skip` with a reason).
+   Then follow the `ingest` skill on that source; for large/dense docs use `extract` (segment ->
+   per-segment enumeration). **The source is the file path `next` printed — `Read` that file directly;
+   `query`/`sources` return metadata, not content.** Ground each claim with `python scripts/wiki_tool.py
+   claim-add --note <note> --source <sid> --quote "<verbatim span>" --text "<claim>" --asserted-by
+   model:<name>`. Cross-link into a hub. One source, fully — no grab-bag synthesis notes.
 4. **Finalize:** `python scripts/wiki_tool.py finalize-ingest`. This is the gate — **strict by default**,
-   so it blocks the commit on any ERROR (including the **under-extraction** and **claimless** gates), and
-   a source can't be marked done while it's summarised or ungrounded. (`--no-strict` is a deliberate
-   override for genuine exceptions only.)
+   blocking on any ERROR (the **under-extraction**, **claimless**, and **entity-coverage** gates), so a
+   source can't be marked done while it's summarised, ungrounded, or naming entities that became no node.
+   (`--no-strict` is a deliberate override for genuine exceptions only.)
 5. **Confirm + repeat:** `python scripts/batch.py done <src-id>` (it refuses if no note cites the
    source yet), then back to step 2. `python scripts/batch.py status` shows % accounted and the next
    item.
@@ -47,6 +51,7 @@ notes is flagged and re-queued.
 for, never silently dropped. `requeue <src-id>` puts one back to pending.
 
 ## Anti-patterns
-Mass-registering and then emitting a handful of notes for the whole batch. Marking `done` without
-running `finalize-ingest`. Treating `plan` as ingestion - it only queues; compiling each source is
-still your job.
+Mass-registering and then emitting a handful of notes for the whole batch. **Reading several sources
+together and summarising them into one note** (the lock and the entity-coverage gate exist to stop
+exactly this). Marking `done` without running `finalize-ingest`. Treating `plan` as ingestion - it only
+queues; compiling each source is still your job.

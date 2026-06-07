@@ -489,6 +489,8 @@ def cmd_init(args):
     print(f"machine_id   = {cfg['machine_id']}")
     print(f"active_cloud = {cfg['active_cloud']}")
     print(f"vector_tier  = {'available' if cfg['vector_tier'] else 'BM25 only (optional bits absent)'}")
+    # NOTE (rl-betfair local delta): upstream auto-installs core.hooksPath=.githooks here. Dropped — it
+    # assumes wiki == repo root; rl-betfair's hook lives at the *repo-root* .githooks/, set once manually.
     return cmd_doctor(args)
 
 
@@ -1943,11 +1945,17 @@ def coverage(notes, reg, min_chars=200):
       * under-extraction [ERROR] - (substantive notes + grounded claims) far below the source's real
         size (pdf pages / pptx slides / xlsx rows / words) - the under-counting direction; and
       * claimless [ERROR] - a substantive concept/entity note with zero grounded claims (v3 notes are
-        compositions of claims).
+        compositions of claims); and
+      * unrepresented-entity [ERROR] - the source NAMES a person/org/tool/place/term that no note citing
+        it turns into a node, link, or alias (the under-extraction that size-based checks can't see: a
+        150-word meeting note naming six people scores ~1 'unit', so one bullet-list note cleared the old
+        floor while Samrat, Barkha and Vix never became nodes). Cleared by a node/link or an `entity-skip`.
     ERROR findings block `finalize-ingest` (strict by default; `--no-strict` overrides). The cure is the
     extract skill: enumerate every item and record a claim per assertion.
     """
     import claims as _claims
+    import entities as _ent
+    _node_terms = _ent.terms_from_notes(_wiki_repr_strings(notes))   # whole-wiki recall lexicon
     by_src = {}
     claims_per_src = {}
     note_nclaims = {}
@@ -1989,6 +1997,18 @@ def coverage(notes, reg, min_chars=200):
                              f"under-extracted: '{title}' is ~{units} units (pages/slides/rows/words) "
                              f"but yielded only {items} knowledge items ({substantive} substantive notes "
                              f"+ {nclaims} claims) - run the extract skill (per item + a claim each)"))
+        # entity-coverage: each named entity in the source must be a node/link/alias in a CITING note.
+        if get_source_text(sid, reg) is not None:
+            repr_ns = _ent.build_repr_index(_wiki_repr_strings(ns))
+            res_e, _ = discover_entities(sid, reg, notes, repr_index=repr_ns, node_terms=_node_terms)
+            miss = res_e["missing_error"]
+            if miss:
+                shown = ", ".join(c["surface"] for c in miss[:20])
+                more = f" (+{len(miss) - 20} more)" if len(miss) > 20 else ""
+                findings.append((ERROR, where,
+                                 f"unrepresented entities ({len(miss)}) in '{title}': {shown}{more} - the "
+                                 f"source names these but no citing note has a node/link/alias for them. "
+                                 f"Create a node, link an existing one, or `entity-skip` each with a reason."))
     for n in notes:
         if n.name in HUB_NAMES:
             continue
@@ -1998,6 +2018,153 @@ def coverage(notes, reg, min_chars=200):
                              f"claimless: substantive {typ} note has 0 grounded claims - record a claim "
                              f"per assertion (claim-add)"))
     return findings, stats
+
+
+# --------------------------------------------------------------------------- #
+# entity/concept discovery (the "search the document" pass) + its skip ledger
+# --------------------------------------------------------------------------- #
+def _entity_skips_path():
+    """Resolved at call time (not import) so it follows SCHEMA when tests rebind ROOT/SCHEMA — and never
+    writes into the real repo from a temp-wiki test. Mirrors `_ingest_log_path()`."""
+    return SCHEMA / "entity-skips.jsonl"
+
+
+def load_entity_skips() -> dict:
+    """source_id -> set of normalized candidate surfaces the agent has consciously decided are NOT
+    node-worthy (with a recorded reason). Committed (a decision, part of the source of truth)."""
+    import entities as _ent
+    out: dict = {}
+    p = _entity_skips_path()
+    if not p.exists():
+        return out
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            o = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        out.setdefault(str(o.get("source_id", "")), set()).add(_ent.normalize(o.get("term", "")))
+    return out
+
+
+def _wiki_repr_strings(notes) -> list:
+    """Every surface form the wiki currently represents: note stems, titles, aliases, and the stems of
+    `[[link]]` targets. Feeds both the representation index (is X covered?) and the recall lexicon
+    (re-find known entities by name in new docs)."""
+    out = []
+    for n in notes:
+        if n.name in HUB_NAMES:
+            continue
+        out.append(n.name)
+        out.append(str(n.title))
+        out += [str(a) for a in n.as_list("aliases")]
+        out += [link_target_stem(t) for t in n.links]
+    return out
+
+
+def _entity_signal_for_source(sid, reg):
+    """Compose the text we scan for entities: the source's registered title + filename (real signal —
+    'Aisling - Vix overview' names a person only in the title) + the body with frontmatter stripped."""
+    import entities as _ent
+    entry = reg.get(sid) or {}
+    title = str(entry.get("title", "") or "")
+    loc = entry.get("locations", {}).get(machine_id()) or {}
+    stem = Path(loc["path"]).stem if loc.get("path") else ""
+    body = _ent.content_text(get_source_text(sid, reg) or "")
+    signal = "\n".join([title, stem.replace("-", " ").replace("_", " "), body])
+    return signal, (title or stem or sid)
+
+
+def discover_entities(sid, reg, notes, repr_index=None, node_terms=None):
+    """Run the deterministic discovery for one source: candidate entities in the doc, classified against
+    what the wiki represents. Returns (classification, label). Shared by `discover` and the gate."""
+    import entities as _ent
+    if repr_index is None or node_terms is None:
+        strings = _wiki_repr_strings(notes)
+        repr_index = _ent.build_repr_index(strings)
+        node_terms = _ent.terms_from_notes(strings)
+    signal, label = _entity_signal_for_source(sid, reg)
+    cands = _ent.candidate_entities(signal, extra_terms=node_terms)
+    skips = load_entity_skips().get(sid, set())
+    return _ent.classify(cands, repr_index, skips=skips), label
+
+
+def cmd_discover(args):
+    """Per-document entity/concept worklist: what people/orgs/tools/places/terms the source names, split
+    into 'already in the wiki (link these)' vs 'not represented (create a node, link, or skip)'. This is
+    the missing *search* step — run it right after registering a source, before writing notes."""
+    import entities as _ent
+    reg, notes = load_registry(), find_notes()
+    strings = _wiki_repr_strings(notes)
+    repr_index = _ent.build_repr_index(strings)
+    node_terms = _ent.terms_from_notes(strings)
+    if args.source:
+        if args.source not in reg:
+            print(f"error: source '{args.source}' not in registry", file=sys.stderr)
+            return 2
+        res, label = discover_entities(args.source, reg, notes, repr_index, node_terms)
+    elif args.path:
+        p = Path(args.path) if Path(args.path).is_absolute() else (ROOT / args.path)
+        if not p.exists():
+            print(f"error: file not found: {args.path}", file=sys.stderr)
+            return 2
+        body = _extract_source_text(p)
+        if body is None:
+            body = p.read_text(encoding="utf-8", errors="replace")
+        signal = p.stem.replace("-", " ").replace("_", " ") + "\n" + _ent.content_text(body)
+        cands = _ent.candidate_entities(signal, extra_terms=node_terms)
+        res = _ent.classify(cands, repr_index)
+        label = p.name
+    else:
+        print("error: discover needs --source <id> or --path <file>", file=sys.stderr)
+        return 2
+    missing = res["missing_error"] + res["missing_warn"]
+    total = sum(len(v) for v in res.values())
+
+    def _a(s):
+        return str(s).encode("ascii", "replace").decode("ascii")
+    print(_a(f"# discover: {label}"))
+    print(f"  {total} candidate(s): {len(res['represented'])} already in the wiki, "
+          f"{len(missing)} not yet represented, {len(res['skipped'])} skipped")
+    if res["represented"]:
+        print(_a("  EXISTING (link these): "
+                 + ", ".join(sorted(c["surface"] for c in res["represented"]))))
+    if missing:
+        print(_a("  MISSING  (node / link / skip each): "
+                 + ", ".join(c["surface"] for c in missing)))
+    if res["skipped"]:
+        print(_a("  skipped: " + ", ".join(c["surface"] for c in res["skipped"])))
+    if not missing:
+        print("  -> every named entity is represented. Good to finalize.")
+    return 0
+
+
+def cmd_entity_skip(args):
+    """Record that a discovered candidate is deliberately NOT node-worthy for a source (with a reason),
+    so the entity-coverage gate stops flagging it. The auditable alternative to silently dropping it."""
+    import entities as _ent
+    reg = load_registry()
+    if args.source not in reg:
+        print(f"error: source '{args.source}' not in registry", file=sys.stderr)
+        return 2
+    if not (args.reason or "").strip():
+        print("error: --reason is required (why these mentions don't warrant a node/link)", file=sys.stderr)
+        return 2
+    terms = [t.strip() for t in str(args.term).replace(";", ",").split(",") if t.strip()]
+    if not terms:
+        print("error: --term needs at least one candidate surface", file=sys.stderr)
+        return 2
+    p = _entity_skips_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as f:
+        for t in terms:
+            rec = {"source_id": args.source, "term": _ent.normalize(t), "surface": t,
+                   "reason": args.reason.strip(), "ts": _today()}
+            f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+    print(f"skipped {len(terms)} term(s) for {args.source}: {', '.join(terms)} ({args.reason.strip()})")
+    return 0
 
 
 def cmd_coverage(args):
@@ -2287,6 +2454,20 @@ def build_parser():
     s.add_argument("--strict", action="store_true", help="exit non-zero if anything is flagged")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_coverage)
+
+    s = sub.add_parser("discover",
+                       help="search a source for the entities/concepts it names; show which are missing")
+    s.add_argument("--source", help="registered source id to scan")
+    s.add_argument("--path", help="scan an arbitrary file directly (need not be registered)")
+    s.set_defaults(func=cmd_discover)
+
+    s = sub.add_parser("entity-skip",
+                       help="mark a discovered entity as deliberately not node-worthy for a source (+reason)")
+    s.add_argument("--source", required=True)
+    s.add_argument("--term", required=True,
+                   help="candidate surface(s) to skip, comma-separated (e.g. 'Monday, hopefully, Make')")
+    s.add_argument("--reason", required=True, help="why they don't warrant a node/link")
+    s.set_defaults(func=cmd_entity_skip)
 
     s = sub.add_parser("classify", help="show the detected doc-type per source (drives extraction rules)")
     s.add_argument("--source", help="limit to one source id")

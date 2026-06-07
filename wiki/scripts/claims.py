@@ -42,10 +42,28 @@ def _norm_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 
+# Fold common typographic punctuation (smart quotes, dashes, ellipsis, nbsp) to ASCII, so a faithfully
+# lifted quote isn't refused over cosmetic differences in PDFs / web clippings. Grounding stays honest:
+# the content must still be present - only punctuation/whitespace noise is ignored, never missing text.
+_PUNCT = {
+    "“": '"', "”": '"', "„": '"', "″": '"',   # " " „ ″ -> "
+    "‘": "'", "’": "'", "‚": "'", "′": "'",   # ' ' ‚ ′ -> '
+    "–": "-", "—": "-", "−": "-",                   # – — − -> -
+    "…": "...", " ": " ",                                # … -> ... ; nbsp -> space
+}
+_PUNCT_RE = re.compile("|".join(re.escape(k) for k in _PUNCT))
+
+
+def _fold(s: str) -> str:
+    return _norm_ws(_PUNCT_RE.sub(lambda m: _PUNCT[m.group()], s or ""))
+
+
 def quote_in_text(quote: str, text: str) -> bool:
-    """True iff `quote` occurs in `text`, comparing whitespace-insensitively (PDF text wraps)."""
-    q = _norm_ws(quote)
-    return bool(q) and q in _norm_ws(text)
+    """True iff `quote` occurs in `text`, ignoring whitespace wrapping AND typographic punctuation
+    (smart quotes / dashes / ellipsis) - so a faithfully lifted quote from a PDF or clipping grounds,
+    while a genuinely absent (paraphrased) quote is still refused."""
+    q = _fold(quote)
+    return bool(q) and q in _fold(text)
 
 
 def raw_span(quote: str, text: str):

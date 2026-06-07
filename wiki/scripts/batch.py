@@ -41,14 +41,22 @@ def plan_entries(ledger: dict, items) -> int:
     return added
 
 
-def claim_next(ledger: dict):
-    """Next unit of work: a pending source, or (failing that) an in_progress one to resume after an
-    interrupted run. Returns (sid, path, resumed) or None when the queue is drained."""
+def claim_next(ledger: dict, resume_first: bool = True):
+    """Next unit of work as (sid, path, resumed), or None when drained.
+
+    One-at-a-time lock (resume_first=True, the default): if a source is already `in_progress`, hand THAT
+    one back so it gets finished before another is started — this is what stops the agent reading many
+    sources and summarising them together. `resume_first=False` is the `--force` override: skip the lock
+    and claim the next pending source (deliberate parallelism)."""
     entries = ledger.get("entries", {})
+    if resume_first:                                          # finish an in-flight source before a new one
+        for sid in sorted(entries):
+            if entries[sid]["status"] == "in_progress":
+                return sid, entries[sid]["path"], True
     for sid in sorted(entries):
         if entries[sid]["status"] == "pending":
             return sid, entries[sid]["path"], False
-    for sid in sorted(entries):
+    for sid in sorted(entries):                               # fallback: resume an in_progress one
         if entries[sid]["status"] == "in_progress":
             return sid, entries[sid]["path"], True
     return None
@@ -142,7 +150,9 @@ def main(argv=None):
     sp.add_argument("folder")
     sp.add_argument("--no-recursive", action="store_true")
     sub.add_parser("status", help="reconcile against real notes and show progress")
-    sub.add_parser("next", help="print the next source to ingest and mark it in-progress")
+    sp = sub.add_parser("next", help="print the next source to ingest and mark it in-progress")
+    sp.add_argument("--force", action="store_true",
+                    help="override the one-at-a-time lock: start a new source even if one is in progress")
     sp = sub.add_parser("done", help="confirm a source done (refuses if no note cites it yet)")
     sp.add_argument("sid")
     sp.add_argument("--force", action="store_true")
@@ -178,8 +188,8 @@ def main(argv=None):
         return 0
 
     if args.cmd == "next":
-        reconcile(ledger, wt.coverage_map())
-        nxt = claim_next(ledger)
+        reconcile(ledger, wt.coverage_map())                 # auto-close any in-flight source notes now cite
+        nxt = claim_next(ledger, resume_first=not args.force)
         if not nxt:
             save_ledger(ledger)
             print("queue drained - nothing pending")
@@ -187,8 +197,15 @@ def main(argv=None):
         sid, path, resumed = nxt
         mark(ledger, sid, "in_progress", ts=wt._today())
         save_ledger(ledger)
-        print(("resuming " if resumed else "") + f"{sid}  {path}")
-        print("-> ingest (extract/ingest skills) -> finalize-ingest -> `batch done`")
+        if resumed and not args.force:
+            # one-at-a-time lock: a source is still in flight - finish it before starting another
+            print(f"{sid}  {path}")
+            print("^ STILL IN PROGRESS - finish this source first: discover -> notes/claims -> "
+                  "finalize-ingest -> `batch done`.")
+            print("  Process one source fully at a time. (`batch next --force` to deliberately parallelise.)")
+        else:
+            print(("resuming " if resumed else "") + f"{sid}  {path}")
+            print("-> discover (entities) -> ingest (extract/ingest skills) -> finalize-ingest -> `batch done`")
         return 0
 
     if args.cmd == "done":

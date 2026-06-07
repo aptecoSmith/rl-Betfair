@@ -23,6 +23,10 @@ Quick reminders (full detail in AGENTS.md):
   knowledge docs) and the **inbox** (external ML docs you drop in). One source at a time, read fully;
   large docs go through the anti-shortcut extraction engine.
 - The graph is the product — every note reaches a hub; no orphans.
+- **Search the document for entities** before writing: `python scripts/wiki_tool.py discover --source
+  <id>`. Every named person/org/tool/place/term must become a node/link/alias or an `entity-skip
+  --reason` — the **unrepresented-entity** coverage ERROR (alongside under-extraction + claimless)
+  blocks finalize otherwise.
 - Finalize every ingest with `python scripts/wiki_tool.py finalize-ingest`.
 - **"Process everything" means finish the job** — clear the coverage floor on every heavy source
   before closing it. No "TBD" deferrals, no asking which to prioritise.
