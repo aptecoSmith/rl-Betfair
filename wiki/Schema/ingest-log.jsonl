@@ -188,3 +188,4 @@
 {"event": "finalize", "message": "wiki: ingest arch-exploration (dead reward genes, degenerate GA search)", "notes": 14, "ts": "2026-06-07T01:18:07"}
 {"event": "finalize", "message": "wiki: ingest market-type-filter (schema-stable str_choice gene)", "notes": 15, "ts": "2026-06-07T01:18:59"}
 {"event": "finalize", "message": "wiki: ingest training-monitor autoscroll (UX design decision)", "notes": 16, "ts": "2026-06-07T01:20:04"}
+{"event": "finalize", "message": "wiki: ingest direction-head sweep findings (C11, calibration, data ceiling, recipe ablations, scaling)", "notes": 21, "ts": "2026-06-07T02:17:10"}
