@@ -186,3 +186,4 @@
 {"event": "finalize", "message": "wiki: re-ingest reward-shaping cluster under strict gates (equal-profit, naked-asymmetry, CLAUDE reward)", "notes": 9, "ts": "2026-06-07T00:17:16"}
 {"event": "finalize", "message": "wiki: ingest scalping-asymmetric-hedging (locked-pnl def, worst-case shaping, close-position action)", "notes": 12, "ts": "2026-06-07T01:16:36"}
 {"event": "finalize", "message": "wiki: ingest arch-exploration (dead reward genes, degenerate GA search)", "notes": 14, "ts": "2026-06-07T01:18:07"}
+{"event": "finalize", "message": "wiki: ingest market-type-filter (schema-stable str_choice gene)", "notes": 15, "ts": "2026-06-07T01:18:59"}
