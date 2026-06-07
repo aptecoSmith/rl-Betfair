@@ -217,6 +217,27 @@ def test_pbt_runner_chronological_four_tier(tmp_path: Path) -> None:
     assert all(c["tier"] == 4 for c in champs)  # only the top tier (R4) freezes
 
 
+def test_resolve_holdout_days_requests_non_excluded_count() -> None:
+    """Regression guard for the launch crash: days_arg must be the
+    NON-excluded racing-day count (select_days RAISES if n_days > post-exclude
+    count), NOT the full count."""
+    days = [f"2026-04-{d:02d}" for d in range(1, 29)]  # 28 ascending
+    ex, days_arg, hold = runner_mod._resolve_holdout_days(days, 7, [])
+    assert hold == days[-7:]
+    assert set(ex) == set(days[-7:])
+    assert days_arg == 21              # 28 - 7 (the bug set this to 28 → crash)
+    assert days_arg == len([d for d in days if d not in set(ex)])
+    # base exclude merges and is counted out too.
+    ex2, n2, _ = runner_mod._resolve_holdout_days(days, 7, [days[0]])
+    assert n2 == 20 and days[0] in ex2  # 28 - 7 - 1
+    # off (holdout_recent <= 0): no holdout, full count.
+    assert runner_mod._resolve_holdout_days(days, 0, ["x"]) == (["x"], 28, [])
+    # too few days → loud exit, never a silent under-request.
+    import pytest
+    with pytest.raises(SystemExit, match="holdout-recent"):
+        runner_mod._resolve_holdout_days(days[:5], 7, [])
+
+
 def test_resolve_generations_self_heals_with_tiers() -> None:
     """G = n_tiers + K when --maturation-gens set (constant top-tier window as
     the ladder deepens); explicit --generations when not."""

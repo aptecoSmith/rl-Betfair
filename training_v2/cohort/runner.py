@@ -2769,6 +2769,33 @@ def _resolve_seed_bands(
     return seed_bands, (enabled_set | frozenset(auto_enable))
 
 
+def _resolve_holdout_days(
+    all_days: list[str], holdout_recent: int, base_exclude: list[str],
+) -> "tuple[list[str], int, list[str]]":
+    """Tick-Tock sliding holdout. ``all_days`` is the data-dir's racing days
+    ascending (from the SAME ``_enumerate_day_files`` ``select_days`` uses).
+
+    Holds out the newest ``holdout_recent`` days and returns
+    ``(exclude, days_arg, holdout)`` where ``exclude`` = ``base_exclude`` ∪
+    holdout and ``days_arg`` is the EXACT non-excluded racing-day count —
+    because ``select_days`` RAISES (does not cap) when ``n_days`` exceeds the
+    post-exclude count, so we must request exactly the remainder. Extracted +
+    unit-tested (the ``_resolve_<knob>`` pattern) after a launch crash where
+    ``n_days`` was set to the full count instead of the non-holdout count.
+    """
+    n = int(holdout_recent)
+    if n <= 0:
+        return list(base_exclude), len(all_days), []
+    if len(all_days) <= n:
+        raise SystemExit(
+            f"--holdout-recent {n} >= available racing days {len(all_days)}",
+        )
+    holdout = list(all_days[-n:])
+    exclude = sorted(set(base_exclude) | set(holdout))
+    days_arg = sum(1 for d in all_days if d not in set(exclude))
+    return exclude, days_arg, holdout
+
+
 def _resolve_generations(
     *, maturation_gens: "int | None", n_tiers: int, explicit_generations: int,
 ) -> int:
@@ -3900,27 +3927,19 @@ def main(argv: list[str] | None = None) -> int:
     # --holdout-recent N: hold out the NEWEST N racing days (fold into
     # --exclude-days) and take ALL the rest as the training pool, so the
     # chronological folds + preflight + scoreboard all use the same set.
-    _days_arg = int(args.days)
     _exclude = list(args.exclude_days) if args.exclude_days else []
+    _days_arg = int(args.days)
     if int(args.holdout_recent) > 0:
-        import re as _re
-        _all_racing = sorted(
-            p.stem for p in Path(args.data_dir).glob("*.parquet")
-            if "_runners" not in p.stem
-            and _re.match(r"\d{4}-\d{2}-\d{2}$", p.stem)
+        # Use the SAME enumeration select_days uses (ascending racing days).
+        from training_v2.discrete_ppo.train import _enumerate_day_files
+        _all_racing = list(_enumerate_day_files(Path(args.data_dir)))
+        _exclude, _days_arg, _holdout = _resolve_holdout_days(
+            _all_racing, int(args.holdout_recent), _exclude,
         )
-        _n = int(args.holdout_recent)
-        if len(_all_racing) <= _n:
-            raise SystemExit(
-                f"--holdout-recent {_n} >= available racing days "
-                f"{len(_all_racing)}",
-            )
-        _holdout = _all_racing[-_n:]
-        _exclude = sorted(set(_exclude) | set(_holdout))
-        _days_arg = len(_all_racing)  # take all; exclude removes the holdout
         logger.info(
             "Tick-Tock holdout-recent=%d: holding out %s; training pool = "
-            "%d non-holdout days", _n, _holdout, len(_all_racing) - _n,
+            "%d non-holdout days", int(args.holdout_recent), _holdout,
+            _days_arg,
         )
 
     # ── Tick-Tock N-tier ladder (rotation-rework) ────────────────────────
