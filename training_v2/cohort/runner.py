@@ -2068,6 +2068,7 @@ def run_cohort(
                             output_dir,
                             now_iso=_dt.now(_tz.utc).isoformat(
                                 timespec="seconds"),
+                            n_tiers=pbt_config.n_tiers,
                         )
                         logger.info(
                             "PBT leaderboard: %d R3 champions, %d model-rows "
@@ -2131,7 +2132,8 @@ def run_cohort(
             )
             try:
                 from tools.pbt_leaderboard import regenerate as _regen_f
-                _nc_f, _nm_f = _regen_f(output_dir, now_iso=_final_at)
+                _nc_f, _nm_f = _regen_f(output_dir, now_iso=_final_at,
+                                        n_tiers=pbt_config.n_tiers)
                 logger.info(
                     "PBT leaderboard (end-of-run): %d R3 champions, "
                     "%d model-rows -> %s",

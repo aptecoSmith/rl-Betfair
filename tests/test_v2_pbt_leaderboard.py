@@ -8,7 +8,15 @@ these guard the render + the old-row tolerance.
 
 from __future__ import annotations
 
-from tools.pbt_leaderboard import _fmt_hms, build_leaderboard_text
+import json
+from pathlib import Path
+
+from tools.pbt_leaderboard import (
+    _fmt_hms,
+    build_leaderboard_text,
+    infer_top_tier,
+    regenerate,
+)
 
 
 class TestFmtHms:
@@ -87,3 +95,57 @@ class TestTrainedAtColumn:
         del r["trained_at"]
         txt = build_leaderboard_text([r], "run", frozen=False)
         assert "trained_at" in txt and "abc12345" in txt   # header + row OK
+
+
+class TestRegenerateNTier:
+    """rotation-rework: regenerate writes a board for every non-top tier
+    R1..R(N-1) and labels the hall-of-fame R{N}; 3-tier stays R1+R2 + R3 hall."""
+
+    def _row(self, tier, mid, **kw):
+        r = {"model_id": mid, "generation": tier - 1, "tier": tier,
+             "architecture": "lstm", "hidden_size": 128,
+             "locked_pnl": 10.0 - tier, "naked_pnl": -5.0,
+             "train_seconds": 100, "trained_at": "2026-06-07T10:00:00+00:00",
+             "genes": {"learning_rate": 1e-4, "entropy_coeff": 0.01}}
+        r.update(kw)
+        return r
+
+    def _write(self, d: Path, lineage, hall):
+        (d / "pbt_lineage.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in lineage), encoding="utf-8")
+        (d / "pbt_hall_of_fame.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in hall), encoding="utf-8")
+
+    def test_four_tier_writes_r1_r2_r3_and_r4_hall(self, tmp_path: Path):
+        lineage = [self._row(t, f"m{t}") for t in (1, 2, 3, 4)]
+        hall = [self._row(4, "m4", frozen_at="2026-06-07T11:00:00+00:00")]
+        self._write(tmp_path, lineage, hall)
+        regenerate(tmp_path, n_tiers=4)
+        lb = (tmp_path / "leaderboard.txt").read_text(encoding="utf-8")
+        assert "R4 HALL-OF-FAME" in lb
+        for t in (1, 2, 3):
+            assert (tmp_path / f"leaderboard_r{t}.txt").exists()
+            assert f"R{t} TIER" in (tmp_path / f"leaderboard_r{t}.txt").read_text(
+                encoding="utf-8")
+        # R4 is the hall-of-fame tier — no separate R4 board.
+        assert not (tmp_path / "leaderboard_r4.txt").exists()
+
+    def test_three_tier_unchanged(self, tmp_path: Path):
+        lineage = [self._row(t, f"m{t}") for t in (1, 2, 3)]
+        hall = [self._row(3, "m3", frozen_at="2026-06-07T11:00:00+00:00")]
+        self._write(tmp_path, lineage, hall)
+        regenerate(tmp_path, n_tiers=3)
+        assert "R3 HALL-OF-FAME" in (tmp_path / "leaderboard.txt").read_text(
+            encoding="utf-8")
+        assert (tmp_path / "leaderboard_r1.txt").exists()
+        assert (tmp_path / "leaderboard_r2.txt").exists()
+        assert not (tmp_path / "leaderboard_r3.txt").exists()
+
+    def test_infer_top_tier_precedence(self):
+        # explicit wins
+        assert infer_top_tier([{"tier": 2}], [], 4) == 4
+        # recorded on rows next
+        assert infer_top_tier([{"tier": 2, "n_tiers": 5}], [], None) == 5
+        # else max observed, floored at 3 (legacy)
+        assert infer_top_tier([{"tier": 1}, {"tier": 2}], [], None) == 3
+        assert infer_top_tier([{"tier": 4}], [{"tier": 4}], None) == 4

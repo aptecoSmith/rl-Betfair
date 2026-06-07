@@ -249,9 +249,36 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         w.writerows(rows)
 
 
-def regenerate(run_dir: Path, now_iso: str | None = None) -> tuple[int, int]:
-    """Rewrite ``leaderboard.txt`` + ``model_register.csv`` from the run's
-    JSONL. Returns ``(n_champions, n_models)``. Safe to call mid-run.
+def infer_top_tier(
+    lineage: list[dict], hall: list[dict], n_tiers: int | None,
+) -> int:
+    """The ladder's top tier RN (the hall-of-fame tier). Precedence:
+    explicit ``n_tiers`` > an ``n_tiers`` recorded on the rows > the max
+    observed ``tier``, floored at 3 so a legacy 3-tier run still renders the
+    classic R1+R2 boards + R3 hall-of-fame even before R3 forms."""
+    if n_tiers:
+        return int(n_tiers)
+    recorded = [
+        int(r["n_tiers"]) for r in list(lineage) + list(hall)
+        if r.get("n_tiers")
+    ]
+    if recorded:
+        return max(recorded)
+    observed = [int(r.get("tier", 0)) for r in list(lineage) + list(hall)]
+    return max([3] + observed)
+
+
+def regenerate(
+    run_dir: Path, now_iso: str | None = None, n_tiers: int | None = None,
+) -> tuple[int, int]:
+    """Rewrite the leaderboards + ``model_register.csv`` from the run's JSONL.
+    Returns ``(n_champions, n_models)``. Safe to call mid-run.
+
+    N-tier aware: the hall-of-fame is the top tier ``R{N}`` and a live-tier
+    board ``leaderboard_r{t}.txt`` is written for every non-top tier
+    ``R1..R(N-1)``. ``N`` is resolved by :func:`infer_top_tier` (explicit
+    ``n_tiers`` arg, else recorded on rows, else max observed tier ≥ 3). A
+    3-tier run is unchanged (R1+R2 boards + R3 hall-of-fame).
     """
     run_dir = Path(run_dir)
     hall = _load_jsonl(run_dir / "pbt_hall_of_fame.jsonl")
@@ -259,28 +286,30 @@ def regenerate(run_dir: Path, now_iso: str | None = None) -> tuple[int, int]:
     frozen_keys = {
         (h.get("model_id"), int(h.get("generation", -1))) for h in hall
     }
-    # R3 hall-of-fame (the frozen champions, with frozen_at).
+    top = infer_top_tier(lineage, hall, n_tiers)
+    # R{top} hall-of-fame (the frozen champions, with frozen_at).
     (run_dir / "leaderboard.txt").write_text(
         build_leaderboard_text(
             hall, run_dir.name, now_iso, frozen=True,
-            tier_label="R3 HALL-OF-FAME",
-            empty_msg="(no R3 champions frozen yet -- the gauntlet reaches "
-                      "R3 around generation 3; champions freeze from then on.)",
+            tier_label=f"R{top} HALL-OF-FAME",
+            empty_msg=f"(no R{top} champions frozen yet -- the gauntlet "
+                      f"reaches R{top} around generation {top}; champions "
+                      f"freeze from then on.)",
         ),
         encoding="utf-8")
-    # R1 + R2 LIVE-tier leaderboards: the best performers seen at each tier
-    # across all generations (a tier filter on the same per-model rows). R1 =
-    # the rookie division (fresh blood's first rotation); R2 = the promoted +
-    # offspring mid-tier. Ranked by locked_pnl like R3; capped at top 60.
-    for tier, fname in ((1, "leaderboard_r1.txt"), (2, "leaderboard_r2.txt")):
-        tier_rows = [r for r in lineage if int(r.get("tier", 0)) == tier]
-        (run_dir / fname).write_text(
+    # LIVE-tier leaderboards for every non-top tier R1..R(top-1): the best
+    # performers seen at each tier across all generations (a tier filter on
+    # the same per-model rows). R1 = rookie division; the top tier R{top}
+    # lives in the hall-of-fame above. Ranked by locked_pnl; capped at top 60.
+    for tier in range(1, top):
+        (run_dir / f"leaderboard_r{tier}.txt").write_text(
             build_leaderboard_text(
-                tier_rows, run_dir.name, now_iso, frozen=False,
+                [r for r in lineage if int(r.get("tier", 0)) == tier],
+                run_dir.name, now_iso, frozen=False,
                 tier_label=f"R{tier} TIER (best across all gens)",
                 top_n=60,
-                empty_msg=f"(no R{tier} agents yet -- the pipeline fills R2 "
-                          f"by gen 2, R3 by gen 3.)",
+                empty_msg=f"(no R{tier} agents yet -- the pipeline fills each "
+                          f"tier R_t by generation t-1.)",
             ),
             encoding="utf-8")
     write_csv(run_dir / "model_register.csv",
@@ -296,9 +325,15 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run_dir", type=Path, help="a PBT run output directory")
+    p.add_argument(
+        "--n-tiers", type=int, default=None, metavar="N",
+        help="Top tier of the ladder (N). Default: inferred from the rows "
+             "(max observed tier, floored at 3). Pass e.g. 4 to force the "
+             "R1..R3 boards + R4 hall-of-fame before R4 has formed.",
+    )
     args = p.parse_args(argv)
-    n_champ, n_models = regenerate(args.run_dir)
-    print(f"leaderboard.txt: {n_champ} R3 champions | "
+    n_champ, n_models = regenerate(args.run_dir, n_tiers=args.n_tiers)
+    print(f"leaderboard.txt: {n_champ} champions | "
           f"model_register.csv: {n_models} model-rows")
     print((args.run_dir / "leaderboard.txt").read_text(encoding="utf-8"))
     return 0
