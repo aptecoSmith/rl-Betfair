@@ -1,0 +1,37 @@
+==============================================================================
+PHASE 0 — SINGLE-WORKER MEMORY PROFILE
+==============================================================================
+cache=registry\tt_tock_004\mp_static_obs_cache_full
+train_day=2026-04-06 eval_day=2026-04-07 hidden_size=256  predictors ON, full obs (2050-d)
+
+stage                                      rss_gb   uss_gb    drss    duss
+------------------------------------------------------------------------------
+baseline (interpreter + psutil)              0.02     0.01   +0.00   +0.00
+after torch/numpy/worker import              0.75     0.55   +0.72   +0.54
+after predictor bundle load                  1.03     0.80   +0.28   +0.25
+after mmap 2 days (81MB on disk)             1.03     0.80   -0.00   -0.00
+after train_one_agent (1058s)                1.68     1.36   +0.65   +0.56
+------------------------------------------------------------------------------
+peak-during-train: rss=1.93GB uss=1.61GB
+
+INTERPRETATION
+  predictor bundle private cost (USS delta): +0.25 GB -> this scales x n_workers
+  static_obs memmap (81MB/2 days on disk): RSS includes
+    the faulted file-backed pages, but they are ONE physical copy shared
+    across workers (USS excludes them) -> day-growth = one shared copy.
+  final RSS-USS gap = 0.32 GB (shared: libs + memmap)
+
+PYTHON-LEVEL TOP ALLOCATIONS (tracemalloc; excludes C++/memmap)
+    117.8 MB  <frozen importlib._bootstrap_external>:511
+     18.5 MB  <frozen importlib._bootstrap>:491
+     13.6 MB  C:\Users\jsmit\source\repos\rl-betfair\training_v2\cohort\static_obs_cache.py:190
+      4.3 MB  C:\Python314\Lib\linecache.py:188
+      3.8 MB  C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\scipy\_lib\_array_api.py:847
+      2.6 MB  C:\Python314\Lib\dataclasses.py:506
+      2.2 MB  C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\__init__.py:2167
+      1.8 MB  <frozen abc>:106
+      0.9 MB  <frozen importlib._bootstrap_external>:528
+      0.9 MB  <frozen importlib._bootstrap_external>:128
+      0.8 MB  <frozen importlib._bootstrap_external>:1437
+      0.7 MB  C:\Users\jsmit\AppData\Roaming\Python\Python314\site-packages\torch\_ops.py:1228
+

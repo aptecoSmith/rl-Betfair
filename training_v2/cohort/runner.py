@@ -64,7 +64,12 @@ from training_v2.cohort.pbt import (
     init_pbt_population,
     make_rotations,
 )
-from training_v2.cohort.batched_worker import train_cluster_batched
+from training_v2.cohort.lockstep import (
+    catch_up_train_days,
+    init_lockstep_population,
+    n_tranches_for_pool,
+    select_lockstep,
+)
 from training_v2.cohort.multiproc_worker import (
     train_cluster_multiproc,
     prebuild_feature_cache,
@@ -80,7 +85,10 @@ from training_v2.cohort.worker import (
     scalping_train_config,
     train_one_agent,
 )
-from training_v2.discrete_ppo.batched_rollout import cluster_agents_by_arch
+from training_v2.cohort.gauntlet import GauntletConfig, run_gauntlet
+from training_v2.cohort.executor import TrancheExecConfig, run_tranche
+from training_v2.cohort.breeder import BreedConfig
+from training_v2.cohort.ledger import DaySplit
 from training_v2.discrete_ppo.rollout import RolloutCollector
 from training_v2.discrete_ppo.train import select_days
 from agents_v2.discrete_policy import DiscreteLSTMPolicy
@@ -107,6 +115,15 @@ logger = logging.getLogger(__name__)
 
 COMPOSITE_SCORE_MODE_TOTAL_REWARD = "total_reward"
 COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED = "locked_weighted"
+# Lockstep default (plans/lockstep-cohort/). The locked_weighted structural
+# floor PLUS an explicit NATURAL-maturation reward, so GA selection rewards
+# pairs that MATURE (the scalping ideal), not just the £ they happen to lock:
+#   score = locked_pnl + 0.25×naked_pnl + maturation_bonus_weight × arbs_completed
+# ``arbs_completed`` is natural maturation ONLY — matches the phenotype
+# maturation_rate numerator and the reward-side matured-arb bonus; agent-closed
+# / force-closed are excluded (they aren't maturation). ``maturation_bonus_
+# weight = 0`` ⇒ identical to ``locked_weighted``.
+COMPOSITE_SCORE_MODE_LOCKED_MATURATION = "locked_maturation"
 # scalping-tight-naked-variance Phase 2A (2026-05-15). Variance-aware
 # selection: surfaces low-σ_naked agents at the GA-selection step.
 # Formula: ``mean_locked - 0.5 × σ_naked_daily + 0.25 × mean_naked``.
@@ -160,6 +177,7 @@ COMPOSITE_SCORE_MODE_SORTINO = "sortino"
 COMPOSITE_SCORE_MODES = (
     COMPOSITE_SCORE_MODE_TOTAL_REWARD,
     COMPOSITE_SCORE_MODE_LOCKED_WEIGHTED,
+    COMPOSITE_SCORE_MODE_LOCKED_MATURATION,
     COMPOSITE_SCORE_MODE_TIGHT_VARIANCE,
     COMPOSITE_SCORE_MODE_LOCKED_PER_STD,
     COMPOSITE_SCORE_MODE_DAY_PNL_PER_STD,
@@ -287,6 +305,15 @@ def _composite_score_base(
         return (
             float(eval_stats.locked_pnl)
             + LOCKED_WEIGHTED_NAKED_COEFFICIENT * float(eval_stats.naked_pnl)
+        )
+    if composite_score_mode == COMPOSITE_SCORE_MODE_LOCKED_MATURATION:
+        # locked_weighted floor + explicit natural-maturation reward (lockstep
+        # default). arbs_completed = natural maturation only (NOT agent-closed /
+        # force-closed). weight 0 ⇒ identical to locked_weighted.
+        return (
+            float(eval_stats.locked_pnl)
+            + LOCKED_WEIGHTED_NAKED_COEFFICIENT * float(eval_stats.naked_pnl)
+            + float(maturation_bonus_weight) * int(eval_stats.arbs_completed)
         )
     if composite_score_mode == COMPOSITE_SCORE_MODE_TIGHT_VARIANCE:
         # scalping-tight-naked-variance Phase 2A. Surface low-σ_naked
@@ -847,6 +874,166 @@ def _preflight_cache_schema_check(
     raise ValueError("\n".join(lines))
 
 
+def _run_gauntlet_breeding(
+    *, n_agents, n_generations, training_days, eval_pool, validation_days,
+    data_dir, output_dir, model_store, seed, device, pbt_config,
+    parallel_agents, enabled_set, seed_bands, reward_overrides,
+    maturation_bonus_weight=0.0, era_id=None, era_type=None, hypothesis_id=None,
+    train_one_agent_fn, predictor_bundle, predictor_manifests,
+    use_race_outcome_predictor, use_direction_predictor, strategy_mode,
+    composite_score_mode, argmax_eval, per_transition_credit,
+    bc_pretrain_steps_override, bc_learning_rate_override,
+    bc_target_entropy_warmup_eps_override, bc_include_negative_samples,
+    bc_positive_weight, bc_include_close_hold_samples,
+    arb_spread_target_lock_pct_override, predictor_p_win_back_threshold,
+    predictor_p_win_back_max_threshold, predictor_p_win_lay_threshold,
+    direction_gate_enabled, mature_prob_open_threshold,
+    race_confidence_threshold, lay_price_max, frozen_direction_head_path,
+    big_model_threads, gpu_policy_lane, gpu_lane_max_concurrent,
+) -> list:
+    """Drive the gauntlet-pipeline (executor+ledger+breeder) and return the
+    frontier recipes' AgentResults. Dispatched from :func:`run_cohort` when
+    ``breeding=="gauntlet"``; the ga/pbt/lockstep paths never reach here.
+
+    Builds FIXED-SIZE chronological tranches over the non-sealed pool (reusing
+    ``make_rotations``), folding each rotation's eval days into train because the
+    gauntlet selects on the FIXED fc=0 validation set. The gauntlet grows by
+    appending tranches as data banks; here we materialise every tranche the
+    current pool yields and run the full pipeline.
+    """
+    import random as _random
+
+    if not validation_days:
+        raise ValueError(
+            "--breeding gauntlet requires --validation-holdout-recent > 0 "
+            "(the FIXED fc=0 selection set the breeder ranks on).")
+
+    cfgp = pbt_config or PbtConfig(n_agents=int(n_agents))
+    val = sorted(set(validation_days))
+    nonsealed_pool = sorted(
+        d for d in (set(training_days) | set(eval_pool)) if d not in set(val))
+    n_tranches = n_tranches_for_pool(
+        len(nonsealed_pool), cfgp.train_per_rotation, cfgp.eval_per_rotation)
+    rotations = make_rotations(
+        nonsealed_pool, cohort_seed=int(seed), n_rotations=n_tranches,
+        train_per_rotation=cfgp.train_per_rotation,
+        eval_per_rotation=cfgp.eval_per_rotation, mode="chronological")
+    tranche_days = [list(r.train_days) + list(r.eval_days) for r in rotations]
+    split = DaySplit(tranche_days=tranche_days, validation_days=val,
+                     final_test_days=[])
+
+    logger.info(
+        "── Gauntlet pipeline: %d recipes over %d fixed tranches; fc=0 "
+        "validation=%d days; %d breed round(s). Recipe-pure, full fair shot. ──",
+        n_agents, n_tranches, len(val), max(0, int(n_generations) - 1))
+    for i, td in enumerate(tranche_days, 1):
+        logger.info("   tranche %d: train(+folded eval)=%s", i, td)
+
+    exec_cfg = TrancheExecConfig(
+        data_dir=data_dir, output_dir=output_dir, model_store=model_store,
+        predictor_bundle=predictor_bundle,
+        predictor_manifests=(tuple(predictor_manifests)
+                             if predictor_manifests else None),
+        use_race_outcome_predictor=use_race_outcome_predictor,
+        use_direction_predictor=use_direction_predictor,
+        parallel_agents=int(parallel_agents), device=device,
+        big_model_threads=int(big_model_threads),
+        gpu_policy_lane=gpu_policy_lane,
+        gpu_lane_max_concurrent=int(gpu_lane_max_concurrent),
+        enabled_set=enabled_set, reward_overrides=reward_overrides,
+        strategy_mode=strategy_mode, composite_score_mode=composite_score_mode,
+        argmax_eval=argmax_eval, per_transition_credit=per_transition_credit,
+        bc_pretrain_steps_override=bc_pretrain_steps_override,
+        bc_learning_rate_override=bc_learning_rate_override,
+        bc_target_entropy_warmup_eps_override=(
+            bc_target_entropy_warmup_eps_override),
+        bc_include_negative_samples=bc_include_negative_samples,
+        bc_positive_weight=bc_positive_weight,
+        bc_include_close_hold_samples=bc_include_close_hold_samples,
+        arb_spread_target_lock_pct_override=arb_spread_target_lock_pct_override,
+        predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+        predictor_p_win_back_max_threshold=predictor_p_win_back_max_threshold,
+        predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+        direction_gate_enabled=direction_gate_enabled,
+        mature_prob_open_threshold=mature_prob_open_threshold,
+        race_confidence_threshold=race_confidence_threshold,
+        lay_price_max=lay_price_max,
+        frozen_direction_head_path=frozen_direction_head_path,
+        n_agents_hint=int(n_agents))
+
+    gcfg = GauntletConfig(
+        n_recipes=int(n_agents),
+        max_breed_rounds=max(0, int(n_generations) - 1),
+        seed_base=int(seed), enabled_set=enabled_set, seed_bands=seed_bands,
+        breed=BreedConfig(
+            keep_fraction=float(getattr(cfgp, "survivor_fraction", 0.5)),
+            perturb_frac=float(getattr(cfgp, "perturb_frac", 0.20)),
+            enabled_set=enabled_set, seed_bands=seed_bands, min_quorum=2))
+
+    # Capture each lineage's latest AgentResult (run_cohort returns the
+    # frontier's AgentResults) AND write the per-agent scoreboard row — the
+    # worker writes weights/models.db/bet_logs but NOT scoreboard.jsonl (that
+    # is the generation loop's job on the other paths), and the Phase 6 judge
+    # (tools.cross_era_holdout_board) + tools.gene_register both read it.
+    lineage_results: dict = {}
+    scoreboard_path = output_dir / "scoreboard.jsonl"
+    era_tags = {
+        k: v for k, v in (
+            ("era_id", era_id), ("era_type", era_type),
+            ("hypothesis_id", hypothesis_id)) if v is not None
+    }
+
+    def _capturing_run_tranche(agents, **kw):
+        res = run_tranche(agents, train_one_agent_fn=train_one_agent_fn, **kw)
+        _K = int(kw.get("tranche_K", 0))
+        _train = list(kw.get("train_days_for_K", []))
+        _val = list(kw.get("validation_days", []))
+        with scoreboard_path.open("a", encoding="utf-8") as sf:
+            for i, (a, r) in enumerate(zip(agents, res)):
+                if r is None or r.result is None:
+                    continue
+                lineage_results[a.lineage_id] = r.result
+                try:
+                    row = _agent_result_to_scoreboard_row(
+                        result=r.result, generation=_K, agent_idx=i,
+                        eval_days=_val, training_days=_train,
+                        maturation_bonus_weight=float(maturation_bonus_weight),
+                        argmax_eval=bool(argmax_eval),
+                        composite_score_mode=str(composite_score_mode),
+                        era_tags=era_tags or None)
+                    # Gauntlet-specific bookkeeping for downstream tools.
+                    row["lineage_id"] = a.lineage_id
+                    row["origin"] = a.origin
+                    row["tranche_K"] = _K
+                    sf.write(json.dumps(row) + "\n")
+                except Exception:
+                    logger.exception(
+                        "gauntlet: failed to write scoreboard row for %s",
+                        a.agent_id)
+        return res
+
+    executor = (make_pool(int(parallel_agents))
+                if int(parallel_agents) > 0 else None)
+    try:
+        ledger = run_gauntlet(
+            split=split, exec_cfg=exec_cfg, cfg=gcfg,
+            ledger_path=output_dir / "gauntlet_ledger.jsonl",
+            rng=_random.Random(int(seed)), executor=executor,
+            run_tranche_fn=_capturing_run_tranche)
+    finally:
+        if executor is not None:
+            executor.shutdown()
+
+    frontier = ledger.frontier()
+    out = [lineage_results[e.lineage_id] for e in frontier
+           if e.lineage_id in lineage_results]
+    out.sort(key=lambda r: float(getattr(r.eval, "locked_pnl", float("-inf"))),
+             reverse=True)
+    logger.info("── Gauntlet complete: %d frontier recipes at depth %d ──",
+                len(out), ledger.frontier_depth())
+    return out
+
+
 def run_cohort(
     *,
     n_agents: int,
@@ -868,7 +1055,6 @@ def run_cohort(
     era_type: str | None = None,
     hypothesis_id: str | None = None,
     rotation_mode: str = "random",
-    batched: bool = False,
     parallel_agents: int = 0,
     maturation_bonus_weight: float = 0.0,
     n_eval_days: int | None = None,
@@ -899,6 +1085,7 @@ def run_cohort(
     early_stop_patience: int = 0,
     early_stop_min_gens: int = 4,
     cohort_eval_days: list[str] | None = None,
+    validation_days: list[str] | None = None,
     training_days_explicit: list[str] | None = None,
     monitor_days: list[str] | None = None,
     rotating_eval_sample: int = 0,
@@ -1049,18 +1236,80 @@ def run_cohort(
     # silently ignore). ``rotations`` / ``pbt_specs`` stay unused on the
     # GA path.
     breeding = str(breeding).lower()
-    if breeding not in ("ga", "pbt"):
-        raise ValueError(f"breeding must be 'ga' or 'pbt', got {breeding!r}")
+    if breeding not in ("ga", "pbt", "lockstep", "gauntlet"):
+        raise ValueError(
+            "breeding must be 'ga', 'pbt', 'lockstep', or 'gauntlet', got "
+            f"{breeding!r}")
+
+    # ── Gauntlet pipeline (plans/gauntlet-pipeline/) ──────────────────
+    # The decoupled executor+ledger+breeder path. It has its OWN loop
+    # (training_v2.cohort.gauntlet.run_gauntlet), so it dispatches HERE and
+    # returns BEFORE any of the ga/pbt/lockstep generation-loop machinery
+    # below runs — the existing paths are byte-untouched (HC: keep lockstep
+    # working until cutover). Day selection + model_store (above) are reused.
+    if breeding == "gauntlet":
+        return _run_gauntlet_breeding(
+            n_agents=int(n_agents),
+            n_generations=int(n_generations),
+            training_days=training_days,
+            eval_pool=eval_pool,
+            validation_days=validation_days,
+            data_dir=data_dir,
+            output_dir=output_dir,
+            model_store=model_store,
+            seed=int(seed),
+            device=device,
+            pbt_config=pbt_config,
+            parallel_agents=int(parallel_agents),
+            enabled_set=enabled_set,
+            seed_bands=seed_bands,
+            reward_overrides=reward_overrides,
+            maturation_bonus_weight=float(maturation_bonus_weight),
+            era_id=era_id,
+            era_type=era_type,
+            hypothesis_id=hypothesis_id,
+            train_one_agent_fn=train_one_agent_fn,
+            predictor_bundle=predictor_bundle,
+            predictor_manifests=predictor_manifests,
+            use_race_outcome_predictor=bool(use_race_outcome_predictor),
+            use_direction_predictor=bool(use_direction_predictor),
+            strategy_mode=strategy_mode,
+            composite_score_mode=composite_score_mode,
+            argmax_eval=bool(argmax_eval),
+            per_transition_credit=bool(per_transition_credit),
+            bc_pretrain_steps_override=bc_pretrain_steps_override,
+            bc_learning_rate_override=bc_learning_rate_override,
+            bc_target_entropy_warmup_eps_override=(
+                bc_target_entropy_warmup_eps_override),
+            bc_include_negative_samples=bool(bc_include_negative_samples),
+            bc_positive_weight=float(bc_positive_weight),
+            bc_include_close_hold_samples=bool(bc_include_close_hold_samples),
+            arb_spread_target_lock_pct_override=(
+                arb_spread_target_lock_pct_override),
+            predictor_p_win_back_threshold=predictor_p_win_back_threshold,
+            predictor_p_win_back_max_threshold=(
+                predictor_p_win_back_max_threshold),
+            predictor_p_win_lay_threshold=predictor_p_win_lay_threshold,
+            direction_gate_enabled=bool(direction_gate_enabled),
+            mature_prob_open_threshold=mature_prob_open_threshold,
+            race_confidence_threshold=race_confidence_threshold,
+            lay_price_max=lay_price_max,
+            frozen_direction_head_path=frozen_direction_head_path,
+            big_model_threads=int(big_model_threads),
+            gpu_policy_lane=bool(gpu_policy_lane),
+            gpu_lane_max_concurrent=int(gpu_lane_max_concurrent),
+        )
+
     pbt_specs: "list | None" = None
     pbt_rotations: list = []
     pbt_hall_of_fame: list = []   # [(spec, result)] R3 champions, frozen
     pbt_gen_metrics: list = []    # per-gen heritability/diversity rows
+    lockstep_tranches: list = []  # chronological tranches for --breeding lockstep
+    lockstep_specs: "list | None" = None  # [(spec)] this gen's lockstep cohort
     if breeding == "pbt":
         _incompat = []
         if resume_from is not None:
             _incompat.append("--resume-from")
-        if batched:
-            _incompat.append("--batched")
         if monitor_days:
             _incompat.append("--monitor-days")
         if early_stop_patience > 0:
@@ -1120,6 +1369,41 @@ def run_cohort(
                 rot.index, list(rot.train_days), list(rot.eval_days),
             )
 
+    if breeding == "lockstep":
+        # Lockstep march (plans/lockstep-cohort/): ONE population walks the
+        # chronological tranches in lockstep, one generation per tranche.
+        # Reuses the rotation flags as the tranche train/eval sizes.
+        if pbt_config is None:
+            pbt_config = PbtConfig(n_agents=int(n_agents))
+        nonsealed_pool = sorted(set(training_days) | set(eval_pool))
+        _n_tranches = n_tranches_for_pool(
+            len(nonsealed_pool),
+            pbt_config.train_per_rotation, pbt_config.eval_per_rotation,
+        )
+        lockstep_tranches = make_rotations(
+            nonsealed_pool, cohort_seed=int(seed),
+            n_rotations=_n_tranches,
+            train_per_rotation=pbt_config.train_per_rotation,
+            eval_per_rotation=pbt_config.eval_per_rotation,
+            mode="chronological",
+        )
+        # One generation per tranche — overrides the CLI generation budget.
+        n_generations = len(lockstep_tranches)
+        logger.info(
+            "── Lockstep march: %d agents through %d chronological tranches "
+            "of %d/%d (train/eval) from %d non-sealed days; survive top "
+            "%.0f%%, mutate ±%.0f%%. ──",
+            n_agents, n_generations, pbt_config.train_per_rotation,
+            pbt_config.eval_per_rotation, len(nonsealed_pool),
+            pbt_config.survivor_fraction * 100.0,
+            pbt_config.perturb_frac * 100.0,
+        )
+        for tr in lockstep_tranches:
+            logger.info(
+                "   tranche %d: train=%s eval=%s",
+                tr.index, list(tr.train_days), list(tr.eval_days),
+            )
+
     # ── Initial population (gen 0) OR resume (ga-recipe-search §C) ────
     rng = random.Random(int(seed))
     start_generation = 0
@@ -1143,6 +1427,41 @@ def run_cohort(
             start_generation + 1, n_generations, len(cohort),
             _resume.get("run_id"),
         )
+        if breeding == "lockstep":
+            # Rebuild lockstep_specs from the checkpoint (the saved state carries
+            # genes + parent_ids but not origin/weights). select_lockstep emits
+            # survivors FIRST then mutants, so the first round(N*survivor_fraction)
+            # cohort entries are survivors — warm-start from their parent's saved
+            # weights — and the rest are from-scratch catch-up mutants. lineage_id
+            # / tranches_trained aren't persisted -> regenerated (cosmetic; only
+            # the register labels differ). Plan: plans/lockstep-cohort/.
+            import uuid as _uuid
+            from training_v2.cohort.lockstep import LockstepAgentSpec
+            _sf = pbt_config.survivor_fraction if pbt_config is not None else 0.5
+            _n_survive = max(1, min(len(cohort), round(int(n_agents) * _sf)))
+            _wdir = output_dir / "weights"
+            lockstep_specs = []
+            for _i, _genes in enumerate(cohort):
+                _pmid = parent_ids[_i][0]
+                _surv = _i < _n_survive
+                _wp = (_wdir / f"{_pmid}.pt") if (_surv and _pmid) else None
+                if _wp is not None and not _wp.exists():
+                    logger.warning(
+                        "RESUME: survivor %d weights %s missing — training "
+                        "from scratch", _i, _wp)
+                    _wp = None
+                lockstep_specs.append(LockstepAgentSpec(
+                    genes=_genes,
+                    origin="survivor" if _surv else "mutant",
+                    lineage_id=_uuid.uuid4().hex,
+                    init_weights_path=str(_wp) if _wp else None,
+                    parent_model_id=_pmid,
+                    tranches_trained=int(start_generation) if _surv else 0,
+                ))
+            logger.info(
+                "RESUME (lockstep): rebuilt %d survivors + %d mutants for "
+                "generation %d.", _n_survive, len(cohort) - _n_survive,
+                start_generation + 1)
     elif breeding == "pbt":
         # Generation 0: n_agents fresh-blood lineages, all in tier 1 (the
         # rookie division). The pipeline fills on later gens as winners
@@ -1152,6 +1471,13 @@ def run_cohort(
         )
         cohort = [s.genes for s in pbt_specs]
         parent_ids = [(s.parent_model_id, None) for s in pbt_specs]
+    elif breeding == "lockstep":
+        # Gen 0: n_agents fresh-blood lineages (band-seeded for a Tock).
+        lockstep_specs = init_lockstep_population(
+            rng, int(n_agents), enabled_set=enabled_set, seed_bands=seed_bands,
+        )
+        cohort = [s.genes for s in lockstep_specs]
+        parent_ids = [(s.parent_model_id, None) for s in lockstep_specs]
     else:
         cohort = [
             sample_genes(rng, enabled_set=enabled_set) for _ in range(n_agents)
@@ -1332,6 +1658,16 @@ def run_cohort(
             "RESUME: kept %d scoreboard rows from generations < %d.",
             _kept, start_generation,
         )
+        # Same for the lineage JSONL (the model_register / held-out board source,
+        # also append-per-gen) so a mid-generation kill can't leave duplicate
+        # rows for the re-run generation. Reuses the generic gen-keyed truncate.
+        _kept_lin = _truncate_scoreboard_at_generation(
+            output_dir / "pbt_lineage.jsonl", start_generation,
+        )
+        logger.info(
+            "RESUME: kept %d lineage rows from generations < %d.",
+            _kept_lin, start_generation,
+        )
     with scoreboard_path.open(_sb_mode, encoding="utf-8") as sf:
         for generation in range(start_generation, n_generations):
             gen_t0 = time.perf_counter()
@@ -1383,6 +1719,76 @@ def run_cohort(
                 _agent_lean = [
                     bool(s.genes.predictor_lean_obs) for s in pbt_specs
                 ]
+            elif breeding == "lockstep":
+                # Every agent on the SAME tranche this generation. Survivors
+                # warm-start on the current tranche; fresh/mutants train from
+                # scratch with a catch-up replay over all earlier tranches.
+                _cur = lockstep_tranches[generation]
+                # Held-out selection (holdout-selection.md): when a FIXED
+                # validation set is reserved (--validation-holdout-recent V),
+                # select every tranche on it instead of the rotating
+                # tranche-eval days, and FOLD the freed tranche-eval days into
+                # train (more data; the spec's default). When validation_days
+                # is None (V=0) this whole branch is byte-identical to the
+                # rotating-eval path below.
+                _use_validation = bool(validation_days)
+                _agent_train_days = []
+                _agent_eval_days = []
+                _agent_init_weights = []
+                for s in lockstep_specs:
+                    if s.origin == "survivor":
+                        if _use_validation:
+                            # Fold this tranche's freed eval days into train.
+                            _agent_train_days.append(
+                                list(_cur.train_days) + list(_cur.eval_days))
+                        else:
+                            _agent_train_days.append(list(_cur.train_days))
+                        _agent_init_weights.append(s.init_weights_path)
+                    else:
+                        if _use_validation:
+                            # Catch-up over EVERY earlier tranche's train+eval
+                            # days (the freed eval days fold into train here
+                            # too, so survivors and mutants see the same
+                            # history by eval time — the lockstep contract).
+                            _cu = []
+                            _upto = min(generation, len(lockstep_tranches) - 1)
+                            for _t in lockstep_tranches[: _upto + 1]:
+                                _cu.extend(_t.train_days)
+                                _cu.extend(_t.eval_days)
+                            _agent_train_days.append(_cu)
+                        else:
+                            _agent_train_days.append(
+                                catch_up_train_days(
+                                    lockstep_tranches, generation))
+                        _agent_init_weights.append(None)
+                    if _use_validation:
+                        _agent_eval_days.append(list(validation_days))
+                    else:
+                        _agent_eval_days.append(list(_cur.eval_days))
+                # Wiring audit (feedback_audit_launch_wiring): on the first
+                # tranche assert the fixed validation set actually reached
+                # every agent's eval_days (not the tranche eval days) — the
+                # launch-flag foot-gun detector for this knob.
+                if _use_validation and generation == start_generation:
+                    _val = sorted(validation_days)
+                    for _i, _ed in enumerate(_agent_eval_days):
+                        assert sorted(_ed) == _val, (
+                            "validation-holdout wiring broken: agent "
+                            f"{_i} eval_days={sorted(_ed)} != validation "
+                            f"{_val}"
+                        )
+                    assert not (set(_val) & set(_cur.train_days)), (
+                        "validation ∩ tranche-train != ∅ — leakage"
+                    )
+                    logger.info(
+                        "Lockstep held-out selection ACTIVE: selecting every "
+                        "tranche on the FIXED %d-day validation set %s "
+                        "(fc=0); freed tranche-eval days folded into train.",
+                        len(_val), _val,
+                    )
+                _agent_lean = [
+                    bool(s.genes.predictor_lean_obs) for s in lockstep_specs
+                ]
             else:
                 _agent_train_days = [list(training_days) for _ in cohort]
                 _agent_eval_days = [list(eval_days) for _ in cohort]
@@ -1398,7 +1804,7 @@ def run_cohort(
 
             results: list[AgentResult] = [None] * len(cohort)  # type: ignore[list-item]
 
-            if parallel_agents and int(parallel_agents) > 0 and not batched:
+            if parallel_agents and int(parallel_agents) > 0:
                 # ── R5: parallel solo-agent processes (fast CPU path) ──
                 # Train the whole cohort as N parallel worker PROCESSES, each
                 # a single solo ``train_one_agent`` (the golden path) at its
@@ -1628,72 +2034,6 @@ def run_cohort(
                 for idx, result in enumerate(cluster_results):
                     results[idx] = result
                     total_agents_trained += 1
-            elif batched:
-                # Cluster by architecture, run each cluster batched.
-                # Cross-cluster scheduling is sequential (one cluster
-                # consumes the GPU at a time — Session 02 prompt §2
-                # "Cross-cluster scheduling. Sequential.").
-                #
-                # We dry-instantiate policies temporarily just to get
-                # the cluster key from each agent's hidden_size; full
-                # policy construction (under per-agent seed) happens
-                # inside ``train_cluster_batched``.
-                cluster_to_indices: dict[tuple, list[int]] = {}
-                for i, g in enumerate(cohort):
-                    key = (
-                        "DiscreteLSTMPolicy",
-                        int(g.hidden_size),
-                    )
-                    cluster_to_indices.setdefault(key, []).append(i)
-                for cluster_key, idxs in cluster_to_indices.items():
-                    logger.info(
-                        "── Cluster %s: %d agents (batched) ──",
-                        cluster_key, len(idxs),
-                    )
-                    cluster_results = train_cluster_batched(
-                        agent_ids=[agent_ids_gen[i] for i in idxs],
-                        genes_list=[cohort[i] for i in idxs],
-                        days_to_train=list(training_days),
-                        eval_days=list(eval_days),
-                        data_dir=data_dir,
-                        device=device,
-                        seeds=[per_agent_seeds[i] for i in idxs],
-                        model_store=model_store,
-                        generation=generation,
-                        parent_ids=[parent_ids[i] for i in idxs],
-                        event_emitter=event_emitter,
-                        agent_indices_in_cohort=[int(i) for i in idxs],
-                        n_agents_in_cohort=int(n_agents),
-                        reward_overrides=reward_overrides,
-                        enabled_set=enabled_set,
-                        argmax_eval=argmax_eval,
-                    )
-                    if per_transition_credit:
-                        # Per-transition credit lives in the sequential
-                        # trainer path; the batched cohort runner has
-                        # not been wired through. Surface a clear
-                        # warning rather than silently failing the gate.
-                        logger.warning(
-                            "per_transition_credit=True ignored under "
-                            "--batched; flag has no effect on this run.",
-                        )
-                    if (
-                        bc_pretrain_steps_override is not None
-                        and int(bc_pretrain_steps_override) > 0
-                    ):
-                        # BC pretrain lives in the sequential per-agent
-                        # path (worker.py); the batched cluster runner
-                        # has not been wired through. Same surface as
-                        # per_transition_credit above — warn so the
-                        # operator knows the flag was a no-op.
-                        logger.warning(
-                            "--bc-pretrain-steps=%d ignored under "
-                            "--batched; flag has no effect on this run.",
-                            int(bc_pretrain_steps_override),
-                        )
-                    for k, i in enumerate(idxs):
-                        results[i] = cluster_results[k]
-                        total_agents_trained += 1
             else:
                 for idx, genes in enumerate(cohort):
                     pa_id, pb_id = parent_ids[idx]
@@ -1767,9 +2107,7 @@ def run_cohort(
                     # tooling) reading scoreboard.jsonl mid-cohort sees
                     # per-agent results land at agent-completion cadence
                     # (~18 min on AMBER v2 wall) rather than at end-of-
-                    # generation. The batched branch keeps its post-
-                    # cluster write (agents in a batched cluster don't
-                    # finish independently). See plans/rewrite/phase-3-
+                    # generation. See plans/rewrite/phase-3-
                     # followups/cohort-visibility/.
                     row = _agent_result_to_scoreboard_row(
                         result=result,
@@ -1785,8 +2123,8 @@ def run_cohort(
                     sf.write(json.dumps(row) + "\n")
                     sf.flush()
 
-            if batched or (parallel_agents and int(parallel_agents) > 0):
-                # Batched / multiprocess branches: write scoreboard rows after
+            if parallel_agents and int(parallel_agents) > 0:
+                # Multiprocess branch: write scoreboard rows after
                 # the cluster has populated ``results`` (the agents don't
                 # finish independently / live worker events don't cross the
                 # spawn boundary — the solo ``else`` branch writes its rows
@@ -1813,7 +2151,9 @@ def run_cohort(
             # BEFORE the in-place sort below scrambles it — breed_pbt ranks
             # within each tier itself.
             _pbt_pairs_this_gen = (
-                list(zip(pbt_specs, results)) if breeding == "pbt" else None
+                list(zip(pbt_specs, results)) if breeding == "pbt"
+                else list(zip(lockstep_specs, results))
+                if breeding == "lockstep" else None
             )
             if _pbt_pairs_this_gen is not None:
                 _write_pbt_lineage(
@@ -2078,6 +2418,27 @@ def run_cohort(
                     except Exception:
                         logger.exception(
                             "PBT leaderboard regenerate failed; continuing")
+                elif breeding == "lockstep":
+                    # Truncation select: top survivor_fraction carry weights to
+                    # the next tranche; the rest become from-scratch mutants.
+                    def _ls_score(res):
+                        return _composite_score(
+                            res.eval, maturation_bonus_weight,
+                            composite_score_mode,
+                        )
+                    # Use the PRE-SORT pairing (results is sorted in place
+                    # below for the GA path; lockstep_specs stays index-order).
+                    lockstep_specs = select_lockstep(
+                        _pbt_pairs_this_gen, rng,
+                        n_agents=n_agents, score_fn=_ls_score,
+                        survivor_fraction=pbt_config.survivor_fraction,
+                        perturb_frac=pbt_config.perturb_frac,
+                        enabled_set=enabled_set,
+                    )
+                    cohort = [s.genes for s in lockstep_specs]
+                    parent_ids = [
+                        (s.parent_model_id, None) for s in lockstep_specs
+                    ]
                 else:
                     cohort, parent_ids = _breed_next_generation(
                         parents_ranked=results,
@@ -2142,6 +2503,28 @@ def run_cohort(
             except Exception:
                 logger.exception(
                     "PBT end-of-run leaderboard regenerate failed; continuing")
+
+    if breeding == "lockstep":
+        # No tier hall-of-fame; flatten the per-gen lineage into the global,
+        # origin-tagged model_register.csv (the phenotype tool's input).
+        # Champions are chosen HELD-OUT post-run via tools/reevaluate_cohort.py
+        # on the sealed days — see plans/lockstep-cohort/.
+        try:
+            from tools.pbt_leaderboard import (
+                _load_jsonl as _ls_load,
+                build_register_rows as _ls_build,
+                write_csv as _ls_csv,
+            )
+            _ls_lineage = _ls_load(output_dir / "pbt_lineage.jsonl")
+            _ls_rows = _ls_build(_ls_lineage, frozen_keys=set())
+            _ls_csv(output_dir / "model_register.csv", _ls_rows)
+            logger.info(
+                "Lockstep: wrote model_register.csv (%d models) -> %s",
+                len(_ls_rows), output_dir / "model_register.csv",
+            )
+        except Exception:
+            logger.exception(
+                "Lockstep model_register write failed; continuing")
 
     cohort_wall = time.perf_counter() - cohort_t0
     logger.info(
@@ -2291,9 +2674,10 @@ def _pbt_model_row(spec, res, *, generation: int, score: float,
         "agent_id": getattr(res, "agent_id", None),
         "model_id": getattr(res, "model_id", None),
         "lineage_id": spec.lineage_id,
-        "tier": int(spec.tier),
-        "role": spec.role,
-        "rotations_seen": sorted(int(r) for r in spec.rotations_seen),
+        "tier": int(getattr(spec, "tier", 0)),
+        "role": getattr(spec, "role", None) or getattr(spec, "origin", None),
+        "rotations_seen": sorted(
+            int(r) for r in (getattr(spec, "rotations_seen", ()) or ())),
         "arch_name": getattr(res, "architecture_name", ""),
         "architecture": str(g.architecture),
         "hidden_size": int(g.hidden_size),
@@ -2334,6 +2718,11 @@ def _pbt_model_row(spec, res, *, generation: int, score: float,
         # (operator 2026-06-04).
         "trained_at": trained_at,
         "genes": g.to_dict(),
+        # Lockstep origin/age — only present for lockstep specs (fresh /
+        # survivor / mutant + tranches a survivor lineage has trained through).
+        **({"origin": spec.origin,
+            "tranches_trained": int(getattr(spec, "tranches_trained", 0))}
+           if hasattr(spec, "origin") else {}),
         # Tick-Tock era tags (piece B) — only present on a tagged era.
         **(era_tags or {}),
     }
@@ -2659,6 +3048,12 @@ def _agent_result_to_scoreboard_row(
         "eval_direction_gate_refusals": (
             result.eval.direction_gate_refusals
         ),
+        # Path-C mature_prob open-gate refusals (maturation-raising
+        # 2026-06-12). Default 0 so pre-patch rows parse with
+        # ``.get("eval_mature_gate_refusals", 0)``.
+        "eval_mature_gate_refusals": (
+            result.eval.mature_gate_refusals
+        ),
         "eval_pwin_back_gate_refusals": (
             result.eval.pwin_back_gate_refusals
         ),
@@ -2746,10 +3141,11 @@ def _resolve_seed_bands(
         seed_bands[name] = band
     if not seed_bands:
         return {}, enabled_set
-    if breeding != "pbt":
+    if breeding not in ("pbt", "lockstep", "gauntlet"):
         raise SystemExit(
-            "--seed-gene requires --breeding pbt (the band-seed enters via "
-            "the PBT fresh-blood funnel; the gene-only GA path ignores it).",
+            "--seed-gene requires --breeding pbt, --breeding lockstep, or "
+            "--breeding gauntlet (the band-seed enters via the fresh-blood / "
+            "gen-0 funnel; the gene-only GA path ignores it).",
         )
     collision = set(seed_bands) & set(reward_overrides or {})
     if collision:
@@ -2769,6 +3165,33 @@ def _resolve_seed_bands(
             )
     auto_enable = {n for n in seed_bands if n in PHASE5_GENE_NAMES}
     return seed_bands, (enabled_set | frozenset(auto_enable))
+
+
+def _resolve_composite_defaults(
+    breeding: str,
+    composite_score_mode: "str | None",
+    maturation_bonus_weight: "float | None",
+) -> "tuple[str, float]":
+    """Breeding-aware GA-selector defaults (the canonical _resolve_<knob>).
+
+    Lockstep defaults to the maturation-aware selector
+    (``locked_maturation``) with a non-zero maturation weight, so a lockstep
+    era rewards pairs that RESOLVE by default — the operator's "selection
+    should count maturation" requirement. ``ga``/``pbt`` keep the
+    byte-identical ``total_reward`` + ``0.0``. An EXPLICIT CLI value always
+    wins (``None`` means "unset" — argparse default). Guard:
+    ``tests/test_v2_lockstep.py::TestResolveCompositeDefaults``.
+    """
+    mode = composite_score_mode or (
+        COMPOSITE_SCORE_MODE_LOCKED_MATURATION
+        if breeding == "lockstep"
+        else COMPOSITE_SCORE_MODE_TOTAL_REWARD
+    )
+    if maturation_bonus_weight is None:
+        weight = 1.0 if breeding == "lockstep" else 0.0
+    else:
+        weight = float(maturation_bonus_weight)
+    return mode, float(weight)
 
 
 def _resolve_holdout_days(
@@ -2796,6 +3219,111 @@ def _resolve_holdout_days(
     exclude = sorted(set(base_exclude) | set(holdout))
     days_arg = sum(1 for d in all_days if d not in set(exclude))
     return exclude, days_arg, holdout
+
+
+def _stratified_sample_across_time(items: list[str], k: int) -> list[str]:
+    """Pick ``k`` items EVENLY SPREAD across the ascending list ``items``
+    (a deterministic systematic sample — no RNG, so reproducible without a
+    seed). ``k`` contiguous bins, take each bin's midpoint, so the picks span
+    oldest→newest and cover every regime. Used for the ``sampled`` validation
+    flavor (explore / Tick): a regime-robust validation set, vs the
+    ``contiguous`` deploy-recent block (exploit / Tock).
+    """
+    n = len(items)
+    if k >= n:
+        return list(items)
+    out: list[str] = []
+    for i in range(k):
+        lo = i * n // k
+        hi = (i + 1) * n // k
+        mid = (lo + hi - 1) // 2  # bin midpoint; bins disjoint+non-empty
+        out.append(items[mid])
+    return out
+
+
+def _resolve_validation_holdout_days(
+    all_days: list[str],
+    holdout_recent: int,
+    validation_recent: int,
+    base_exclude: list[str],
+    *,
+    mode: str = "contiguous",
+) -> "tuple[list[str], int, list[str], list[str]]":
+    """Three-way train / validation / sealed-final-test split
+    (plans/maturation-raising/holdout-selection.md).
+
+    Reserves, newest-first: the ``holdout_recent`` (F) SEALED final-test
+    (scored post-run only), then ``validation_recent`` (V) validation days
+    used for per-tranche lockstep selection. Both are excluded from training.
+
+    ``mode`` chooses the V validation days from the pre-final-test pool:
+
+    * ``"contiguous"`` (default; EXPLOIT / Tock) — the V days IMMEDIATELY
+      BEFORE the sealed final-test (deploy-recent: select for the regime you
+      deploy into).
+    * ``"sampled"`` (EXPLORE / Tick) — V days EVENLY SPREAD across the whole
+      pre-final-test range (regime-robust: select for genes that generalise
+      across time, not just the latest window — so an explore era doesn't
+      narrow onto one recent regime). The sealed final-test stays the newest
+      F either way (deploy-representative + inviolate).
+
+    Returns ``(exclude, days_arg, final_test, validation)`` where
+    ``exclude`` = ``base_exclude`` ∪ final_test ∪ validation, ``days_arg``
+    is the EXACT non-excluded racing-day count (``select_days`` RAISES
+    rather than caps), ``final_test`` is the newest F (== the
+    ``_resolve_holdout_days`` holdout).
+
+    ``V == 0`` ⇒ ``validation == []`` and the return is byte-identical to
+    ``_resolve_holdout_days`` (the F-only path) REGARDLESS of ``mode``, so the
+    whole feature is a no-op when the flag is unset. The ``_resolve_<knob>``
+    pattern + leakage asserts mirror ``_resolve_holdout_days`` and
+    ``feedback_audit_launch_wiring`` / ``project_select_days_data_dir_
+    dependence``.
+    """
+    # F first via the existing (regression-covered) helper.
+    exclude, days_arg, final_test = _resolve_holdout_days(
+        all_days, int(holdout_recent), base_exclude,
+    )
+    v = int(validation_recent)
+    if v <= 0:
+        return exclude, days_arg, final_test, []
+    if mode not in ("contiguous", "sampled"):
+        raise SystemExit(
+            f"--validation-holdout-mode must be 'contiguous' or 'sampled', "
+            f"got {mode!r}",
+        )
+    excl = set(exclude)
+    remaining = [d for d in all_days if d not in excl]  # ascending
+    if len(remaining) <= v:
+        raise SystemExit(
+            f"--validation-holdout-recent {v} >= available non-final-test "
+            f"racing days {len(remaining)} — not enough days left to train",
+        )
+    if mode == "sampled":
+        # EXPLORE: V days evenly spread across the timeline (regime-robust).
+        validation = sorted(_stratified_sample_across_time(remaining, v))
+    else:
+        # EXPLOIT: the V most-recent days, just before the sealed final-test.
+        validation = list(remaining[-v:])
+    exclude2 = sorted(excl | set(validation))
+    excl2 = set(exclude2)
+    days_arg2 = sum(1 for d in all_days if d not in excl2)
+    # Leakage asserts (project_select_days_data_dir_dependence): the train
+    # pool is everything NOT excluded; validation and final-test must be
+    # disjoint from it and from each other.
+    train_set = {d for d in all_days if d not in excl2}
+    val_set = set(validation)
+    ft_set = set(final_test)
+    if val_set & train_set:
+        raise AssertionError(
+            f"validation ∩ train != ∅: {sorted(val_set & train_set)}",
+        )
+    if ft_set & (train_set | val_set):
+        raise AssertionError(
+            "final_test ∩ (train ∪ validation) != ∅: "
+            f"{sorted(ft_set & (train_set | val_set))}",
+        )
+    return exclude2, days_arg2, final_test, validation
 
 
 def _resolve_generations(
@@ -2906,7 +3434,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     # ── PBT promotion ladder (pbt-breeding) ──────────────────────────
     p.add_argument(
-        "--breeding", choices=["ga", "pbt"], default="ga",
+        "--breeding", choices=["ga", "pbt", "lockstep", "gauntlet"],
+        default="ga",
         help=(
             "Breeding mechanism. 'ga' (default) = the gene-only GA "
             "(re-trains from scratch each gen; byte-identical to before). "
@@ -2914,8 +3443,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "weight inheritance + a day-rotation gauntlet (fresh blood -> "
             "rotation 1; winning earns the next unseen rotation; R3 winners "
             "freeze to a hall-of-fame). Requires --parallel-agents > 0 and "
-            "is incompatible with --batched / --resume-from / --monitor-days "
-            "/ --early-stop-patience / --rotating-eval-sample."
+            "is incompatible with --resume-from / --monitor-days "
+            "/ --early-stop-patience / --rotating-eval-sample. "
+            "'lockstep' = truncation-selection march through chronological "
+            "tranches (top --survivor-fraction survive as weight-clones, rest "
+            "are from-scratch catch-up mutants); one generation per tranche, "
+            "sealed-holdout champions. See plans/lockstep-cohort/. "
+            "'gauntlet' = the decoupled pipeline (plans/gauntlet-pipeline/): "
+            "a uniform per-tranche executor fed by per-tranche queues, with "
+            "selection in a separate breeder. Recipe-pure (mutants climb from "
+            "T1, never warm-started from a survivor); fixed tranche size, the "
+            "gauntlet grows by appending tranches; full fair shot. Requires "
+            "--validation-holdout-recent > 0 (the fixed fc=0 selection set)."
         ),
     )
     p.add_argument("--pbt-rotations", type=int, default=3,
@@ -2936,6 +3475,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="PBT: top-K of R3 frozen to hall-of-fame/gen. Default 3.")
     p.add_argument("--pbt-perturb-frac", type=float, default=0.20,
                    help="PBT: offspring recipe perturbation ±frac. Default 0.20.")
+    p.add_argument("--survivor-fraction", type=float, default=0.5,
+                   help="Lockstep: top fraction surviving each tranche boundary "
+                        "as weight-clones (rest become mutants). Default 0.5.")
     # ── Tick-Tock rotation-rework ────────────────────────────────────
     p.add_argument(
         "--pbt-rotation-mode", choices=["random", "chronological"],
@@ -2955,7 +3497,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "--data-dir (added to --exclude-days; the rest become the "
             "training pool). 0 (default) = off (use --days/--exclude-days as "
             "before). The held-out judge (tools/tick_tock_compare) uses the "
-            "same newest-N."
+            "same newest-N. This is the SEALED final-test (scored post-run "
+            "via score_holdout.bat, never trained or selected on)."
+        ),
+    )
+    p.add_argument(
+        "--validation-holdout-recent", type=int, default=0, metavar="V",
+        help=(
+            "Held-out SELECTION split (plans/maturation-raising/"
+            "holdout-selection.md). Reserve the V racing days IMMEDIATELY "
+            "BEFORE the --holdout-recent sealed final-test as a FIXED "
+            "validation set: excluded from training, and (lockstep only) each "
+            "tranche's per-agent eval_days are pointed at this fixed set so "
+            "select_lockstep scores survivors on days they were NOT trained "
+            "on, in the deploy-recent regime. 0 (default) = OFF = "
+            "byte-identical to the current per-tranche-eval selection. The "
+            "freed tranche-eval days fold into TRAIN. Selection stays at fc=0 "
+            "(the env's training regime); the sealed final-test is still "
+            "scored separately at fc=120/fc=0 post-run. Pair with "
+            "--validation-holdout-mode to pick the validation-day FLAVOR."
+        ),
+    )
+    p.add_argument(
+        "--validation-holdout-mode",
+        choices=["contiguous", "sampled"], default="contiguous",
+        help=(
+            "Which V validation days --validation-holdout-recent reserves "
+            "(the sealed final-test stays the newest F either way). "
+            "'contiguous' (default; EXPLOIT / Tock) = the V days immediately "
+            "before the final-test (deploy-recent: select for the regime you "
+            "deploy into). 'sampled' (EXPLORE / Tick) = V days evenly spread "
+            "across the whole pre-final-test timeline (regime-robust: select "
+            "for genes that generalise across time, not one recent window, so "
+            "an explore era isn't narrowed onto the latest regime). No-op "
+            "when --validation-holdout-recent 0."
         ),
     )
     p.add_argument(
@@ -3213,10 +3788,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--composite-score-mode",
-        default=COMPOSITE_SCORE_MODE_TOTAL_REWARD,
+        default=None,
         choices=list(COMPOSITE_SCORE_MODES),
         help=(
-            "GA selection scalar formula. "
+            "GA selection scalar formula. Default when unset: "
+            "'locked_maturation' for --breeding lockstep, else 'total_reward'. "
             "`total_reward` (default, byte-identical to pre-plan): "
             "score = total_reward + maturation_bonus_weight x "
             "(arbs_completed + arbs_closed). "
@@ -3229,17 +3805,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "noise dominate. Mutually exclusive with maturation_bonus_"
             "weight (locked_weighted ignores it; the registry column "
             "still records the active mode + score)."
-        ),
-    )
-    p.add_argument(
-        "--sortino-lambda", type=float, default=SORTINO_DEFAULT_LAMBDA,
-        metavar="FLOAT",
-        help=(
-            "Penalty weight on the downside-deviation term in the "
-            "sortino composite_score_mode. Default %(default)s = a "
-            "GBP1 increase in downside_dev cancels GBP1 of mean pnl. "
-            "Only consumed when --composite-score-mode=sortino. "
-            "See plans/robust-phenotype/ for the formula."
         ),
     )
     p.add_argument(
@@ -3258,11 +3823,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--maturation-bonus-weight", type=float, default=0.0,
+        "--maturation-bonus-weight", type=float, default=None,
         metavar="FLOAT",
         help=(
-            "GA selection-score bonus per matured-or-agent-closed pair "
-            "(£-scale). Default 0.0 = byte-identical to pre-2026-05-04 "
+            "GA selection-score bonus per matured pair (£-scale). Default "
+            "when unset: 1.0 for --breeding lockstep, else 0.0 = byte-identical "
+            "to pre-2026-05-04 "
             "selection (sort by total_reward only). When > 0 the GA "
             "sorts by ``total_reward + w × (arbs_completed + arbs_closed)`` "
             "so high-maturation lineages survive selection even when "
@@ -3278,17 +3844,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--batched", action="store_true",
-        help=(
-            "Use the batched cohort path (throughput-fix Session 02). "
-            "Clusters agents by architecture (hidden_size) and shares "
-            "one BatchedRolloutCollector per cluster per training day. "
-            "Default OFF; the sequential per-agent path stays the "
-            "default until at least one cohort run validates the "
-            "batched path."
-        ),
-    )
-    p.add_argument(
         "--parallel-agents", type=int, default=None, metavar="N",
         help=(
             "training-speedup-v2 R5: train the cohort as N parallel solo-"
@@ -3300,8 +3855,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "tools/measure_optimal_n.py; re-calibrate per machine). 0 = OFF "
             "(sequential). N is the concurrency CAP, not the cohort size: a "
             "cohort of M agents runs ceil(M/N) waves. Predictor runs ARE "
-            "supported (workers rebuild the bundle from manifests). Yields to "
-            "--batched (error only if both set explicitly)."
+            "supported (workers rebuild the bundle from manifests)."
         ),
     )
     p.add_argument(
@@ -3347,61 +3901,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--bc-target-entropy-warmup-eps", type=int, default=None,
-        metavar="N",
-        help=(
-            "Phase 8 S02. Cohort-wide pin for "
-            "``bc_target_entropy_warmup_eps``. Override the gene "
-            "default (5) for the entropy-controller warmup window. "
-            "Phase 11 sweep target. Default ``None`` = leave each "
-            "agent's gene at default."
-        ),
-    )
-    p.add_argument(
-        "--bc-include-negative-samples", action="store_true",
-        help=(
-            "BC label augmentation Phase A "
-            "(``plans/bc-label-augmentation/``). Also load the "
-            "negative-sample cache (``oracle_samples_negative.npz`` "
-            "per training day) and use it during BC pretrain to target "
-            "the NOOP action class on (tick, runner) pairs that are "
-            "NOT in the oracle's positive arb set. Adds positive "
-            "gradient on NOOP so it doesn't softmax-decay across BC "
-            "steps. Default OFF = byte-identical to pre-plan. Requires "
-            "caches scanned with ``--include-negative-samples``."
-        ),
-    )
-    p.add_argument(
-        "--bc-positive-weight", type=float, default=1.0, metavar="FLOAT",
-        help=(
-            "BC label augmentation Phase A. Multiplicative weight on "
-            "the positive (oracle + direction + dir-BCE) loss term "
-            "when negative samples are active. Default 1.0 keeps the "
-            "positive loss at unit scale; the negative-NOOP CE term "
-            "is added with weight 1.0. Set < 1.0 to soften positive "
-            "pressure relative to NOOP (more NOOP authority); > 1.0 "
-            "to prioritise positives. Ignored when "
-            "``--bc-include-negative-samples`` is off."
-        ),
-    )
-    p.add_argument(
-        "--bc-include-close-hold-samples", action="store_true",
-        help=(
-            "BC label augmentation Phase B "
-            "(``plans/bc-label-augmentation/``). Also load the "
-            "close/hold sample cache (``oracle_samples_close_hold.npz`` "
-            "per training day) and use it during BC pretrain. Each "
-            "sample carries a target action class — CLOSE on the "
-            "open pair's runner_idx when the env would have force-"
-            "closed the pair, NOOP when it would have matured "
-            "naturally. Adds positive gradient on both CLOSE and "
-            "NOOP for obs vectors that include an open-pair "
-            "position signature. Default OFF = byte-identical to "
-            "pre-plan. Requires caches scanned with ``--include-"
-            "close-hold-samples``."
-        ),
-    )
-    p.add_argument(
         "--arb-spread-target-lock-pct", type=float, default=None,
         metavar="PCT",
         help=(
@@ -3416,19 +3915,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "gene draw / default (0.02 = 2%% lock per pair). Mutually "
             "exclusive with --enable-gene arb_spread_target_lock_pct. "
             "See plans/force_close_and_arb_spread/findings.md."
-        ),
-    )
-    p.add_argument(
-        "--per-transition-credit", action="store_true",
-        help=(
-            "Phase 9 S02. Replace the per-slot mature_prob BCE label "
-            "broadcast with per-transition credit assignment: each "
-            "pair's strict-mature label lands on the SINGLE step "
-            "where the pair was opened, not on every transition. "
-            "Default OFF (byte-identical to Phase 7). When ON, the "
-            "per-update log reports n_mature_targets and per-episode "
-            "stats carry per_transition_credit_active=True. fill_prob "
-            "and risk_nll stay on the per-slot path."
         ),
     )
     p.add_argument(
@@ -3482,18 +3968,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     # Predictor-integration (plans/predictor-integration/).
-    p.add_argument(
-        "--strategy-mode", default=None,
-        choices=["arb", "value_win", "value_each_way"],
-        help=(
-            "Strategy mode (predictor-integration Session 03). "
-            "`arb` = pair-trade scalping (default + byte-identical "
-            "to pre-plan). `value_win` = single-shot back/lay "
-            "informed by champion's calibrated p_win. "
-            "`value_each_way` = single-shot EW (Session 06; needs "
-            "Session 04 part 3+ env shim translation)."
-        ),
-    )
     p.add_argument(
         "--predictor-bundle-manifests", nargs=3, default=None,
         metavar=("CHAMPION", "RANKER", "DIRECTION"),
@@ -3584,7 +4058,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Policy-side action-mask gate: refuse OPEN_BACK/OPEN_LAY "
             "on runners whose own mature_prob_head sigmoid output is "
             "below this threshold. Default 0.0 = gate disabled. "
-            "Refusals surface in the direction_gate_refusals counter. "
+            "Refusals surface in the mature_gate_refusals counter "
+            "(independent of direction_gate_refusals; added 2026-06-12, "
+            "maturation-raising P1). "
             "Effective threshold anneals from 0.0 up to this value "
             "over mature_gate_warmup_eps episodes to avoid cold-start "
             "collapse. See plans/recipe-expansion-and-robustness/ "
@@ -3631,17 +4107,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _resolve_parallel_agents(
-    parallel_agents_arg: "int | None", *, batched: bool,
+    parallel_agents_arg: "int | None",
 ) -> int:
     """Resolve the ``--parallel-agents`` worker count (training-speedup-v2 R5).
 
     Default (arg is ``None``) is **16** — the measured throughput peak
     (``tools/measure_optimal_n.py``) — so the fast multiprocess path is ON by
-    default. The only conflict is ``--batched``: it takes precedence, raising
-    ONLY if BOTH were set explicitly, otherwise the default 16 silently yields
-    to batched (returns 0). Predictor runs ARE supported (workers rebuild the
-    bundle from manifests — see the multiprocess branch in ``run_cohort``), so
-    they no longer disable multiprocess.
+    default. Predictor runs ARE supported (workers rebuild the bundle from
+    manifests — see the multiprocess branch in ``run_cohort``).
 
     Returns the resolved worker count (0 = sequential / off). This mirrors the
     `_resolve_<knob>` pattern from the Path-A precedence foot-gun lesson
@@ -3651,28 +4124,12 @@ def _resolve_parallel_agents(
     pa = int(parallel_agents_arg) if explicit else 16
     if pa <= 0:
         return 0
-    if batched:
-        if explicit:
-            raise SystemExit(
-                "--parallel-agents and --batched are mutually exclusive: "
-                "--parallel-agents runs N solo agents as parallel CPU "
-                "processes; --batched runs one GPU-batched cluster. Pick one."
-            )
-        return 0
     return pa
 
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     args = _parse_args(argv if argv is not None else sys.argv[1:])
-
-    # robust-phenotype R1. Set the module-level sortino_lambda from
-    # the CLI BEFORE any _composite_score calls happen (the function
-    # reads _SORTINO_LAMBDA when its ``sortino_lambda`` param is
-    # left None). Default value preserves byte-identity when the
-    # flag is unset.
-    global _SORTINO_LAMBDA
-    _SORTINO_LAMBDA = float(args.sortino_lambda)
 
     # spray-and-bail redesign (2026-06-06). Set the module-level
     # force-close-rate penalty weight from the CLI before any
@@ -3807,16 +4264,20 @@ def main(argv: list[str] | None = None) -> int:
             "will be forced to 0 in trainer_hp.",
             args.direction_head_manifest,
         )
-    if float(args.maturation_bonus_weight) != 0.0:
+    # Breeding-aware composite/maturation defaults: lockstep defaults to the
+    # maturation-aware selector (locked_maturation) with a non-zero maturation
+    # weight, so a lockstep era rewards pairs that RESOLVE by default; ga/pbt
+    # keep the byte-identical total_reward + 0.0 weight.
+    _composite_mode, _mat_weight = _resolve_composite_defaults(
+        args.breeding, args.composite_score_mode, args.maturation_bonus_weight,
+    )
+    if _mat_weight != 0.0:
         logger.info(
-            "GA selection composite_score = total_reward + %.3f × "
-            "(arbs_completed + arbs_closed)",
-            float(args.maturation_bonus_weight),
+            "GA selection composite_score mode=%s + maturation weight=%.3f",
+            _composite_mode, _mat_weight,
         )
     if args.argmax_eval:
         logger.info("Eval mode: argmax (deterministic action + Beta.mean stake)")
-    if args.per_transition_credit:
-        logger.info("Per-transition mature_prob credit: ENABLED")
     if args.bc_pretrain_steps is not None:
         logger.info(
             "BC pretrain: cohort-wide pin %d steps (overrides per-agent gene)",
@@ -3838,18 +4299,6 @@ def main(argv: list[str] | None = None) -> int:
                 "Cannot combine --bc-learning-rate with "
                 "--enable-gene bc_learning_rate (or --enable-all-genes): "
                 "one source of truth per knob per run.",
-            )
-    if args.bc_target_entropy_warmup_eps is not None:
-        logger.info(
-            "BC pretrain: cohort-wide pin target_entropy_warmup_eps=%d",
-            int(args.bc_target_entropy_warmup_eps),
-        )
-        # 2026-06-06: same guard as --bc-learning-rate above.
-        if "bc_target_entropy_warmup_eps" in enabled_set:
-            raise ValueError(
-                "Cannot combine --bc-target-entropy-warmup-eps with "
-                "--enable-gene bc_target_entropy_warmup_eps (or "
-                "--enable-all-genes): one source of truth per knob per run.",
             )
     if args.arb_spread_target_lock_pct is not None:
         logger.info(
@@ -3921,9 +4370,7 @@ def main(argv: list[str] | None = None) -> int:
             "--predictor-bundle-manifests CHAMPION RANKER DIRECTION",
         )
 
-    parallel_agents = _resolve_parallel_agents(
-        args.parallel_agents, batched=bool(args.batched),
-    )
+    parallel_agents = _resolve_parallel_agents(args.parallel_agents)
 
     # ── Tick-Tock sliding holdout (rotation-rework) ──────────────────────
     # --holdout-recent N: hold out the NEWEST N racing days (fold into
@@ -3931,22 +4378,42 @@ def main(argv: list[str] | None = None) -> int:
     # chronological folds + preflight + scoreboard all use the same set.
     _exclude = list(args.exclude_days) if args.exclude_days else []
     _days_arg = int(args.days)
-    if int(args.holdout_recent) > 0:
+    _validation: list[str] = []
+    if int(args.holdout_recent) > 0 or int(args.validation_holdout_recent) > 0:
         # Use the SAME enumeration select_days uses (ascending racing days).
         from training_v2.discrete_ppo.train import _enumerate_day_files
         _all_racing = list(_enumerate_day_files(Path(args.data_dir)))
-        _exclude, _days_arg, _holdout = _resolve_holdout_days(
-            _all_racing, int(args.holdout_recent), _exclude,
+        # 3-way split: sealed final-test (F) + fixed validation (V) + train.
+        # V=0 ⇒ byte-identical to the F-only _resolve_holdout_days path.
+        _exclude, _days_arg, _holdout, _validation = (
+            _resolve_validation_holdout_days(
+                _all_racing, int(args.holdout_recent),
+                int(args.validation_holdout_recent), _exclude,
+                mode=str(args.validation_holdout_mode),
+            )
         )
         logger.info(
-            "Tick-Tock holdout-recent=%d: holding out %s; training pool = "
-            "%d non-holdout days", int(args.holdout_recent), _holdout,
-            _days_arg,
+            "Tick-Tock holdout-recent=%d validation-holdout-recent=%d "
+            "(mode=%s): sealed final-test=%s; validation=%s; training pool "
+            "= %d days",
+            int(args.holdout_recent), int(args.validation_holdout_recent),
+            str(args.validation_holdout_mode),
+            _holdout, _validation, _days_arg,
         )
+        if _validation and args.breeding not in ("lockstep", "gauntlet"):
+            logger.warning(
+                "--validation-holdout-recent is only wired into the lockstep "
+                "and gauntlet selection paths; breeding=%s will exclude the "
+                "validation days from training but NOT select on them (they "
+                "become an unused reserve). See holdout-selection.md.",
+                args.breeding,
+            )
 
     # ── Tick-Tock N-tier ladder (rotation-rework) ────────────────────────
+    # Lockstep reuses PbtConfig as the carrier for tranche train/eval sizes +
+    # perturb_frac + survivor_fraction (it ignores the tier fields).
     _pbt_config = None
-    if args.breeding == "pbt":
+    if args.breeding in ("pbt", "lockstep", "gauntlet"):
         _tier_sizes = _promote_counts = _freeze_top = None
         _n_rotations = int(args.pbt_rotations)
         if args.pbt_tier_sizes is not None:
@@ -3978,6 +4445,7 @@ def main(argv: list[str] | None = None) -> int:
             tier_sizes=_tier_sizes,
             promote_counts=_promote_counts,
             freeze_top=_freeze_top,
+            survivor_fraction=float(args.survivor_fraction),
         )
 
     # Self-healing generation budget: G = n_tiers + K when --maturation-gens
@@ -4019,14 +4487,12 @@ def main(argv: list[str] | None = None) -> int:
             era_id=args.era_id,
             era_type=args.era_type,
             hypothesis_id=args.hypothesis_id,
-            batched=bool(args.batched),
             parallel_agents=parallel_agents,
-            maturation_bonus_weight=float(args.maturation_bonus_weight),
+            maturation_bonus_weight=_mat_weight,
             n_eval_days=(
                 int(args.n_eval_days) if args.n_eval_days is not None else None
             ),
             argmax_eval=bool(args.argmax_eval),
-            per_transition_credit=bool(args.per_transition_credit),
             bc_pretrain_steps_override=(
                 int(args.bc_pretrain_steps)
                 if args.bc_pretrain_steps is not None else None
@@ -4035,22 +4501,12 @@ def main(argv: list[str] | None = None) -> int:
                 float(args.bc_learning_rate)
                 if args.bc_learning_rate is not None else None
             ),
-            bc_target_entropy_warmup_eps_override=(
-                int(args.bc_target_entropy_warmup_eps)
-                if args.bc_target_entropy_warmup_eps is not None else None
-            ),
-            bc_include_negative_samples=bool(args.bc_include_negative_samples),
-            bc_positive_weight=float(args.bc_positive_weight),
-            bc_include_close_hold_samples=bool(
-                args.bc_include_close_hold_samples,
-            ),
             arb_spread_target_lock_pct_override=(
                 float(args.arb_spread_target_lock_pct)
                 if args.arb_spread_target_lock_pct is not None else None
             ),
             predictor_bundle=predictor_bundle,
             predictor_manifests=args.predictor_bundle_manifests,
-            strategy_mode=args.strategy_mode,
             use_race_outcome_predictor=bool(args.use_race_outcome_predictor),
             predictor_lean_obs=bool(args.predictor_lean_obs),
             use_direction_predictor=bool(args.use_direction_predictor),
@@ -4062,12 +4518,13 @@ def main(argv: list[str] | None = None) -> int:
             race_confidence_threshold=float(args.race_confidence_threshold),
             lay_price_max=float(args.lay_price_max),
             exclude_days=_exclude or None,
-            composite_score_mode=str(args.composite_score_mode),
+            composite_score_mode=str(_composite_mode),
             early_stop_patience=int(args.early_stop_patience),
             early_stop_min_gens=int(args.early_stop_min_gens),
             cohort_eval_days=(
                 list(args.cohort_eval_days) if args.cohort_eval_days else None
             ),
+            validation_days=(_validation or None),
             training_days_explicit=(
                 list(args.training_days_explicit)
                 if args.training_days_explicit else None

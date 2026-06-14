@@ -221,6 +221,9 @@ def test_run_cohort_writes_scoreboard_and_registry(tmp_path: Path) -> None:
             # Phase-14 S06 (added 2026-05-07). Threshold-warmup
             # window — operator-controlled, default 5.
             "direction_gate_warmup_eps",
+            # maturation-raising P1 (added 2026-06-12). Path-C mature-gate
+            # threshold-warmup window — gene, default 5.
+            "mature_gate_warmup_eps",
             # Predictor-integration Session 03 (added 2026-05-10).
             "predictor_feature_gain",
             "value_edge_threshold",
@@ -517,19 +520,6 @@ class TestPhase5EnableGeneCli:
                 "--output-dir", str(tmp_path / "out"),
                 "--enable-all-genes",
                 "--bc-learning-rate", "1e-4",
-            ])
-
-    def test_enable_all_genes_collides_with_bc_warmup_flag(
-        self, tmp_path: Path,
-    ) -> None:
-        import pytest
-        with pytest.raises(ValueError, match="bc_target_entropy_warmup_eps"):
-            runner_mod.main([
-                "--n-agents", "2", "--generations", "1", "--days", "2",
-                "--data-dir", str(tmp_path),
-                "--output-dir", str(tmp_path / "out"),
-                "--enable-all-genes",
-                "--bc-target-entropy-warmup-eps", "7",
             ])
 
     def test_enable_all_genes_collides_with_reward_override(
