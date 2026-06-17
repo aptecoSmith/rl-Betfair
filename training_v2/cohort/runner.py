@@ -3435,9 +3435,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     # ── PBT promotion ladder (pbt-breeding) ──────────────────────────
     p.add_argument(
         "--breeding", choices=["ga", "pbt", "lockstep", "gauntlet"],
-        default="ga",
+        default="gauntlet",
         help=(
-            "Breeding mechanism. 'ga' (default) = the gene-only GA "
+            "Breeding mechanism. 'gauntlet' (DEFAULT as of the 2026-06-16 "
+            "cutover — the A/B beat lockstep on held-out locked/sigma; see "
+            "plans/gauntlet-pipeline/findings.md). 'ga' = the gene-only GA "
             "(re-trains from scratch each gen; byte-identical to before). "
             "'pbt' = Population-Based-Training promotion ladder: warm-start "
             "weight inheritance + a day-rotation gauntlet (fresh blood -> "

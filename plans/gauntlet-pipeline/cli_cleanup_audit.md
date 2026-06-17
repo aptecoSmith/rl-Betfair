@@ -181,3 +181,24 @@ lockstep/pbt (Phase C). `--mutation-rate` is GA-only (gauntlet mutation =
 **Net so far: 8 flags removed (79 → ~71 real options). Remaining removals are all
 cutover-gated (ga + lockstep + tier-ladder pbt) → wait for the A/B verdict +
 bat migration.**
+
+---
+
+## CUTOVER EXECUTED — behavioural part  (2026-06-16, branch `cutover-gauntlet`)
+
+A/B passed (gauntlet champion £19.32 locked @ σ22.8 vs lockstep £15.83 @ σ22.7;
+findings.md Phase 6). Cutover done:
+- **Default breeding flipped `ga` → `gauntlet`** (argparse default; `run_cohort`
+  param default left `ga` for programmatic/test compat until the ga code is removed).
+- **`start_tick.bat` + `start_tock.bat` repointed** to `--breeding gauntlet
+  --generations 5` (both already pass `--validation-holdout-recent`). `resume_tock.bat`
+  left on lockstep (it's a `--resume-from` helper; gauntlet auto-resumes via the ledger).
+- 77 kept-path tests green; lockstep + pbt still fully work as the fallback.
+
+**STILL PENDING — deep ga/pbt CODE removal (Phase B + C):** large + coupled.
+Blockers/notes: the `launch_tock_*.sh` / `launch_tick_001.sh` era scripts still use
+`--breeding pbt` (must be migrated/retired before pbt code is deleted, per the
+"bat migrated FIRST" rule); `test_v2_pbt_runner.py` + the ga-default tests in
+`test_v2_cohort_runner.py` need pruning; the ga branch lives inside the 2700-line
+`run_cohort`. To be done as a separate staged refactor with the kept-path suite
+green at each step. `--breeding lockstep` stays as the grace-period fallback.

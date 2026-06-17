@@ -4,6 +4,42 @@ Build log. Entry shape: **Intention / Implementation / Result.**
 
 ---
 
+## Phase 6 — A/B validation (the cutover gate)  [2026-06-16]  — PASS
+
+**Intention.** Run `--breeding gauntlet` vs `--breeding lockstep` on the SAME
+data + seed, judge both on the sealed-7 held-out (locked/σ_naked_leg). Cut over
+only if gauntlet matches-or-beats.
+
+**Implementation.** `tick-tock/run_gauntlet_ab_full.sh` — both arms identical
+except `--breeding`: 16 agents, full 43-day non-sealed pool → 4 fixed tranches,
+`--validation-holdout-recent 5` (fc=0 select), `--holdout-recent 7` (sealed),
+full `--enable-all-genes` + `--gpu-policy-lane` (transformers on CUDA),
+predictors ON. Gauntlet `--generations 4` (3 breed rounds) ≈ lockstep's 4
+tranches (3 selection boundaries) — matched selection rounds. Judged via
+`tools.cross_era_holdout_board --rank-by locked_over_sigma`. Wall: arm A ~24h,
+arm B ~19h, judge ~5.5h (~2.5 days total — full-obs/transformer agents +
+full-fair-shot re-climbs).
+
+**Result — PASS. Board `registry/gauntlet_ab_board.txt`:**
+- **Gauntlet champion da8ce989 (transformer): held-out locked £19.32 @ σ_leg
+  £22.8 (locked/σ 0.85) — the #1 model on the board.**
+- Lockstep champion 7b449d99: £15.83 @ £22.7 (locked/σ 0.70).
+- Gauntlet's best beats lockstep's best by ≈+22% on locked/σ; both σ_leg inside
+  the £30 ceiling. Gauntlet holds 7 of the top 12 slots.
+- Honest caveats: (1) single seed, modest margin — lockstep takes ranks 2-3, so
+  it's "gauntlet's best > lockstep's best", not a sweep. (2) Both arms' absolute
+  quality is still poor (large negative naked ho_nkd −250…−470, maturation 7-12%)
+  — that's the known unsolved SELECTIVITY problem (maturation-raising), NOT an
+  orchestration difference. The A/B only asks "is the gauntlet orchestration at
+  least as good?" → yes.
+
+**DECISION: gate cleared → proceed to cutover** (flip default to gauntlet +
+repoint tick/tock bats + Phase C/D removals), per `feedback_improvements_become_
+default`. Operational wins also confirmed: uniform per-tranche wall (no heavy
+tail), recipe purity held across all breed rounds on real weights.
+
+---
+
 ## Phase 5b — real-training smoke of `--breeding gauntlet`  [2026-06-13]
 
 **Intention.** Before the Phase 6 A/B, validate the LIVE training path
