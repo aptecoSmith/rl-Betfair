@@ -106,12 +106,20 @@ def climb_to_frontier(
     seed_base: int = 0,
     executor=None,
     run_tranche_fn=run_tranche,
+    score_result_fn=None,
 ) -> int:
     """Advance every active lineage to depth ``n_tranches`` via uniform runs.
 
     Each iteration picks the SHALLOWEST non-empty `needs-T(K)` queue and runs
     that whole same-depth cohort through tranche K (one `run_tranche` call =
     one uniform batch). Returns the number of tranche-runs executed.
+
+    ``score_result_fn(AgentResult) -> float`` is the breeder's selection score
+    recorded per tranche. Passed by the runner as
+    ``_composite_score(eval, maturation_bonus_weight, composite_score_mode)`` so
+    in-loop selection matches lockstep's discipline EXACTLY — the composite folds
+    in the ``naked_std`` σ-penalty (locked_weighted) AND the force-close-rate
+    penalty (global weight). ``None`` falls back to raw held-out locked.
     """
     n_tranches = split.n_tranches
     runs = 0
@@ -138,11 +146,17 @@ def climb_to_frontier(
                                getattr(r, "error", "no result"))
                 ledger.set_status(e.lineage_id, "culled")
                 continue
-            # Record on the fc=0 validation locked (the structural selection
-            # metric — feedback_naked_variance_primary_metric / sort-by-locked).
+            # Selection score = the lockstep composite (fc-penalty + naked_std
+            # σ-penalty) when the runner supplies score_result_fn; else raw
+            # held-out locked. ``locked``/``naked`` stay the raw structural
+            # values regardless (for diagnostics / the post-run holdout board).
+            if score_result_fn is not None and r.result is not None:
+                comp = float(score_result_fn(r.result))
+            else:
+                comp = r.validation_locked
             ledger.record_tranche(
                 e.lineage_id, K, weights_path=r.weights_path,
-                composite=r.validation_locked, locked=r.validation_locked,
+                composite=comp, locked=r.validation_locked,
                 naked=r.validation_naked, agent_id=r.agent_id)
         runs += 1
     return runs
@@ -158,6 +172,7 @@ def run_gauntlet(
     executor=None,
     run_tranche_fn=run_tranche,
     sigma_leg_fn=None,
+    score_result_fn=None,
 ) -> GauntletLedger:
     """Run the full gauntlet pipeline; return the (resumable) ledger.
 
@@ -176,7 +191,8 @@ def run_gauntlet(
 
     # First full climb.
     climb_to_frontier(ledger, split, exec_cfg, seed_base=cfg.seed_base,
-                      executor=executor, run_tranche_fn=run_tranche_fn)
+                      executor=executor, run_tranche_fn=run_tranche_fn,
+                      score_result_fn=score_result_fn)
 
     # Breed→climb cycles.
     for round_i in range(int(cfg.max_breed_rounds)):
@@ -189,7 +205,8 @@ def run_gauntlet(
                     round_i + 1, len(res.survivors), len(res.culled),
                     len(res.new_lineage_ids))
         climb_to_frontier(ledger, split, exec_cfg, seed_base=cfg.seed_base,
-                          executor=executor, run_tranche_fn=run_tranche_fn)
+                          executor=executor, run_tranche_fn=run_tranche_fn,
+                          score_result_fn=score_result_fn)
 
     ledger.compact()
     return ledger

@@ -105,6 +105,44 @@ def test_train_days_are_the_tranche_for_K(tmp_path):
     assert calls[1]["train_days"] == split.train_days_for(2)
 
 
+def test_score_result_fn_drives_recorded_composite(tmp_path):
+    """The breeder ranks on the composite the runner supplies (lockstep's
+    _composite_score: σ-penalty + fc-penalty), NOT raw held-out locked. Guards
+    the launch-wiring foot gun (those flags going inert on the gauntlet path)."""
+    import types
+    led = GauntletLedger(tmp_path / "l.jsonl")
+    seed_population(led, GauntletConfig(n_recipes=2), random.Random(0))
+
+    def stub(agents, *, tranche_K, train_days_for_K, validation_days, cfg,
+             executor=None):
+        out = []
+        for a in agents:
+            wp = str(tmp_path / f"{a.lineage_id}_K{tranche_K}.pt")
+            Path(wp).write_bytes(b"x")
+            # locked = open_cost; the composite will be a DIFFERENT transform.
+            res = types.SimpleNamespace(
+                eval=types.SimpleNamespace(locked_pnl=float(a.genes.open_cost)))
+            out.append(TrancheResult(
+                agent_id=a.agent_id, lineage_id=a.lineage_id,
+                tranche_K=tranche_K, weights_path=wp, result=res,
+                validation_locked=float(a.genes.open_cost),
+                validation_naked=-1.0, validation_day_pnl=0.0,
+                composite_score=float("nan")))
+        return out
+
+    # composite = locked - 100 (clearly different from raw locked)
+    def score(result):
+        return result.eval.locked_pnl - 100.0
+
+    climb_to_frontier(led, _split(1), _exec_cfg(tmp_path),
+                      run_tranche_fn=stub, score_result_fn=score)
+    for e in led.all_entries():
+        locked = e.validation_locked["1"]
+        composite = e.validation_score["1"]      # what the breeder ranks on
+        assert composite == locked - 100.0       # composite, not raw locked
+        assert e.validation_locked["1"] == locked  # raw locked preserved
+
+
 def test_run_gauntlet_with_breeding_keeps_population_climbing(tmp_path):
     led = run_gauntlet(
         split=_split(2),

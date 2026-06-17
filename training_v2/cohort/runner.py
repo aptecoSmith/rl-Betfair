@@ -1012,6 +1012,21 @@ def _run_gauntlet_breeding(
                         a.agent_id)
         return res
 
+    # In-loop selection metric — match lockstep's discipline EXACTLY: the
+    # breeder ranks frontier lineages on the same composite lockstep's _ls_score
+    # uses, which folds in the naked_std σ-penalty (composite_score_mode, e.g.
+    # locked_weighted) AND the force-close-rate penalty (the module-level
+    # _FORCE_CLOSE_RATE_PENALTY_WEIGHT set from --force-close-rate-penalty-weight).
+    # Without this the gauntlet breeder would rank on raw held-out locked and
+    # silently ignore both — the launch-wiring foot gun. The hard σ_leg≤£30
+    # ceiling stays the POST-RUN holdout-board filter (score_holdout), same as
+    # lockstep. Built here (not in gauntlet.py) to avoid a runner import cycle.
+    def _gauntlet_selection_score(result) -> float:
+        return _composite_score(
+            result.eval, float(maturation_bonus_weight),
+            str(composite_score_mode),
+        )
+
     executor = (make_pool(int(parallel_agents))
                 if int(parallel_agents) > 0 else None)
     try:
@@ -1019,7 +1034,8 @@ def _run_gauntlet_breeding(
             split=split, exec_cfg=exec_cfg, cfg=gcfg,
             ledger_path=output_dir / "gauntlet_ledger.jsonl",
             rng=_random.Random(int(seed)), executor=executor,
-            run_tranche_fn=_capturing_run_tranche)
+            run_tranche_fn=_capturing_run_tranche,
+            score_result_fn=_gauntlet_selection_score)
     finally:
         if executor is not None:
             executor.shutdown()
