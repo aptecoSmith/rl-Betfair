@@ -41,7 +41,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -732,20 +734,83 @@ def load_samples(
 
     tick_arr = data["tick_index"]
     runner_arr = data["runner_idx"]
-    obs_matrix = data["obs"]
     spread_arr = data["arb_spread_ticks"]
     pnl_arr = data["expected_locked_pnl"]
+
+    # Shared-memory oracle obs (memmap, ONE physical copy across all workers
+    # via the OS page cache) — mirrors the static_obs day cache
+    # (plans/shared-memory-day-cache/). Without this, every cohort worker
+    # np.load'd the full ~100 MB/day obs into PRIVATE memory (+ a per-sample
+    # .astype copy): 16 workers x 10 days = ~17 GB of duplicated obs (the BC
+    # OOM spike that killed --breeding gauntlet ticks at 16-wide). The obs is
+    # extracted ONCE to a raw, memmappable ``oracle_obs_d{obs_dim}.npy`` next
+    # to the .npz (atomic write; keyed by obs_dim so lean/full stay separate);
+    # all callers then mmap it read-only. ``data["obs"]`` is touched ONLY on
+    # the one-time build, never in the steady state.
+    obs_mm = _load_or_build_oracle_obs_memmap(cache_dir, data)
 
     return [
         OracleSample(
             tick_index=int(tick_arr[i]),
             runner_idx=int(runner_arr[i]),
-            obs=obs_matrix[i].astype(np.float32),
+            obs=obs_mm[i],  # memmap row view (float32) — shared, no per-sample copy
             arb_spread_ticks=int(spread_arr[i]),
             expected_locked_pnl=float(pnl_arr[i]),
         )
         for i in range(len(tick_arr))
     ]
+
+
+def _load_or_build_oracle_obs_memmap(cache_dir: Path, data) -> np.ndarray:
+    """Return the day's oracle ``obs`` matrix as a READ-ONLY memmap.
+
+    The big ``(n_samples, obs_dim)`` float32 obs block is the only large part
+    of the oracle cache. Storing it as a raw ``.npy`` and loading it
+    ``mmap_mode='r'`` means the OS page cache holds a SINGLE physical copy that
+    every cohort worker shares — the same mechanism as the static_obs day cache
+    — instead of one private copy per worker.
+
+    The ``.npy`` is built lazily the first time a day is needed (extracted from
+    the existing ``.npz``), written atomically (tmp + ``os.replace``) so 16
+    workers racing to create it is safe, and keyed by ``obs_dim`` so a lean-obs
+    (574) and full-obs (2254) cache never collide. A stale/short file is
+    rebuilt. Falls back to a private copy only if the memmap can't be created
+    (degrade, never fail BC).
+    """
+    obs_dim = int(data["obs_dim_stored"]) if "obs_dim_stored" in data.files else -1
+    obs_npy = cache_dir / f"oracle_obs_d{obs_dim}.npy"
+
+    def _build() -> None:
+        obs = np.ascontiguousarray(data["obs"], dtype=np.float32)
+        fd, tmp = tempfile.mkstemp(dir=str(cache_dir), suffix=".npytmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                np.save(fh, obs)
+            os.replace(tmp, obs_npy)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    try:
+        if not obs_npy.exists():
+            _build()
+        mm = np.load(obs_npy, mmap_mode="r")
+        # Guard a stale/short file (e.g. an interrupted earlier write or an
+        # obs config change that reused the same dim): rebuild once.
+        if mm.ndim != 2 or mm.shape[0] != int(data["tick_index"].shape[0]):
+            _build()
+            mm = np.load(obs_npy, mmap_mode="r")
+        return mm
+    except Exception:
+        logger.warning(
+            "oracle obs memmap unavailable for %s; falling back to a private "
+            "in-RAM copy (slower + more memory, still correct).", cache_dir.name,
+            exc_info=True,
+        )
+        return np.ascontiguousarray(data["obs"], dtype=np.float32)
 
 
 def save_negative_samples(
