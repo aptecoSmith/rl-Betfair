@@ -215,39 +215,47 @@ def climb_cull_per_tranche(
         breed_cfg = BreedConfig()
     n_tranches = split.n_tranches
     runs = 0
-    for K in range(1, n_tranches + 1):
-        batch = ledger.needs(K)  # the resident pool at depth K-1
-        if not batch:
-            break
-        logger.info("gauntlet[cull]: tranche %d/%d on %d resident lineages",
-                    K, n_tranches, len(batch))
-        _run_tranche_and_record(
-            ledger, batch, K, split=split, exec_cfg=exec_cfg,
-            seed_base=seed_base, executor=executor,
-            run_tranche_fn=run_tranche_fn, score_result_fn=score_result_fn)
-        runs += 1
-        # Eliminate the bottom keep_fraction at depth K + emit mutant refills
-        # at needs-T1 (breed_frontier culls at the current frontier == K).
-        res = breed_frontier(ledger, rng, cfg=breed_cfg, sigma_leg_fn=sigma_leg_fn)
-        if not res.bred:
-            continue
-        logger.info("gauntlet[cull]: tranche %d — kept %d, culled %d, +%d "
-                    "mutants to catch up", K, len(res.survivors),
-                    len(res.culled), len(res.new_lineage_ids))
-        # CATCH-UP: re-climb the new mutants T1..TK (no culling) so they rejoin
-        # the pool at depth K. needs(j) at this point holds ONLY the climbing
-        # mutants (survivors sit at depth K, never at depth j-1<K).
-        for j in range(1, K + 1):
-            cu = ledger.needs(j)
-            if not cu:
-                continue
-            logger.info("gauntlet[cull]: catch-up tranche %d/%d on %d mutants",
-                        j, K, len(cu))
+
+    def _drain_to(target_K: int) -> None:
+        """Advance EVERY active lineage below ``target_K`` up to depth
+        ``target_K``, running the shallowest non-empty needs-queue each step
+        (resident pool advancing + mutants catching up climb together). Purely
+        ledger-derived ⇒ resume-safe: a re-loaded ledger continues from wherever
+        each lineage sits, and a half-trained (un-recorded) tranche re-runs.
+        """
+        nonlocal runs
+        while True:
+            pending = [e for e in ledger.all_entries()
+                       if e.status == "active" and e.tranches_completed < target_K]
+            if not pending:
+                return
+            j = min(e.needs_tranche() for e in pending)
+            batch = [e for e in pending if e.needs_tranche() == j]
+            logger.info("gauntlet[cull]: tranche %d on %d lineages "
+                        "(→ depth %d/%d)", j, len(batch), target_K, n_tranches)
             _run_tranche_and_record(
-                ledger, cu, j, split=split, exec_cfg=exec_cfg,
+                ledger, batch, j, split=split, exec_cfg=exec_cfg,
                 seed_base=seed_base, executor=executor,
                 run_tranche_fn=run_tranche_fn, score_result_fn=score_result_fn)
             runs += 1
+
+    # Each depth K: bring the resident pool to K → cull the bottom keep_fraction
+    # ONCE (idempotent via the ledger's bred-depths marker) → eagerly catch the
+    # new mutants back up to K so the pool is whole for K+1. The whole loop is
+    # ledger-driven, so a stopped run resumes: completed depths replay as no-ops
+    # (their drains find nothing pending, their breed is already marked) and work
+    # continues at the first unfinished depth.
+    for K in range(1, n_tranches + 1):
+        _drain_to(K)
+        if K not in ledger.bred_depths():
+            res = breed_frontier(ledger, rng, cfg=breed_cfg,
+                                 sigma_leg_fn=sigma_leg_fn)
+            ledger.mark_bred(K)
+            if res.bred:
+                logger.info("gauntlet[cull]: tranche %d — kept %d, culled %d, "
+                            "+%d mutants catching up", K, len(res.survivors),
+                            len(res.culled), len(res.new_lineage_ids))
+        _drain_to(K)  # eager catch-up: new mutants climb T1..TK to rejoin at K
     return runs
 
 

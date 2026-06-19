@@ -143,11 +143,16 @@ class GauntletLedger:
     """Durable, resumable lineage ledger backed by one JSONL file."""
 
     META_KEY = "__meta__"
+    BRED_KEY = "__bred__"
 
     def __init__(self, path: "str | Path", *, split: DaySplit | None = None):
         self.path = Path(path)
         self._entries: dict[str, LedgerEntry] = {}
         self.split: DaySplit | None = split
+        # Depths whose per-tranche cull (breed) has already fired — the
+        # cull-early ("the tick") resume marker, so a resumed run does NOT
+        # re-cull a depth it already bred. Empty for the full-fair-shot path.
+        self._bred_depths: set[int] = set()
 
     # ── persistence ──────────────────────────────────────────────────────
 
@@ -176,6 +181,9 @@ class GauntletLedger:
                             tranche_days=[list(t) for t in sp["tranche_days"]],
                             validation_days=list(sp["validation_days"]),
                             final_test_days=list(sp.get("final_test_days", [])))
+                    continue
+                if rec.get("lineage_id") == cls.BRED_KEY:
+                    led._bred_depths.add(int(rec["depth"]))
                     continue
                 led._entries[rec["lineage_id"]] = _entry_from_dict(rec)
         return led
@@ -207,6 +215,9 @@ class GauntletLedger:
                         "validation_days": self.split.validation_days,
                         "final_test_days": self.split.final_test_days,
                     }}) + "\n")
+                for d in sorted(self._bred_depths):
+                    fh.write(json.dumps(
+                        {"lineage_id": self.BRED_KEY, "depth": int(d)}) + "\n")
                 for e in self._entries.values():
                     fh.write(json.dumps(asdict(e), default=str) + "\n")
             os.replace(tmp, self.path)
@@ -264,6 +275,16 @@ class GauntletLedger:
         e.status = str(status)
         self._append(asdict(e))
         return e
+
+    def mark_bred(self, depth: int) -> None:
+        """Record that the per-tranche cull (breed) has fired at ``depth`` — the
+        cull-early resume marker (idempotent: a resumed run skips re-culling)."""
+        self._bred_depths.add(int(depth))
+        self._append({"lineage_id": self.BRED_KEY, "depth": int(depth)})
+
+    def bred_depths(self) -> set:
+        """Depths whose cull has already fired (see :meth:`mark_bred`)."""
+        return set(self._bred_depths)
 
     # ── queries (derive the queues) ──────────────────────────────────────
 

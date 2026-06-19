@@ -104,6 +104,52 @@ def test_per_tranche_leaderboards_recorded(tmp_path):
     assert len(calls) == 9
 
 
+def test_stop_and_resume_completes_without_double_culling(tmp_path):
+    # The architecture must be stop/resumable: kill mid-training, reload the
+    # ledger from disk, continue → same final state, and crucially NO depth is
+    # bred twice (the bred-depths marker is the idempotency guard).
+    split = _split(3)
+    ledger_path = tmp_path / "ledger.jsonl"
+
+    # Run 1: crash after a handful of tranche runs (simulates a mid-training kill).
+    led1 = GauntletLedger(ledger_path)
+    led1.set_split(split)
+    seed_population(led1, GauntletConfig(n_recipes=4, enabled_set=frozenset()),
+                    random.Random(0))
+    calls1: list = []
+    fake1 = _make_fake_runner(calls1)
+
+    def crashing(*a, **k):
+        if len(calls1) >= 4:           # die partway through (during a drain)
+            raise RuntimeError("simulated mid-training kill")
+        return fake1(*a, **k)
+
+    breed = BreedConfig(keep_fraction=0.5, min_quorum=2,
+                        enabled_set=frozenset(), mutant_fraction=1.0)
+    try:
+        climb_cull_per_tranche(led1, split, exec_cfg=None, rng=random.Random(0),
+                               seed_base=1, run_tranche_fn=crashing,
+                               score_result_fn=lambda r: r.quality, breed_cfg=breed)
+    except RuntimeError:
+        pass
+    assert len(calls1) == 4  # confirmed it died mid-way
+
+    # Run 2: RELOAD the ledger from disk (the resume) and finish cleanly.
+    led2 = GauntletLedger.load(ledger_path)
+    assert led2.split is not None  # split persisted + reloaded
+    calls2: list = []
+    climb_cull_per_tranche(led2, led2.split, exec_cfg=None, rng=random.Random(0),
+                           seed_base=1, run_tranche_fn=_make_fake_runner(calls2),
+                           score_result_fn=lambda r: r.quality, breed_cfg=breed)
+
+    # Final state identical to an uninterrupted run, and no depth double-bred.
+    assert led2.bred_depths() == {1, 2, 3}
+    assert len(led2.frontier(3)) == 4
+    culled = [e for e in led2.all_entries() if e.status == "culled"]
+    assert len(culled) == 6, "double-cull on resume would push this above 6"
+    assert len(led2.all_entries()) == 10
+
+
 def test_depth1_cull_is_truncation_on_score(tmp_path):
     # The depth-1 elimination is truncation on score: among the 4 SEEDS (the
     # only fresh-origin lineages — refills are mutants), the 2 with the higher
