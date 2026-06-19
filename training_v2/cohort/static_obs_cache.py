@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +39,38 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
 __all__ = ["DayStaticObs", "StaticObsCacheMismatch", "SCHEMA_VERSION"]
+
+
+def _atomic_replace(src: Path, dst: Path, *, attempts: int = 6) -> None:
+    """``src.replace(dst)``, tolerant of transient Windows interference.
+
+    Root cause of the 2026-06-18 ``FileNotFoundError`` mid-prebuild: a
+    freshly-written temp file (``meta_*.pkl.tmp``) can be briefly held open
+    or quarantined by Defender / a search indexer between the write and the
+    rename, so ``os.replace`` raises ``PermissionError`` (WinError 5/32) or
+    ``FileNotFoundError`` (WinError 2 — the temp was moved out from under us).
+    These are transient: retry with backoff. If the temp is gone but ``dst``
+    already exists, the rename actually landed (or a prior build did) — treat
+    as success (idempotent). Only raise after exhausting the retries with no
+    valid ``dst`` in place.
+    """
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except FileNotFoundError as e:
+            # Temp vanished. If the destination is in place, the move
+            # effectively succeeded (or a concurrent build wrote it).
+            if dst.exists() and not src.exists():
+                return
+            last = e
+        except PermissionError as e:  # WinError 5/32 — file briefly locked
+            last = e
+        time.sleep(0.25 * (i + 1))
+    if dst.exists():
+        return
+    raise last if last is not None else FileNotFoundError(str(src))
 
 
 class StaticObsCacheMismatch(ValueError):
@@ -171,8 +204,8 @@ class DayStaticObs:
         with open(tmp_side, "wb") as fh:
             pickle.dump(self._sidecar_payload(), fh,
                         protocol=pickle.HIGHEST_PROTOCOL)
-        tmp_npy.replace(npy_path)
-        tmp_side.replace(sidecar_path)
+        _atomic_replace(tmp_npy, npy_path)
+        _atomic_replace(tmp_side, sidecar_path)
 
     @classmethod
     def load(

@@ -37,7 +37,7 @@ mkdir -p "$DIR"
   --breeding pbt --n-agents 16 --maturation-gens 2 \
   --holdout-recent 7 --pbt-rotation-mode chronological \
   --seed 2001 --parallel-agents 16 --device cpu \
-  --composite-score-mode locked_weighted --force-close-rate-penalty-weight 20 \
+  --composite-score-mode locked_per_std --force-close-rate-penalty-weight 20 \
   --big-model-threads 1 --gpu-policy-lane --gpu-lane-max-concurrent 2 \
   --use-race-outcome-predictor --use-direction-predictor \
   --predictor-bundle-manifests \

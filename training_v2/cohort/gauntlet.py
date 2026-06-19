@@ -35,7 +35,8 @@ from training_v2.cohort.ledger import DaySplit, GauntletLedger
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["GauntletConfig", "run_gauntlet", "climb_to_frontier", "seed_population"]
+__all__ = ["GauntletConfig", "run_gauntlet", "climb_to_frontier",
+           "climb_cull_per_tranche", "seed_population"]
 
 
 @dataclass
@@ -46,6 +47,10 @@ class GauntletConfig:
     enabled_set: frozenset = frozenset()
     seed_bands: dict | None = None  # band-seeded fresh blood (Tock era)
     breed: BreedConfig = None       # type: ignore[assignment]
+    # "frontier" = full fair shot (climb all to N, breed only at the frontier).
+    # "per_tranche" = cull-early successive-halving (cull after EACH tranche,
+    # mutants catch up). Operator 2026-06-19 — the tick uses per_tranche.
+    cull_mode: str = "frontier"
 
     def __post_init__(self):
         if self.breed is None:
@@ -98,6 +103,48 @@ def _entry_to_agent(entry, *, tranche_K: int, seed_base: int) -> RecipeAgent:
     )
 
 
+def _run_tranche_and_record(
+    ledger: GauntletLedger,
+    batch: list,
+    K: int,
+    *,
+    split: DaySplit,
+    exec_cfg: TrancheExecConfig,
+    seed_base: int,
+    executor,
+    run_tranche_fn,
+    score_result_fn,
+) -> None:
+    """Run one same-depth batch through tranche K; record results to the ledger.
+
+    Shared by both climb strategies. Failed lineages (crash / no weights) are
+    culled. Successes record their fc=0 composite (the selection score), locked,
+    and naked at depth K. ``score_result_fn(AgentResult)->float`` is the
+    lockstep composite (σ-penalty + fc-penalty); ``None`` ⇒ raw held-out locked.
+    """
+    agents = [_entry_to_agent(e, tranche_K=K, seed_base=seed_base) for e in batch]
+    results = run_tranche_fn(
+        agents, tranche_K=K,
+        train_days_for_K=split.train_days_for(K),
+        validation_days=split.validation_days,
+        cfg=exec_cfg, executor=executor)
+    for e, r in zip(batch, results):
+        if r is None or r.error or not r.weights_path:
+            logger.warning("gauntlet: lineage %s failed tranche %d (%s) — "
+                           "culling", e.lineage_id, K,
+                           getattr(r, "error", "no result"))
+            ledger.set_status(e.lineage_id, "culled")
+            continue
+        if score_result_fn is not None and r.result is not None:
+            comp = float(score_result_fn(r.result))
+        else:
+            comp = r.validation_locked
+        ledger.record_tranche(
+            e.lineage_id, K, weights_path=r.weights_path,
+            composite=comp, locked=r.validation_locked,
+            naked=r.validation_naked, agent_id=r.agent_id)
+
+
 def climb_to_frontier(
     ledger: GauntletLedger,
     split: DaySplit,
@@ -110,16 +157,11 @@ def climb_to_frontier(
 ) -> int:
     """Advance every active lineage to depth ``n_tranches`` via uniform runs.
 
-    Each iteration picks the SHALLOWEST non-empty `needs-T(K)` queue and runs
-    that whole same-depth cohort through tranche K (one `run_tranche` call =
-    one uniform batch). Returns the number of tranche-runs executed.
-
-    ``score_result_fn(AgentResult) -> float`` is the breeder's selection score
-    recorded per tranche. Passed by the runner as
-    ``_composite_score(eval, maturation_bonus_weight, composite_score_mode)`` so
-    in-loop selection matches lockstep's discipline EXACTLY — the composite folds
-    in the ``naked_std`` σ-penalty (locked_weighted) AND the force-close-rate
-    penalty (global weight). ``None`` falls back to raw held-out locked.
+    FULL-FAIR-SHOT strategy: each iteration picks the SHALLOWEST non-empty
+    `needs-T(K)` queue and runs that whole same-depth cohort through tranche K
+    (one `run_tranche` call = one uniform batch) — NO mid-climb culling. Returns
+    the number of tranche-runs executed. Selection happens only at the frontier
+    (the caller's breed rounds). Contrast :func:`climb_cull_per_tranche`.
     """
     n_tranches = split.n_tranches
     runs = 0
@@ -130,35 +172,82 @@ def climb_to_frontier(
             break
         K = min(e.needs_tranche() for e in pending)
         batch = [e for e in pending if e.needs_tranche() == K]
-        agents = [_entry_to_agent(e, tranche_K=K, seed_base=seed_base)
-                  for e in batch]
         logger.info("gauntlet: climbing %d lineages through tranche %d/%d",
-                    len(agents), K, n_tranches)
-        results = run_tranche_fn(
-            agents, tranche_K=K,
-            train_days_for_K=split.train_days_for(K),
-            validation_days=split.validation_days,
-            cfg=exec_cfg, executor=executor)
-        for e, r in zip(batch, results):
-            if r is None or r.error or not r.weights_path:
-                logger.warning("gauntlet: lineage %s failed tranche %d (%s) — "
-                               "culling", e.lineage_id, K,
-                               getattr(r, "error", "no result"))
-                ledger.set_status(e.lineage_id, "culled")
-                continue
-            # Selection score = the lockstep composite (fc-penalty + naked_std
-            # σ-penalty) when the runner supplies score_result_fn; else raw
-            # held-out locked. ``locked``/``naked`` stay the raw structural
-            # values regardless (for diagnostics / the post-run holdout board).
-            if score_result_fn is not None and r.result is not None:
-                comp = float(score_result_fn(r.result))
-            else:
-                comp = r.validation_locked
-            ledger.record_tranche(
-                e.lineage_id, K, weights_path=r.weights_path,
-                composite=comp, locked=r.validation_locked,
-                naked=r.validation_naked, agent_id=r.agent_id)
+                    len(batch), K, n_tranches)
+        _run_tranche_and_record(
+            ledger, batch, K, split=split, exec_cfg=exec_cfg,
+            seed_base=seed_base, executor=executor,
+            run_tranche_fn=run_tranche_fn, score_result_fn=score_result_fn)
         runs += 1
+    return runs
+
+
+def climb_cull_per_tranche(
+    ledger: GauntletLedger,
+    split: DaySplit,
+    exec_cfg: TrancheExecConfig,
+    rng,
+    *,
+    seed_base: int = 0,
+    executor=None,
+    run_tranche_fn=run_tranche,
+    score_result_fn=None,
+    breed_cfg: BreedConfig = None,  # type: ignore[assignment]
+    sigma_leg_fn=None,
+) -> int:
+    """Successive-halving gauntlet: cull AFTER EACH tranche; mutants catch up.
+
+    The cull-early "tick" (operator decision 2026-06-19, supersedes full-fair-
+    shot for the tick): a resident pool runs tranche K, the bottom
+    ``keep_fraction`` is eliminated IMMEDIATELY (``breed_frontier`` at depth K),
+    survivors are mutated to refill, and the new mutants re-climb T1..TK (recipe-
+    pure catch-up, no culling) to rejoin the pool at depth K — then tranche K+1.
+
+    So selection pressure applies at EVERY depth and only survivors+caught-up
+    mutants ever pay for deeper training (duds die after T1). The catch-up cost
+    grows with depth (a mutant born after TK must climb K tranches) — the
+    accepted price of cull-early vs :func:`climb_to_frontier`'s full fair shot.
+
+    Returns the number of tranche-runs executed (incl. catch-up runs). Driven by
+    the ledger queues, so a resumed run continues from wherever the pool sits.
+    """
+    if breed_cfg is None:
+        breed_cfg = BreedConfig()
+    n_tranches = split.n_tranches
+    runs = 0
+    for K in range(1, n_tranches + 1):
+        batch = ledger.needs(K)  # the resident pool at depth K-1
+        if not batch:
+            break
+        logger.info("gauntlet[cull]: tranche %d/%d on %d resident lineages",
+                    K, n_tranches, len(batch))
+        _run_tranche_and_record(
+            ledger, batch, K, split=split, exec_cfg=exec_cfg,
+            seed_base=seed_base, executor=executor,
+            run_tranche_fn=run_tranche_fn, score_result_fn=score_result_fn)
+        runs += 1
+        # Eliminate the bottom keep_fraction at depth K + emit mutant refills
+        # at needs-T1 (breed_frontier culls at the current frontier == K).
+        res = breed_frontier(ledger, rng, cfg=breed_cfg, sigma_leg_fn=sigma_leg_fn)
+        if not res.bred:
+            continue
+        logger.info("gauntlet[cull]: tranche %d — kept %d, culled %d, +%d "
+                    "mutants to catch up", K, len(res.survivors),
+                    len(res.culled), len(res.new_lineage_ids))
+        # CATCH-UP: re-climb the new mutants T1..TK (no culling) so they rejoin
+        # the pool at depth K. needs(j) at this point holds ONLY the climbing
+        # mutants (survivors sit at depth K, never at depth j-1<K).
+        for j in range(1, K + 1):
+            cu = ledger.needs(j)
+            if not cu:
+                continue
+            logger.info("gauntlet[cull]: catch-up tranche %d/%d on %d mutants",
+                        j, K, len(cu))
+            _run_tranche_and_record(
+                ledger, cu, j, split=split, exec_cfg=exec_cfg,
+                seed_base=seed_base, executor=executor,
+                run_tranche_fn=run_tranche_fn, score_result_fn=score_result_fn)
+            runs += 1
     return runs
 
 
@@ -189,7 +278,18 @@ def run_gauntlet(
         ledger.set_split(split)
     seed_population(ledger, cfg, rng)
 
-    # First full climb.
+    # Cull-early "tick": cull after EACH tranche, mutants catch up. Selection
+    # at every depth; no separate breed-round loop (breeding is interleaved).
+    if cfg.cull_mode == "per_tranche":
+        climb_cull_per_tranche(
+            ledger, split, exec_cfg, rng, seed_base=cfg.seed_base,
+            executor=executor, run_tranche_fn=run_tranche_fn,
+            score_result_fn=score_result_fn, breed_cfg=cfg.breed,
+            sigma_leg_fn=sigma_leg_fn)
+        ledger.compact()
+        return ledger
+
+    # Full fair shot: first full climb, then breed→climb cycles.
     climb_to_frontier(ledger, split, exec_cfg, seed_base=cfg.seed_base,
                       executor=executor, run_tranche_fn=run_tranche_fn,
                       score_result_fn=score_result_fn)

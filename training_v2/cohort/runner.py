@@ -890,6 +890,7 @@ def _run_gauntlet_breeding(
     direction_gate_enabled, mature_prob_open_threshold,
     race_confidence_threshold, lay_price_max, frozen_direction_head_path,
     big_model_threads, gpu_policy_lane, gpu_lane_max_concurrent,
+    gauntlet_cull_mode="frontier",
 ) -> list:
     """Drive the gauntlet-pipeline (executor+ledger+breeder) and return the
     frontier recipes' AgentResults. Dispatched from :func:`run_cohort` when
@@ -922,10 +923,14 @@ def _run_gauntlet_breeding(
     split = DaySplit(tranche_days=tranche_days, validation_days=val,
                      final_test_days=[])
 
+    _cull_desc = ("cull-early (cull after each tranche, mutants catch up)"
+                  if gauntlet_cull_mode == "per_tranche"
+                  else "full fair shot (no mid-climb cull)")
     logger.info(
         "── Gauntlet pipeline: %d recipes over %d fixed tranches; fc=0 "
-        "validation=%d days; %d breed round(s). Recipe-pure, full fair shot. ──",
-        n_agents, n_tranches, len(val), max(0, int(n_generations) - 1))
+        "validation=%d days; %d breed round(s). Recipe-pure, %s. ──",
+        n_agents, n_tranches, len(val), max(0, int(n_generations) - 1),
+        _cull_desc)
     for i, td in enumerate(tranche_days, 1):
         logger.info("   tranche %d: train(+folded eval)=%s", i, td)
 
@@ -965,6 +970,7 @@ def _run_gauntlet_breeding(
         n_recipes=int(n_agents),
         max_breed_rounds=max(0, int(n_generations) - 1),
         seed_base=int(seed), enabled_set=enabled_set, seed_bands=seed_bands,
+        cull_mode=str(gauntlet_cull_mode),
         breed=BreedConfig(
             keep_fraction=float(getattr(cfgp, "survivor_fraction", 0.5)),
             perturb_frac=float(getattr(cfgp, "perturb_frac", 0.20)),
@@ -1112,6 +1118,7 @@ def run_cohort(
     big_model_threads: int = 1,
     gpu_policy_lane: bool = False,
     gpu_lane_max_concurrent: int = 2,
+    gauntlet_cull_mode: str = "frontier",
 ) -> list[AgentResult]:
     """Run the cohort end-to-end. Returns one :class:`AgentResult` per agent.
 
@@ -1314,6 +1321,7 @@ def run_cohort(
             big_model_threads=int(big_model_threads),
             gpu_policy_lane=bool(gpu_policy_lane),
             gpu_lane_max_concurrent=int(gpu_lane_max_concurrent),
+            gauntlet_cull_mode=str(gauntlet_cull_mode),
         )
 
     pbt_specs: "list | None" = None
@@ -3193,14 +3201,27 @@ def _resolve_composite_defaults(
     Lockstep defaults to the maturation-aware selector
     (``locked_maturation``) with a non-zero maturation weight, so a lockstep
     era rewards pairs that RESOLVE by default — the operator's "selection
-    should count maturation" requirement. ``ga``/``pbt`` keep the
-    byte-identical ``total_reward`` + ``0.0``. An EXPLICIT CLI value always
-    wins (``None`` means "unset" — argparse default). Guard:
-    ``tests/test_v2_lockstep.py::TestResolveCompositeDefaults``.
+    should count maturation" requirement.
+
+    Gauntlet defaults to ``locked_per_std`` (tnv2 = ``mean_locked /
+    (1 + σ_naked)``) — the scalper selector. The earlier ``locked_weighted``
+    default (``locked + 0.25·naked``) reads naked-sign, so when locked is
+    near-zero (early training) it bred toward naked LUCK and culled the genuine
+    scalpers at the frontier (observed 2026-06-19, tt_tick_002). ``locked_per_std``
+    selects on the structural locked floor discounted by naked volatility,
+    never reading naked-sign — "we are after scalpers" (operator). It needs
+    ≥2 eval days (the gauntlet runs ≥10 validation days, so it does NOT hit the
+    locked_weighted fallback).
+
+    ``ga``/``pbt`` keep the byte-identical ``total_reward`` + ``0.0``. An
+    EXPLICIT CLI value always wins (``None`` means "unset" — argparse default).
+    Guard: ``tests/test_v2_lockstep.py::TestResolveCompositeDefaults``.
     """
     mode = composite_score_mode or (
         COMPOSITE_SCORE_MODE_LOCKED_MATURATION
         if breeding == "lockstep"
+        else COMPOSITE_SCORE_MODE_LOCKED_PER_STD
+        if breeding == "gauntlet"
         else COMPOSITE_SCORE_MODE_TOTAL_REWARD
     )
     if maturation_bonus_weight is None:
@@ -3473,6 +3494,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "T1, never warm-started from a survivor); fixed tranche size, the "
             "gauntlet grows by appending tranches; full fair shot. Requires "
             "--validation-holdout-recent > 0 (the fixed fc=0 selection set)."
+        ),
+    )
+    p.add_argument(
+        "--gauntlet-cull", choices=["frontier", "per_tranche"],
+        default="frontier",
+        help=(
+            "Gauntlet selection timing (only with --breeding gauntlet). "
+            "'frontier' (default, byte-identical to the cutover): full fair "
+            "shot — all recipes climb T1..TN uninterrupted, breeding only at "
+            "the frontier. 'per_tranche': cull-early successive-halving — cull "
+            "the bottom --survivor-fraction AFTER EACH tranche, mutate "
+            "survivors, and re-climb the mutants T1..TK to rejoin the pool "
+            "(operator 2026-06-19, 'the tick'; duds die after T1, compute "
+            "concentrates on winners; use --n-agents 32 for a 16-survivor pool)."
         ),
     )
     p.add_argument("--pbt-rotations", type=int, default=3,
@@ -3810,7 +3845,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         choices=list(COMPOSITE_SCORE_MODES),
         help=(
             "GA selection scalar formula. Default when unset: "
-            "'locked_maturation' for --breeding lockstep, else 'total_reward'. "
+            "'locked_maturation' for --breeding lockstep, 'locked_per_std' "
+            "(scalper selector) for --breeding gauntlet, else 'total_reward'. "
             "`total_reward` (default, byte-identical to pre-plan): "
             "score = total_reward + maturation_bonus_weight x "
             "(arbs_completed + arbs_closed). "
@@ -4143,6 +4179,72 @@ def _resolve_parallel_agents(
     if pa <= 0:
         return 0
     return pa
+
+
+def _acquire_run_lock(output_dir: Path) -> Path:
+    """Refuse to start a second cohort run on the same ``output_dir``.
+
+    Root cause of the 2026-06-18 "silent worker collapse" + the
+    ``FileNotFoundError`` on ``meta_*.pkl.tmp``: TWO masters writing one
+    ``output_dir`` (overlapping launches — a re-spawned background job after
+    a reboot, a scheduler, a stray relaunch) race the atomic static_obs cache
+    rename AND double the worker pool (2×N procs thrash a 20-core box → the OS
+    kills one run's workers → no exception, no OOM log). A liveness-checked
+    lockfile makes the duplicate refuse cleanly. A STALE lock (holder dead via
+    crash/reboot) is reclaimed, so a normal resume on the same dir still works.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = output_dir / ".run.lock"
+
+    def _holder_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            import psutil  # type: ignore
+        except ImportError:
+            return False  # can't verify → treat as stale (best effort)
+        try:
+            if not psutil.pid_exists(pid):
+                return False
+            return "cohort.runner" in " ".join(psutil.Process(pid).cmdline() or [])
+        except Exception:
+            return False
+
+    payload = f"{os.getpid()}|{time.strftime('%Y-%m-%dT%H:%M:%S')}".encode()
+    for _attempt in (0, 1):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            return lock_path
+        except FileExistsError:
+            try:
+                prior = lock_path.read_text(encoding="utf-8").strip()
+                prior_pid = int(prior.split("|", 1)[0]) if prior else -1
+            except Exception:
+                prior_pid = -1
+            if _holder_alive(prior_pid):
+                raise SystemExit(
+                    f"another cohort.runner (pid={prior_pid}) is already running "
+                    f"on output_dir={output_dir} (lock {lock_path}); refusing to "
+                    f"start a duplicate — two runs on one dir race the static_obs "
+                    f"cache write and double the worker pool (the silent-collapse "
+                    f"bug). Stop the other run first, or use a different "
+                    f"--output-dir."
+                )
+            logger.warning(
+                "reclaiming stale run lock %s (holder pid=%s not alive)",
+                lock_path, prior_pid,
+            )
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+    raise SystemExit(
+        f"could not acquire run lock {lock_path} (lost a concurrent-start race)"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4485,6 +4587,8 @@ def main(argv: list[str] | None = None) -> int:
             int(args.maturation_gens) + 1,
         )
 
+    _output_dir = Path(args.output_dir)
+    _run_lock = _acquire_run_lock(_output_dir)
     try:
         run_cohort(
             n_agents=args.n_agents,
@@ -4493,7 +4597,7 @@ def main(argv: list[str] | None = None) -> int:
             data_dir=Path(args.data_dir),
             device=args.device,
             seed=args.seed,
-            output_dir=Path(args.output_dir),
+            output_dir=_output_dir,
             mutation_rate=args.mutation_rate,
             breeding=args.breeding,
             pbt_config=_pbt_config,
@@ -4563,6 +4667,7 @@ def main(argv: list[str] | None = None) -> int:
             big_model_threads=int(args.big_model_threads),
             gpu_policy_lane=bool(args.gpu_policy_lane),
             gpu_lane_max_concurrent=int(args.gpu_lane_max_concurrent),
+            gauntlet_cull_mode=str(args.gauntlet_cull),
         )
     finally:
         if server is not None:
@@ -4570,6 +4675,10 @@ def main(argv: list[str] | None = None) -> int:
             # event before closing the listen socket.
             time.sleep(0.5)
             server.stop()
+        try:
+            _run_lock.unlink()
+        except OSError:
+            pass
     return 0
 
 

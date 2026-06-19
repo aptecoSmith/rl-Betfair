@@ -41,12 +41,13 @@ mkdir "%DIR%"
 
 echo [start_tick] launching TICK %ERA%  ^(gauntlet, predictors+BC ON^)  -^>  %DIR%
 "%PY%" -m training_v2.cohort.runner ^
-  --breeding gauntlet --generations 5 --n-agents 16 --parallel-agents 16 --device cpu --seed 3002 ^
+  --breeding gauntlet --gauntlet-cull per_tranche ^
+  --generations 5 --n-agents 32 --parallel-agents 16 --device cpu --seed 3002 ^
   --survivor-fraction 0.5 ^
   --pbt-train-per-rotation 6 --pbt-eval-per-rotation 4 ^
   --holdout-recent 7 ^
   --validation-holdout-recent 10 --validation-holdout-mode sampled ^
-  --composite-score-mode locked_weighted ^
+  --composite-score-mode locked_per_std ^
   --force-close-rate-penalty-weight 20 ^
   --big-model-threads 1 --gpu-policy-lane --gpu-lane-max-concurrent 2 ^
   --use-race-outcome-predictor --use-direction-predictor --bc-pretrain-steps 500 ^
