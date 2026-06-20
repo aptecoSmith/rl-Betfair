@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import sys
 from pathlib import Path
 
 _SORTS = {
@@ -95,36 +96,64 @@ def _fmt_board(rows: list[dict], status: dict[str, str], K: int,
     return "\n".join(lines)
 
 
+def _build_report(d: Path, tranche: int | None, sort_key: str, top: int) -> str:
+    sb = _load_jsonl(d / "scoreboard.jsonl")
+    if not sb:
+        return (f"(no scoreboard rows yet in {d}/scoreboard.jsonl — "
+                f"no tranche has completed)")
+    status = _ledger_status(_load_jsonl(d / "gauntlet_ledger.jsonl"))
+    by_t = collections.defaultdict(list)
+    for r in sb:
+        by_t[r.get("tranche_K")].append(r)
+    tranches = [tranche] if tranche is not None else sorted(
+        k for k in by_t if k is not None)
+    parts = [f"run: {d}   tranches present: "
+             f"{dict(sorted((k, len(v)) for k, v in by_t.items() if k is not None))}"]
+    for K in tranches:
+        parts.append(_fmt_board(by_t[K], status, K, sort_key, top)
+                     if K in by_t else f"(no rows for tranche {K})")
+    return "\n".join(parts)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dir", required=True, help="run output dir (e.g. registry/tt_tick_002)")
     ap.add_argument("--tranche", type=int, default=None, help="only this tranche depth")
     ap.add_argument("--sort", choices=list(_SORTS), default="composite")
     ap.add_argument("--top", type=int, default=20, help="rows to show (0 = all)")
+    ap.add_argument("--watch", type=int, default=0, metavar="SECS",
+                    help="refresh every SECS, writing <dir>/leaderboards.txt "
+                         "(0 = print once to stdout). Keeps the file current "
+                         "alongside a live run.")
+    ap.add_argument("--out", default=None,
+                    help="watch output file (default <dir>/leaderboards.txt)")
     args = ap.parse_args(argv)
 
-    d = Path(args.dir)
-    sb = _load_jsonl(d / "scoreboard.jsonl")
-    if not sb:
-        print(f"(no scoreboard rows yet in {d}/scoreboard.jsonl — "
-              f"no tranche has completed)")
-        return 0
-    status = _ledger_status(_load_jsonl(d / "gauntlet_ledger.jsonl"))
-    sort_key = _SORTS[args.sort]
+    # Detached/Windows stdout is cp1252 and chokes on £/…/σ — make it tolerant
+    # (the leaderboards.txt file is always written UTF-8 regardless).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
-    by_t = collections.defaultdict(list)
-    for r in sb:
-        by_t[r.get("tranche_K")].append(r)
-    tranches = [args.tranche] if args.tranche is not None else sorted(
-        k for k in by_t if k is not None)
-    print(f"run: {d}   tranches present: "
-          f"{dict(sorted((k, len(v)) for k, v in by_t.items() if k is not None))}")
-    for K in tranches:
-        if K not in by_t:
-            print(f"(no rows for tranche {K})")
-            continue
-        print(_fmt_board(by_t[K], status, K, sort_key, args.top))
-    return 0
+    d = Path(args.dir)
+    sort_key = _SORTS[args.sort]
+    if args.watch <= 0:
+        print(_build_report(d, args.tranche, sort_key, args.top))
+        return 0
+
+    import time
+    out = Path(args.out) if args.out else d / "leaderboards.txt"
+    print(f"watching {d} every {args.watch}s -> {out} (Ctrl-C to stop)")
+    while True:
+        report = _build_report(d, args.tranche, sort_key, args.top)
+        try:
+            tmp = out.with_suffix(out.suffix + ".tmp")
+            tmp.write_text(report + "\n", encoding="utf-8")
+            tmp.replace(out)  # atomic — a reader never sees a half-written file
+        except OSError:
+            pass
+        time.sleep(args.watch)
 
 
 if __name__ == "__main__":
