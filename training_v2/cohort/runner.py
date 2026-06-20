@@ -874,6 +874,26 @@ def _preflight_cache_schema_check(
     raise ValueError("\n".join(lines))
 
 
+def _gauntlet_tranche_days(
+    nonsealed_pool: list, train_per_rotation: int, eval_per_rotation: int,
+) -> list:
+    """Fixed-size chronological tranches for the gauntlet (one definition).
+
+    The gauntlet invariant (hard_constraints.md): EVERY tranche is exactly
+    ``train_per_rotation + eval_per_rotation`` days, so every recipe faces the
+    IDENTICAL T1..TN. Unlike lockstep — where ``make_rotations`` deliberately
+    folds the trailing <per-day remainder INTO the last tranche — the gauntlet
+    must NOT resize the last tranche: the trailing remainder is simply not a
+    tranche yet (it becomes T(N+1) once ``per`` more days bank). Old-anchored
+    (``nonsealed_pool`` sorted ascending ⇒ T1 = oldest block, fixed as data
+    grows). Guard: tests/test_v2_gauntlet_tranches.py.
+    """
+    per = int(train_per_rotation) + int(eval_per_rotation)
+    pool = sorted(set(nonsealed_pool))
+    n = n_tranches_for_pool(len(pool), train_per_rotation, eval_per_rotation)
+    return [pool[i * per:(i + 1) * per] for i in range(n)]
+
+
 def _run_gauntlet_breeding(
     *, n_agents, n_generations, training_days, eval_pool, validation_days,
     data_dir, output_dir, model_store, seed, device, pbt_config,
@@ -913,13 +933,13 @@ def _run_gauntlet_breeding(
     val = sorted(set(validation_days))
     nonsealed_pool = sorted(
         d for d in (set(training_days) | set(eval_pool)) if d not in set(val))
-    n_tranches = n_tranches_for_pool(
-        len(nonsealed_pool), cfgp.train_per_rotation, cfgp.eval_per_rotation)
-    rotations = make_rotations(
-        nonsealed_pool, cohort_seed=int(seed), n_rotations=n_tranches,
-        train_per_rotation=cfgp.train_per_rotation,
-        eval_per_rotation=cfgp.eval_per_rotation, mode="chronological")
-    tranche_days = [list(r.train_days) + list(r.eval_days) for r in rotations]
+    # FIXED-SIZE tranches (gauntlet invariant) — drop the trailing remainder,
+    # never fold it into the last tranche (that's the lockstep make_rotations
+    # behaviour and would make T_last oversized, breaking "every recipe faces
+    # the identical T1..TN"). See _gauntlet_tranche_days.
+    tranche_days = _gauntlet_tranche_days(
+        nonsealed_pool, cfgp.train_per_rotation, cfgp.eval_per_rotation)
+    n_tranches = len(tranche_days)
     split = DaySplit(tranche_days=tranche_days, validation_days=val,
                      final_test_days=[])
 
