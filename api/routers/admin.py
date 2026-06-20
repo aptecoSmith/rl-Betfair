@@ -553,40 +553,43 @@ def _scan_backups(backup_dir: Path, extracted: set[str]) -> list[StreamrecorderB
     if not backup_dir.exists():
         return []
 
-    # Collect all .sql.gz files grouped by (kind, date) → list of (timestamp, filename)
-    by_date: dict[str, dict[str, list[tuple[str, str]]]] = {}
+    # Collect all .sql.gz files grouped by date → backup-run (shared timestamp) →
+    # {kind: (filename, size)}.  A "run" is one StreamRecorder backup invocation;
+    # its cold + hot dumps share a timestamp.
+    by_date: dict[str, dict[str, dict[str, tuple[str, int]]]] = {}
     for f in backup_dir.iterdir():
         m = _BACKUP_RE.match(f.name)
         if not m:
             continue
         kind, date_str, ts = m.group(1), m.group(2), m.group(3) or "000000"
-        by_date.setdefault(date_str, {}).setdefault(kind, []).append((ts, f.name))
+        by_date.setdefault(date_str, {}).setdefault(ts, {})[kind] = (f.name, f.stat().st_size)
 
     results: list[StreamrecorderBackup] = []
     for date_str in sorted(by_date.keys()):
-        groups = by_date[date_str]
-        cold_list = groups.get("coldData", [])
-        hot_list = groups.get("hotData", [])
-        if not cold_list or not hot_list:
-            continue  # need both cold + hot
+        runs = by_date[date_str]
+        # Keep only runs that have BOTH cold + hot dumps.
+        complete = {ts: r for ts, r in runs.items() if "coldData" in r and "hotData" in r}
+        if not complete:
+            continue
 
-        # Pick latest timestamp for each
-        cold_list.sort(key=lambda x: x[0], reverse=True)
-        hot_list.sort(key=lambda x: x[0], reverse=True)
+        # Pick the run with the most data, not the latest timestamp: a recorder
+        # may emit a later schema-only (empty) re-backup whose timestamp is newer
+        # but whose payload is ~empty.  Tie-break on newer timestamp.
+        def _run_total(item: tuple[str, dict[str, tuple[str, int]]]) -> tuple[int, str]:
+            ts, r = item
+            return (r["coldData"][1] + r["hotData"][1], ts)
 
-        cold_ts, cold_file = cold_list[0]
-        hot_ts, hot_file = hot_list[0]
-
-        cold_path = backup_dir / cold_file
-        hot_path = backup_dir / hot_file
+        ts, run = max(complete.items(), key=_run_total)
+        cold_file, cold_size = run["coldData"]
+        hot_file, hot_size = run["hotData"]
 
         results.append(StreamrecorderBackup(
             date=date_str,
-            timestamp=max(cold_ts, hot_ts),
+            timestamp=ts,
             cold_file=cold_file,
             hot_file=hot_file,
-            cold_size_bytes=cold_path.stat().st_size,
-            hot_size_bytes=hot_path.stat().st_size,
+            cold_size_bytes=cold_size,
+            hot_size_bytes=hot_size,
             already_extracted=date_str in extracted,
         ))
 

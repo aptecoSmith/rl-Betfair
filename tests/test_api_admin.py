@@ -234,6 +234,44 @@ class TestListBackupDays:
             assert resp.json()["days"] == []
 
 
+class TestScanBackups:
+    """`_scan_backups` must pick the backup run with the most DATA per date,
+    not the latest timestamp — a recorder can emit a later schema-only (empty)
+    re-backup whose newer timestamp would otherwise win and fail extraction."""
+
+    @staticmethod
+    def _write(path: Path, size: int) -> None:
+        path.write_bytes(b"0" * size)
+
+    def test_picks_largest_run_not_latest_timestamp(self):
+        from api.routers.admin import _scan_backups
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            # Real backup at 22:05 (big), empty re-backup at 22:30 (latest).
+            self._write(d / "coldData-2026-06-19_220525.sql.gz", 199702)
+            self._write(d / "hotData-2026-06-19_220525.sql.gz", 42208789)
+            self._write(d / "coldData-2026-06-19_223000.sql.gz", 4006)
+            self._write(d / "hotData-2026-06-19_223000.sql.gz", 3038)
+
+            backups = _scan_backups(d, extracted=set())
+            assert len(backups) == 1
+            b = backups[0]
+            assert b.timestamp == "220525"  # the run with data, not 223000
+            assert b.cold_file == "coldData-2026-06-19_220525.sql.gz"
+            assert b.hot_file == "hotData-2026-06-19_220525.sql.gz"
+            assert b.hot_size_bytes == 42208789
+
+    def test_skips_run_missing_one_half(self):
+        from api.routers.admin import _scan_backups
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            # Only a cold dump exists — incomplete, must be skipped.
+            self._write(d / "coldData-2026-06-20_223000.sql.gz", 5000)
+            assert _scan_backups(d, extracted=set()) == []
+
+
 # ── GET /admin/agents tests ──────────────────────────────────────────
 
 
